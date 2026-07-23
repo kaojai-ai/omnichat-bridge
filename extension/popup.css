@@ -1,0 +1,33 @@
+:root { --shopee: #ee4d2d; --shopee-dark: #d73211; --ink: #1f2937; --muted: #667085; --line: #eaecf0; }
+body { font: 13px/1.4 system-ui, sans-serif; margin: 0; min-width: 350px; background: #fffaf8; color: var(--ink); }
+main { padding: 14px; display: grid; gap: 14px; }
+.brand { display: flex; align-items: center; gap: 9px; }
+.provider-mark { width: 28px; height: 28px; border-radius: 9px; }
+h1 { font-size: 16px; line-height: 1.15; margin: 0; letter-spacing: -0.02em; }
+.provider-label { color: var(--shopee-dark); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+h2 { font-size: 15px; line-height: 1.2; margin: 0; }
+p { margin: 0; color: var(--muted); }
+[hidden] { display: none !important; }
+.screen, #config-screen { display: grid; gap: 10px; }
+textarea { min-height: 104px; border: 1px solid #d0d5dd; border-radius: 8px; background: white; color: var(--ink); font: 11px/1.35 ui-monospace, monospace; padding: 9px; resize: vertical; }
+textarea:focus { outline: 3px solid #ffd6cc; border-color: var(--shopee); }
+label { display: flex; gap: 8px; align-items: flex-start; color: #344054; font-weight: 500; }
+input[type="checkbox"] { accent-color: var(--shopee); margin-top: 2px; }
+button { min-height: 36px; padding: 8px 12px; border: 0; border-radius: 8px; background: var(--shopee); color: white; font: inherit; font-weight: 700; cursor: pointer; }
+button:hover { background: var(--shopee-dark); }
+button:focus-visible { outline: 3px solid #ffd6cc; outline-offset: 2px; }
+.actions { display: grid; }
+#status { color: #344054; font-weight: 600; }
+.account { display: flex; align-items: center; gap: 10px; }
+.account img { background: #fff1ed; border-radius: 50%; height: 36px; object-fit: cover; width: 36px; }
+.account-profile { display: grid; flex: 1; gap: 2px; min-width: 0; }
+#account-title { font-weight: 700; }
+.account-profile strong { font-size: 12px; }
+.account-id { margin-left: auto; min-height: 30px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--ink); font-family: ui-monospace, monospace; }
+.account-id:hover:not(:disabled) { background: #f9fafb; }
+.account-id:disabled { border-color: var(--line); background: #f9fafb; color: var(--muted); cursor: default; }
+#consent-error { min-height: 16px; color: #b42318; }
+#config-screen { border-top: 1px solid var(--line); padding-top: 12px; }
+.clear { background: transparent; color: var(--muted); margin-left: auto; min-height: auto; padding: 4px 8px; }
+.clear:hover { background: transparent; color: var(--shopee-dark); text-decoration: underline; }
+footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; padding-top: 10px; text-align: center; }

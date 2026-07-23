@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="popup.css"><title>Omnichat Realtime Bridge</title></head>
+  <body>
+    <main>
+      <header class="brand">
+        <img class="provider-mark" src="icons/icon-48.png" alt="">
+        <div><h1>Omnichat Realtime Bridge</h1><span class="provider-label">Shopee</span></div>
+        <button id="clear" class="clear" type="button" hidden>Reset</button>
+      </header>
+      <section id="consent-screen" class="screen">
+        <h2>Consent required</h2>
+        <p>This extension transfers <strong>text, image/video URLs, and buyer profiles</strong> from your open Shopee Seller Chat, including display names, profile pictures, IDs, and timestamps.</p>
+        <p>This extension does <strong>NOT</strong> collect or transfer passwords, cookies, login tokens, or other browser credentials.</p>
+        <label><input id="consent" type="checkbox"> I consent to collecting and sending this data.</label>
+        <button id="continue">Continue</button>
+        <p id="consent-error" role="status"></p>
+      </section>
+      <section id="setup-screen" class="screen" hidden>
+        <section class="account" aria-labelledby="account-title">
+          <img id="account-avatar" alt="" hidden>
+          <div class="account-profile">
+            <span id="account-title">Shopee account</span>
+            <strong id="account-name">Detecting…</strong>
+          </div>
+          <button id="account-id" class="account-id" type="button" disabled>Detecting…</button>
+        </section>
+        <section id="config-screen">
+          <h2>Connect your server</h2>
+          <p>Paste the HMAC setup. It stays on this device.</p>
+          <textarea id="config" spellcheck="false" placeholder='{"version":1,"provider":"shopee","destination":{...},"hmac_secret":"..."}'></textarea>
+          <div class="actions">
+            <button id="save">Sync messages</button>
+          </div>
+          <p id="status" role="status" hidden></p>
+        </section>
+      </section>
+      <footer>GitHub <span>·</span> <span id="version"></span></footer>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
