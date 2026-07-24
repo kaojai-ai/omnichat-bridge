@@ -15,16 +15,24 @@ const accountAvatar = document.querySelector("#account-avatar");
 function validateConfig(value) {
   if (value?.version !== 1 || value.provider !== "shopee") throw new Error("Setup must be version 1 for Shopee.");
   if (!value.destination?.events_url || new URL(value.destination.events_url).protocol !== "https:") throw new Error("Setup requires an HTTPS events URL.");
+  if ((value.destination?.live_url || value.destination?.live_socket_url)
+    && (!value.destination?.live_url || !value.destination?.live_socket_url
+      || new URL(value.destination.live_url).protocol !== "https:"
+      || new URL(value.destination.live_socket_url).protocol !== "wss:")) {
+    throw new Error("Live replies require HTTPS and WSS URLs.");
+  }
   if (!value.hmac_secret) throw new Error("Setup requires an HMAC secret.");
   const { key_id: _legacyKeyId, ...config } = value;
   return config;
 }
 
-async function requestTargetPermission(eventsUrl) {
-  const url = new URL(eventsUrl);
-  const origin = `${url.protocol}//${url.host}/*`;
-  if (await chrome.permissions.contains({ origins: [origin] })) return;
-  if (!await chrome.permissions.request({ origins: [origin] })) throw new Error("Target-server permission was not granted.");
+async function requestTargetPermission(...urls) {
+  const origins = [...new Set(urls.filter(Boolean).map((value) => {
+    const url = new URL(value);
+    return `${url.protocol === "wss:" ? "https:" : url.protocol}//${url.host}/*`;
+  }))];
+  if (await chrome.permissions.contains({ origins })) return;
+  if (!await chrome.permissions.request({ origins })) throw new Error("Target-server permission was not granted.");
 }
 
 function showResult(result) {
@@ -122,7 +130,7 @@ document.querySelector("#continue").addEventListener("click", async () => {
 document.querySelector("#save").addEventListener("click", async () => {
   try {
     const config = validateConfig(JSON.parse(configInput.value));
-    await requestTargetPermission(config.destination.events_url);
+    await requestTargetPermission(config.destination.events_url, config.destination.live_url, config.destination.live_socket_url);
     await writeStorage({ [STORAGE.config]: config, [STORAGE.status]: { state: "starting" } });
     saveButton.textContent = "Sync messages";
     status.hidden = false;

@@ -31,6 +31,19 @@ Chrome and the Seller Chat tab must remain open for realtime capture. When the
 laptop or Chrome is off, nothing is captured or sent. Recovery may fetch missed
 messages after the seller returns.
 
+## Optional live replies
+
+Your server can send one plain-text reply to the active seller browser. The
+extension fills and submits Shopee's visible composer; it does not call a
+Shopee private message API and never transfers Shopee cookies, passwords, or
+login tokens.
+
+- The target conversation must already be open in Seller Chat.
+- If the browser is offline or another conversation is open, the server returns
+  an error. There is no remote command queue or retry.
+- The live service keeps only a short-lived connection ticket and browser
+  presence record. It does not store message text.
+
 ## Recovery
 
 - First recovery and **Sync messages**: 10 newest conversations, up to 25
@@ -59,7 +72,9 @@ messages after the seller returns.
   "version": 1,
   "provider": "shopee",
   "destination": {
-    "events_url": "https://collector.example.com/omnichat/events"
+    "events_url": "https://collector.example.com/omnichat/events",
+    "live_url": "https://live.example.com/",
+    "live_socket_url": "wss://socket.example.com/live"
   },
   "hmac_secret": "base64-secret"
 }

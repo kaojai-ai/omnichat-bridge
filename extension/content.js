@@ -4,7 +4,10 @@
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
+  const pendingOutbound = new Map();
+  let activeConversationId = null;
   let resumeSyncTimer;
+  const MAX_REPLY_TEXT_LENGTH = 2_000;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
 
@@ -139,9 +142,14 @@
   }
 
   async function handleRealtimeEvent(body) {
-    const messages = addConversationProfile(
-      globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket")
-    );
+    const messages = addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))
+      .map((message) => {
+        const key = `${message.conversation_id}\u0000${message.text ?? ""}`;
+        const pending = pendingOutbound.get(key);
+        if (!pending) return message;
+        pendingOutbound.delete(key);
+        return { ...message, command_id: pending.commandId, client_message_id: pending.clientMessageId };
+      });
     if (!messages.length) return;
     const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
     if (document.documentElement) {
@@ -180,6 +188,41 @@
     }
   }
 
+  function setComposerText(composer, text) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    if (!setter) throw new Error("Shopee message composer is unavailable.");
+    setter.call(composer, text);
+    composer.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+  }
+
+  async function sendText(message) {
+    const requestId = typeof message?.request_id === "string" ? message.request_id : "";
+    const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
+    const text = typeof message?.text === "string" ? message.text.trim() : "";
+    if (!requestId || !conversationId || !text || text.length > MAX_REPLY_TEXT_LENGTH) {
+      return { ok: false, error: "Reply text is invalid." };
+    }
+    if (activeConversationId !== conversationId) {
+      return { ok: false, error: "Open the matching Shopee conversation before replying." };
+    }
+
+    const composer = document.querySelector("textarea[placeholder]");
+    const sendControl = composer?.parentElement?.querySelector("i");
+    if (!(composer instanceof HTMLTextAreaElement) || !(sendControl instanceof HTMLElement)) {
+      return { ok: false, error: "Open the Shopee conversation before replying." };
+    }
+
+    if (typeof message.client_message_id === "string" && message.client_message_id) {
+      const key = `${conversationId}\u0000${text}`;
+      pendingOutbound.set(key, { commandId: requestId, clientMessageId: message.client_message_id });
+      setTimeout(() => pendingOutbound.delete(key), 60_000);
+    }
+    setComposerText(composer, text);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    sendControl.click();
+    return { ok: true };
+  }
+
   async function markSyncComplete(requestId) {
     try {
       await chrome.runtime.sendMessage({ type: "sync_complete", request_id: requestId });
@@ -198,6 +241,8 @@
       handleAccountDetectionFailed(event.data);
     } else if (event.data.type === "profiles_detected") {
       handleProfilesDetected(event.data);
+    } else if (event.data.type === "active_conversation") {
+      activeConversationId = typeof event.data.conversation_id === "string" ? event.data.conversation_id : null;
     } else if (event.data.type === "recovery_batch") {
       void handleRecoveryBatch(event.data);
     } else if (event.data.type === "recovery_progress") {
@@ -218,6 +263,10 @@
     }
     if (message?.type === "detect_account") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
+      return true;
+    }
+    if (message?.type === "send_text") {
+      void sendText(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     return undefined;

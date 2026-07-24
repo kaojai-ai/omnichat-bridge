@@ -8,9 +8,14 @@ const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
+const MAX_REPLY_TEXT_LENGTH = 2_000;
 let mutationQueue = Promise.resolve();
 let activeSync = null;
 const completedRecoveryIds = new Set();
+let liveSocket = null;
+let liveReconnectTimer = null;
+let liveHeartbeatTimer = null;
+let liveReconnectAttempt = 0;
 
 function exclusive(task) {
   const result = mutationQueue.then(task, task);
@@ -87,8 +92,143 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "send_text") {
+    void sendTextInOpenShopeeChat(message).then(
+      (result) => respond(result),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
   return undefined;
 });
+
+async function sendTextInOpenShopeeChat(message) {
+  const requestId = typeof message?.request_id === "string" ? message.request_id : "";
+  const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
+  const clientMessageId = typeof message?.client_message_id === "string" ? message.client_message_id : "";
+  const text = typeof message?.text === "string" ? message.text.trim() : "";
+  if (!requestId || !conversationId || !text || text.length > MAX_REPLY_TEXT_LENGTH) {
+    return { ok: false, error: "Reply text is invalid." };
+  }
+  const tab = await findShopeeChatTab();
+  if (!tab?.id) return { ok: false, error: "Open Shopee Seller Chat before replying." };
+  await ensureShopeeBridge(tab.id);
+  return chrome.tabs.sendMessage(tab.id, {
+    type: "send_text",
+    request_id: requestId,
+    conversation_id: conversationId,
+    ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+    text,
+  });
+}
+
+function liveEndpoints(config) {
+  const liveUrl = config?.destination?.live_url;
+  const liveSocketUrl = config?.destination?.live_socket_url;
+  if (typeof liveUrl !== "string" || typeof liveSocketUrl !== "string") return null;
+  const http = new URL(liveUrl);
+  const socket = new URL(liveSocketUrl);
+  if (http.protocol !== "https:" || socket.protocol !== "wss:") return null;
+  return { liveUrl: http, liveSocketUrl: socket };
+}
+
+function stopLiveConnection() {
+  clearTimeout(liveReconnectTimer);
+  clearInterval(liveHeartbeatTimer);
+  liveReconnectTimer = null;
+  liveHeartbeatTimer = null;
+  liveSocket?.close();
+  liveSocket = null;
+}
+
+function scheduleLiveReconnect() {
+  clearTimeout(liveReconnectTimer);
+  const delay = Math.min(60_000, 1_000 * 2 ** Math.min(liveReconnectAttempt, 6));
+  liveReconnectAttempt += 1;
+  liveReconnectTimer = setTimeout(() => { void ensureLiveConnection(); }, delay);
+}
+
+async function signedLiveTicket(config, providerAccountId) {
+  const { liveUrl } = liveEndpoints(config) ?? {};
+  if (!liveUrl) throw new Error("Live reply endpoint is not configured.");
+  const url = new URL("tickets", `${liveUrl.toString().replace(/\/$/, "")}/`);
+  const body = JSON.stringify({ provider: "shopee", provider_account_id: providerAccountId, installation_id: await installationId() });
+  const timestamp = new Date().toISOString();
+  const nonce = crypto.randomUUID();
+  const bodyHash = await sha256Hex(body);
+  const signature = await hmacHex(config.hmac_secret, `POST\n${url.pathname}\n${timestamp}\n${nonce}\n${bodyHash}`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-omnichat-provider-account-id": providerAccountId,
+      "x-omnichat-timestamp": timestamp,
+      "x-omnichat-nonce": nonce,
+      "x-omnichat-signature": signature,
+    },
+    body,
+  });
+  if (!response.ok) throw new Error(`Live reply endpoint returned ${response.status}.`);
+  const ticket = await response.json();
+  if (typeof ticket?.ticket !== "string" || !ticket.ticket) throw new Error("Live reply endpoint returned an invalid ticket.");
+  return ticket.ticket;
+}
+
+async function ensureLiveConnection() {
+  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccount]);
+  const account = stored[STORAGE.detectedAccount];
+  const endpoints = liveEndpoints(stored[STORAGE.config]);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || account?.provider !== "shopee" || !endpoints) {
+    stopLiveConnection();
+    return;
+  }
+  if (liveSocket?.readyState === WebSocket.OPEN || liveSocket?.readyState === WebSocket.CONNECTING) return;
+  try {
+    const ticket = await signedLiveTicket(stored[STORAGE.config], account.provider_account_id);
+    const socketUrl = new URL(endpoints.liveSocketUrl);
+    socketUrl.searchParams.set("ticket", ticket);
+    const socket = new WebSocket(socketUrl);
+    liveSocket = socket;
+    socket.addEventListener("open", () => {
+      liveReconnectAttempt = 0;
+      clearInterval(liveHeartbeatTimer);
+      liveHeartbeatTimer = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
+      }, 20_000);
+    });
+    socket.addEventListener("message", (event) => { void handleLiveCommand(event.data); });
+    socket.addEventListener("close", () => {
+      if (liveSocket === socket) {
+        liveSocket = null;
+        clearInterval(liveHeartbeatTimer);
+        scheduleLiveReconnect();
+      }
+    });
+    socket.addEventListener("error", () => socket.close());
+  } catch {
+    scheduleLiveReconnect();
+  }
+}
+
+async function handleLiveCommand(raw) {
+  let command;
+  try { command = JSON.parse(raw); } catch { return; }
+  if (command?.type !== "send_text" || command.provider !== "shopee") return;
+  const stored = await readStorage([STORAGE.detectedAccount]);
+  if (stored[STORAGE.detectedAccount]?.provider_account_id !== command.provider_account_id) return;
+  const result = await sendTextInOpenShopeeChat(command);
+  if (liveSocket?.readyState === WebSocket.OPEN) {
+    liveSocket.send(JSON.stringify({ type: "send_result", request_id: command.request_id, ok: Boolean(result?.ok), ...(result?.ok ? {} : { error: result?.error ?? "Reply failed." }) }));
+  }
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") return;
+  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccount]) void ensureLiveConnection();
+});
+
+chrome.runtime.onStartup.addListener(() => { void ensureLiveConnection(); });
+void ensureLiveConnection();
 
 async function detectOpenShopeeAccount() {
   let tab = await findShopeeChatTab();
@@ -254,6 +394,8 @@ function batchFor(messages, installId) {
       ...(message.text ? { text: message.text } : {}),
       ...(message.media_url ? { media_url: message.media_url } : {}),
       ...(message.provider_type ? { provider_type: message.provider_type } : {}),
+      ...(message.command_id ? { command_id: message.command_id } : {}),
+      ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}),
       capture_method: message.capture_method
     });
     conversations.set(message.conversation_id, conversation);

@@ -14,6 +14,7 @@
     socket: null,
     account: null,
     profilesByConversation: new Map(),
+    activeConversationId: null,
     acknowledgements: new Map(),
     nextRecoveryRequestAt: 0
   };
@@ -156,6 +157,14 @@
     }
     if (profiles.length) post({ type: "profiles_detected", profiles });
   };
+  const captureActiveConversation = (request) => {
+    const match = pathOf(request.url).match(/^\/webchat\/api\/v1\.2\/conversations\/([^/]+)\/messages$/);
+    if (!match) return;
+    const conversationId = decodeURIComponent(match[1]);
+    if (!conversationId || state.activeConversationId === conversationId) return;
+    state.activeConversationId = conversationId;
+    post({ type: "active_conversation", conversation_id: conversationId });
+  };
 
   async function fetchConversations() {
     const response = await recoveryFetch(new Request(state.listTemplate.url, {
@@ -277,6 +286,7 @@
       const request = new Request(input, init);
       const response = await originalFetch(input, init);
       const path = pathOf(request.url);
+      if (request.method === "GET") captureActiveConversation(request);
       if (path.startsWith("/webchat/api/") && request.method === "GET" && !state.getTemplate) {
         void templateFrom(request).then((template) => { state.getTemplate = template; });
       }

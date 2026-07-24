@@ -38,6 +38,7 @@ flowchart LR
     A["Your open provider chat"] --> B["Provider adapter"]
     B --> C["Local pending queue"]
     C -->|"HTTPS + HMAC"| D["Your chosen server"]
+    D -->|"Optional WSS"| G["Online-only text reply"]
     E["Chrome closed"] --> F["No live capture or sending"]
 ```
 
@@ -46,7 +47,10 @@ flowchart LR
 - Sends the [`omnichat.message_batch` version 1 contract](docs/payload-contract.md).
 - Advances each conversation cursor only after server acknowledgement.
 - Keeps pending messages and sync cursors in extension-local storage.
-- Has no remote send-message command yet.
+- Optional live reply uses a short-lived ticket and WebSocket presence only. It
+  stores no command or message text remotely.
+- A reply is accepted only while the configured seller browser is online and
+  has the matching Shopee conversation open.
 
 Provider-specific capture, recovery, data fields, and setup are documented in
 each provider guide.
