@@ -65,22 +65,33 @@ login tokens.
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose the `extension/` folder.
 3. Accept the disclosure and let the extension detect the Shop ID.
-4. Paste the HMAC connection setup and select **Sync messages**.
+4. Open **Configure**, add the detected Shop ID or import a configuration file,
+   and select **Sync messages**.
 
 ```json
 {
-  "version": 1,
-  "provider": "shopee",
-  "destination": {
-    "events_url": "https://collector.example.com/omnichat/events",
-    "live_url": "https://live.example.com/",
-    "live_socket_url": "wss://socket.example.com/live"
-  },
-  "hmac_secret": "base64-secret"
+  "version": 2,
+  "accounts": [
+    {
+      "provider": "shopee",
+      "provider_account_id": "shop-1",
+      "events_url": "https://collector.example.com/omnichat/events",
+      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "hmac_secret": "base64-secret"
+    },
+    {
+      "provider": "shopee",
+      "provider_account_id": "shop-2",
+      "events_url": "https://collector.example.com/omnichat/events",
+      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "hmac_secret": "another-base64-secret"
+    }
+  ]
 }
 ```
 
 Never commit a real connection setup. The destination server must map the
-detected Shop ID to the same HMAC secret.
+detected Shop ID to the same HMAC secret. Import replaces the complete saved
+account list; export includes the HMAC secrets and must be stored securely.
 
 See the main [safety and account-risk notice](../../README.md).

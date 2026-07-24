@@ -1,5 +1,14 @@
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
-import { STORAGE, hasLocalConsent, installationId, readStorage, writeStorage } from "./lib/storage.js";
+import { accountConfigKey, findAccountConfig } from "./lib/config.js";
+import {
+  STORAGE,
+  hasLocalConsent,
+  installationId,
+  readAccountState,
+  readStorage,
+  writeAccountState,
+  writeStorage,
+} from "./lib/storage.js";
 
 const SHOPEE_URL_PATTERN = "https://seller.shopee.co.th/*";
 const SHOPEE_CHAT_URL = "https://seller.shopee.co.th/new-webchat/conversations";
@@ -16,6 +25,18 @@ let liveSocket = null;
 let liveReconnectTimer = null;
 let liveHeartbeatTimer = null;
 let liveReconnectAttempt = 0;
+let liveConnectionKey = null;
+
+function currentAccountContext(stored) {
+  const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+  const config = findAccountConfig(stored[STORAGE.config], stored[STORAGE.detectedAccount]);
+  return key && config ? { key, config, account: stored[STORAGE.detectedAccount] } : null;
+}
+
+async function writeScopedState(storageKey, key, value) {
+  const stored = await readStorage([storageKey]);
+  await writeStorage({ [storageKey]: writeAccountState(stored[storageKey], key, value) });
+}
 
 function exclusive(task) {
   const result = mutationQueue.then(task, task);
@@ -25,8 +46,14 @@ function exclusive(task) {
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "get_sync_state") {
-    void readStorage([STORAGE.targetCursor]).then(
-      (stored) => respond({ ok: true, cursor: stored[STORAGE.targetCursor] ?? null }),
+    void readStorage([STORAGE.detectedAccount, STORAGE.targetCursor]).then(
+      (stored) => {
+        const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+        respond({
+          ok: true,
+          cursor: readAccountState(stored[STORAGE.targetCursor], key, null),
+        });
+      },
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
@@ -64,12 +91,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       respond({ ok: true, ignored: true });
       return false;
     }
-    void writeStorage({
-      [STORAGE.status]: {
+    void readStorage([STORAGE.detectedAccount]).then((stored) => {
+      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+      if (!key) throw new Error("Shopee account is not detected.");
+      return writeScopedState(STORAGE.status, key, {
         state: "syncing",
         completed_conversations: message.completed_conversations,
         total_conversations: message.total_conversations
-      }
+      });
     }).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
@@ -79,7 +108,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "sync_complete") {
     completedRecoveryIds.add(message.request_id);
     setTimeout(() => completedRecoveryIds.delete(message.request_id), RESUME_SYNC_COOLDOWN_MS);
-    void writeStorage({ [STORAGE.status]: { state: "watching", last_sync_at: new Date().toISOString() } }).then(
+    void readStorage([STORAGE.detectedAccount]).then((stored) => {
+      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+      if (!key) throw new Error("Shopee account is not detected.");
+      return writeScopedState(STORAGE.status, key, {
+        state: "watching",
+        last_sync_at: new Date().toISOString(),
+      });
+    }).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -122,14 +158,10 @@ async function sendTextInOpenShopeeChat(message) {
   });
 }
 
-function liveEndpoints(config) {
-  const liveUrl = config?.destination?.live_url;
-  const liveSocketUrl = config?.destination?.live_socket_url;
-  if (typeof liveUrl !== "string" || typeof liveSocketUrl !== "string") return null;
-  const http = new URL(liveUrl);
-  const socket = new URL(liveSocketUrl);
-  if (http.protocol !== "https:" || socket.protocol !== "wss:") return null;
-  return { liveUrl: http, liveSocketUrl: socket };
+function liveEndpoint(config) {
+  if (typeof config?.commands_url !== "string") return null;
+  const url = new URL(config.commands_url);
+  return url.protocol === "https:" ? url : null;
 }
 
 function stopLiveConnection() {
@@ -139,6 +171,7 @@ function stopLiveConnection() {
   liveHeartbeatTimer = null;
   liveSocket?.close();
   liveSocket = null;
+  liveConnectionKey = null;
 }
 
 function scheduleLiveReconnect() {
@@ -149,9 +182,8 @@ function scheduleLiveReconnect() {
 }
 
 async function signedLiveTicket(config, providerAccountId) {
-  const { liveUrl } = liveEndpoints(config) ?? {};
-  if (!liveUrl) throw new Error("Live reply endpoint is not configured.");
-  const url = new URL("tickets", `${liveUrl.toString().replace(/\/$/, "")}/`);
+  const url = liveEndpoint(config);
+  if (!url) throw new Error("Live reply endpoint is not configured.");
   const body = JSON.stringify({ provider: "shopee", provider_account_id: providerAccountId, installation_id: await installationId() });
   const timestamp = new Date().toISOString();
   const nonce = crypto.randomUUID();
@@ -171,24 +203,36 @@ async function signedLiveTicket(config, providerAccountId) {
   if (!response.ok) throw new Error(`Live reply endpoint returned ${response.status}.`);
   const ticket = await response.json();
   if (typeof ticket?.ticket !== "string" || !ticket.ticket) throw new Error("Live reply endpoint returned an invalid ticket.");
-  return ticket.ticket;
+  let socketUrl;
+  try {
+    socketUrl = new URL(ticket.socket_url);
+  } catch {
+    throw new Error("Live reply endpoint returned an invalid socket URL.");
+  }
+  if (socketUrl.protocol !== "wss:") throw new Error("Live reply endpoint returned an invalid socket URL.");
+  return { ticket: ticket.ticket, socketUrl };
 }
 
 async function ensureLiveConnection() {
   const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccount]);
-  const account = stored[STORAGE.detectedAccount];
-  const endpoints = liveEndpoints(stored[STORAGE.config]);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || account?.provider !== "shopee" || !endpoints) {
+  const context = currentAccountContext(stored);
+  const endpoint = liveEndpoint(context?.config);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !endpoint) {
     stopLiveConnection();
     return;
   }
+  const connectionKey = `${context.key}:${endpoint}`;
+  if (liveConnectionKey && liveConnectionKey !== connectionKey) stopLiveConnection();
   if (liveSocket?.readyState === WebSocket.OPEN || liveSocket?.readyState === WebSocket.CONNECTING) return;
   try {
-    const ticket = await signedLiveTicket(stored[STORAGE.config], account.provider_account_id);
-    const socketUrl = new URL(endpoints.liveSocketUrl);
+    const { ticket, socketUrl } = await signedLiveTicket(
+      context.config,
+      context.account.provider_account_id,
+    );
     socketUrl.searchParams.set("ticket", ticket);
     const socket = new WebSocket(socketUrl);
     liveSocket = socket;
+    liveConnectionKey = connectionKey;
     socket.addEventListener("open", () => {
       liveReconnectAttempt = 0;
       clearInterval(liveHeartbeatTimer);
@@ -200,6 +244,7 @@ async function ensureLiveConnection() {
     socket.addEventListener("close", () => {
       if (liveSocket === socket) {
         liveSocket = null;
+        liveConnectionKey = null;
         clearInterval(liveHeartbeatTimer);
         scheduleLiveReconnect();
       }
@@ -296,13 +341,29 @@ function startSync(mode = "limited") {
   activeSync = (mode === "resume" ? resumeRecovery() : manualSync())
     .then(async (result) => {
       const syncedAt = new Date().toISOString();
+      const stored = await readStorage([
+        STORAGE.detectedAccount,
+        STORAGE.lastResumeSyncAt,
+        STORAGE.status,
+      ]);
+      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+      if (!key) throw new Error("Shopee account is not detected.");
       await writeStorage({
-        [STORAGE.status]: {
+        [STORAGE.status]: writeAccountState(stored[STORAGE.status], key, {
           state: "watching",
           last_sync_at: syncedAt,
-          caught_up: result.pending === 0
-        },
-        [STORAGE.lastResumeSyncAt]: syncedAt
+          caught_up: result.pending === 0,
+          last_result: {
+            recovered: result.recovered,
+            sent: result.sent,
+            pending: result.pending,
+          },
+        }),
+        [STORAGE.lastResumeSyncAt]: writeAccountState(
+          stored[STORAGE.lastResumeSyncAt],
+          key,
+          syncedAt,
+        ),
       });
       return result;
     })
@@ -323,16 +384,32 @@ async function resumeRecovery() {
 
 async function resumeSync() {
   if (activeSync) return activeSync;
-  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.lastResumeSyncAt, STORAGE.targetCursor]);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || stored[STORAGE.config]?.provider !== "shopee") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccount,
+    STORAGE.lastResumeSyncAt,
+    STORAGE.targetCursor,
+  ]);
+  const context = currentAccountContext(stored);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
     return { skipped: "not_configured" };
   }
-  const lastResumeSyncAt = Date.parse(stored[STORAGE.lastResumeSyncAt] ?? "");
+  const lastResumeSyncAt = Date.parse(
+    readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, "") ?? "",
+  );
   if (Number.isFinite(lastResumeSyncAt) && Date.now() - lastResumeSyncAt < RESUME_SYNC_COOLDOWN_MS) {
     return { skipped: "cooldown" };
   }
-  await writeStorage({ [STORAGE.lastResumeSyncAt]: new Date().toISOString() });
-  const hasCursor = Object.keys(stored[STORAGE.targetCursor]?.conversations ?? {}).length > 0;
+  await writeStorage({
+    [STORAGE.lastResumeSyncAt]: writeAccountState(
+      stored[STORAGE.lastResumeSyncAt],
+      context.key,
+      new Date().toISOString(),
+    ),
+  });
+  const cursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
+  const hasCursor = Object.keys(cursor?.conversations ?? {}).length > 0;
   return startSync(hasCursor ? "resume" : "limited");
 }
 
@@ -350,20 +427,36 @@ function isAfterCursor(message, cursor) {
 }
 
 async function queueMessages(messages, shouldFlush) {
-  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.pending, STORAGE.targetCursor]);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || stored[STORAGE.config]?.provider !== "shopee") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccount,
+    STORAGE.pending,
+    STORAGE.targetCursor,
+  ]);
+  const context = currentAccountContext(stored);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
     return { queued: 0, sent: 0, pending: 0 };
   }
-  const pending = stored[STORAGE.pending] ?? [];
+  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+  const targetCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
   const known = new Set(pending.map(messageKey));
   const added = [];
   for (const message of messages ?? []) {
-    const cursor = stored[STORAGE.targetCursor]?.conversations?.[message?.conversation_id];
+    const cursor = targetCursor?.conversations?.[message?.conversation_id];
     if (message?.provider !== "shopee" || known.has(messageKey(message)) || !isAfterCursor(message, cursor)) continue;
     known.add(messageKey(message));
     added.push(message);
   }
-  if (added.length) await writeStorage({ [STORAGE.pending]: [...pending, ...added] });
+  if (added.length) {
+    await writeStorage({
+      [STORAGE.pending]: writeAccountState(
+        stored[STORAGE.pending],
+        context.key,
+        [...pending, ...added],
+      ),
+    });
+  }
   if (!shouldFlush) return { queued: added.length, sent: 0, pending: pending.length + added.length };
   try {
     const delivered = await flushAll();
@@ -428,7 +521,7 @@ function selectBatchMessages(pending) {
 }
 
 async function signedRequest(config, providerAccountId, payload) {
-  const url = new URL(config.destination.events_url);
+  const url = new URL(config.events_url);
   if (url.protocol !== "https:") throw new Error("Target server must use HTTPS.");
   const body = JSON.stringify(payload);
   const timestamp = new Date().toISOString();
@@ -479,19 +572,27 @@ function advancedCursor(current, delivered) {
 }
 
 async function flushBatch() {
-  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.pending, STORAGE.targetCursor, STORAGE.detectedAccount]);
-  const pending = stored[STORAGE.pending] ?? [];
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !stored[STORAGE.config]?.destination || !pending.length) {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.pending,
+    STORAGE.targetCursor,
+    STORAGE.detectedAccount,
+    STORAGE.status,
+  ]);
+  const context = currentAccountContext(stored);
+  const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !pending.length) {
     return { sent: 0, pending: pending.length };
   }
   const selected = selectBatchMessages(pending);
   const payload = batchFor(selected, await installationId());
   if (JSON.stringify(payload).length > 1_000_000) throw new Error("Queued batch exceeds the 1 MiB limit.");
-  const providerAccountId = stored[STORAGE.detectedAccount]?.provider === "shopee"
-    ? stored[STORAGE.detectedAccount].provider_account_id
-    : null;
-  if (!providerAccountId) throw new Error("Shopee account ID is not detected. Open Shopee Seller Chat and retry.");
-  const acknowledgement = await signedRequest(stored[STORAGE.config], providerAccountId, payload);
+  const acknowledgement = await signedRequest(
+    context.config,
+    context.account.provider_account_id,
+    payload,
+  );
   if (acknowledgement.schema !== "omnichat.message_batch_ack"
     || acknowledgement.batch_id !== payload.batch_id
     || acknowledgement.accepted_messages + acknowledgement.duplicate_messages !== selected.length) {
@@ -499,10 +600,18 @@ async function flushBatch() {
   }
   const deliveredKeys = new Set(selected.map(messageKey));
   const remaining = pending.filter((message) => !deliveredKeys.has(messageKey(message)));
+  const targetCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
   await writeStorage({
-    [STORAGE.pending]: remaining,
-    [STORAGE.targetCursor]: advancedCursor(stored[STORAGE.targetCursor], selected),
-    [STORAGE.status]: { state: "watching", last_sync_at: new Date().toISOString() }
+    [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, remaining),
+    [STORAGE.targetCursor]: writeAccountState(
+      stored[STORAGE.targetCursor],
+      context.key,
+      advancedCursor(targetCursor, selected),
+    ),
+    [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, {
+      state: "watching",
+      last_sync_at: new Date().toISOString(),
+    }),
   });
   return { sent: selected.length, pending: remaining.length };
 }

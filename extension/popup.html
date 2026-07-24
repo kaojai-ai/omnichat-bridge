@@ -1,41 +1,95 @@
 <!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="popup.css"><title>Omnichat Realtime Bridge</title></head>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="popup.css">
+    <title>Omnichat Browser Bridge</title>
+  </head>
   <body>
     <main>
       <header class="brand">
         <img class="provider-mark" src="icons/icon-48.png" alt="">
-        <div><h1>Omnichat Realtime Bridge</h1><span class="provider-label">Shopee</span></div>
-        <button id="clear" class="clear" type="button" hidden>Reset</button>
+        <div class="brand-copy">
+          <h1>Omnichat Browser Bridge</h1>
+          <span>Private browser-to-server chat sync</span>
+        </div>
+        <button id="open-config" class="header-icon-button" type="button" aria-label="Settings" title="Settings" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
       </header>
+
       <section id="consent-screen" class="screen">
         <h2>Consent required</h2>
-        <p>This extension transfers <strong>text, image/video URLs, and buyer profiles</strong> from your open Shopee Seller Chat, including display names, profile pictures, IDs, and timestamps.</p>
-        <p>This extension does <strong>NOT</strong> collect or transfer passwords, cookies, login tokens, or other browser credentials.</p>
-        <label><input id="consent" type="checkbox"> I consent to collecting and sending this data.</label>
-        <button id="continue">Continue</button>
-        <p id="consent-error" role="status"></p>
+        <p>This extension <strong>DO TRANSFERS</strong> text, image/video URLs, and buyer profiles from your open Shopee Seller Chat, including display names, profile pictures, IDs, and timestamps.</p>
+        <p>This extension <strong>DOES NOT</strong> collect or transfer passwords, cookies, login tokens, or other browser credentials.</p>
+        <label class="consent"><input id="consent" type="checkbox"> I consent to collecting and sending this data.</label>
+        <button id="continue" type="button">Continue</button>
+        <p id="consent-error" class="error" role="status"></p>
       </section>
-      <section id="setup-screen" class="screen" hidden>
-        <section class="account" aria-labelledby="account-title">
-          <img id="account-avatar" alt="" hidden>
-          <div class="account-profile">
-            <span id="account-title">Shopee account</span>
-            <strong id="account-name">Detecting…</strong>
+
+      <section id="dashboard-screen" class="screen" hidden>
+        <section class="account-section" aria-labelledby="account-title">
+          <h2 id="account-title">Shopee account</h2>
+          <div class="account">
+            <img id="account-avatar" alt="" hidden>
+            <div class="account-profile">
+              <strong id="account-name">Detecting…</strong>
+              <button id="account-status" class="status-pill" type="button" aria-live="polite" disabled>
+                <i></i><span>Detecting</span>
+              </button>
+            </div>
+            <button id="account-id" class="account-id" type="button" disabled aria-label="Copy Shop ID">
+              <span id="account-id-value">Detecting…</span>
+              <svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8.5A2.5 2.5 0 0 1 11.5 6h6A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-6A2.5 2.5 0 0 1 9 16.5z"/><path d="M15 6V5.5A2.5 2.5 0 0 0 12.5 3h-6A2.5 2.5 0 0 0 4 5.5v8A2.5 2.5 0 0 0 6.5 16H9"/></svg>
+            </button>
           </div>
-          <button id="account-id" class="account-id" type="button" disabled>Detecting…</button>
         </section>
-        <section id="config-screen">
-          <h2>Connect your server</h2>
-          <p>Paste the HMAC setup. It stays on this device.</p>
-          <textarea id="config" spellcheck="false" placeholder='{"version":1,"provider":"shopee","destination":{...},"hmac_secret":"..."}'></textarea>
-          <div class="actions">
-            <button id="save">Sync messages</button>
-          </div>
-          <p id="status" role="status" hidden></p>
+
+        <button id="sync" type="button" disabled>Sync messages</button>
+
+        <section id="progress-area" class="progress-area" aria-live="polite" hidden>
+          <progress id="sync-progress" max="100" value="0" hidden></progress>
+          <p id="last-sync" hidden></p>
+          <p id="status" role="status"></p>
         </section>
       </section>
-      <footer>GitHub <span>·</span> <span id="version"></span></footer>
+
+      <section id="config-screen" class="screen" hidden>
+        <header class="screen-heading">
+          <button id="close-config" class="icon-button" type="button" aria-label="Back">←</button>
+          <div>
+            <h2>Account configuration</h2>
+            <p id="config-count">No accounts saved</p>
+          </div>
+        </header>
+
+        <label class="field">
+          <span>Account</span>
+          <select id="config-account"></select>
+        </label>
+
+        <label class="field">
+          <span>JSON configuration</span>
+          <textarea id="config" spellcheck="false"></textarea>
+        </label>
+
+        <button id="save-config" type="button">Save account</button>
+
+        <div class="file-actions">
+          <button id="import-config" class="secondary-button" type="button">Import file</button>
+          <button id="export-config" class="secondary-button" type="button">Export all</button>
+          <input id="config-file" type="file" accept="application/json,.json" hidden>
+        </div>
+        <p id="config-status" role="status"></p>
+        <button id="clear" class="delete-link" type="button" hidden>Delete all configuration</button>
+      </section>
+
+      <footer>
+        <a href="https://github.com/kaojai-ai/omnichat-browser-bridge" target="_blank" rel="noreferrer">GitHub</a>
+        <span>·</span>
+        <span id="version"></span>
+      </footer>
     </main>
     <script src="popup.js" type="module"></script>
   </body>

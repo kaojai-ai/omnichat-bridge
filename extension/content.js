@@ -12,8 +12,21 @@
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
 
   async function isConfigured() {
-    const stored = await chrome.storage.local.get(["config", "local_consent"]);
-    return Boolean(stored.local_consent?.accepted_at && stored.config?.provider === "shopee");
+    const stored = await chrome.storage.local.get([
+      "config",
+      "detected_account",
+      "local_consent",
+    ]);
+    const accountId = stored.detected_account?.provider_account_id;
+    return Boolean(
+      stored.local_consent?.accepted_at
+      && stored.detected_account?.provider === "shopee"
+      && accountId
+      && stored.config?.accounts?.some(
+        (account) => account.provider === "shopee"
+          && account.provider_account_id === accountId,
+      ),
+    );
   }
 
   async function requestRecovery(mode = "limited") {

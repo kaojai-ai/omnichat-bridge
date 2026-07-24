@@ -12,6 +12,22 @@ export const STORAGE = {
 export const readStorage = (keys) => chrome.storage.local.get(keys);
 export const writeStorage = (values) => chrome.storage.local.set(values);
 
+export function readAccountState(container, key, fallback) {
+  return key && container?.version === 2 && container.accounts?.[key] !== undefined
+    ? container.accounts[key]
+    : fallback;
+}
+
+export function writeAccountState(container, key, value) {
+  return {
+    version: 2,
+    accounts: {
+      ...(container?.version === 2 ? container.accounts : {}),
+      [key]: value,
+    },
+  };
+}
+
 export function hasLocalConsent(consent) {
   return Boolean(consent?.accepted_at && consent?.policy_version === 2);
 }

@@ -23,7 +23,7 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
   "batch_id": "11111111-1111-4111-8111-111111111111",
   "installation_id": "22222222-2222-4222-8222-222222222222",
   "provider": "shopee",
-  "extension_version": "0.1.14",
+  "extension_version": "0.2.0",
   "adapter_version": "shopee-realtime-1",
   "conversations": [
     {
