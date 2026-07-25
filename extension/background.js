@@ -47,6 +47,18 @@ async function writeScopedState(storageKey, key, value) {
   await writeStorage({ [storageKey]: writeAccountState(stored[storageKey], key, value) });
 }
 
+async function updateLiveState(context, patch) {
+  const stored = await readStorage([STORAGE.live]);
+  const current = readAccountState(stored[STORAGE.live], context.key, {});
+  await writeStorage({
+    [STORAGE.live]: writeAccountState(stored[STORAGE.live], context.key, {
+      ...current,
+      ...patch,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+}
+
 function exclusive(task) {
   const result = mutationQueue.then(task, task);
   mutationQueue = result.then(() => undefined, () => undefined);
@@ -82,7 +94,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_now") {
-    void startSync().then(
+    void ensureLiveConnection().then(() => startSync()).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -148,7 +160,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "get_live_state") {
-    void getLiveState().then(respond, async (error) => {
+    void ensureLiveConnection().then(() => getLiveState()).then(respond, async (error) => {
       await recordUnexpected("live_state", error);
       respond({ ok: false, error: String(error) });
     });
@@ -276,11 +288,10 @@ async function signedLeaderRequest(action) {
   });
   if (!response.ok) throw new Error(`Leader endpoint returned ${response.status}.`);
   const result = await response.json();
-  await writeScopedState(STORAGE.live, context.key, {
+  await updateLiveState(context, {
     socket: liveSocket?.readyState === WebSocket.OPEN ? "connected" : "connecting",
     leader: result?.leader_installation_id === await installationId(),
     leader_installation_id: result?.leader_installation_id ?? null,
-    updated_at: new Date().toISOString(),
   });
   return { ok: true, ...result };
 }
@@ -290,10 +301,9 @@ async function getLiveState() {
   catch (error) {
     const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
     const context = currentAccountContext(stored);
-    if (context) await writeScopedState(STORAGE.live, context.key, {
-      socket: liveSocket?.readyState === WebSocket.OPEN ? "connected" : "disconnected",
+    if (context) await updateLiveState(context, {
+      socket: liveSocket?.readyState === WebSocket.OPEN ? "connected" : "reconnecting",
       leader: false,
-      updated_at: new Date().toISOString(),
     });
     throw error;
   }
@@ -384,6 +394,7 @@ async function ensureLiveConnection() {
   const connectionKey = `${context.key}:${endpoint}`;
   if (liveConnectionKey && liveConnectionKey !== connectionKey) stopLiveConnection();
   if (liveSocket?.readyState === WebSocket.OPEN || liveSocket?.readyState === WebSocket.CONNECTING) return;
+  await updateLiveState(context, { socket: "connecting" });
   try {
     const { ticket, socketUrl } = await signedLiveTicket(
       context.config,
@@ -395,6 +406,7 @@ async function ensureLiveConnection() {
     liveConnectionKey = connectionKey;
     socket.addEventListener("open", () => {
       liveReconnectAttempt = 0;
+      void updateLiveState(context, { socket: "connected" });
       clearInterval(liveHeartbeatTimer);
       liveHeartbeatTimer = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
@@ -407,11 +419,13 @@ async function ensureLiveConnection() {
         liveSocket = null;
         liveConnectionKey = null;
         clearInterval(liveHeartbeatTimer);
+        void updateLiveState(context, { socket: "reconnecting", leader: false });
         scheduleLiveReconnect();
       }
     });
     socket.addEventListener("error", () => socket.close());
   } catch {
+    await updateLiveState(context, { socket: "reconnecting" });
     scheduleLiveReconnect();
   }
 }

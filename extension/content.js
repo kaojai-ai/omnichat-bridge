@@ -172,7 +172,11 @@
   function requestResumeSync() {
     clearTimeout(resumeSyncTimer);
     resumeSyncTimer = setTimeout(() => {
-      void chrome.runtime.sendMessage({ type: "resume_sync" });
+      void chrome.runtime.sendMessage({ type: "resume_sync" }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
+        console.warn("Could not resume Omnichat sync.", error);
+      });
     }, 500);
   }
 

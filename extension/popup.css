@@ -489,7 +489,6 @@ progress {
   gap: 6px;
 }
 
-select,
 textarea {
   background: #fff;
   border: 1px solid #d0d5dd;
@@ -500,7 +499,6 @@ textarea {
   width: 100%;
 }
 
-select:hover,
 textarea:hover { border-color: #98a2b3; }
 
 textarea {

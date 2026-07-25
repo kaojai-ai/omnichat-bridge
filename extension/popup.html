@@ -97,7 +97,7 @@
           </button>
           <div>
             <h2>Settings</h2>
-            <p id="config-count">No accounts saved</p>
+            <p id="config-count">Current saved configuration</p>
           </div>
           <div class="settings-actions">
             <button id="import-config" class="icon-button" type="button" aria-label="Import configuration" title="Import configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 13v6h14v-6"/></svg></button>
@@ -107,16 +107,11 @@
         </header>
 
         <label class="field">
-          <span>Account</span>
-          <select id="config-account"></select>
-        </label>
-
-        <label class="field">
           <span>JSON configuration</span>
           <textarea id="config" spellcheck="false"></textarea>
         </label>
 
-        <button id="save-config" type="button">Save account</button>
+        <button id="save-config" type="button">Save configuration</button>
 
         <p id="config-status" role="status"></p>
       </section>

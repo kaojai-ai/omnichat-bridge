@@ -3,7 +3,6 @@ import {
   accountConfigKey,
   accountOrigins,
   findAccountConfig,
-  validateAccountConfig,
   validateConfigFile,
 } from "./lib/config.js";
 import { STORAGE, hasLocalConsent, readAccountState, readStorage, writeStorage } from "./lib/storage.js";
@@ -34,7 +33,6 @@ const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
 const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
-const configSelect = document.querySelector("#config-account");
 const configInput = document.querySelector("#config");
 const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
@@ -58,7 +56,6 @@ let storedStatus = null;
 let liveState = null;
 let targetCursors = null;
 let unexpected = [];
-let commandTabs = null;
 let popupTabId = null;
 let storedConsent = null;
 let viewingPrivacy = false;
@@ -104,24 +101,6 @@ function configOrEmpty(value) {
     return emptyConfig();
   }
 }
-
-function configTemplate(account) {
-  return {
-    provider: account?.provider ?? "shopee",
-    provider_account_id: account?.provider_account_id ?? "",
-    events_url: "https://collector.example.com/omnichat/events",
-    commands_url: "https://admin.example.com/api/omnichat/tickets",
-    hmac_secret: "YOUR_HMAC_SECRET",
-  };
-}
-
-const configPlaceholder = JSON.stringify({
-  provider: "shopee",
-  provider_account_id: "SHOP_ID",
-  events_url: "https://collector.example.com/omnichat/events",
-  commands_url: "https://admin.example.com/api/omnichat/tickets",
-  hmac_secret: "YOUR_HMAC_SECRET",
-}, null, 2);
 
 async function requestTargetPermission(urls) {
   const origins = [...new Set(urls.map((value) => {
@@ -194,15 +173,13 @@ function renderDashboard(message = "", isError = false) {
   const targetCursor = readAccountState(targetCursors, key, null);
   const hasCursor = Object.keys(targetCursor?.conversations ?? {}).length > 0;
   const live = readAccountState(liveState, key, null);
-  const commandTabId = readAccountState(commandTabs, key, null);
-  const isSelectedCommandTab = Number.isInteger(commandTabId) && commandTabId === popupTabId;
-  const isLeaderTab = Boolean(live?.leader) && isSelectedCommandTab;
+  const isLeader = Boolean(live?.leader);
   const socketConnected = live?.socket === "connected";
   leaderStatus.hidden = !key || !config;
-  leaderCurrent.textContent = isLeaderTab ? "Leader" : "Standby";
-  leaderStatus.querySelector(".leader-action").textContent = isLeaderTab ? "Unset leader" : "Set leader";
-  leaderStatus.dataset.leader = String(isLeaderTab);
-  leaderStatus.title = isLeaderTab ? "Unset this tab as leader" : "Set this tab as leader";
+  leaderCurrent.textContent = isLeader ? "Leader" : "Standby";
+  leaderStatus.querySelector(".leader-action").textContent = isLeader ? "Unset leader" : "Set leader";
+  leaderStatus.dataset.leader = String(isLeader);
+  leaderStatus.title = isLeader ? "Unset this installation as leader" : "Set this tab as leader";
 
   if (!key) {
     const openSellerChat = !isShopeeChatTab;
@@ -227,7 +204,7 @@ function renderDashboard(message = "", isError = false) {
     return;
   }
 
-  setAccountStatus(socketConnected ? "Connected" : live ? "Offline" : "Connecting", socketConnected ? "ready" : "neutral");
+  setAccountStatus(socketConnected ? "Connected" : live?.socket === "disconnected" ? "Offline" : "Connecting", socketConnected ? "ready" : "neutral");
   syncButton.disabled = false;
   syncButton.dataset.action = "sync";
   syncButton.textContent = syncState?.caught_up ? "Refresh messages" : "Sync messages";
@@ -277,14 +254,13 @@ function renderUnexpected() {
 }
 
 async function refreshStoredState() {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount, STORAGE.status, STORAGE.targetCursor, STORAGE.live, STORAGE.unexpected, STORAGE.commandTab]);
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount, STORAGE.status, STORAGE.targetCursor, STORAGE.live, STORAGE.unexpected]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccount = stored[STORAGE.detectedAccount] ?? null;
   storedStatus = stored[STORAGE.status] ?? null;
   targetCursors = stored[STORAGE.targetCursor] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
-  commandTabs = stored[STORAGE.commandTab] ?? null;
   renderDashboard();
   renderUnexpected();
 }
@@ -308,48 +284,11 @@ async function detectAccount() {
   progressArea.hidden = true;
 }
 
-function configOptionLabel(account) {
-  const isDetected = account.provider === detectedAccount?.provider
-    && account.provider_account_id === detectedAccount?.provider_account_id;
-  return `${isDetected ? "Current · " : ""}${account.provider.toUpperCase()} · ${account.provider_account_id}`;
-}
-
-function renderConfigEditor(preferredKey) {
-  const detectedKey = accountConfigKey(detectedAccount);
-  const accounts = [...storedConfig.accounts];
-  if (detectedKey && !accounts.some((account) => accountConfigKey(account) === detectedKey)) {
-    accounts.unshift(configTemplate(detectedAccount));
-  }
-
-  configSelect.replaceChildren();
-  for (const account of accounts) {
-    const option = document.createElement("option");
-    option.value = accountConfigKey(account);
-    option.textContent = configOptionLabel(account);
-    configSelect.append(option);
-  }
-
-  if (!accounts.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "Detect a Shopee account first";
-    configSelect.append(option);
-    configInput.value = "";
-    configInput.placeholder = "";
-    configInput.disabled = true;
-    document.querySelector("#save-config").disabled = true;
-  } else {
-    const selectedKey = preferredKey && accounts.some((account) => accountConfigKey(account) === preferredKey)
-      ? preferredKey
-      : detectedKey ?? accountConfigKey(accounts[0]);
-    configSelect.value = selectedKey;
-    const selected = storedConfig.accounts.find((account) => accountConfigKey(account) === selectedKey);
-    configInput.value = selected ? JSON.stringify(selected, null, 2) : "";
-    configInput.placeholder = selected ? "" : configPlaceholder;
-    configInput.disabled = false;
-    document.querySelector("#save-config").disabled = false;
-  }
-  configCount.textContent = `${storedConfig.accounts.length} account${storedConfig.accounts.length === 1 ? "" : "s"} saved`;
+function renderConfigEditor() {
+  configInput.value = JSON.stringify(storedConfig, null, 2);
+  configInput.disabled = false;
+  document.querySelector("#save-config").disabled = false;
+  configCount.textContent = "Current saved configuration";
   exportButton.disabled = storedConfig.accounts.length === 0;
 }
 
@@ -360,7 +299,7 @@ function openConfig() {
   configScreen.hidden = false;
   setHeaderActionsVisible(false);
   setConfigStatus("");
-  renderConfigEditor(accountConfigKey(detectedAccount));
+  renderConfigEditor();
 }
 
 function closeConfig() {
@@ -390,7 +329,6 @@ async function load() {
     STORAGE.targetCursor,
     STORAGE.live,
     STORAGE.unexpected,
-    STORAGE.commandTab,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
@@ -400,7 +338,6 @@ async function load() {
   targetCursors = stored[STORAGE.targetCursor] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
-  commandTabs = stored[STORAGE.commandTab] ?? null;
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   isShopeeChatTab = activeTab?.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations") ?? false;
@@ -522,32 +459,18 @@ copyErrorsButton.addEventListener("click", async () => {
   setTimeout(() => { copyErrorsButton.textContent = "Copy all"; }, 1_200);
 });
 
-configSelect.addEventListener("change", () => {
-  const account = storedConfig.accounts.find((item) => accountConfigKey(item) === configSelect.value);
-  configInput.value = account ? JSON.stringify(account, null, 2) : "";
-  configInput.placeholder = account ? "" : configPlaceholder;
-  setConfigStatus("");
-});
-
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
-    const account = validateAccountConfig(JSON.parse(configInput.value));
-    const selectedKey = configSelect.value;
-    if (selectedKey && accountConfigKey(account) !== selectedKey) {
-      throw new Error("Shop ID cannot be changed while editing this account.");
-    }
-    const accounts = storedConfig.accounts.filter(
-      (item) => accountConfigKey(item) !== accountConfigKey(account),
-    );
-    const config = validateConfigFile({
-      version: CONFIG_VERSION,
-      accounts: [...accounts, account],
-    });
-    await requestTargetPermission(accountOrigins(config));
+    const config = validateConfigFile(JSON.parse(configInput.value));
     await writeStorage({ [STORAGE.config]: config });
     storedConfig = config;
-    setConfigStatus("Account saved.");
-    renderConfigEditor(accountConfigKey(account));
+    renderConfigEditor();
+    try {
+      await requestTargetPermission(accountOrigins(config));
+      setConfigStatus("Configuration saved.");
+    } catch (error) {
+      setConfigStatus(`Configuration saved. ${error.message}`, true);
+    }
   } catch (error) {
     setConfigStatus(error.message, true);
   }
@@ -562,11 +485,19 @@ configFile.addEventListener("change", async () => {
     const config = validateConfigFile(JSON.parse(await file.text()));
     await writeStorage({ [STORAGE.config]: config });
     storedConfig = config;
-    const message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}. Sync to approve the configured server.`;
-    if (configScreen.hidden) renderDashboard(message);
+    let message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}.`;
+    let permissionError = false;
+    try {
+      await requestTargetPermission(accountOrigins(config));
+      message += " Server access approved.";
+    } catch (error) {
+      message += ` ${error.message}`;
+      permissionError = true;
+    }
+    if (configScreen.hidden) renderDashboard(message, permissionError);
     else {
-      setConfigStatus(message);
-      renderConfigEditor(accountConfigKey(detectedAccount));
+      setConfigStatus(message, permissionError);
+      renderConfigEditor();
     }
   } catch (error) {
     if (configScreen.hidden) renderDashboard(error.message, true);
