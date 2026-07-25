@@ -5,8 +5,8 @@
   const HISTORY_LIMIT = 100;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
-  const MIN_RECOVERY_REQUEST_INTERVAL_MS = 3_000;
-  const SOCKET_OBSERVER_INTERVAL_MS = 1_000;
+  const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
+  const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const state = window.__omnichatRealtimeState ??= {
     getTemplate: null,
     listTemplate: null,
