@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="popup.css">
+    <title>Omnichat Bridge</title>
+  </head>
+  <body>
+    <main>
+      <header class="brand">
+        <img class="provider-mark" src="icons/icon-48.png" alt="">
+        <div class="brand-copy">
+          <h1>Omnichat Bridge</h1>
+          <span>Secured bridge to your server</span>
+        </div>
+        <div class="header-actions">
+        <button id="open-errors" class="header-log-button" type="button" aria-label="logs" title="logs" hidden>Logs</button>
+        <button id="open-config" class="header-icon-button" type="button" aria-label="Settings" title="Settings" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        </div>
+        <input id="config-file" type="file" accept="application/json,.json" hidden>
+      </header>
+
+      <section id="consent-screen" class="screen">
+        <div class="screen-intro">
+          <button id="close-privacy" class="icon-button privacy-back" type="button" aria-label="Back" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <h2>Before you continue</h2>
+          <p>Review what leaves this browser.</p>
+        </div>
+        <div class="consent-copy">
+          <p><strong>This extension transfers</strong> chat messages, media links, buyer profiles, IDs, and timestamps to the server you configure.</p>
+          <p><strong>It never collects or transfers</strong> passwords, cookies, login tokens, or other browser credentials.</p>
+          <p id="privacy-github" class="privacy-github">Learn more about this extension on <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>.</p>
+        </div>
+        <p id="consent-record" class="consent-record" hidden></p>
+        <label class="consent">
+          <input id="consent" type="checkbox">
+          <span>I understand and consent to this transfer.</span>
+        </label>
+        <button id="continue" type="button" disabled>Continue</button>
+        <p id="consent-error" class="error" role="status"></p>
+      </section>
+
+      <section id="hint-screen" class="screen hint-screen" hidden>
+        <div class="screen-intro">
+          <h2 class="provider-links-title">Supported providers</h2>
+          <p>Choose a provider to manage its account here.</p>
+        </div>
+        <div class="provider-links">
+          <a class="provider-link" href="https://seller.shopee.co.th/new-webchat/conversations" target="_blank" rel="noreferrer"><span>Shopee Seller Chat</span><small>Open Website</small></a>
+          <button class="provider-link" type="button" disabled><span>LINE Official Account</span><small>Coming soon</small></button>
+        </div>
+        <p class="hint-guide">Need help? See the <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">documentation on GitHub</a>.</p>
+      </section>
+
+      <section id="dashboard-screen" class="screen" hidden>
+        <section class="account-section" aria-labelledby="account-title">
+          <h2 id="account-title">Shopee account</h2>
+          <div class="account">
+            <img id="account-avatar" alt="" hidden>
+            <div class="account-profile">
+              <strong id="account-name">Detecting…</strong>
+              <div class="account-status-row">
+                <button id="account-status" class="status-pill" type="button" aria-live="polite" disabled>
+                  <i></i><span class="connection-status">Detecting</span>
+                </button>
+                <button id="leader-status" class="leader-badge" type="button" hidden>
+                  <span class="leader-current">Standby</span>
+                  <span class="leader-action">Set leader</span>
+                </button>
+              </div>
+            </div>
+            <button id="account-id" class="account-id" type="button" disabled aria-label="Copy Shop ID">
+              <span id="account-id-value">Detecting…</span>
+              <svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8.5A2.5 2.5 0 0 1 11.5 6h6A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-6A2.5 2.5 0 0 1 9 16.5z"/><path d="M15 6V5.5A2.5 2.5 0 0 0 12.5 3h-6A2.5 2.5 0 0 0 4 5.5v8A2.5 2.5 0 0 0 6.5 16H9"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <button id="sync" type="button" disabled>Sync messages</button>
+
+        <section id="progress-area" class="progress-area" aria-live="polite" hidden>
+          <progress id="sync-progress" max="100" value="0" hidden></progress>
+          <p id="last-sync" hidden></p>
+          <p id="status" role="status"></p>
+        </section>
+      </section>
+
+      <section id="config-screen" class="screen" hidden>
+        <header class="screen-heading">
+          <button id="close-config" class="icon-button" type="button" aria-label="Back">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <div>
+            <h2>Settings</h2>
+            <p id="config-count">No accounts saved</p>
+          </div>
+          <div class="settings-actions">
+            <button id="import-config" class="icon-button" type="button" aria-label="Import configuration" title="Import configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 13v6h14v-6"/></svg></button>
+            <button id="export-config" class="icon-button" type="button" aria-label="Export configuration" title="Export configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0 4 4m-4-4L8 7M5 13v6h14v-6"/></svg></button>
+            <button id="clear" class="icon-button delete-action" type="button" aria-label="Delete all configuration" title="Delete all configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v5m4-5v5M9 7l1-3h4l1 3m-9 0 1 13h10l1-13"/></svg></button>
+          </div>
+        </header>
+
+        <label class="field">
+          <span>Account</span>
+          <select id="config-account"></select>
+        </label>
+
+        <label class="field">
+          <span>JSON configuration</span>
+          <textarea id="config" spellcheck="false"></textarea>
+        </label>
+
+        <button id="save-config" type="button">Save account</button>
+
+        <p id="config-status" role="status"></p>
+      </section>
+
+      <section id="errors-screen" class="screen" hidden>
+        <header class="screen-heading">
+          <button id="close-errors" class="icon-button" type="button" aria-label="Back">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <div>
+            <h2>Recent errors</h2>
+            <p>Saved only on this device</p>
+          </div>
+        </header>
+        <button id="copy-errors" class="secondary-button" type="button">Copy all</button>
+        <ol id="error-log" class="error-log"></ol>
+        <p id="error-log-empty" class="empty-log" hidden>No errors recorded.</p>
+      </section>
+
+      <footer>
+        <button id="open-privacy" class="footer-link" type="button">Privacy Policy</button>
+        <span>·</span>
+        <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>
+        <span>·</span>
+        <span id="version"></span>
+      </footer>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

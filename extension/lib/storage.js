@@ -1,0 +1,44 @@
+export const STORAGE = {
+  config: "config",
+  consent: "local_consent",
+  detectedAccount: "detected_account",
+  installationId: "installation_id",
+  pending: "pending_messages",
+  status: "status",
+  targetCursor: "target_sync_cursor",
+  lastResumeSyncAt: "last_resume_sync_at",
+  live: "live_status",
+  commandTab: "command_tab",
+  unexpected: "unexpected_events"
+};
+
+export const readStorage = (keys) => chrome.storage.local.get(keys);
+export const writeStorage = (values) => chrome.storage.local.set(values);
+
+export function readAccountState(container, key, fallback) {
+  return key && container?.version === 2 && container.accounts?.[key] !== undefined
+    ? container.accounts[key]
+    : fallback;
+}
+
+export function writeAccountState(container, key, value) {
+  return {
+    version: 2,
+    accounts: {
+      ...(container?.version === 2 ? container.accounts : {}),
+      [key]: value,
+    },
+  };
+}
+
+export function hasLocalConsent(consent) {
+  return Boolean(consent?.accepted_at && consent?.policy_version === 2);
+}
+
+export async function installationId() {
+  const stored = await readStorage([STORAGE.installationId]);
+  if (stored[STORAGE.installationId]) return stored[STORAGE.installationId];
+  const value = crypto.randomUUID();
+  await writeStorage({ [STORAGE.installationId]: value });
+  return value;
+}
