@@ -1,6 +1,15 @@
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, findAccountConfig } from "./lib/config.js";
 import {
+  advanceConversationCursors,
+  compareMessageCursor,
+  deliveryRetryDelay,
+  hasScanBacklog,
+  isAfterMessageCursor,
+  latestMessageCursor,
+  migrateScanState,
+} from "./lib/sync-state.js";
+import {
   STORAGE,
   hasLocalConsent,
   installationId,
@@ -18,9 +27,9 @@ const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
+const DELIVERY_RETRY_ALARM = "omnichat-delivery-retry";
 let mutationQueue = Promise.resolve();
 let activeSync = null;
-const completedRecoveryIds = new Set();
 let liveSocket = null;
 let liveReconnectTimer = null;
 let liveHeartbeatTimer = null;
@@ -42,9 +51,15 @@ function currentAccountContext(stored) {
   return key && config ? { key, config, account: stored[STORAGE.detectedAccount] } : null;
 }
 
-async function writeScopedState(storageKey, key, value) {
+async function updateScopedState(storageKey, key, patch) {
   const stored = await readStorage([storageKey]);
-  await writeStorage({ [storageKey]: writeAccountState(stored[storageKey], key, value) });
+  const current = readAccountState(stored[storageKey], key, {});
+  await writeStorage({
+    [storageKey]: writeAccountState(stored[storageKey], key, {
+      ...current,
+      ...patch,
+    }),
+  });
 }
 
 async function updateLiveState(context, patch) {
@@ -59,6 +74,106 @@ async function updateLiveState(context, patch) {
   });
 }
 
+async function getAccountScanState() {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccount,
+    STORAGE.pending,
+    STORAGE.scanState,
+    STORAGE.targetCursor,
+    STORAGE.lastResumeSyncAt,
+  ]);
+  const context = currentAccountContext(stored);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    throw new Error("Shopee browser bridge is not configured.");
+  }
+  const existing = readAccountState(stored[STORAGE.scanState], context.key, null);
+  if (existing?.version === 1) return { context, state: existing, stored };
+  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+  const legacyCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
+  const legacyLastAutoAt = readAccountState(
+    stored[STORAGE.lastResumeSyncAt],
+    context.key,
+    null,
+  );
+  const state = migrateScanState(legacyCursor, pending, legacyLastAutoAt);
+  const scanState = writeAccountState(
+    stored[STORAGE.scanState],
+    context.key,
+    state,
+  );
+  await writeStorage({ [STORAGE.scanState]: scanState });
+  stored[STORAGE.scanState] = scanState;
+  return { context, state, stored };
+}
+
+async function writeAccountScanState(context, state, container = null) {
+  const currentContainer = container ?? (await readStorage([STORAGE.scanState]))[STORAGE.scanState];
+  await writeStorage({
+    [STORAGE.scanState]: writeAccountState(
+      currentContainer,
+      context.key,
+      { ...state, version: 1, updated_at: new Date().toISOString() },
+    ),
+  });
+}
+
+function bootstrapConversation(value) {
+  const id = String(value?.id ?? "").trim();
+  if (!id) return null;
+  return {
+    id,
+    shop_id: String(value?.shop_id ?? "").trim(),
+    biz_id: String(value?.biz_id ?? "0").trim() || "0",
+    last_message_time: value?.last_message_time ?? null,
+    created_timestamp: value?.created_timestamp ?? null,
+    to_id: String(value?.to_id ?? "").trim(),
+    to_shop_id: String(value?.to_shop_id ?? "").trim(),
+    to_name: String(value?.to_name ?? "").trim(),
+    to_avatar: String(value?.to_avatar ?? "").trim(),
+  };
+}
+
+async function saveBootstrapSelection(conversations) {
+  const { context, state, stored } = await getAccountScanState();
+  if (state.watermark || state.bootstrap?.conversations?.length) return;
+  const selected = (Array.isArray(conversations) ? conversations : [])
+    .map(bootstrapConversation)
+    .filter(Boolean)
+    .slice(0, 10);
+  if (!selected.length) return;
+  await writeAccountScanState(context, {
+    ...state,
+    bootstrap: { conversations: selected },
+    in_progress: true,
+  }, stored[STORAGE.scanState]);
+}
+
+async function advanceScanCursor(conversationId, cursor, summaryToken) {
+  const id = String(conversationId ?? "").trim();
+  if (!id) return;
+  const { context, state, stored } = await getAccountScanState();
+  const previous = state.conversations?.[id];
+  const next = cursor && compareMessageCursor(cursor, previous) > 0
+    ? {
+      event_timestamp: cursor.event_timestamp,
+      message_id: cursor.message_id,
+    }
+    : { ...(previous ?? {}) };
+  if (typeof summaryToken === "string" && summaryToken) {
+    next.summary_token = summaryToken;
+  }
+  if (!next.event_timestamp) return;
+  await writeAccountScanState(context, {
+    ...state,
+    conversations: {
+      ...(state.conversations ?? {}),
+      [id]: next,
+    },
+  }, stored[STORAGE.scanState]);
+}
+
 function exclusive(task) {
   const result = mutationQueue.then(task, task);
   mutationQueue = result.then(() => undefined, () => undefined);
@@ -67,34 +182,32 @@ function exclusive(task) {
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "get_sync_state") {
-    void readStorage([STORAGE.detectedAccount, STORAGE.targetCursor]).then(
-      (stored) => {
-        const key = accountConfigKey(stored[STORAGE.detectedAccount]);
-        respond({
-          ok: true,
-          cursor: readAccountState(stored[STORAGE.targetCursor], key, null),
-        });
-      },
+    void exclusive(() => getAccountScanState()).then(
+      ({ state }) => respond({ ok: true, checkpoint: state }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "queue_messages") {
-    void exclusive(() => queueMessages(message.messages, Boolean(message.flush))).then(
+    void exclusive(() => queueMessages(
+      message.messages,
+      Boolean(message.flush),
+      message.advance_cursor !== false,
+    )).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "flush_now") {
-    void exclusive(() => flushAll()).then(
+    void exclusive(() => attemptDelivery({ resetBackoff: true })).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "sync_now") {
-    void ensureLiveConnection().then(() => startSync()).then(
+    void ensureLiveConnection().then(() => startSync("manual")).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -108,17 +221,43 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_progress") {
-    if (completedRecoveryIds.has(message.request_id)) {
-      respond({ ok: true, ignored: true });
-      return false;
-    }
-    void readStorage([STORAGE.detectedAccount]).then((stored) => {
+    void exclusive(() => readStorage([STORAGE.detectedAccount, STORAGE.status]).then((stored) => {
       const key = accountConfigKey(stored[STORAGE.detectedAccount]);
       if (!key) throw new Error("Shopee account is not detected.");
-      return writeScopedState(STORAGE.status, key, {
+      const current = readAccountState(stored[STORAGE.status], key, {});
+      if (!["discovering", "syncing"].includes(current.state)) return;
+      return updateScopedState(STORAGE.status, key, {
         state: "syncing",
         completed_conversations: message.completed_conversations,
         total_conversations: message.total_conversations
+      });
+    })).then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "save_sync_diagnostics") {
+    void readStorage([STORAGE.detectedAccount]).then((stored) => {
+      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+      if (!key) throw new Error("Shopee account is not detected.");
+      const conversations = Array.isArray(message.conversations)
+        ? message.conversations.slice(0, 10).map((item) => ({
+          conversation_id: String(item?.conversation_id ?? ""),
+          summary_timestamp: typeof item?.summary_timestamp === "string" ? item.summary_timestamp : null,
+          cursor_timestamp: typeof item?.cursor_timestamp === "string" ? item.cursor_timestamp : null,
+          cursor_message_id: typeof item?.cursor_message_id === "string" ? item.cursor_message_id : null,
+          decision: ["skip", "probe", "history_job"].includes(item?.decision)
+            ? item.decision
+            : "history_job",
+          reason: typeof item?.reason === "string" ? item.reason : "unknown",
+        }))
+        : [];
+      return updateScopedState(STORAGE.syncDiagnostics, key, {
+        captured_at: new Date().toISOString(),
+        mode: message.mode === "bootstrap" ? "bootstrap" : "incremental",
+        checkpoint: typeof message.checkpoint === "string" ? message.checkpoint : null,
+        conversations,
       });
     }).then(
       () => respond({ ok: true }),
@@ -126,17 +265,19 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
-  if (message?.type === "sync_complete") {
-    completedRecoveryIds.add(message.request_id);
-    setTimeout(() => completedRecoveryIds.delete(message.request_id), RESUME_SYNC_COOLDOWN_MS);
-    void readStorage([STORAGE.detectedAccount]).then((stored) => {
-      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
-      if (!key) throw new Error("Shopee account is not detected.");
-      return writeScopedState(STORAGE.status, key, {
-        state: "watching",
-        last_sync_at: new Date().toISOString(),
-      });
-    }).then(
+  if (message?.type === "advance_scan_cursor") {
+    void exclusive(() => advanceScanCursor(
+      message.conversation_id,
+      message.cursor,
+      message.summary_token,
+    )).then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "save_bootstrap") {
+    void exclusive(() => saveBootstrapSelection(message.conversations)).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -453,7 +594,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccount]) void ensureLiveConnection();
 });
 
-chrome.runtime.onStartup.addListener(() => { void ensureLiveConnection(); });
+chrome.runtime.onStartup.addListener(() => {
+  void ensureLiveConnection();
+  void exclusive(() => attemptDelivery({ resetBackoff: false }));
+});
 void ensureLiveConnection();
 
 async function detectOpenShopeeAccount() {
@@ -493,154 +637,190 @@ async function waitForShopeeBridge(tabId) {
   throw new Error("Shopee Seller Chat did not finish loading.");
 }
 
-async function syncOpenShopee(mode) {
+async function syncOpenShopee() {
   const tab = await findShopeeChatTab();
   if (!tab) throw new Error("Open Shopee Seller Chat to sync messages.");
   await ensureShopeeBridge(tab.id);
-  const result = await chrome.tabs.sendMessage(tab.id, { type: "recover_now", mode });
+  const result = await chrome.tabs.sendMessage(tab.id, { type: "sync_now" });
   if (!result?.ok) throw new Error(result?.error ?? "Shopee recovery failed.");
   return result;
 }
 
-async function manualSync() {
-  const recovered = await syncOpenShopee("limited");
-  const delivered = await exclusive(() => flushAll());
-  return {
-    recovered: recovered.recovered ?? 0,
-    queued: recovered.queued ?? 0,
-    sent: (recovered.sent ?? 0) + delivered.sent,
-    pending: delivered.pending
-  };
-}
-
-function startSync(mode = "limited") {
+function startSync(trigger = "manual") {
   if (activeSync) return activeSync;
-  activeSync = (mode === "resume" ? resumeRecovery() : manualSync())
-    .then(async (result) => {
-      const syncedAt = new Date().toISOString();
-      const stored = await readStorage([
-        STORAGE.detectedAccount,
-        STORAGE.lastResumeSyncAt,
-        STORAGE.status,
-      ]);
-      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
-      if (!key) throw new Error("Shopee account is not detected.");
-      await writeStorage({
-        [STORAGE.status]: writeAccountState(stored[STORAGE.status], key, {
-          state: "watching",
-          last_sync_at: syncedAt,
-          caught_up: result.pending === 0,
-          last_result: {
-            recovered: result.recovered,
-            sent: result.sent,
-            pending: result.pending,
-          },
-        }),
-        [STORAGE.lastResumeSyncAt]: writeAccountState(
-          stored[STORAGE.lastResumeSyncAt],
-          key,
-          syncedAt,
-        ),
-      });
-      return result;
-    })
+  activeSync = runUnifiedSync(trigger)
     .finally(() => { activeSync = null; });
   return activeSync;
 }
 
-async function resumeRecovery() {
-  const recovered = await syncOpenShopee("resume");
-  const delivered = await exclusive(() => flushAll());
-  return {
-    recovered: recovered.recovered ?? 0,
-    queued: recovered.queued ?? 0,
-    sent: (recovered.sent ?? 0) + delivered.sent,
-    pending: delivered.pending
-  };
+async function runUnifiedSync(trigger) {
+  const automatic = trigger === "automatic";
+  const prepared = await exclusive(async () => {
+    const { context, state, stored } = await getAccountScanState();
+    const lastAutoAt = Date.parse(state.last_auto_at ?? "");
+    if (automatic
+      && Number.isFinite(lastAutoAt)
+      && Date.now() - lastAutoAt < RESUME_SYNC_COOLDOWN_MS) {
+      return { skipped: "cooldown" };
+    }
+    const startedAt = new Date().toISOString();
+    await writeAccountScanState(context, {
+      ...state,
+      in_progress: true,
+      started_at: startedAt,
+      ...(automatic ? { last_auto_at: startedAt } : {}),
+    }, stored[STORAGE.scanState]);
+    await updateScopedState(STORAGE.status, context.key, {
+      state: "discovering",
+      caught_up: false,
+      sync_error: null,
+      completed_conversations: null,
+      total_conversations: null,
+    });
+    return { context };
+  });
+  if (prepared.skipped) return prepared;
+
+  try {
+    await exclusive(() => attemptDelivery({ resetBackoff: true }));
+    const recovered = await syncOpenShopee();
+    await exclusive(async () => {
+      const { context, state, stored } = await getAccountScanState();
+      await writeAccountScanState(context, {
+        ...state,
+        watermark: recovered.watermark ?? state.watermark,
+        bootstrap: null,
+        in_progress: false,
+        completed_at: new Date().toISOString(),
+      }, stored[STORAGE.scanState]);
+    });
+    const delivered = await exclusive(() => attemptDelivery({ resetBackoff: true }));
+    const result = {
+      recovered: recovered.recovered ?? 0,
+      queued: recovered.queued ?? 0,
+      sent: delivered.sent,
+      pending: delivered.pending,
+    };
+    const syncedAt = new Date().toISOString();
+    await updateScopedState(STORAGE.status, prepared.context.key, {
+      state: "watching",
+      last_sync_at: syncedAt,
+      caught_up: result.pending === 0,
+      sync_error: null,
+      completed_conversations: null,
+      total_conversations: null,
+      last_result: result,
+    });
+    return result;
+  } catch (error) {
+    const delivery = await exclusive(() => attemptDelivery({ resetBackoff: false }));
+    const message = error instanceof Error ? error.message : String(error);
+    await updateScopedState(STORAGE.status, prepared.context.key, {
+      state: "error",
+      caught_up: false,
+      sync_error: message,
+      pending: delivery.pending,
+    });
+    await recordUnexpected("message_sync", error);
+    throw error;
+  }
 }
 
 async function resumeSync() {
   if (activeSync) return activeSync;
-  const stored = await readStorage([
-    STORAGE.config,
-    STORAGE.consent,
-    STORAGE.detectedAccount,
-    STORAGE.lastResumeSyncAt,
-    STORAGE.targetCursor,
-  ]);
-  const context = currentAccountContext(stored);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
-    return { skipped: "not_configured" };
+  try {
+    return await startSync("automatic");
+  } catch (error) {
+    if (String(error).includes("not configured")) return { skipped: "not_configured" };
+    throw error;
   }
-  const lastResumeSyncAt = Date.parse(
-    readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, "") ?? "",
-  );
-  if (Number.isFinite(lastResumeSyncAt) && Date.now() - lastResumeSyncAt < RESUME_SYNC_COOLDOWN_MS) {
-    return { skipped: "cooldown" };
-  }
-  await writeStorage({
-    [STORAGE.lastResumeSyncAt]: writeAccountState(
-      stored[STORAGE.lastResumeSyncAt],
-      context.key,
-      new Date().toISOString(),
-    ),
-  });
-  const cursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
-  const hasCursor = Object.keys(cursor?.conversations ?? {}).length > 0;
-  return startSync(hasCursor ? "resume" : "limited");
 }
 
 function messageKey(message) {
   return `${message.provider}:${message.conversation_id}:${message.id}`;
 }
 
-function isAfterCursor(message, cursor) {
-  if (!cursor) return true;
-  const messageTime = Date.parse(message.event_timestamp);
-  const cursorTime = Date.parse(cursor.event_timestamp);
-  if (!Number.isFinite(messageTime) || !Number.isFinite(cursorTime)) return true;
-  if (messageTime !== cursorTime) return messageTime > cursorTime;
-  return String(message.id) > String(cursor.message_id ?? "");
-}
-
-async function queueMessages(messages, shouldFlush) {
+async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
     STORAGE.detectedAccount,
     STORAGE.pending,
+    STORAGE.scanState,
     STORAGE.targetCursor,
+    STORAGE.lastResumeSyncAt,
   ]);
   const context = currentAccountContext(stored);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
     return { queued: 0, sent: 0, pending: 0 };
   }
+  let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
-  const targetCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
+  const migrated = scanState?.version !== 1;
+  if (scanState?.version !== 1) {
+    scanState = migrateScanState(
+      readAccountState(stored[STORAGE.targetCursor], context.key, null),
+      pending,
+      readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, null),
+    );
+  }
+  const deferCursorAdvance = advanceCursor && hasScanBacklog(scanState);
   const known = new Set(pending.map(messageKey));
+  const eligible = [];
   const added = [];
   for (const message of messages ?? []) {
-    const cursor = targetCursor?.conversations?.[message?.conversation_id];
-    if (message?.provider !== "shopee" || known.has(messageKey(message)) || !isAfterCursor(message, cursor)) continue;
+    const cursor = scanState.conversations?.[message?.conversation_id];
+    if (message?.provider !== "shopee"
+      || !isAfterMessageCursor(message, cursor)) continue;
+    eligible.push(message);
+    if (known.has(messageKey(message))) continue;
     known.add(messageKey(message));
     added.push(message);
   }
+  const writes = {};
   if (added.length) {
-    await writeStorage({
-      [STORAGE.pending]: writeAccountState(
-        stored[STORAGE.pending],
-        context.key,
-        [...pending, ...added],
-      ),
-    });
+    writes[STORAGE.pending] = writeAccountState(
+      stored[STORAGE.pending],
+      context.key,
+      [...pending, ...added],
+    );
   }
-  if (!shouldFlush) return { queued: added.length, sent: 0, pending: pending.length + added.length };
-  try {
-    const delivered = await flushAll();
-    return { queued: added.length, ...delivered };
-  } catch (error) {
-    return { queued: added.length, sent: 0, pending: pending.length + added.length, sync_error: String(error) };
+  if (!deferCursorAdvance && advanceCursor && added.length) {
+    writes[STORAGE.scanState] = writeAccountState(
+      stored[STORAGE.scanState],
+      context.key,
+      {
+        ...scanState,
+        conversations: advanceConversationCursors(scanState, added),
+        updated_at: new Date().toISOString(),
+      },
+    );
+  } else if (migrated) {
+    writes[STORAGE.scanState] = writeAccountState(
+      stored[STORAGE.scanState],
+      context.key,
+      scanState,
+    );
   }
+  if (Object.keys(writes).length) await writeStorage(writes);
+  const pendingCount = pending.length + added.length;
+  const latestCursor = latestMessageCursor(eligible);
+  if (!shouldFlush) {
+    return {
+      queued: added.length,
+      sent: 0,
+      pending: pendingCount,
+      deferred: deferCursorAdvance,
+      latest_cursor: latestCursor,
+    };
+  }
+  const delivered = await attemptDelivery({ resetBackoff: false });
+  return {
+    queued: added.length,
+    deferred: deferCursorAdvance,
+    ...delivered,
+    latest_cursor: latestCursor,
+  };
 }
 
 function batchFor(messages, installId) {
@@ -729,31 +909,11 @@ async function signedRequest(config, providerAccountId, payload) {
   return response.json();
 }
 
-function advancedCursor(current, delivered) {
-  const conversations = { ...(current?.conversations ?? {}) };
-  for (const message of delivered) {
-    const previous = conversations[message.conversation_id];
-    const previousTime = Date.parse(previous?.event_timestamp ?? "");
-    const messageTime = Date.parse(message.event_timestamp);
-    if (!Number.isFinite(messageTime)) continue;
-    if (!Number.isFinite(previousTime)
-      || messageTime > previousTime
-      || (messageTime === previousTime && String(message.id) > String(previous.message_id))) {
-      conversations[message.conversation_id] = {
-        event_timestamp: message.event_timestamp,
-        message_id: message.id
-      };
-    }
-  }
-  return { version: 1, conversations, updated_at: new Date().toISOString() };
-}
-
 async function flushBatch() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
     STORAGE.pending,
-    STORAGE.targetCursor,
     STORAGE.detectedAccount,
     STORAGE.status,
   ]);
@@ -762,32 +922,46 @@ async function flushBatch() {
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !pending.length) {
     return { sent: 0, pending: pending.length };
   }
-  const selected = selectBatchMessages(pending);
-  const payload = batchFor(selected, await installationId());
-  if (JSON.stringify(payload).length > 1_000_000) throw new Error("Queued batch exceeds the 1 MiB limit.");
-  const acknowledgement = await signedRequest(
-    context.config,
-    context.account.provider_account_id,
-    payload,
-  );
-  if (acknowledgement.schema !== "omnichat.message_batch_ack"
-    || acknowledgement.batch_id !== payload.batch_id
-    || acknowledgement.accepted_messages + acknowledgement.duplicate_messages !== selected.length) {
-    throw new Error("Target server acknowledgement is invalid.");
+  let selected;
+  let payload;
+  try {
+    const installId = await installationId();
+    selected = selectBatchMessages(pending);
+    if (!selected.length) return { sent: 0, pending: pending.length };
+    payload = batchFor(selected, installId);
+    if (JSON.stringify(payload).length > 1_000_000) throw new Error("Queued batch exceeds the 1 MiB limit.");
+    const acknowledgement = await signedRequest(
+      context.config,
+      context.account.provider_account_id,
+      payload,
+    );
+    if (acknowledgement.schema !== "omnichat.message_batch_ack"
+      || acknowledgement.batch_id !== payload.batch_id
+      || acknowledgement.accepted_messages + acknowledgement.duplicate_messages !== selected.length) {
+      throw new Error("Target server acknowledgement is invalid.");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateScopedState(STORAGE.status, context.key, {
+      delivery_error: message,
+      delivery_error_at: new Date().toISOString(),
+    });
+    await recordUnexpected("message_delivery", error);
+    throw error;
   }
   const deliveredKeys = new Set(selected.map(messageKey));
   const remaining = pending.filter((message) => !deliveredKeys.has(messageKey(message)));
-  const targetCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
+  const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
   await writeStorage({
     [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, remaining),
-    [STORAGE.targetCursor]: writeAccountState(
-      stored[STORAGE.targetCursor],
-      context.key,
-      advancedCursor(targetCursor, selected),
-    ),
     [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, {
-      state: "watching",
-      last_sync_at: new Date().toISOString(),
+      ...currentStatus,
+      state: ["discovering", "syncing"].includes(currentStatus.state)
+        ? currentStatus.state
+        : "watching",
+      delivery_error: null,
+      delivery_error_at: null,
+      pending: remaining.length,
     }),
   });
   return { sent: selected.length, pending: remaining.length };
@@ -804,3 +978,80 @@ async function flushAll() {
   }
   return { sent, pending };
 }
+
+async function resetDeliveryRetry(context) {
+  await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
+  const stored = await readStorage([STORAGE.deliveryRetry]);
+  await writeStorage({
+    [STORAGE.deliveryRetry]: writeAccountState(
+      stored[STORAGE.deliveryRetry],
+      context.key,
+      { attempt: 0, next_at: null },
+    ),
+  });
+}
+
+async function clearDeliveryRetry(context) {
+  await resetDeliveryRetry(context);
+  await updateScopedState(STORAGE.status, context.key, {
+    delivery_error: null,
+    delivery_error_at: null,
+    pending: 0,
+  });
+}
+
+async function scheduleDeliveryRetry(context) {
+  const stored = await readStorage([STORAGE.deliveryRetry]);
+  const current = readAccountState(stored[STORAGE.deliveryRetry], context.key, {});
+  const attempt = Number(current?.attempt) || 0;
+  const nextAt = Date.now() + deliveryRetryDelay(attempt);
+  await writeStorage({
+    [STORAGE.deliveryRetry]: writeAccountState(
+      stored[STORAGE.deliveryRetry],
+      context.key,
+      {
+        attempt: attempt + 1,
+        next_at: new Date(nextAt).toISOString(),
+      },
+    ),
+  });
+  chrome.alarms.create(DELIVERY_RETRY_ALARM, { when: nextAt });
+}
+
+async function attemptDelivery({ resetBackoff }) {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccount,
+    STORAGE.pending,
+  ]);
+  const context = currentAccountContext(stored);
+  const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    return { sent: 0, pending: pending.length };
+  }
+  if (resetBackoff) await resetDeliveryRetry(context);
+  if (!pending.length) {
+    await clearDeliveryRetry(context);
+    return { sent: 0, pending: 0 };
+  }
+  try {
+    const result = await flushAll();
+    if (result.pending) await scheduleDeliveryRetry(context);
+    else await clearDeliveryRetry(context);
+    await updateScopedState(STORAGE.status, context.key, { pending: result.pending });
+    return result;
+  } catch (error) {
+    await scheduleDeliveryRetry(context);
+    return {
+      sent: 0,
+      pending: pending.length,
+      delivery_error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== DELIVERY_RETRY_ALARM) return;
+  void exclusive(() => attemptDelivery({ resetBackoff: false }));
+});

@@ -43,6 +43,8 @@ const errorsScreen = document.querySelector("#errors-screen");
 const errorLog = document.querySelector("#error-log");
 const errorLogEmpty = document.querySelector("#error-log-empty");
 const copyErrorsButton = document.querySelector("#copy-errors");
+const copyDiagnosticsButton = document.querySelector("#copy-diagnostics");
+const diagnosticsEmpty = document.querySelector("#diagnostics-empty");
 const openPrivacyButton = document.querySelector("#open-privacy");
 const closePrivacyButton = document.querySelector("#close-privacy");
 const consentRecord = document.querySelector("#consent-record");
@@ -54,8 +56,10 @@ let storedConfig = emptyConfig();
 let detectedAccount = null;
 let storedStatus = null;
 let liveState = null;
-let targetCursors = null;
+let scanStates = null;
+let pendingStates = null;
 let unexpected = [];
+let storedSyncDiagnostics = null;
 let popupTabId = null;
 let storedConsent = null;
 let viewingPrivacy = false;
@@ -112,11 +116,16 @@ async function requestTargetPermission(urls) {
   }
 }
 
-function setAccountStatus(label, state) {
+function setAccountStatus(label, state, action = "") {
   accountStatus.dataset.state = state;
+  accountStatus.dataset.action = action;
   connectionStatus.textContent = label;
-  accountStatus.disabled = label !== "Need config";
-  accountStatus.title = accountStatus.disabled ? "" : "Open settings";
+  accountStatus.disabled = !action;
+  accountStatus.title = action === "config"
+    ? "Open settings"
+    : action === "logs"
+      ? "Open error logs"
+      : "";
 }
 
 function setConfigStatus(message, isError = false) {
@@ -137,11 +146,11 @@ function formatLastSync(value) {
 
 function formatSyncResult(result) {
   if (!result) return "";
-  const recovered = Number(result.recovered) || 0;
   const sent = Number(result.sent) || 0;
   const pending = Number(result.pending) || 0;
-  if (!recovered && !sent && !pending) return "Checked Shopee. No newer messages.";
-  return `Scanned ${recovered}. Sent ${sent}. Pending ${pending}.`;
+  if (pending) return `${pending} message${pending === 1 ? "" : "s"} pending.`;
+  if (sent) return `Sent ${sent} message${sent === 1 ? "" : "s"}.`;
+  return "No new messages.";
 }
 
 function showAccount(account) {
@@ -170,8 +179,9 @@ function renderDashboard(message = "", isError = false) {
   const key = accountConfigKey(detectedAccount);
   const config = findAccountConfig(storedConfig, detectedAccount);
   const syncState = readAccountState(storedStatus, key, null);
-  const targetCursor = readAccountState(targetCursors, key, null);
-  const hasCursor = Object.keys(targetCursor?.conversations ?? {}).length > 0;
+  const scanState = readAccountState(scanStates, key, null);
+  const pending = readAccountState(pendingStates, key, []);
+  const hasCheckpoint = Boolean(scanState?.watermark);
   const live = readAccountState(liveState, key, null);
   const isLeader = Boolean(live?.leader);
   const socketConnected = live?.socket === "connected";
@@ -194,7 +204,7 @@ function renderDashboard(message = "", isError = false) {
   }
 
   if (!config) {
-    setAccountStatus("Need config", "warning");
+    setAccountStatus("Need config", "warning", "config");
     status.textContent = message;
     syncButton.disabled = false;
     syncButton.dataset.action = "configure";
@@ -204,12 +214,28 @@ function renderDashboard(message = "", isError = false) {
     return;
   }
 
-  setAccountStatus(socketConnected ? "Connected" : live?.socket === "disconnected" ? "Offline" : "Connecting", socketConnected ? "ready" : "neutral");
-  syncButton.disabled = false;
+  const deliveryError = typeof syncState?.delivery_error === "string" && syncState.delivery_error;
+  const syncError = typeof syncState?.sync_error === "string" && syncState.sync_error;
+  const currentError = deliveryError || syncError;
+  status.classList.toggle("error", isError || Boolean(currentError));
+  const syncing = ["discovering", "syncing"].includes(syncState?.state);
+  const needsRetry = pending.length > 0 || scanState?.in_progress || currentError;
+  setAccountStatus(
+    currentError
+      ? `Error${pending.length ? ` · ${pending.length} pending` : ""}`
+      : socketConnected
+        ? "Connected"
+        : ["disconnected", "reconnecting"].includes(live?.socket)
+          ? "Offline"
+          : "Connecting",
+    currentError ? "error" : socketConnected ? "ready" : "neutral",
+    currentError ? "logs" : "",
+  );
+  syncButton.disabled = syncing;
   syncButton.dataset.action = "sync";
-  syncButton.textContent = syncState?.caught_up ? "Refresh messages" : "Sync messages";
+  syncButton.textContent = syncing ? "Syncing…" : needsRetry ? "Retry now" : "Sync messages";
   const lastSyncText = formatLastSync(syncState?.last_sync_at);
-  if (hasCursor && lastSyncText) {
+  if (hasCheckpoint && lastSyncText) {
     lastSync.textContent = lastSyncText;
     lastSync.hidden = false;
   }
@@ -222,8 +248,16 @@ function renderDashboard(message = "", isError = false) {
     syncProgress.value = percentage;
     progressArea.hidden = false;
     status.textContent = `Syncing ${completed} of ${total} conversations · ${percentage}%`;
+  } else if (syncState?.state === "discovering") {
+    syncProgress.hidden = true;
+    progressArea.hidden = false;
+    status.textContent = "Checking for missed messages…";
   } else {
-    const resultMessage = message || (hasCursor ? formatSyncResult(syncState?.last_result) : "");
+    const resultMessage = message
+      || (currentError
+        ? `${pending.length ? `${pending.length} pending. ` : ""}Select Error to view logs.`
+        : "")
+      || (hasCheckpoint ? formatSyncResult(syncState?.last_result) : "");
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage;
     status.textContent = resultMessage;
@@ -253,16 +287,59 @@ function renderUnexpected() {
   copyErrorsButton.disabled = unexpected.length === 0;
 }
 
+function currentSyncDiagnostics() {
+  return readAccountState(storedSyncDiagnostics, accountConfigKey(detectedAccount), null);
+}
+
+function renderSyncDiagnostics() {
+  const diagnostics = currentSyncDiagnostics();
+  const available = Boolean(diagnostics?.conversations?.length);
+  copyDiagnosticsButton.disabled = !available;
+  diagnosticsEmpty.hidden = available;
+}
+
+function formatSyncDiagnostics(diagnostics) {
+  const rows = [
+    ["conversation_id", "summary_timestamp", "cursor_timestamp", "cursor_message_id", "decision", "reason"],
+    ...diagnostics.conversations.map((item) => [
+      item.conversation_id,
+      item.summary_timestamp ?? "",
+      item.cursor_timestamp ?? "",
+      item.cursor_message_id ?? "",
+      item.decision,
+      item.reason,
+    ]),
+  ];
+  return [
+    `captured_at\t${diagnostics.captured_at ?? ""}`,
+    `mode\t${diagnostics.mode ?? ""}`,
+    `checkpoint\t${diagnostics.checkpoint ?? ""}`,
+    ...rows.map((row) => row.join("\t")),
+  ].join("\n");
+}
+
 async function refreshStoredState() {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount, STORAGE.status, STORAGE.targetCursor, STORAGE.live, STORAGE.unexpected]);
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.detectedAccount,
+    STORAGE.status,
+    STORAGE.scanState,
+    STORAGE.pending,
+    STORAGE.live,
+    STORAGE.unexpected,
+    STORAGE.syncDiagnostics,
+  ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccount = stored[STORAGE.detectedAccount] ?? null;
   storedStatus = stored[STORAGE.status] ?? null;
-  targetCursors = stored[STORAGE.targetCursor] ?? null;
+  scanStates = stored[STORAGE.scanState] ?? null;
+  pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
+  storedSyncDiagnostics = stored[STORAGE.syncDiagnostics] ?? null;
   renderDashboard();
   renderUnexpected();
+  renderSyncDiagnostics();
 }
 
 async function detectAccount() {
@@ -326,18 +403,22 @@ async function load() {
     STORAGE.consent,
     STORAGE.detectedAccount,
     STORAGE.status,
-    STORAGE.targetCursor,
+    STORAGE.scanState,
+    STORAGE.pending,
     STORAGE.live,
     STORAGE.unexpected,
+    STORAGE.syncDiagnostics,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccount = stored[STORAGE.detectedAccount] ?? null;
   storedStatus = stored[STORAGE.status] ?? null;
-  targetCursors = stored[STORAGE.targetCursor] ?? null;
+  scanStates = stored[STORAGE.scanState] ?? null;
+  pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
+  storedSyncDiagnostics = stored[STORAGE.syncDiagnostics] ?? null;
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   isShopeeChatTab = activeTab?.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations") ?? false;
@@ -355,6 +436,7 @@ async function load() {
   renderConsentScreen();
   renderDashboard();
   renderUnexpected();
+  renderSyncDiagnostics();
   if (consented) void detectAccount();
   if (consented) void chrome.runtime.sendMessage({ type: "get_live_state" }).catch(() => undefined);
 }
@@ -410,10 +492,9 @@ syncButton.addEventListener("click", async () => {
   }
   syncButton.disabled = true;
   progressArea.hidden = false;
-  syncProgress.hidden = false;
-  syncProgress.removeAttribute("value");
+  syncProgress.hidden = true;
   status.classList.remove("error");
-  status.textContent = "Starting sync…";
+  status.textContent = "Checking for missed messages…";
   try {
     await requestTargetPermission(accountOrigins(storedConfig));
     await showSyncResult(await chrome.runtime.sendMessage({ type: "sync_now" }));
@@ -424,7 +505,8 @@ syncButton.addEventListener("click", async () => {
 
 document.querySelector("#open-config").addEventListener("click", openConfig);
 accountStatus.addEventListener("click", () => {
-  if (!accountStatus.disabled) openConfig();
+  if (accountStatus.dataset.action === "config") openConfig();
+  else if (accountStatus.dataset.action === "logs") openErrors();
 });
 leaderStatus.addEventListener("click", async () => {
   const isLeader = leaderStatus.dataset.leader === "true";
@@ -434,12 +516,13 @@ leaderStatus.addEventListener("click", async () => {
   if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);
-openErrorsButton.addEventListener("click", () => {
+function openErrors() {
   brandHeader.hidden = true;
   dashboardScreen.hidden = true;
   setHeaderActionsVisible(false);
   errorsScreen.hidden = false;
-});
+}
+openErrorsButton.addEventListener("click", openErrors);
 document.querySelector("#close-errors").addEventListener("click", () => {
   brandHeader.hidden = false;
   errorsScreen.hidden = true;
@@ -457,6 +540,18 @@ copyErrorsButton.addEventListener("click", async () => {
     copyErrorsButton.textContent = "Could not copy";
   }
   setTimeout(() => { copyErrorsButton.textContent = "Copy all"; }, 1_200);
+});
+
+copyDiagnosticsButton.addEventListener("click", async () => {
+  const diagnostics = currentSyncDiagnostics();
+  if (!diagnostics?.conversations?.length) return;
+  try {
+    await navigator.clipboard.writeText(formatSyncDiagnostics(diagnostics));
+    copyDiagnosticsButton.textContent = "Copied";
+  } catch {
+    copyDiagnosticsButton.textContent = "Could not copy";
+  }
+  setTimeout(() => { copyDiagnosticsButton.textContent = "Copy sync diagnostics"; }, 1_200);
 });
 
 document.querySelector("#save-config").addEventListener("click", async () => {
@@ -523,7 +618,8 @@ document.querySelector("#export-config").addEventListener("click", () => {
 });
 
 clearButton.addEventListener("click", async () => {
-  if (!confirm("Clear all accounts, consent, pending messages, and sync cursors?")) return;
+  if (!confirm("Erase all local extension data, including accounts, consent, pending messages, sync cursors, and logs?")) return;
+  await chrome.alarms.clear("omnichat-delivery-retry");
   await chrome.storage.local.clear();
   await load();
 });
@@ -543,7 +639,7 @@ accountButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.targetCursor] || changes[STORAGE.live] || changes[STORAGE.unexpected] || changes[STORAGE.commandTab]) {
+  if (changes[STORAGE.config] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.unexpected] || changes[STORAGE.commandTab] || changes[STORAGE.syncDiagnostics]) {
     void refreshStoredState();
   }
 });

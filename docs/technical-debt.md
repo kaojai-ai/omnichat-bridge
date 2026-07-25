@@ -26,9 +26,10 @@ flowchart TD
     F -. "Failure" .-> D
 ```
 
-The cursor represents what the **target server has acknowledged**, not a
-provider API cursor. Pending messages remain local until the target accepts or
-deduplicates the whole batch.
+The scan cursor represents what the extension has **durably persisted to its
+local pending queue**, not a provider API cursor or collector acknowledgement.
+Pending messages remain local until the target accepts or deduplicates the
+whole batch. This keeps provider discovery independent from collector outages.
 
 ### Extension configuration contract
 
@@ -59,8 +60,8 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
 
 The signature covers the method, request path, timestamp, nonce, and SHA-256
 hash of the exact body. The server acknowledges the matching `batch_id` and
-reports accepted plus duplicate message counts. The extension advances its
-cursor only when those counts cover every message sent.
+reports accepted plus duplicate message counts. The extension removes those
+messages from its local queue only when the counts cover every message sent.
 
 ### Current delivery limits
 
@@ -71,6 +72,8 @@ cursor only when those counts cover every message sent.
 - At most 10 batches in one flush.
 - Configuration, consent, pending messages, installation ID, and cursors live
   in `chrome.storage.local`.
+- Failed delivery uses an account-scoped Chrome alarm with capped exponential
+  backoff. Manual retry and normal resume reset the backoff.
 
 ### Technical debt
 

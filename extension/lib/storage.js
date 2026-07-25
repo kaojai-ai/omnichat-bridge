@@ -7,9 +7,12 @@ export const STORAGE = {
   status: "status",
   targetCursor: "target_sync_cursor",
   lastResumeSyncAt: "last_resume_sync_at",
+  scanState: "sync_scan_state",
+  deliveryRetry: "delivery_retry_state",
   live: "live_status",
   commandTab: "command_tab",
-  unexpected: "unexpected_events"
+  unexpected: "unexpected_events",
+  syncDiagnostics: "sync_diagnostics"
 };
 
 export const readStorage = (keys) => chrome.storage.local.get(keys);

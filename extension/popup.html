@@ -102,7 +102,7 @@
           <div class="settings-actions">
             <button id="import-config" class="icon-button" type="button" aria-label="Import configuration" title="Import configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 13v6h14v-6"/></svg></button>
             <button id="export-config" class="icon-button" type="button" aria-label="Export configuration" title="Export configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0 4 4m-4-4L8 7M5 13v6h14v-6"/></svg></button>
-            <button id="clear" class="icon-button delete-action" type="button" aria-label="Delete all configuration" title="Delete all configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16m-10 4v5m4-5v5M9 7l1-3h4l1 3m-9 0 1 13h10l1-13"/></svg></button>
+            <span class="settings-action-spacer" aria-hidden="true"></span>
           </div>
         </header>
 
@@ -111,7 +111,12 @@
           <textarea id="config" spellcheck="false"></textarea>
         </label>
 
-        <button id="save-config" type="button">Save configuration</button>
+        <div class="config-actions">
+          <button id="save-config" type="button">Save configuration</button>
+          <button id="clear" class="delete-link" type="button">
+            <span>Erase all data</span>
+          </button>
+        </div>
 
         <p id="config-status" role="status"></p>
       </section>
@@ -129,6 +134,14 @@
         <button id="copy-errors" class="secondary-button" type="button">Copy all</button>
         <ol id="error-log" class="error-log"></ol>
         <p id="error-log-empty" class="empty-log" hidden>No errors recorded.</p>
+        <section class="diagnostics-section">
+          <div>
+            <h3>Sync diagnostics</h3>
+            <p>Last 10 conversations · IDs and timestamps only</p>
+          </div>
+          <button id="copy-diagnostics" class="secondary-button" type="button">Copy sync diagnostics</button>
+          <p id="diagnostics-empty" class="empty-log" hidden>Run Sync messages to capture diagnostics.</p>
+        </section>
       </section>
 
       <footer>

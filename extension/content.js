@@ -1,6 +1,5 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
-  const FALLBACK_DAYS = 7;
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
@@ -51,24 +50,18 @@
     );
   }
 
-  async function requestRecovery(mode = "limited") {
+  async function requestRecovery() {
     if (!await isConfigured()) return { ok: false, error: "Extension setup is required." };
     const syncState = await chrome.runtime.sendMessage({ type: "get_sync_state" });
     if (!syncState?.ok) return syncState;
     const requestId = crypto.randomUUID();
     const result = new Promise((resolve) => {
-      const timeout = mode === "resume" ? null : setTimeout(() => {
-        recoveries.delete(requestId);
-        resolve({ ok: false, error: "Shopee recovery timed out." });
-      }, 120_000);
-      recoveries.set(requestId, { resolve, timeout });
+      recoveries.set(requestId, { resolve });
     });
     post({
-      type: "recover",
+      type: "sync",
       request_id: requestId,
-      mode,
-      cursors: syncState.cursor?.conversations ?? {},
-      fallback_since: new Date(Date.now() - FALLBACK_DAYS * 86_400_000).toISOString()
+      checkpoint: syncState.checkpoint,
     });
     return result;
   }
@@ -146,14 +139,56 @@
       const messages = addConversationProfile(
         globalThis.OmnichatShopee.parseShopeeMessages(message.body, "history_recovery")
       );
-      const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: false });
+      const result = await chrome.runtime.sendMessage({
+        type: "queue_messages",
+        messages,
+        flush: false,
+        advance_cursor: false,
+      });
       post({
         type: "recovery_ack",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         parsed: messages.length,
         queued: result?.queued ?? 0,
+        latest_cursor: result?.latest_cursor ?? null,
         ...(result?.ok ? {} : { error: result?.error ?? "Could not persist recovered messages." })
+      });
+    } catch (error) {
+      post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
+  async function handleRecoveryCursor(message) {
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: "advance_scan_cursor",
+        conversation_id: message.conversation_id,
+        cursor: message.cursor,
+        summary_token: message.summary_token,
+      });
+      post({
+        type: "recovery_ack",
+        request_id: message.request_id,
+        ok: Boolean(result?.ok),
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not save sync cursor." }),
+      });
+    } catch (error) {
+      post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
+  async function handleBootstrapSelection(message) {
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: "save_bootstrap",
+        conversations: message.conversations,
+      });
+      post({
+        type: "recovery_ack",
+        request_id: message.request_id,
+        ok: Boolean(result?.ok),
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not save bootstrap state." }),
       });
     } catch (error) {
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
@@ -197,37 +232,37 @@
     if (!messages.length) return;
     const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
     if (document.documentElement) {
-      document.documentElement.dataset.omnichatRealtimeCapture = JSON.stringify({ parsed: messages.length, queued: result?.queued ?? 0 });
+      document.documentElement.dataset.omnichatRealtimeCapture = JSON.stringify({
+        parsed: messages.length,
+        queued: result?.queued ?? 0,
+        deferred: Boolean(result?.deferred),
+      });
     }
   }
 
   async function handleRecoveryComplete(message) {
     const pending = recoveries.get(message.request_id);
     if (!message.ok) {
-      await markSyncComplete(message.request_id);
       if (pending) {
         recoveries.delete(message.request_id);
-        clearTimeout(pending.timeout);
         pending.resolve(message);
       }
       return;
     }
-    const delivery = await chrome.runtime.sendMessage({ type: "flush_now" });
     const result = {
       ok: true,
       recovered: message.recovered ?? 0,
       queued: message.queued ?? 0,
-      sent: delivery?.sent ?? 0,
-      pending: delivery?.pending ?? message.queued ?? 0,
-      ...(delivery?.ok ? {} : { sync_error: delivery?.error ?? "Target sync failed." })
+      watermark: message.watermark ?? null,
     };
     if (document.documentElement) {
-      document.documentElement.dataset.omnichatRecovery = JSON.stringify({ recovered: result.recovered, queued: result.queued, sent: result.sent });
+      document.documentElement.dataset.omnichatRecovery = JSON.stringify({
+        recovered: result.recovered,
+        queued: result.queued,
+      });
     }
-    await markSyncComplete(message.request_id);
     if (pending) {
       recoveries.delete(message.request_id);
-      clearTimeout(pending.timeout);
       pending.resolve(result);
     }
   }
@@ -301,14 +336,6 @@
       : { ok: false, error: message.error ? `Shopee API error: ${message.error}` : "Shopee API reply failed." });
   }
 
-  async function markSyncComplete(requestId) {
-    try {
-      await chrome.runtime.sendMessage({ type: "sync_complete", request_id: requestId });
-    } catch {
-      // The popup state is non-critical; delivery state is managed by the background worker.
-    }
-  }
-
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
@@ -321,10 +348,23 @@
       handleProfilesDetected(event.data);
     } else if (event.data.type === "active_conversation") {
       activeConversationId = typeof event.data.conversation_id === "string" ? event.data.conversation_id : null;
+    } else if (event.data.type === "socket_connected") {
+      requestResumeSync();
     } else if (event.data.type === "recovery_batch") {
       void handleRecoveryBatch(event.data);
+    } else if (event.data.type === "recovery_cursor") {
+      void handleRecoveryCursor(event.data);
+    } else if (event.data.type === "recovery_bootstrap") {
+      void handleBootstrapSelection(event.data);
     } else if (event.data.type === "recovery_progress") {
       handleRecoveryProgress(event.data);
+    } else if (event.data.type === "sync_diagnostics") {
+      void chrome.runtime.sendMessage({
+        type: "save_sync_diagnostics",
+        mode: event.data.mode,
+        checkpoint: event.data.checkpoint,
+        conversations: event.data.conversations,
+      });
     } else if (event.data.type === "recovery_complete") {
       void handleRecoveryComplete(event.data);
     } else if (event.data.type === "api_send_result") {
@@ -337,8 +377,8 @@
       respond({ ok: true });
       return false;
     }
-    if (message?.type === "recover_now") {
-      void requestRecovery(message.mode).then(respond, (error) => respond({ ok: false, error: String(error) }));
+    if (message?.type === "sync_now") {
+      void requestRecovery().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "detect_account") {

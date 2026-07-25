@@ -11,7 +11,9 @@ Shopee Seller Chat is the first supported provider.
    Seller Chat session.
 4. Supported messages enter a local pending queue.
 5. The extension sends an HMAC-signed batch to the configured HTTPS server.
-6. The local cursor advances only after the server acknowledges the batch.
+6. The local scan cursor advances after messages are durably queued in the
+   extension. The queue removes them only after the server acknowledges the
+   batch.
 
 See the shared [`omnichat.message_batch` v1 contract](../payload-contract.md).
 
@@ -21,7 +23,7 @@ flowchart LR
     B --> C["Parse supported messages"]
     C --> D["Local pending queue"]
     D -->|"HTTPS + HMAC"| E["Configured server"]
-    E -->|"Acknowledgement"| F["Advance conversation cursor"]
+    E -->|"Acknowledgement"| F["Remove messages from local queue"]
 ```
 
 The extension **does NOT save or send the seller's Shopee password, cookies, or
@@ -44,15 +46,28 @@ login tokens.
 - The live service keeps only a short-lived connection ticket and browser
   presence record. It does not store message text.
 
-## Recovery
+## Sync and recovery
 
-- First recovery and **Sync messages**: 10 newest conversations, up to 25
-  newest messages each.
-- Resume with an existing cursor: no extension-imposed conversation or message
-  cap.
-- Conversations without a cursor: at most the last seven days.
-- Resume cooldown: five minutes.
-- Shopee requests are spaced by at least three seconds.
+Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
+
+- Without a completed checkpoint, bootstrap reads the 10 newest conversations
+  and at most 25 newest messages from each.
+- With a checkpoint, sync follows every changed conversation back to its local
+  cursor without an extension-imposed conversation or message cap.
+- Conversation-list and message-history pages are requested sequentially.
+- Every history page is saved to the local queue immediately. A conversation
+  cursor advances only after all required pages for that conversation finish.
+- Realtime capture starts only after bootstrap completes and pauses while a
+  recovery scan is incomplete. The scan catches messages received during that
+  window before realtime cursor advancement resumes.
+- The global conversation-list watermark advances only after the complete scan
+  finishes. An interrupted scan restarts discovery and skips work already
+  covered by conversation cursors.
+- Load, reconnect, and visible focus can resume sync at most once every five
+  minutes. **Sync messages** and **Retry now** bypass that window.
+- Failed collector delivery retries after approximately 1, 2, 5, 15, and 30
+  minutes, capped at 30 minutes. Retry never calls Shopee.
+- Shopee recovery requests are spaced by at least one second.
 
 ## Data sent
 

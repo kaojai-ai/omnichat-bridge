@@ -324,16 +324,112 @@
     post({ type: "active_conversation", conversation_id: conversationId });
   };
 
-  async function fetchConversations() {
-    const response = await recoveryFetch(new Request(state.listTemplate.url, {
+  const conversationTime = (conversation) => timeMs(
+    conversation?.last_message_time ?? conversation?.created_timestamp,
+  );
+
+  const conversationToken = (conversation) => {
+    const id = firstValue(conversation ?? {}, [
+      "last_message_id",
+      "latest_message_id",
+      "message_id",
+    ]) ?? firstValue(conversation?.last_message ?? {}, ["id", "message_id"]);
+    return id ? `message:${id}` : null;
+  };
+
+  const conversationItems = (body) => {
+    if (Array.isArray(body)) return body;
+    for (const candidate of [
+      body?.conversations,
+      body?.items,
+      body?.data?.conversations,
+      body?.data?.items,
+      body?.data,
+    ]) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+  };
+
+  const nextConversationUrl = (currentUrl, body, items) => {
+    const url = new URL(currentUrl);
+    const nextCursor = firstValue(body ?? {}, ["next_cursor", "nextCursor"])
+      ?? firstValue(body?.data ?? {}, ["next_cursor", "nextCursor"]);
+    if (nextCursor) {
+      url.searchParams.set(
+        url.searchParams.has("next_cursor") ? "next_cursor" : "cursor",
+        nextCursor,
+      );
+      return url.toString();
+    }
+    const limit = Number(url.searchParams.get("limit") ?? url.searchParams.get("page_size"));
+    if (!Number.isFinite(limit) || limit <= 0 || items.length !== limit) return null;
+    if (url.searchParams.has("offset")) {
+      const offset = Number(url.searchParams.get("offset")) || 0;
+      url.searchParams.set("offset", String(offset + limit));
+      return url.toString();
+    }
+    if (url.searchParams.has("page")) {
+      const page = Number(url.searchParams.get("page")) || 0;
+      url.searchParams.set("page", String(page + 1));
+      return url.toString();
+    }
+    return null;
+  };
+
+  async function fetchConversationPage(requestUrl = state.listTemplate.url) {
+    const response = await recoveryFetch(new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0)
     }));
     if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
     const body = await response.json();
-    detectAccount(body);
-    captureProfiles(body);
-    return Array.isArray(body) ? body : [];
+    const items = conversationItems(body);
+    detectAccount(items);
+    captureProfiles(items);
+    return {
+      items,
+      next: nextConversationUrl(requestUrl, body, items),
+    };
+  }
+
+  async function fetchConversations() {
+    return (await fetchConversationPage()).items;
+  }
+
+  async function fetchConversationPages({
+    checkpointMs = 0,
+    requiredIds = null,
+    maxItems = null,
+  } = {}) {
+    const conversations = [];
+    const seenIds = new Set();
+    const required = requiredIds ? new Set(requiredIds) : null;
+    let url = state.listTemplate.url;
+    let firstPage = [];
+    while (url) {
+      const page = await fetchConversationPage(url);
+      if (!firstPage.length) firstPage = page.items;
+      let added = 0;
+      for (const conversation of page.items) {
+        const id = String(conversation?.id ?? "");
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        conversations.push(conversation);
+        required?.delete(id);
+        added += 1;
+      }
+      if (maxItems && conversations.length >= maxItems) break;
+      const oldest = page.items.reduce((value, conversation) => {
+        const candidate = conversationTime(conversation);
+        return candidate && candidate < value ? candidate : value;
+      }, Number.POSITIVE_INFINITY);
+      if (required && required.size === 0) break;
+      if (!required && checkpointMs && oldest < checkpointMs) break;
+      if (!page.next || !added) break;
+      url = page.next;
+    }
+    return { conversations, firstPage };
   }
 
   async function detectCurrentAccount(requestId) {
@@ -349,9 +445,13 @@
     }
   }
 
-  async function fetchHistory(conversation, sinceMs, maxMessages) {
-    const messages = [];
+  async function fetchHistory(conversation, cursor, maxMessages, onPage) {
+    const sinceMs = timeMs(cursor?.event_timestamp);
     const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
+    let accepted = 0;
+    let parsed = 0;
+    let queued = 0;
+    let latestCursor = null;
     for (let page = 0; ; page += 1) {
       const sourceUrl = new URL(state.getTemplate.url);
       const url = new URL(sourceUrl.origin);
@@ -374,21 +474,35 @@
       if (!response.ok) throw new Error(`Shopee message recovery returned ${response.status}. Refresh Seller Chat.`);
       const pageMessages = await response.json();
       if (!Array.isArray(pageMessages)) break;
-      const currentMessages = pageMessages
+      let currentMessages = pageMessages
         .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
-        .sort((left, right) => timeMs(right.created_timestamp ?? right.created_at) - timeMs(left.created_timestamp ?? left.created_at));
-      messages.push(...currentMessages);
-      if (maxMessages && messages.length >= maxMessages) return messages.slice(0, maxMessages);
+        .sort((left, right) => {
+          const timeDifference = timeMs(right.created_timestamp ?? right.created_at)
+            - timeMs(left.created_timestamp ?? left.created_at);
+          if (timeDifference) return timeDifference;
+          const rightId = String(right.id ?? right.message_id ?? "");
+          const leftId = String(left.id ?? left.message_id ?? "");
+          return rightId === leftId ? 0 : rightId > leftId ? 1 : -1;
+        });
+      if (maxMessages) currentMessages = currentMessages.slice(0, maxMessages - accepted);
+      if (currentMessages.length) {
+        const acknowledgement = await onPage(currentMessages, page);
+        parsed += acknowledgement.parsed ?? 0;
+        queued += acknowledgement.queued ?? 0;
+        latestCursor ??= acknowledgement.latest_cursor ?? null;
+        accepted += currentMessages.length;
+      }
+      if (maxMessages && accepted >= maxMessages) break;
       const oldest = pageMessages.reduce((value, message) => {
         const candidate = timeMs(message.created_timestamp ?? message.created_at);
         return candidate && candidate < value ? candidate : value;
       }, Number.POSITIVE_INFINITY);
-      if (pageMessages.length < pageSize || oldest <= sinceMs) break;
+      if (pageMessages.length < pageSize || oldest < sinceMs) break;
     }
-    return messages;
+    return { parsed, queued, latestCursor };
   }
 
-  async function recover(requestId, cursors, fallbackSince, mode = "limited") {
+  async function recover(requestId, checkpoint = {}) {
     if (state.recoveryInFlight) {
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: "Recovery is already running." });
       return;
@@ -399,38 +513,157 @@
     let checked = 0;
     try {
       await waitForTemplate();
-      const conversations = await fetchConversations();
-      const fallbackSinceMs = timeMs(fallbackSince);
-      const recoveryConversations = [...conversations]
-        .sort((left, right) => timeMs(right.last_message_time ?? right.created_timestamp) - timeMs(left.last_message_time ?? left.created_timestamp));
-      if (mode === "limited") recoveryConversations.splice(MANUAL_SYNC_MAX_CONVERSATIONS);
-      const totalConversations = recoveryConversations.length;
-      let completedConversations = 0;
-      post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
-      for (const conversation of recoveryConversations) {
-        const cursor = cursors?.[conversation.id];
-        const sinceMs = timeMs(cursor?.event_timestamp) || fallbackSinceMs;
-        const latestMs = timeMs(conversation.last_message_time ?? conversation.created_timestamp);
-        if (!(latestMs && latestMs < sinceMs)) {
-          checked += 1;
-          const history = await fetchHistory(
-          conversation,
-          sinceMs,
-          mode === "limited" ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined
+      const watermarkMs = timeMs(checkpoint?.watermark);
+      const bootstrap = !watermarkMs;
+      const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
+        ? checkpoint.bootstrap.conversations
+        : [];
+      const requiredIds = bootstrap && frozenBootstrap.length
+        ? frozenBootstrap.map((conversation) => String(conversation.id))
+        : null;
+      const pages = await fetchConversationPages({
+        checkpointMs: bootstrap ? 0 : watermarkMs,
+        requiredIds,
+        maxItems: bootstrap && !requiredIds ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
+      });
+      const sorted = [...pages.conversations]
+        .sort((left, right) => conversationTime(right) - conversationTime(left));
+      let recoveryConversations;
+      if (bootstrap && frozenBootstrap.length) {
+        const liveById = new Map(sorted.map((conversation) => [String(conversation.id), conversation]));
+        recoveryConversations = frozenBootstrap.map(
+          (conversation) => liveById.get(String(conversation.id)) ?? conversation,
         );
-          if (history.length) {
-            const batchRequestId = `${requestId}:${conversation.id}`;
-            post({ type: "recovery_batch", request_id: batchRequestId, body: history });
-            const acknowledgement = await waitForAcknowledgement(batchRequestId);
-            if (!acknowledgement.ok) throw new Error(acknowledgement.error ?? "Could not queue recovered messages.");
-            parsed += acknowledgement.parsed ?? 0;
-            queued += acknowledgement.queued ?? 0;
-          }
+      } else if (bootstrap) {
+        recoveryConversations = sorted.slice(0, MANUAL_SYNC_MAX_CONVERSATIONS);
+        const bootstrapRequestId = `${requestId}:bootstrap`;
+        post({
+          type: "recovery_bootstrap",
+          request_id: bootstrapRequestId,
+          conversations: recoveryConversations,
+        });
+        const acknowledgement = await waitForAcknowledgement(bootstrapRequestId);
+        if (!acknowledgement.ok) {
+          throw new Error(acknowledgement.error ?? "Could not save bootstrap state.");
         }
-        completedConversations += 1;
+      } else {
+        recoveryConversations = sorted;
+      }
+      const firstPageFloor = pages.firstPage.reduce((value, conversation) => {
+        const candidate = conversationTime(conversation);
+        return candidate && candidate < value ? candidate : value;
+      }, Number.POSITIVE_INFINITY);
+      const bootstrapFloor = recoveryConversations.reduce((value, conversation) => {
+        const candidate = conversationTime(conversation);
+        return candidate && candidate < value ? candidate : value;
+      }, Number.POSITIVE_INFINITY);
+      const nextWatermarkMs = bootstrap
+        ? bootstrapFloor
+        : (Number.isFinite(firstPageFloor) ? Math.max(watermarkMs, firstPageFloor) : watermarkMs);
+      const cursors = checkpoint?.conversations ?? {};
+      const classify = (conversation) => {
+        const cursor = cursors[String(conversation.id)];
+        const cursorMs = timeMs(cursor?.event_timestamp);
+        const summaryMs = conversationTime(conversation);
+        const token = conversationToken(conversation);
+        if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor, token };
+        if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor, token };
+        if (!cursorMs) {
+          return summaryMs >= watermarkMs
+            ? { decision: "history_job", reason: "new_conversation", cursor, token }
+            : { decision: "skip", reason: "summary_older_than_checkpoint", cursor, token };
+        }
+        if (summaryMs > cursorMs) return { decision: "history_job", reason: "summary_newer", cursor, token };
+        if (summaryMs < cursorMs) return { decision: "skip", reason: "summary_older_than_cursor", cursor, token };
+        if (token && token === cursor.summary_token) {
+          return { decision: "skip", reason: "same_summary_token", cursor, token };
+        }
+        return { decision: "probe", reason: "same_timestamp", cursor, token };
+      };
+      const classified = recoveryConversations.map((conversation) => ({
+        conversation,
+        ...classify(conversation),
+      }));
+      post({
+        type: "sync_diagnostics",
+        mode: bootstrap ? "bootstrap" : "incremental",
+        checkpoint: watermarkMs ? new Date(watermarkMs).toISOString() : null,
+        conversations: classified.slice(0, 10).map(({ conversation, cursor, decision, reason }) => {
+          const cursorMs = timeMs(cursor?.event_timestamp);
+          const summaryMs = conversationTime(conversation);
+          return {
+            conversation_id: String(conversation.id ?? ""),
+            summary_timestamp: summaryMs ? new Date(summaryMs).toISOString() : null,
+            cursor_timestamp: cursorMs ? new Date(cursorMs).toISOString() : null,
+            cursor_message_id: cursor?.message_id ? String(cursor.message_id) : null,
+            decision,
+            reason,
+          };
+        }),
+      });
+      const probes = classified.filter(({ decision }) => decision === "probe");
+      const recoveryJobs = classified.filter(({ decision }) => decision === "history_job");
+      const totalConversations = recoveryJobs.length;
+      let completedConversations = 0;
+      if (totalConversations) {
         post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
       }
-      post({ type: "recovery_complete", request_id: requestId, ok: true, recovered: parsed, queued, conversations_checked: checked });
+      for (const item of [...probes, ...recoveryJobs]) {
+        const { conversation, cursor, token, decision } = item;
+        checked += 1;
+        const history = await fetchHistory(
+          conversation,
+          cursor,
+          bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined,
+          async (messages, page) => {
+            const batchRequestId = `${requestId}:${conversation.id}:${page}`;
+            post({ type: "recovery_batch", request_id: batchRequestId, body: messages });
+            const acknowledgement = await waitForAcknowledgement(batchRequestId);
+            if (!acknowledgement.ok) {
+              throw new Error(acknowledgement.error ?? "Could not queue recovered messages.");
+            }
+            return acknowledgement;
+          },
+        );
+        parsed += history.parsed;
+        queued += history.queued;
+        const summaryMs = conversationTime(conversation);
+        const completedCursor = history.latestCursor
+          ?? cursor
+          ?? (summaryMs ? {
+            event_timestamp: new Date(summaryMs).toISOString(),
+            message_id: "",
+          } : null);
+        if (completedCursor) {
+          const cursorRequestId = `${requestId}:${conversation.id}:cursor`;
+          post({
+            type: "recovery_cursor",
+            request_id: cursorRequestId,
+            conversation_id: String(conversation.id),
+            cursor: completedCursor,
+            summary_token: token,
+          });
+          const acknowledgement = await waitForAcknowledgement(cursorRequestId);
+          if (!acknowledgement.ok) {
+            throw new Error(acknowledgement.error ?? "Could not save sync cursor.");
+          }
+        }
+        if (decision === "history_job") {
+          completedConversations += 1;
+          post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
+        }
+      }
+      post({
+        type: "recovery_complete",
+        request_id: requestId,
+        ok: true,
+        recovered: parsed,
+        queued,
+        conversations_checked: checked,
+        watermark: Number.isFinite(nextWatermarkMs)
+          ? new Date(nextWatermarkMs).toISOString()
+          : checkpoint?.watermark ?? null,
+      });
     } catch (error) {
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: String(error) });
     } finally {
@@ -474,6 +707,7 @@
     if (!socket?.on || state.socket === socket) return;
     state.socket = socket;
     if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
+    post({ type: "socket_connected" });
     socket.on("message", (event) => {
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
@@ -491,8 +725,8 @@
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "recover") {
-      void recover(event.data.request_id, event.data.cursors ?? {}, event.data.fallback_since, event.data.mode);
+    if (event.data.type === "sync") {
+      void recover(event.data.request_id, event.data.checkpoint ?? {});
     } else if (event.data.type === "detect_account") {
       void detectCurrentAccount(event.data.request_id);
     } else if (event.data.type === "send_api") {
