@@ -6,6 +6,7 @@
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 3_000;
+  const SOCKET_OBSERVER_INTERVAL_MS = 1_000;
   const state = window.__omnichatRealtimeState ??= {
     getTemplate: null,
     listTemplate: null,
@@ -486,7 +487,7 @@
   }
 
   observeSocket();
-  setInterval(observeSocket, 2_000);
+  setInterval(observeSocket, SOCKET_OBSERVER_INTERVAL_MS);
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
