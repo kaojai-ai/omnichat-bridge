@@ -5,7 +5,6 @@
   const profilesByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
-  const ignoredApiEchoes = new Map();
   let activeConversationId = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
@@ -63,22 +62,6 @@
     pendingOutbound.delete(key);
   }
 
-  function ignoreNextApiEcho(clientMessageId) {
-    const previous = ignoredApiEchoes.get(clientMessageId);
-    if (previous) clearTimeout(previous);
-    ignoredApiEchoes.set(clientMessageId, setTimeout(() => {
-      ignoredApiEchoes.delete(clientMessageId);
-    }, 60_000));
-  }
-
-  function consumeIgnoredApiEcho(clientMessageId) {
-    const timeout = ignoredApiEchoes.get(clientMessageId);
-    if (!timeout) return false;
-    clearTimeout(timeout);
-    ignoredApiEchoes.delete(clientMessageId);
-    return true;
-  }
-
   function findPendingApiSend(message) {
     if (!message.client_message_id) return null;
     for (const [requestId, pending] of pendingApiSends) {
@@ -100,7 +83,6 @@
       pendingApiSends.delete(requestId);
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
-      if (!pending.echo) ignoreNextApiEcho(pending.clientMessageId);
       pending.resolve({ ok: true, provider_message_id: providerMessageId });
       return;
     }
@@ -351,9 +333,7 @@
       if (apiSend) {
         apiSend.pending.echo = message;
         finishPendingApiSend(apiSend.requestId, apiSend.pending);
-        continue;
       }
-      if (message.client_message_id && consumeIgnoredApiEcho(message.client_message_id)) continue;
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
