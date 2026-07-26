@@ -81,7 +81,7 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
 
 function messageType(value) {
   const raw = string(value)?.toLowerCase() ?? "unknown";
-  if (raw === "text" || raw === "image" || raw === "video") return { type: raw };
+  if (raw === "text" || raw === "image" || raw === "video" || raw === "product") return { type: raw };
   return { type: "unsupported", provider_type: raw };
 }
 
@@ -106,9 +106,12 @@ function parseShopeeMessages(payload, captureMethod) {
     const conversationId = string(message.conversation_id);
     const senderId = string(message.from_id);
     const recipientId = string(message.to_id);
-    const text = textContent(message.content);
-    const clientMessageId = string(contentRecord(message.content)?.uid);
+    const content = contentRecord(message.content);
     const parsedType = messageType(message.type ?? message.message_type);
+    const text = parsedType.type === "product"
+      ? string(content?.product_name) ?? ""
+      : textContent(message.content);
+    const clientMessageId = string(content?.uid);
     const url = mediaUrl(message.content, parsedType.type) ?? mediaUrl(message, parsedType.type);
     if (!id || !conversationId || !senderId || !recipientId || (parsedType.type === "text" && (!text || text.length > 20_000))) continue;
     const key = `${conversationId}:${id}`;
@@ -128,6 +131,14 @@ function parseShopeeMessages(payload, captureMethod) {
       ...(text && text.length <= 20_000 ? { text } : {}),
       ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
       ...(url ? { media_url: url } : {}),
+      ...(parsedType.type === "product" && string(content?.product_id)
+        ? {
+          product: {
+            provider_product_id: string(content.product_id),
+            product_name: string(content.product_name) ?? "Product",
+          },
+        }
+        : {}),
       ...(parsedType.provider_type ? { provider_type: parsedType.provider_type } : {}),
       capture_method: captureMethod
     });

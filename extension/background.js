@@ -32,6 +32,7 @@ const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
+const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
 const DELIVERY_RETRY_ALARM = "omnichat-delivery-retry";
 const LOG_UPLOAD_ALARM = "omnichat-log-upload";
 const MAX_LOG_UPLOAD_BATCH = 100;
@@ -447,11 +448,11 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
-  if (message?.type === "send_text") {
-    void sendTextViaShopeeApi(message).then(
+  if (["send_text", "send_image", "send_product"].includes(message?.type)) {
+    void sendViaShopeeApi(message).then(
       (result) => respond(result),
       async (error) => {
-        await recordUnexpected("send_text", error);
+        await recordUnexpected("send_message", error);
         respond({ ok: false, error: String(error) });
       }
     );
@@ -516,25 +517,56 @@ async function selectCommandTab(context, tabId) {
   await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
 }
 
-async function sendTextViaShopeeApi(message) {
+async function sendViaShopeeApi(message) {
   const requestId = typeof message?.request_id === "string" ? message.request_id : "";
   const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
   const clientMessageId = typeof message?.client_message_id === "string" ? message.client_message_id : "";
-  const text = typeof message?.text === "string" ? message.text.trim() : "";
-  if (!requestId || !conversationId || !text || text.length > MAX_REPLY_TEXT_LENGTH) {
-    return { ok: false, error: "Reply text is invalid." };
+  const commandType = typeof message?.type === "string" ? message.type : "";
+  if (!requestId || !conversationId || !["send_text", "send_image", "send_product"].includes(commandType)) {
+    return { ok: false, error: "Reply command is invalid." };
   }
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
   const context = currentAccountContext(stored);
   if (!context) return { ok: false, error: "Shopee browser bridge is not configured." };
   const tab = await commandTab(context);
   await ensureShopeeBridge(tab.id);
+  let imagePayload = {};
+  if (commandType === "send_image") {
+    const imageUrl = typeof message.image_url === "string" ? message.image_url : "";
+    let parsedUrl;
+    try { parsedUrl = new URL(imageUrl); } catch { /* Validated below. */ }
+    if (parsedUrl?.protocol !== "https:") {
+      return { ok: false, error: "Reply image URL is invalid." };
+    }
+    if (!context.config.image_server_url) {
+      return { ok: false, error: "Reply image server is not configured." };
+    }
+    if (parsedUrl.origin !== new URL(context.config.image_server_url).origin) {
+      return { ok: false, error: "Reply image URL is not from the configured image server." };
+    }
+    const response = await fetch(parsedUrl);
+    const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+    if (!response.ok || !imageType.startsWith("image/")) {
+      return { ok: false, error: "Could not load reply image." };
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.byteLength || bytes.byteLength > MAX_REPLY_IMAGE_BYTES) {
+      return { ok: false, error: "Reply image must be 10 MB or smaller." };
+    }
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 32_768) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+    }
+    imagePayload = { image_base64: btoa(binary), image_type: imageType };
+  }
   return chrome.tabs.sendMessage(tab.id, {
-    type: "send_text_api",
+    ...message,
+    ...imagePayload,
+    type: "send_api",
+    command_type: commandType,
     request_id: requestId,
     conversation_id: conversationId,
     ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-    text,
   });
 }
 
@@ -758,18 +790,25 @@ async function ensureLiveConnection() {
 async function handleLiveCommand(raw) {
   let command;
   try { command = JSON.parse(raw); } catch { return; }
-  if (command?.type !== "send_text" || command.provider !== "shopee") return;
+  if (!["send_text", "send_image", "send_product"].includes(command?.type) || command.provider !== "shopee") return;
   const stored = await readStorage([STORAGE.detectedAccount]);
   if (stored[STORAGE.detectedAccount]?.provider_account_id !== command.provider_account_id) return;
   let result;
   try {
-    result = await exclusive(() => sendTextViaShopeeApi(command));
+    result = await exclusive(() => sendViaShopeeApi(command));
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.");
   if (liveSocket?.readyState === WebSocket.OPEN) {
-    liveSocket.send(JSON.stringify({ type: "send_result", request_id: command.request_id, ok: Boolean(result?.ok), ...(result?.ok ? {} : { error: result?.error ?? "Reply failed." }) }));
+    liveSocket.send(JSON.stringify({
+      type: "send_result",
+      request_id: command.request_id,
+      ok: Boolean(result?.ok),
+      ...(result?.ok
+        ? { provider_message_id: result.provider_message_id }
+        : { error: result?.error ?? "Reply failed." }),
+    }));
   }
 }
 
@@ -1205,6 +1244,7 @@ function batchFor(messages, installId) {
       ...(message.provider_type ? { provider_type: message.provider_type } : {}),
       ...(message.command_id ? { command_id: message.command_id } : {}),
       ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}),
+      ...(message.product ? { product: message.product } : {}),
       capture_method: message.capture_method
     });
     conversations.set(message.conversation_id, conversation);
@@ -1216,7 +1256,7 @@ function batchFor(messages, installId) {
     installation_id: installId,
     provider: "shopee",
     extension_version: chrome.runtime.getManifest().version,
-    adapter_version: "shopee-realtime-1",
+    adapter_version: "shopee-realtime-2",
     conversations: [...conversations.values()]
   };
 }

@@ -8,6 +8,7 @@
   let activeConversationId = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
+  const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
   const RECOVERY_INACTIVITY_TIMEOUT_MS = 60_000;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
@@ -59,6 +60,51 @@
     if (!outbound || outbound.commandId !== commandId) return;
     if (outbound.timeout) clearTimeout(outbound.timeout);
     pendingOutbound.delete(key);
+  }
+
+  function findPendingApiSend(message) {
+    if (!message.client_message_id) return null;
+    for (const [requestId, pending] of pendingApiSends) {
+      if (
+        pending.clientMessageId === message.client_message_id
+        && pending.conversationId === message.conversation_id
+      ) {
+        return { requestId, pending };
+      }
+    }
+    return null;
+  }
+
+  function finishPendingApiSend(requestId, pending) {
+    const providerMessageId = String(
+      pending.result?.provider_message_id ?? pending.echo?.id ?? ""
+    ).trim();
+    if (providerMessageId && (pending.result?.ok || pending.echo)) {
+      pendingApiSends.delete(requestId);
+      clearTimeout(pending.timeout);
+      if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
+      pending.resolve({ ok: true, provider_message_id: providerMessageId });
+      return;
+    }
+    if (pending.result?.ok) {
+      if (pending.providerIdTimeout) return;
+      pending.providerIdTimeout = setTimeout(() => {
+        if (pendingApiSends.get(requestId) !== pending) return;
+        pendingApiSends.delete(requestId);
+        clearTimeout(pending.timeout);
+        pending.resolve({ ok: false, error: "Shopee did not return a provider message ID." });
+      }, 2_000);
+      return;
+    }
+    if (!pending.result) return;
+    pendingApiSends.delete(requestId);
+    clearTimeout(pending.timeout);
+    pending.resolve({
+      ok: false,
+      error: pending.result.error
+        ? `Shopee API error: ${pending.result.error}`
+        : "Shopee API reply failed."
+    });
   }
 
   async function isConfigured() {
@@ -281,19 +327,28 @@
   }
 
   async function handleRealtimeEvent(body) {
-    const messages = addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))
-      .map((message) => {
-        const key = outboundKey(message.conversation_id, message.text ?? "");
-        const pending = pendingOutbound.get(key);
-        if (!pending) return message;
-        if (pending.timeout) clearTimeout(pending.timeout);
-        pendingOutbound.delete(key);
-        return {
-          ...message,
-          command_id: pending.commandId,
-          client_message_id: message.client_message_id ?? pending.clientMessageId,
-        };
+    const messages = [];
+    for (const message of addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))) {
+      const apiSend = findPendingApiSend(message);
+      if (apiSend) {
+        apiSend.pending.echo = message;
+        finishPendingApiSend(apiSend.requestId, apiSend.pending);
+      }
+
+      const key = outboundKey(message.conversation_id, message.text ?? "");
+      const pending = pendingOutbound.get(key);
+      if (!pending) {
+        messages.push(message);
+        continue;
+      }
+      if (pending.timeout) clearTimeout(pending.timeout);
+      pendingOutbound.delete(key);
+      messages.push({
+        ...message,
+        command_id: pending.commandId,
+        client_message_id: message.client_message_id ?? pending.clientMessageId,
       });
+    }
     if (!messages.length) return;
     const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
     log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
@@ -379,39 +434,80 @@
     return { ok: true };
   }
 
-  async function sendTextViaApi(message) {
+  async function sendViaApi(message) {
     const requestId = typeof message?.request_id === "string" ? message.request_id : "";
     const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
+    const commandType = typeof message?.command_type === "string" ? message.command_type : "";
     const text = typeof message?.text === "string" ? message.text.trim() : "";
     const clientMessageId = typeof message?.client_message_id === "string" && message.client_message_id
       ? message.client_message_id
       : requestId;
-    if (!requestId || !conversationId || !text || text.length > MAX_REPLY_TEXT_LENGTH) {
+    if (!requestId || !conversationId || !clientMessageId) {
+      return { ok: false, error: "Reply command is invalid." };
+    }
+    if (commandType === "send_text" && (!text || text.length > MAX_REPLY_TEXT_LENGTH)) {
       return { ok: false, error: "Reply text is invalid." };
+    }
+    if (commandType === "send_product") {
+      const providerProductId = String(message?.provider_product_id ?? "").trim();
+      const productName = String(message?.product_name ?? "").trim();
+      if (!/^\d+$/.test(providerProductId) || !productName) {
+        return { ok: false, error: "Shopee product is invalid." };
+      }
+    }
+    let imagePayload = {};
+    if (commandType === "send_image") {
+      const imageBase64 = typeof message?.image_base64 === "string" ? message.image_base64 : "";
+      const imageType = typeof message?.image_type === "string" ? message.image_type : "";
+      if (!imageBase64 || !imageType.startsWith("image/")) return { ok: false, error: "Reply image is invalid." };
+      let binary;
+      try { binary = atob(imageBase64); } catch { return { ok: false, error: "Reply image is invalid." }; }
+      const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
+      if (!imageBytes.byteLength || imageBytes.byteLength > MAX_REPLY_IMAGE_BYTES) {
+        return { ok: false, error: "Reply image must be 10 MB or smaller." };
+      }
+      imagePayload = { image_bytes: imageBytes, image_type: imageType };
+    }
+    if (!["send_text", "send_image", "send_product"].includes(commandType)) {
+      return { ok: false, error: "Unsupported Shopee reply command." };
     }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
+        const pending = pendingApiSends.get(requestId);
+        if (!pending) return;
         pendingApiSends.delete(requestId);
-        clearTrackedOutbound(conversationId, text, requestId);
+        if (pending.echo?.id) {
+          resolve({ ok: true, provider_message_id: pending.echo.id });
+          return;
+        }
         resolve({ ok: false, error: "Shopee API reply timed out." });
-      }, 20_000);
-      pendingApiSends.set(requestId, { resolve, timeout, conversationId, text, clientMessageId });
-      // Shopee can broadcast the echo before its HTTP sender resolves. Track first so
-      // the collector preserves the Admin optimistic message's client_message_id.
-      trackOutbound(conversationId, text, requestId, clientMessageId);
-      post({ type: "send_api", request_id: requestId, conversation_id: conversationId, text, client_message_id: clientMessageId });
+      }, 30_000);
+      pendingApiSends.set(requestId, {
+        resolve,
+        timeout,
+        conversationId,
+        clientMessageId,
+        echo: null,
+        result: null,
+        providerIdTimeout: null,
+      });
+      post({
+        type: "send_api",
+        ...message,
+        ...imagePayload,
+        request_id: requestId,
+        conversation_id: conversationId,
+        command_type: commandType,
+        client_message_id: clientMessageId,
+      });
     });
   }
 
   function handleApiSendResult(message) {
     const pending = pendingApiSends.get(message.request_id);
     if (!pending) return;
-    pendingApiSends.delete(message.request_id);
-    clearTimeout(pending.timeout);
-    if (!message.ok) clearTrackedOutbound(pending.conversationId, pending.text, message.request_id);
-    pending.resolve(message.ok
-      ? { ok: true, ...(message.provider_message_id ? { provider_message_id: message.provider_message_id } : {}) }
-      : { ok: false, error: message.error ? `Shopee API error: ${message.error}` : "Shopee API reply failed." });
+    pending.result = message;
+    finishPendingApiSend(message.request_id, pending);
   }
 
   window.addEventListener("message", (event) => {
@@ -478,8 +574,8 @@
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "send_text_api") {
-      void sendTextViaApi(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
+    if (message?.type === "send_api") {
+      void sendViaApi(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "send_text_ui_click_wip") {

@@ -23,6 +23,7 @@ const sampleConfig = {
     provider_account_id: "123456789",
     events_url: "https://your-server.example.com/omnichat/events",
     commands_url: "https://your-server.example.com/omnichat/tickets",
+    image_server_url: "https://your-images.example.com",
     logs_url: "https://your-server.example.com/omnichat/logs",
     hmac_secret: "replace-with-your-secret",
   }],
