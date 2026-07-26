@@ -27,6 +27,10 @@ batches over HTTPS. For an optional live reply, your server wakes the connected
 extension over WebSocket; the extension types into the matching open
 conversation and immediately returns success or an error.
 
+## Demo video
+
+[![Watch the video](https://img.youtube.com/vi/eoJaO0jIv24/hqdefault.jpg)](https://youtu.be/eoJaO0jIv24)
+
 ## A simple analogy
 
 Imagine a helpful assistant sitting beside you 👀. They read the open chat,
