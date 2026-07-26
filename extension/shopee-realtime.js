@@ -273,14 +273,60 @@
     setTimeout(() => state.sendErrorsByClientMessageId.delete(clientMessageId), 60_000);
   };
 
+  const uploadImage = async (message, routing) => {
+    if (!(message.image_bytes instanceof ArrayBuffer) || message.image_bytes.byteLength === 0) {
+      throw new Error("Reply image is invalid.");
+    }
+    const sourceTemplateUrl = state.getTemplate?.url ?? state.sendTemplate?.url;
+    if (!sourceTemplateUrl) throw new Error("Shopee image uploader is still initializing.");
+    const sourceUrl = new URL(sourceTemplateUrl);
+    const url = new URL("/webchat/api/coreapi/v1.2/images", sourceUrl.origin);
+    for (const key of ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"]) {
+      if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
+    }
+    url.searchParams.set("shop_id", routing.shop_id);
+    url.searchParams.set("biz_id", routing.biz_id);
+
+    const type = String(message.image_type ?? "image/jpeg").trim();
+    const extension = type.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "jpg";
+    const form = new FormData();
+    form.append("file", new Blob([message.image_bytes], { type }), `kaojai-reply.${extension}`);
+    form.append("conversation_id", routing.conversation_id);
+    const headers = new Headers(
+      state.getTemplate?.init?.headers ?? state.sendTemplate?.headers ?? {},
+    );
+    headers.delete("content-type");
+    headers.delete("content-length");
+    const response = await state.nativeFetch(url.toString(), {
+      method: "POST",
+      body: form,
+      credentials: "include",
+      headers,
+    });
+    const body = await response.json().catch(() => null);
+    const providerReason = shopeeError(body);
+    if (!response.ok || providerReason || !body?.url) {
+      throw new Error(providerReason ?? `Shopee image upload returned ${response.status}.`);
+    }
+    return {
+      uid: String(message.client_message_id ?? message.request_id),
+      url_hash: String(body.url).split("/").pop(),
+      url: body.url,
+      thumb_url: body.thumbnail,
+      thumb_width: body.thumb_width,
+      thumb_height: body.thumb_height,
+      file_server_id: body.file_server_id,
+    };
+  };
+
   const sendApi = async (message) => {
     const requestId = String(message?.request_id ?? "").trim();
     const conversationId = String(message?.conversation_id ?? "").trim();
-    const text = String(message?.text ?? "").trim();
+    const commandType = String(message?.command_type ?? "").trim();
     const clientMessageId = String(message?.client_message_id ?? requestId).trim();
     let routing = state.conversationsById.get(conversationId);
-    if (!requestId || !conversationId || !text || !clientMessageId) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply text is invalid." });
+    if (!requestId || !conversationId || !clientMessageId || !["send_text", "send_image", "send_product"].includes(commandType)) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
     }
     if (!routing) {
@@ -306,13 +352,33 @@
       if (!template) throw new Error("Shopee Seller Chat is still initializing. Refresh and wait for the conversation list.");
       const payload = structuredClone(template.payload);
       payload.request_id = requestId;
-      payload.type = "text";
       updateKnown(payload, "conversation_id", conversationId);
       updateKnown(payload, "shop_id", routing.shop_id);
       updateKnown(payload, "to_id", routing.to_id);
       updateKnown(payload, "to_shop_id", routing.to_shop_id);
       updateKnown(payload, "biz_id", routing.biz_id);
-      payload.content = { ...(payload.content && typeof payload.content === "object" ? payload.content : {}), text, uid: clientMessageId };
+      if (commandType === "send_text") {
+        const text = String(message?.text ?? "").trim();
+        if (!text) throw new Error("Reply text is invalid.");
+        payload.type = "text";
+        payload.content = { text, uid: clientMessageId };
+      } else if (commandType === "send_image") {
+        payload.type = "image";
+        payload.content = await uploadImage(message, routing);
+      } else {
+        const providerProductId = String(message?.provider_product_id ?? "").trim();
+        const productName = String(message?.product_name ?? "").trim();
+        if (!/^\d+$/.test(providerProductId) || !productName) {
+          throw new Error("Shopee product is invalid.");
+        }
+        payload.type = "product";
+        payload.content = {
+          uid: clientMessageId,
+          product_id: numericId(providerProductId),
+          shop_id: numericId(routing.shop_id),
+          product_name: productName,
+        };
+      }
       const url = new URL(template.url);
       url.searchParams.set("uuid", clientMessageId);
       const response = await poster(url.toString(), payload, { headers: template.headers });
