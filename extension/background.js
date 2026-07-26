@@ -1238,6 +1238,7 @@ function batchFor(messages, installId) {
       ...(message.provider_type ? { provider_type: message.provider_type } : {}),
       ...(message.command_id ? { command_id: message.command_id } : {}),
       ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}),
+      ...(message.product ? { product: message.product } : {}),
       capture_method: message.capture_method
     });
     conversations.set(message.conversation_id, conversation);
