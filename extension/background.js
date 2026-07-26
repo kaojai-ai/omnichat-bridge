@@ -538,6 +538,12 @@ async function sendViaShopeeApi(message) {
     if (parsedUrl?.protocol !== "https:") {
       return { ok: false, error: "Reply image URL is invalid." };
     }
+    if (!context.config.image_server_url) {
+      return { ok: false, error: "Reply image server is not configured." };
+    }
+    if (parsedUrl.origin !== new URL(context.config.image_server_url).origin) {
+      return { ok: false, error: "Reply image URL is not from the configured image server." };
+    }
     const response = await fetch(parsedUrl);
     const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
     if (!response.ok || !imageType.startsWith("image/")) {

@@ -31,6 +31,9 @@ export function validateAccountConfig(value) {
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
   const commands_url = secureUrl(value.commands_url, "https:", "Commands URL must use HTTPS.");
+  const image_server_url = value.image_server_url === undefined || value.image_server_url === ""
+    ? undefined
+    : secureUrl(value.image_server_url, "https:", "Image server URL must use HTTPS.");
   const logs_url = value.logs_url === undefined || value.logs_url === ""
     ? undefined
     : secureUrl(value.logs_url, "https:", "Logs URL must use HTTPS.");
@@ -39,6 +42,7 @@ export function validateAccountConfig(value) {
     provider_account_id,
     events_url,
     commands_url,
+    ...(image_server_url ? { image_server_url } : {}),
     ...(logs_url ? { logs_url } : {}),
     hmac_secret,
   };
@@ -72,6 +76,7 @@ export function accountOrigins(config) {
   const urls = [];
   for (const account of config.accounts) {
     urls.push(account.events_url, account.commands_url);
+    if (account.image_server_url) urls.push(account.image_server_url);
     if (account.logs_url) urls.push(account.logs_url);
   }
   return urls;
