@@ -535,7 +535,7 @@ async function sendViaShopeeApi(message) {
     const imageUrl = typeof message.image_url === "string" ? message.image_url : "";
     let parsedUrl;
     try { parsedUrl = new URL(imageUrl); } catch { /* Validated below. */ }
-    if (parsedUrl?.protocol !== "https:" || parsedUrl.hostname !== "imgsv.kaojai.ai") {
+    if (parsedUrl?.protocol !== "https:") {
       return { ok: false, error: "Reply image URL is invalid." };
     }
     const response = await fetch(parsedUrl);

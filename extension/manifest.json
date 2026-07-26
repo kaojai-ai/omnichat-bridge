@@ -4,7 +4,7 @@
   "version": "0.3.3",
   "description": "Syncs Shopee seller chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "storage"],
-  "host_permissions": ["https://seller.shopee.co.th/*", "https://imgsv.kaojai.ai/*"],
+  "host_permissions": ["https://seller.shopee.co.th/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
