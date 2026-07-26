@@ -20,14 +20,25 @@
     sendErrorsByClientMessageId: new Map(),
     activeConversationId: null,
     acknowledgements: new Map(),
-    nextRecoveryRequestAt: 0
+    nextRecoveryRequestAt: 0,
+    recoveryRequestId: null,
+    recoveryAbortController: null
   };
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
   state.sendErrorsByClientMessageId ??= new Map();
   state.nextRecoveryRequestAt ??= 0;
+  state.recoveryRequestId ??= null;
+  state.recoveryAbortController ??= null;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  const postLog = (level, event, message, details = {}) => post({
+    type: "diagnostic_log",
+    level,
+    event,
+    message,
+    details,
+  });
   const pathOf = (url) => {
     try { return new URL(url, window.location.href).pathname; }
     catch { return ""; }
@@ -105,7 +116,13 @@
     state.nextRecoveryRequestAt = scheduledAt + MIN_RECOVERY_REQUEST_INTERVAL_MS;
     const waitMs = scheduledAt - Date.now();
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
-    return state.nativeFetch(request);
+    const response = await state.nativeFetch(request, {
+      signal: state.recoveryAbortController?.signal,
+    });
+    if (state.recoveryRequestId) {
+      post({ type: "recovery_activity", request_id: state.recoveryRequestId });
+    }
+    return response;
   };
 
   const waitForTemplate = async () => {
@@ -508,10 +525,16 @@
       return;
     }
     state.recoveryInFlight = true;
+    state.recoveryRequestId = requestId;
+    state.recoveryAbortController = new AbortController();
+    const startedAt = Date.now();
     let parsed = 0;
     let queued = 0;
     let checked = 0;
     try {
+      postLog("info", "recovery_started", "Shopee recovery started.", {
+        checkpoint_present: Boolean(checkpoint?.watermark),
+      });
       await waitForTemplate();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
@@ -585,7 +608,8 @@
         ...classify(conversation),
       }));
       post({
-        type: "sync_diagnostics",
+        type: "sync_plan",
+        request_id: requestId,
         mode: bootstrap ? "bootstrap" : "incremental",
         checkpoint: watermarkMs ? new Date(watermarkMs).toISOString() : null,
         conversations: classified.slice(0, 10).map(({ conversation, cursor, decision, reason }) => {
@@ -603,7 +627,13 @@
       });
       const probes = classified.filter(({ decision }) => decision === "probe");
       const recoveryJobs = classified.filter(({ decision }) => decision === "history_job");
-      const totalConversations = recoveryJobs.length;
+      const totalConversations = probes.length + recoveryJobs.length;
+      postLog("info", "recovery_plan", "Shopee recovery plan prepared.", {
+        candidates: classified.length,
+        history_jobs: recoveryJobs.length,
+        probes: probes.length,
+        skipped: classified.filter(({ decision }) => decision === "skip").length,
+      });
       let completedConversations = 0;
       if (totalConversations) {
         post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
@@ -611,6 +641,11 @@
       for (const item of [...probes, ...recoveryJobs]) {
         const { conversation, cursor, token, decision } = item;
         checked += 1;
+        postLog("debug", "conversation_started", "Checking one conversation for missed messages.", {
+          position: checked,
+          total: probes.length + recoveryJobs.length,
+          decision,
+        });
         const history = await fetchHistory(
           conversation,
           cursor,
@@ -648,10 +683,14 @@
             throw new Error(acknowledgement.error ?? "Could not save sync cursor.");
           }
         }
-        if (decision === "history_job") {
-          completedConversations += 1;
-          post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
-        }
+        completedConversations += 1;
+        post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
+        postLog("debug", "conversation_completed", "Conversation recovery check completed.", {
+          position: checked,
+          parsed: history.parsed,
+          queued: history.queued,
+          decision,
+        });
       }
       post({
         type: "recovery_complete",
@@ -664,10 +703,24 @@
           ? new Date(nextWatermarkMs).toISOString()
           : checkpoint?.watermark ?? null,
       });
+      postLog("info", "recovery_completed", "Shopee recovery completed.", {
+        parsed,
+        queued,
+        conversations_checked: checked,
+        duration_ms: Date.now() - startedAt,
+      });
     } catch (error) {
+      postLog("error", "recovery_failed", error instanceof Error ? error.message : String(error), {
+        conversations_checked: checked,
+        duration_ms: Date.now() - startedAt,
+      });
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: String(error) });
     } finally {
       state.recoveryInFlight = false;
+      if (state.recoveryRequestId === requestId) {
+        state.recoveryRequestId = null;
+        state.recoveryAbortController = null;
+      }
     }
   }
 
@@ -685,10 +738,17 @@
       }
       if (request.method === "GET") captureActiveConversation(request);
       if (path.startsWith("/webchat/api/") && request.method === "GET" && !state.getTemplate) {
-        void templateFrom(request).then((template) => { state.getTemplate = template; });
+        void templateFrom(request).then((template) => {
+          state.getTemplate = template;
+          postLog("info", "history_template_ready", "Shopee history request template captured.");
+        });
       }
       if (path === CONVERSATIONS_PATH) {
-        void templateFrom(request).then((template) => { state.listTemplate = template; });
+        void templateFrom(request).then((template) => {
+          const firstCapture = !state.listTemplate;
+          state.listTemplate = template;
+          if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
+        });
         void response.clone().json().then((body) => {
           detectAccount(body);
           captureProfiles(body);
@@ -708,6 +768,7 @@
     state.socket = socket;
     if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
     post({ type: "socket_connected" });
+    postLog("info", "socket_connected", "Shopee realtime socket connected.");
     socket.on("message", (event) => {
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
@@ -727,6 +788,10 @@
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "sync") {
       void recover(event.data.request_id, event.data.checkpoint ?? {});
+    } else if (event.data.type === "cancel_sync") {
+      if (state.recoveryRequestId === event.data.request_id) {
+        state.recoveryAbortController?.abort();
+      }
     } else if (event.data.type === "detect_account") {
       void detectCurrentAccount(event.data.request_id);
     } else if (event.data.type === "send_api") {

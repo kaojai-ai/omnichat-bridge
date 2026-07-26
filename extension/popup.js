@@ -5,9 +5,28 @@ import {
   findAccountConfig,
   validateConfigFile,
 } from "./lib/config.js";
+import { pruneLogs } from "./lib/logs.js";
 import { STORAGE, hasLocalConsent, readAccountState, readStorage, writeStorage } from "./lib/storage.js";
 
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
+const SYNC_PHASE_LABELS = {
+  preparing: "Preparing sync…",
+  sending_pending: "Sending previously queued messages…",
+  loading_conversations: "Loading Shopee conversations…",
+  checking_conversations: "Checking conversations for missed messages…",
+  sending_recovered: "Sending recovered messages to your server…",
+};
+const sampleConfig = {
+  version: CONFIG_VERSION,
+  accounts: [{
+    provider: "shopee",
+    provider_account_id: "123456789",
+    events_url: "https://your-server.example.com/omnichat/events",
+    commands_url: "https://your-server.example.com/omnichat/tickets",
+    logs_url: "https://your-server.example.com/omnichat/logs",
+    hmac_secret: "replace-with-your-secret",
+  }],
+};
 
 const consentInput = document.querySelector("#consent");
 const consentError = document.querySelector("#consent-error");
@@ -29,6 +48,7 @@ const accountStatus = document.querySelector("#account-status");
 const connectionStatus = accountStatus.querySelector(".connection-status");
 const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
+const cancelSyncButton = document.querySelector("#cancel-sync");
 const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
 const status = document.querySelector("#status");
@@ -38,13 +58,14 @@ const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
 const leaderStatus = document.querySelector("#leader-status");
 const leaderCurrent = leaderStatus.querySelector(".leader-current");
-const openErrorsButton = document.querySelector("#open-errors");
-const errorsScreen = document.querySelector("#errors-screen");
-const errorLog = document.querySelector("#error-log");
-const errorLogEmpty = document.querySelector("#error-log-empty");
-const copyErrorsButton = document.querySelector("#copy-errors");
-const copyDiagnosticsButton = document.querySelector("#copy-diagnostics");
-const diagnosticsEmpty = document.querySelector("#diagnostics-empty");
+const openLogsButton = document.querySelector("#open-logs");
+const logsScreen = document.querySelector("#logs-screen");
+const logList = document.querySelector("#log-list");
+const logEmpty = document.querySelector("#log-empty");
+const copyLogsButton = document.querySelector("#copy-logs");
+const downloadLogsButton = document.querySelector("#download-logs");
+const clearLogsButton = document.querySelector("#clear-logs");
+const logLevel = document.querySelector("#log-level");
 const openPrivacyButton = document.querySelector("#open-privacy");
 const closePrivacyButton = document.querySelector("#close-privacy");
 const consentRecord = document.querySelector("#consent-record");
@@ -58,15 +79,25 @@ let storedStatus = null;
 let liveState = null;
 let scanStates = null;
 let pendingStates = null;
-let unexpected = [];
-let storedSyncDiagnostics = null;
+let logs = [];
 let popupTabId = null;
 let storedConsent = null;
 let viewingPrivacy = false;
 let isShopeeChatTab = false;
 
+function logPopup(level, event, message, details = {}) {
+  void chrome.runtime.sendMessage({
+    type: "record_log",
+    level,
+    area: "popup",
+    event,
+    message,
+    details,
+  }).catch(() => undefined);
+}
+
 function setHeaderActionsVisible(visible) {
-  for (const button of [openErrorsButton, settingsButton]) {
+  for (const button of [openLogsButton, settingsButton]) {
     button.hidden = !visible;
   }
 }
@@ -124,7 +155,7 @@ function setAccountStatus(label, state, action = "") {
   accountStatus.title = action === "config"
     ? "Open settings"
     : action === "logs"
-      ? "Open error logs"
+      ? "Open logs"
       : "";
 }
 
@@ -198,6 +229,9 @@ function renderDashboard(message = "", isError = false) {
     syncButton.disabled = true;
     syncButton.dataset.action = "";
     syncButton.textContent = "Sync messages";
+    syncButton.setAttribute("aria-label", "Sync messages");
+    syncButton.title = "";
+    cancelSyncButton.hidden = true;
     syncProgress.hidden = true;
     progressArea.hidden = !status.textContent;
     return;
@@ -209,6 +243,9 @@ function renderDashboard(message = "", isError = false) {
     syncButton.disabled = false;
     syncButton.dataset.action = "configure";
     syncButton.textContent = "Configure";
+    syncButton.setAttribute("aria-label", "Configure");
+    syncButton.title = "";
+    cancelSyncButton.hidden = true;
     syncProgress.hidden = true;
     progressArea.hidden = !message;
     return;
@@ -234,6 +271,11 @@ function renderDashboard(message = "", isError = false) {
   syncButton.disabled = syncing;
   syncButton.dataset.action = "sync";
   syncButton.textContent = syncing ? "Syncing…" : needsRetry ? "Retry now" : "Sync messages";
+  syncButton.setAttribute("aria-label", syncButton.textContent);
+  syncButton.title = "";
+  cancelSyncButton.hidden = !syncing;
+  cancelSyncButton.disabled = false;
+  cancelSyncButton.textContent = "Cancel sync";
   const lastSyncText = formatLastSync(syncState?.last_sync_at);
   if (hasCheckpoint && lastSyncText) {
     lastSync.textContent = lastSyncText;
@@ -247,15 +289,15 @@ function renderDashboard(message = "", isError = false) {
     syncProgress.hidden = false;
     syncProgress.value = percentage;
     progressArea.hidden = false;
-    status.textContent = `Syncing ${completed} of ${total} conversations · ${percentage}%`;
+    status.textContent = `Checking conversation ${completed} of ${total} · ${percentage}%`;
   } else if (syncState?.state === "discovering") {
     syncProgress.hidden = true;
     progressArea.hidden = false;
-    status.textContent = "Checking for missed messages…";
+    status.textContent = SYNC_PHASE_LABELS[syncState.phase] ?? "Starting sync…";
   } else {
     const resultMessage = message
       || (currentError
-        ? `${pending.length ? `${pending.length} pending. ` : ""}Select Error to view logs.`
+        ? `${pending.length ? `${pending.length} pending. ` : ""}Open Logs for details.`
         : "")
       || (hasCheckpoint ? formatSyncResult(syncState?.last_result) : "");
     syncProgress.hidden = true;
@@ -264,58 +306,74 @@ function renderDashboard(message = "", isError = false) {
   }
 }
 
-function renderUnexpected() {
-  openErrorsButton.title = unexpected.length ? `logs (${unexpected.length})` : "logs";
-  errorLog.replaceChildren();
-  for (const item of unexpected) {
-    const row = document.createElement("li");
-    const heading = document.createElement("div");
-    const scope = document.createElement("strong");
-    const time = document.createElement("time");
-    const message = document.createElement("p");
-    scope.textContent = item.scope || "Extension";
-    time.dateTime = item.at || "";
-    time.textContent = Number.isFinite(Date.parse(item.at ?? ""))
-      ? new Date(item.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+function visibleLogs() {
+  return logLevel.value === "all"
+    ? logs
+    : logs.filter((item) => item.level === logLevel.value);
+}
+
+function formatLogDetails(details) {
+  return Object.entries(details ?? {})
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" · ");
+}
+
+function formatVisibleLogs() {
+  return visibleLogs()
+    .map((item) => [
+      item.at || "Unknown time",
+      item.level || "info",
+      item.area || "extension",
+      item.event || "unknown",
+      item.message || "Extension event",
+      formatLogDetails(item.details),
+    ].filter(Boolean).join(" · "))
+    .join("\n");
+}
+
+function safeFilenamePart(value, fallback) {
+  const sanitized = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || fallback;
+}
+
+function logsFilename() {
+  const provider = safeFilenamePart(detectedAccount?.provider, "unknown-provider");
+  const accountId = safeFilenamePart(detectedAccount?.provider_account_id, "unknown-account");
+  const version = safeFilenamePart(chrome.runtime.getManifest().version, "unknown");
+  const timestamp = new Date().toISOString().replaceAll(":", "-");
+  return `omnichat-bridge-${provider}-${accountId}-v${version}-logs-${timestamp}.log`;
+}
+
+function renderLogs() {
+  const visible = visibleLogs();
+  openLogsButton.title = logs.length ? `Logs (${logs.length})` : "Logs";
+  logList.replaceChildren();
+  for (const item of visible) {
+    const row = document.createElement("div");
+    const timestamp = Number.isFinite(Date.parse(item.at ?? ""))
+      ? new Date(item.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
       : "Unknown time";
-    message.textContent = item.message || "Unknown error";
-    heading.append(scope, time);
-    row.append(heading, message);
-    errorLog.append(row);
+    const details = formatLogDetails(item.details);
+    row.dataset.level = item.level || "info";
+    row.textContent = [
+      timestamp,
+      (item.level || "info").toUpperCase(),
+      `${item.area || "extension"}.${item.event || "unknown"}`,
+      item.message || "Extension event",
+      details,
+    ].filter(Boolean).join(" · ");
+    logList.append(row);
   }
-  errorLogEmpty.hidden = unexpected.length !== 0;
-  copyErrorsButton.disabled = unexpected.length === 0;
-}
-
-function currentSyncDiagnostics() {
-  return readAccountState(storedSyncDiagnostics, accountConfigKey(detectedAccount), null);
-}
-
-function renderSyncDiagnostics() {
-  const diagnostics = currentSyncDiagnostics();
-  const available = Boolean(diagnostics?.conversations?.length);
-  copyDiagnosticsButton.disabled = !available;
-  diagnosticsEmpty.hidden = available;
-}
-
-function formatSyncDiagnostics(diagnostics) {
-  const rows = [
-    ["conversation_id", "summary_timestamp", "cursor_timestamp", "cursor_message_id", "decision", "reason"],
-    ...diagnostics.conversations.map((item) => [
-      item.conversation_id,
-      item.summary_timestamp ?? "",
-      item.cursor_timestamp ?? "",
-      item.cursor_message_id ?? "",
-      item.decision,
-      item.reason,
-    ]),
-  ];
-  return [
-    `captured_at\t${diagnostics.captured_at ?? ""}`,
-    `mode\t${diagnostics.mode ?? ""}`,
-    `checkpoint\t${diagnostics.checkpoint ?? ""}`,
-    ...rows.map((row) => row.join("\t")),
-  ].join("\n");
+  logEmpty.textContent = logs.length
+    ? "No logs match this level."
+    : "No logs recorded yet.";
+  logEmpty.hidden = visible.length !== 0;
+  copyLogsButton.disabled = visible.length === 0;
+  downloadLogsButton.disabled = visible.length === 0;
+  clearLogsButton.disabled = logs.length === 0;
 }
 
 async function refreshStoredState() {
@@ -326,8 +384,7 @@ async function refreshStoredState() {
     STORAGE.scanState,
     STORAGE.pending,
     STORAGE.live,
-    STORAGE.unexpected,
-    STORAGE.syncDiagnostics,
+    STORAGE.logs,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccount = stored[STORAGE.detectedAccount] ?? null;
@@ -335,11 +392,9 @@ async function refreshStoredState() {
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
-  unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
-  storedSyncDiagnostics = stored[STORAGE.syncDiagnostics] ?? null;
+  logs = pruneLogs(stored[STORAGE.logs]);
   renderDashboard();
-  renderUnexpected();
-  renderSyncDiagnostics();
+  renderLogs();
 }
 
 async function detectAccount() {
@@ -362,17 +417,19 @@ async function detectAccount() {
 }
 
 function renderConfigEditor() {
-  configInput.value = JSON.stringify(storedConfig, null, 2);
+  const empty = storedConfig.accounts.length === 0;
+  configInput.value = empty ? "" : JSON.stringify(storedConfig, null, 2);
+  configInput.placeholder = JSON.stringify(sampleConfig, null, 2);
   configInput.disabled = false;
   document.querySelector("#save-config").disabled = false;
-  configCount.textContent = "Current saved configuration";
-  exportButton.disabled = storedConfig.accounts.length === 0;
+  configCount.textContent = empty ? "No saved accounts · sample shown below" : "Current saved configuration";
+  exportButton.disabled = empty;
 }
 
 function openConfig() {
   brandHeader.hidden = true;
   dashboardScreen.hidden = true;
-  errorsScreen.hidden = true;
+  logsScreen.hidden = true;
   configScreen.hidden = false;
   setHeaderActionsVisible(false);
   setConfigStatus("");
@@ -382,7 +439,7 @@ function openConfig() {
 function closeConfig() {
   brandHeader.hidden = false;
   configScreen.hidden = true;
-  errorsScreen.hidden = true;
+  logsScreen.hidden = true;
   dashboardScreen.hidden = false;
   setHeaderActionsVisible(true);
   renderDashboard();
@@ -406,8 +463,7 @@ async function load() {
     STORAGE.scanState,
     STORAGE.pending,
     STORAGE.live,
-    STORAGE.unexpected,
-    STORAGE.syncDiagnostics,
+    STORAGE.logs,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
@@ -417,8 +473,7 @@ async function load() {
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
-  unexpected = Array.isArray(stored[STORAGE.unexpected]) ? stored[STORAGE.unexpected] : [];
-  storedSyncDiagnostics = stored[STORAGE.syncDiagnostics] ?? null;
+  logs = pruneLogs(stored[STORAGE.logs]);
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   isShopeeChatTab = activeTab?.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations") ?? false;
@@ -430,15 +485,13 @@ async function load() {
   brandHeader.hidden = false;
   dashboardScreen.hidden = !showDashboard;
   configScreen.hidden = true;
-  errorsScreen.hidden = true;
+  logsScreen.hidden = true;
   setHeaderActionsVisible(consented && isShopeeChatTab);
   viewingPrivacy = false;
   renderConsentScreen();
   renderDashboard();
-  renderUnexpected();
-  renderSyncDiagnostics();
+  renderLogs();
   if (consented) void detectAccount();
-  if (consented) void chrome.runtime.sendMessage({ type: "get_live_state" }).catch(() => undefined);
 }
 
 consentInput.addEventListener("change", () => {
@@ -467,7 +520,7 @@ openPrivacyButton.addEventListener("click", () => {
   dashboardScreen.hidden = true;
   hintScreen.hidden = true;
   configScreen.hidden = true;
-  errorsScreen.hidden = true;
+  logsScreen.hidden = true;
   consentScreen.hidden = false;
   setHeaderActionsVisible(false);
   renderConsentScreen();
@@ -503,10 +556,27 @@ syncButton.addEventListener("click", async () => {
   }
 });
 
+cancelSyncButton.addEventListener("click", async () => {
+  cancelSyncButton.disabled = true;
+  cancelSyncButton.textContent = "Cancelling…";
+  status.classList.remove("error");
+  status.textContent = "Cancelling sync…";
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "cancel_sync" });
+    await refreshStoredState();
+    renderDashboard(
+      result?.ok && result.cancelled ? "Sync cancelled." : result?.error ?? "No active sync.",
+      !result?.ok,
+    );
+  } catch (error) {
+    renderDashboard(error.message, true);
+  }
+});
+
 document.querySelector("#open-config").addEventListener("click", openConfig);
 accountStatus.addEventListener("click", () => {
   if (accountStatus.dataset.action === "config") openConfig();
-  else if (accountStatus.dataset.action === "logs") openErrors();
+  else if (accountStatus.dataset.action === "logs") openLogs();
 });
 leaderStatus.addEventListener("click", async () => {
   const isLeader = leaderStatus.dataset.leader === "true";
@@ -516,49 +586,63 @@ leaderStatus.addEventListener("click", async () => {
   if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);
-function openErrors() {
+function openLogs() {
   brandHeader.hidden = true;
   dashboardScreen.hidden = true;
   setHeaderActionsVisible(false);
-  errorsScreen.hidden = false;
+  logsScreen.hidden = false;
+  renderLogs();
 }
-openErrorsButton.addEventListener("click", openErrors);
-document.querySelector("#close-errors").addEventListener("click", () => {
+openLogsButton.addEventListener("click", openLogs);
+document.querySelector("#close-logs").addEventListener("click", () => {
   brandHeader.hidden = false;
-  errorsScreen.hidden = true;
+  logsScreen.hidden = true;
   dashboardScreen.hidden = false;
   setHeaderActionsVisible(true);
 });
-copyErrorsButton.addEventListener("click", async () => {
-  const report = unexpected
-    .map((item) => [item.at || "Unknown time", item.scope || "Extension", item.message || "Unknown error"].join(" · "))
-    .join("\n");
+copyLogsButton.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(report);
-    copyErrorsButton.textContent = "Copied";
+    await navigator.clipboard.writeText(formatVisibleLogs());
+    copyLogsButton.textContent = "Copied";
   } catch {
-    copyErrorsButton.textContent = "Could not copy";
+    copyLogsButton.textContent = "Could not copy";
   }
-  setTimeout(() => { copyErrorsButton.textContent = "Copy all"; }, 1_200);
+  setTimeout(() => { copyLogsButton.textContent = "Copy"; }, 1_200);
 });
 
-copyDiagnosticsButton.addEventListener("click", async () => {
-  const diagnostics = currentSyncDiagnostics();
-  if (!diagnostics?.conversations?.length) return;
-  try {
-    await navigator.clipboard.writeText(formatSyncDiagnostics(diagnostics));
-    copyDiagnosticsButton.textContent = "Copied";
-  } catch {
-    copyDiagnosticsButton.textContent = "Could not copy";
-  }
-  setTimeout(() => { copyDiagnosticsButton.textContent = "Copy sync diagnostics"; }, 1_200);
+downloadLogsButton.addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([`${formatVisibleLogs()}\n`], { type: "text/plain" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = logsFilename();
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+logLevel.addEventListener("change", renderLogs);
+
+clearLogsButton.addEventListener("click", async () => {
+  if (!confirm("Clear all local operational logs?")) return;
+  const result = await chrome.runtime.sendMessage({ type: "clear_logs" });
+  if (!result?.ok) return;
+  logs = [];
+  renderLogs();
 });
 
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
     const config = validateConfigFile(JSON.parse(configInput.value));
-    await writeStorage({ [STORAGE.config]: config });
+    await writeStorage({
+      [STORAGE.config]: config,
+      [STORAGE.serverInitialized]: false,
+      [STORAGE.logUploadEnabled]: false,
+      [STORAGE.logOutbox]: [],
+    });
     storedConfig = config;
+    logPopup("info", "configuration_saved", "Configuration saved.", {
+      accounts: config.accounts.length,
+      logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
+    });
     renderConfigEditor();
     try {
       await requestTargetPermission(accountOrigins(config));
@@ -578,8 +662,17 @@ configFile.addEventListener("change", async () => {
   if (!file) return;
   try {
     const config = validateConfigFile(JSON.parse(await file.text()));
-    await writeStorage({ [STORAGE.config]: config });
+    await writeStorage({
+      [STORAGE.config]: config,
+      [STORAGE.serverInitialized]: false,
+      [STORAGE.logUploadEnabled]: false,
+      [STORAGE.logOutbox]: [],
+    });
     storedConfig = config;
+    logPopup("info", "configuration_imported", "Configuration imported.", {
+      accounts: config.accounts.length,
+      logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
+    });
     let message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}.`;
     let permissionError = false;
     try {
@@ -613,6 +706,7 @@ document.querySelector("#export-config").addEventListener("click", () => {
   link.download = "omnichat-bridge-config.json";
   link.click();
   URL.revokeObjectURL(url);
+  logPopup("info", "configuration_exported", "Configuration exported.");
   if (configScreen.hidden) renderDashboard("Configuration exported.");
   else setConfigStatus("Configuration exported.");
 });
@@ -620,6 +714,7 @@ document.querySelector("#export-config").addEventListener("click", () => {
 clearButton.addEventListener("click", async () => {
   if (!confirm("Erase all local extension data, including accounts, consent, pending messages, sync cursors, and logs?")) return;
   await chrome.alarms.clear("omnichat-delivery-retry");
+  await chrome.alarms.clear("omnichat-log-upload");
   await chrome.storage.local.clear();
   await load();
 });
@@ -639,7 +734,7 @@ accountButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.unexpected] || changes[STORAGE.commandTab] || changes[STORAGE.syncDiagnostics]) {
+  if (changes[STORAGE.config] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
     void refreshStoredState();
   }
 });

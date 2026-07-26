@@ -8,10 +8,39 @@
   let activeConversationId = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
+  const RECOVERY_INACTIVITY_TIMEOUT_MS = 60_000;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  const log = (level, event, message, details = {}) => {
+    void chrome.runtime.sendMessage({
+      type: "record_log",
+      level,
+      area: "provider",
+      event,
+      message,
+      details,
+    }).catch(() => undefined);
+  };
 
   const outboundKey = (conversationId, text) => `${conversationId}\u0000${text}`;
+  const recoveryIdFrom = (requestId) => String(requestId ?? "").split(":")[0];
+
+  function touchRecovery(requestId) {
+    const id = recoveryIdFrom(requestId);
+    const pending = recoveries.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    pending.timeout = setTimeout(() => {
+      if (recoveries.get(id) !== pending) return;
+      recoveries.delete(id);
+      post({ type: "cancel_sync", request_id: id });
+      log("error", "recovery_timeout", "Shopee recovery stopped responding.");
+      pending.resolve({
+        ok: false,
+        error: "Shopee recovery stopped responding for 60 seconds. Retry.",
+      });
+    }, RECOVERY_INACTIVITY_TIMEOUT_MS);
+  }
 
   function trackOutbound(conversationId, text, commandId, clientMessageId) {
     const key = outboundKey(conversationId, text);
@@ -51,19 +80,41 @@
   }
 
   async function requestRecovery() {
-    if (!await isConfigured()) return { ok: false, error: "Extension setup is required." };
+    if (!await isConfigured()) {
+      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.");
+      return { ok: false, error: "Extension setup is required." };
+    }
     const syncState = await chrome.runtime.sendMessage({ type: "get_sync_state" });
-    if (!syncState?.ok) return syncState;
+    if (!syncState?.ok) {
+      log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
+      return syncState;
+    }
     const requestId = crypto.randomUUID();
     const result = new Promise((resolve) => {
-      recoveries.set(requestId, { resolve });
+      recoveries.set(requestId, { resolve, timeout: null });
+      touchRecovery(requestId);
     });
     post({
       type: "sync",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
     });
+    log("info", "recovery_requested", "Provider recovery request sent.", {
+      checkpoint_present: Boolean(syncState.checkpoint?.watermark),
+    });
     return result;
+  }
+
+  function cancelRecovery() {
+    let cancelled = 0;
+    for (const [requestId, pending] of recoveries) {
+      clearTimeout(pending.timeout);
+      recoveries.delete(requestId);
+      post({ type: "cancel_sync", request_id: requestId });
+      pending.resolve({ ok: false, error: "Sync cancelled." });
+      cancelled += 1;
+    }
+    return { ok: true, cancelled: cancelled > 0 };
   }
 
   async function requestAccountDetection() {
@@ -71,6 +122,7 @@
     const result = new Promise((resolve) => {
       const timeout = setTimeout(() => {
         accountDetections.delete(requestId);
+        log("warn", "account_detection_timeout", "Shopee account detection timed out.");
         resolve({ ok: false, error: "Refresh Shopee Seller Chat to detect the Shop ID." });
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
@@ -95,6 +147,7 @@
       detected_at: new Date().toISOString()
     };
     await chrome.storage.local.set({ detected_account: account });
+    log("info", "account_detected", "Shopee account detected on provider page.");
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;
     accountDetections.delete(message.request_id);
@@ -107,6 +160,7 @@
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
+    log("warn", "account_detection_failed", message.error ?? "Shopee account was not found.");
     pending.resolve({ ok: false, error: message.error ?? "Shopee Shop ID was not found." });
   }
 
@@ -135,6 +189,7 @@
   }
 
   async function handleRecoveryBatch(message) {
+    touchRecovery(message.request_id);
     try {
       const messages = addConversationProfile(
         globalThis.OmnichatShopee.parseShopeeMessages(message.body, "history_recovery")
@@ -154,12 +209,20 @@
         latest_cursor: result?.latest_cursor ?? null,
         ...(result?.ok ? {} : { error: result?.error ?? "Could not persist recovered messages." })
       });
+      log(result?.ok ? "debug" : "error", "recovery_batch_processed", result?.ok
+        ? "Recovered message page processed."
+        : result?.error ?? "Recovered message page failed.", {
+        parsed: messages.length,
+        queued: Number(result?.queued) || 0,
+      });
     } catch (error) {
+      log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error));
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
   async function handleRecoveryCursor(message) {
+    touchRecovery(message.request_id);
     try {
       const result = await chrome.runtime.sendMessage({
         type: "advance_scan_cursor",
@@ -179,6 +242,7 @@
   }
 
   async function handleBootstrapSelection(message) {
+    touchRecovery(message.request_id);
     try {
       const result = await chrome.runtime.sendMessage({
         type: "save_bootstrap",
@@ -196,6 +260,7 @@
   }
 
   function handleRecoveryProgress(message) {
+    touchRecovery(message.request_id);
     void chrome.runtime.sendMessage({
       type: "sync_progress",
       request_id: message.request_id,
@@ -210,7 +275,7 @@
       void chrome.runtime.sendMessage({ type: "resume_sync" }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
-        console.warn("Could not resume Omnichat sync.", error);
+        log("warn", "resume_failed", message);
       });
     }, 500);
   }
@@ -231,6 +296,13 @@
       });
     if (!messages.length) return;
     const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
+    log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
+      ? "Realtime provider event processed."
+      : result?.error ?? "Realtime provider event failed.", {
+      parsed: messages.length,
+      queued: Number(result?.queued) || 0,
+      deferred: Boolean(result?.deferred),
+    });
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtimeCapture = JSON.stringify({
         parsed: messages.length,
@@ -242,7 +314,9 @@
 
   async function handleRecoveryComplete(message) {
     const pending = recoveries.get(message.request_id);
+    if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
+      log("error", "recovery_failed", message.error ?? "Provider recovery failed.");
       if (pending) {
         recoveries.delete(message.request_id);
         pending.resolve(message);
@@ -265,6 +339,10 @@
       recoveries.delete(message.request_id);
       pending.resolve(result);
     }
+    log("info", "recovery_completed", "Provider recovery completed.", {
+      recovered: result.recovered,
+      queued: result.queued,
+    });
   }
 
   function setComposerText(composer, text) {
@@ -349,7 +427,17 @@
     } else if (event.data.type === "active_conversation") {
       activeConversationId = typeof event.data.conversation_id === "string" ? event.data.conversation_id : null;
     } else if (event.data.type === "socket_connected") {
+      log("info", "socket_observed", "Shopee realtime socket detected.");
       requestResumeSync();
+    } else if (event.data.type === "diagnostic_log") {
+      log(
+        event.data.level,
+        event.data.event,
+        event.data.message,
+        event.data.details,
+      );
+    } else if (event.data.type === "recovery_activity") {
+      touchRecovery(event.data.request_id);
     } else if (event.data.type === "recovery_batch") {
       void handleRecoveryBatch(event.data);
     } else if (event.data.type === "recovery_cursor") {
@@ -358,9 +446,10 @@
       void handleBootstrapSelection(event.data);
     } else if (event.data.type === "recovery_progress") {
       handleRecoveryProgress(event.data);
-    } else if (event.data.type === "sync_diagnostics") {
+    } else if (event.data.type === "sync_plan") {
+      touchRecovery(event.data.request_id);
       void chrome.runtime.sendMessage({
-        type: "save_sync_diagnostics",
+        type: "record_sync_plan",
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
         conversations: event.data.conversations,
@@ -380,6 +469,10 @@
     if (message?.type === "sync_now") {
       void requestRecovery().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
+    }
+    if (message?.type === "cancel_sync") {
+      respond(cancelRecovery());
+      return false;
     }
     if (message?.type === "detect_account") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
@@ -402,4 +495,5 @@
     if (!document.hidden) requestResumeSync();
   });
 
+  log("info", "content_loaded", "Shopee content bridge loaded.");
 })();

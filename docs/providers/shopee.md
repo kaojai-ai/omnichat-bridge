@@ -92,6 +92,7 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
       "provider_account_id": "shop-1",
       "events_url": "https://collector.example.com/omnichat/events",
       "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "your-hmac-secret"
     },
     {
@@ -99,11 +100,17 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
       "provider_account_id": "shop-2",
       "events_url": "https://collector.example.com/omnichat/events",
       "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "another-hmac-secret"
     }
   ]
 }
 ```
+
+`logs_url` is optional. When set, the extension sends sanitized operational
+logs in signed HTTPS batches after **Sync messages** is selected. It never
+includes message text, message bodies, cookies, browser credentials, HMAC
+secrets, request headers, or URLs.
 
 Never commit a real connection setup. The destination server must map the
 detected Shop ID to the same HMAC secret. Import replaces the complete saved

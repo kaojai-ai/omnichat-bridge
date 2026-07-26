@@ -40,6 +40,7 @@ inbound destination, and outbound destination. See the
 
 - `events_url` is the HTTPS message-batch receiver.
 - `commands_url` is the HTTPS command-channel endpoint.
+- `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
 - Import replaces the saved account list. Export includes HMAC secrets.
 - Pending messages, cursors, status, and resume timing are partitioned by the
@@ -70,8 +71,8 @@ messages from its local queue only when the counts cover every message sent.
 - 500 messages total per batch.
 - 1 MiB request body.
 - At most 10 batches in one flush.
-- Configuration, consent, pending messages, installation ID, and cursors live
-  in `chrome.storage.local`.
+- Configuration, consent, pending messages, installation ID, cursors, and
+  48-hour operational logs live in `chrome.storage.local`.
 - Failed delivery uses an account-scoped Chrome alarm with capped exponential
   backoff. Manual retry and normal resume reset the backoff.
 

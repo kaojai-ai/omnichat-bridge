@@ -11,8 +11,10 @@ export const STORAGE = {
   deliveryRetry: "delivery_retry_state",
   live: "live_status",
   commandTab: "command_tab",
-  unexpected: "unexpected_events",
-  syncDiagnostics: "sync_diagnostics"
+  serverInitialized: "server_initialized",
+  logs: "operational_logs",
+  logOutbox: "operational_log_outbox",
+  logUploadEnabled: "operational_log_upload_enabled"
 };
 
 export const readStorage = (keys) => chrome.storage.local.get(keys);

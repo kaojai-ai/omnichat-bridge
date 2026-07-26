@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: July 25, 2026_
+_Last updated: July 26, 2026_
 
 Omnichat Browser Bridge is an open-source Chrome extension. It bridges a
 provider chat open in the user's browser with the HTTPS or WSS server that the
@@ -16,7 +16,7 @@ data needed to provide its bridge function:
 - chat messages, message timestamps, message IDs, and supported media links;
 - provider-page activity needed to detect supported chat events; and
 - the user's bridge configuration, consent record, sync cursor, local delivery
-  queue, and recent error log.
+  queue, and safe operational logs.
 
 The extension uses this data only to sync supported chat events, avoid sending
 duplicates, show status to the user, and send user-authorized commands through
@@ -28,6 +28,14 @@ Chat data is sent only to the HTTPS or WSS destination server explicitly
 configured by the user. The extension signs its requests with the locally
 stored HMAC secret. It does not send that secret to the configured server as
 message data.
+
+If the user adds an optional `logs_url`, the extension also sends sanitized
+operational logs to that configured HTTPS destination in signed batches.
+Upload starts only after the user selects **Sync messages**.
+These logs describe extension lifecycle, provider readiness, sync progress,
+queue counts, delivery status, and errors. They do not include chat content,
+provider credentials, cookies, login tokens, request headers, HMAC secrets,
+or full request URLs.
 
 The project developer does not operate a central service that receives chat
 data. The owner of the configured destination server controls its retention,
@@ -42,11 +50,13 @@ it for creditworthiness or lending decisions.
 
 ## Storage and deletion
 
-The extension stores its configuration and a small temporary delivery queue in
-Chrome's local extension storage on the user's device. Users can delete all
-local configuration, consent, queued data, cursors, and logs from the
-extension settings, or remove the extension. Queued data is removed after a
-successful delivery where supported by the configured destination.
+The extension stores its configuration, a small temporary delivery queue, and
+operational logs in Chrome's local extension storage on the user's device.
+Operational logs expire after 48 hours and are also capped to stay within
+Chrome storage limits. Users can delete all local configuration, consent,
+queued data, cursors, and logs from the extension settings, or remove the
+extension. Queued data is removed after a successful delivery where supported
+by the configured destination.
 
 ## Consent and choices
 

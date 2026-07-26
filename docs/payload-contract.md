@@ -92,6 +92,48 @@ and message participants match that account.
 The extension removes messages from its local queue only when the batch ID
 matches and accepted plus duplicate messages equals the number sent.
 
+## Operational log batch
+
+An account may optionally configure `logs_url`. The extension sends safe
+operational metadata to that HTTPS endpoint using the same timestamp, nonce,
+provider-account, and HMAC signature headers described above. Uploads are
+enabled only after the user clicks **Sync messages**, are best-effort, and do
+not block message sync. Saving or importing configuration clears any pending
+remote-log outbox so logs are never carried to a newly configured target.
+
+```json
+{
+  "schema": "omnichat.log_batch",
+  "version": 1,
+  "batch_id": "33333333-3333-4333-8333-333333333333",
+  "installation_id": "22222222-2222-4222-8222-222222222222",
+  "provider": "shopee",
+  "provider_account_id": "123456789",
+  "extension_version": "0.3.1",
+  "sent_at": "2026-07-26T00:00:00.000Z",
+  "logs": [
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "at": "2026-07-26T00:00:00.000Z",
+      "level": "info",
+      "area": "sync",
+      "event": "progress",
+      "message": "Sync progress updated.",
+      "details": {
+        "completed": 4,
+        "total": 10
+      }
+    }
+  ]
+}
+```
+
+Any `2xx` response accepts the log batch. Log records contain fixed event
+names, bounded sanitized messages, and scalar operational metadata only.
+Sensitive detail keys and values are removed before local storage and upload.
+The extension retains local logs for up to 48 hours, capped at 4,000 records
+to stay within Chrome storage limits.
+
 ## Limits
 
 - 1 MiB request body
@@ -100,3 +142,4 @@ matches and accepted plus duplicate messages equals the number sent.
 - 500 messages total
 - 20,000 characters per text message
 - Five-minute request timestamp window
+- 100 operational logs per upload batch

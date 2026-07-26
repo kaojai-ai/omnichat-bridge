@@ -31,11 +31,15 @@ export function validateAccountConfig(value) {
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
   const commands_url = secureUrl(value.commands_url, "https:", "Commands URL must use HTTPS.");
+  const logs_url = value.logs_url === undefined || value.logs_url === ""
+    ? undefined
+    : secureUrl(value.logs_url, "https:", "Logs URL must use HTTPS.");
   return {
     provider,
     provider_account_id,
     events_url,
     commands_url,
+    ...(logs_url ? { logs_url } : {}),
     hmac_secret,
   };
 }
@@ -68,6 +72,7 @@ export function accountOrigins(config) {
   const urls = [];
   for (const account of config.accounts) {
     urls.push(account.events_url, account.commands_url);
+    if (account.logs_url) urls.push(account.logs_url);
   }
   return urls;
 }
