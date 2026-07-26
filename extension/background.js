@@ -795,7 +795,14 @@ async function handleLiveCommand(raw) {
   }
   if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.");
   if (liveSocket?.readyState === WebSocket.OPEN) {
-    liveSocket.send(JSON.stringify({ type: "send_result", request_id: command.request_id, ok: Boolean(result?.ok), ...(result?.ok ? {} : { error: result?.error ?? "Reply failed." }) }));
+    liveSocket.send(JSON.stringify({
+      type: "send_result",
+      request_id: command.request_id,
+      ok: Boolean(result?.ok),
+      ...(result?.ok
+        ? { provider_message_id: result.provider_message_id }
+        : { error: result?.error ?? "Reply failed." }),
+    }));
   }
 }
 

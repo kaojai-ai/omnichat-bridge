@@ -390,7 +390,15 @@
       if (response?.ok === false || providerReason) {
         throw new Error(providerReason ?? `Shopee API returned ${response?.status ?? "an error"}.`);
       }
-      const providerMessageId = String(body?.id ?? body?.message_id ?? body?.message?.id ?? "").trim();
+      const providerMessageId = String(
+        body?.id
+        ?? body?.message_id
+        ?? body?.message?.id
+        ?? body?.data?.id
+        ?? body?.data?.message_id
+        ?? body?.data?.message?.id
+        ?? ""
+      ).trim();
       post({ type: "api_send_result", request_id: requestId, ok: true, ...(providerMessageId ? { provider_message_id: providerMessageId } : {}) });
     } catch (error) {
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);

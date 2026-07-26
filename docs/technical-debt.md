@@ -106,14 +106,14 @@ flowchart TD
     B --> C["One-time ticket in temporary store"]
     C --> D["Extension opens managed WebSocket"]
     D --> E["Bridge records browser presence"]
-    F["Admin sends one plain-text reply"] --> G["Target server finds newest matching presence"]
+    F["Admin sends one text, image, or product reply"] --> G["Target server finds newest matching presence"]
     G --> H["Temporary request status - no message text"]
-    H --> I["WebSocket send_text command"]
-    I --> J["Extension checks account and open conversation"]
-    J --> K["Fill and submit visible provider composer"]
-    K --> L["WebSocket send_result"]
-    L --> M["Target server returns success or error"]
-    K --> N["Provider echo returns through Flow 1"]
+    H --> I["WebSocket send command"]
+    I --> J["Extension checks account and Seller Chat tab"]
+    J --> K["Send through authenticated provider page"]
+    K --> L["WebSocket send_result with provider message ID"]
+    L --> M["Target server persists the sent message"]
+    K --> N["Matching provider echo is suppressed"]
 ```
 
 This flow is online-only. There is no remote command queue and no delayed
@@ -175,13 +175,13 @@ Extension to target server:
 {
   "type": "send_result",
   "request_id": "11111111-1111-4111-8111-111111111111",
-  "ok": true
+  "ok": true,
+  "provider_message_id": "provider-message-1"
 }
 ```
 
-Failure includes an `error` string. The current Shopee path accepts one
-plain-text message up to 2,000 characters. The matching conversation must
-already be open.
+Failure includes an `error` string. The current Shopee path accepts one text,
+image, or product message. Shopee Seller Chat must be open and authenticated.
 
 ### Security and storage boundary
 

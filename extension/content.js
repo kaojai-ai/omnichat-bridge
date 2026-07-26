@@ -5,6 +5,7 @@
   const profilesByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
+  const ignoredApiEchoes = new Map();
   let activeConversationId = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
@@ -60,6 +61,68 @@
     if (!outbound || outbound.commandId !== commandId) return;
     if (outbound.timeout) clearTimeout(outbound.timeout);
     pendingOutbound.delete(key);
+  }
+
+  function ignoreNextApiEcho(clientMessageId) {
+    const previous = ignoredApiEchoes.get(clientMessageId);
+    if (previous) clearTimeout(previous);
+    ignoredApiEchoes.set(clientMessageId, setTimeout(() => {
+      ignoredApiEchoes.delete(clientMessageId);
+    }, 60_000));
+  }
+
+  function consumeIgnoredApiEcho(clientMessageId) {
+    const timeout = ignoredApiEchoes.get(clientMessageId);
+    if (!timeout) return false;
+    clearTimeout(timeout);
+    ignoredApiEchoes.delete(clientMessageId);
+    return true;
+  }
+
+  function findPendingApiSend(message) {
+    if (!message.client_message_id) return null;
+    for (const [requestId, pending] of pendingApiSends) {
+      if (
+        pending.clientMessageId === message.client_message_id
+        && pending.conversationId === message.conversation_id
+      ) {
+        return { requestId, pending };
+      }
+    }
+    return null;
+  }
+
+  function finishPendingApiSend(requestId, pending) {
+    const providerMessageId = String(
+      pending.result?.provider_message_id ?? pending.echo?.id ?? ""
+    ).trim();
+    if (providerMessageId && (pending.result?.ok || pending.echo)) {
+      pendingApiSends.delete(requestId);
+      clearTimeout(pending.timeout);
+      if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
+      if (!pending.echo) ignoreNextApiEcho(pending.clientMessageId);
+      pending.resolve({ ok: true, provider_message_id: providerMessageId });
+      return;
+    }
+    if (pending.result?.ok) {
+      if (pending.providerIdTimeout) return;
+      pending.providerIdTimeout = setTimeout(() => {
+        if (pendingApiSends.get(requestId) !== pending) return;
+        pendingApiSends.delete(requestId);
+        clearTimeout(pending.timeout);
+        pending.resolve({ ok: false, error: "Shopee did not return a provider message ID." });
+      }, 2_000);
+      return;
+    }
+    if (!pending.result) return;
+    pendingApiSends.delete(requestId);
+    clearTimeout(pending.timeout);
+    pending.resolve({
+      ok: false,
+      error: pending.result.error
+        ? `Shopee API error: ${pending.result.error}`
+        : "Shopee API reply failed."
+    });
   }
 
   async function isConfigured() {
@@ -282,19 +345,30 @@
   }
 
   async function handleRealtimeEvent(body) {
-    const messages = addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))
-      .map((message) => {
-        const key = outboundKey(message.conversation_id, message.text ?? "");
-        const pending = pendingOutbound.get(key);
-        if (!pending) return message;
-        if (pending.timeout) clearTimeout(pending.timeout);
-        pendingOutbound.delete(key);
-        return {
-          ...message,
-          command_id: pending.commandId,
-          client_message_id: message.client_message_id ?? pending.clientMessageId,
-        };
+    const messages = [];
+    for (const message of addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))) {
+      const apiSend = findPendingApiSend(message);
+      if (apiSend) {
+        apiSend.pending.echo = message;
+        finishPendingApiSend(apiSend.requestId, apiSend.pending);
+        continue;
+      }
+      if (message.client_message_id && consumeIgnoredApiEcho(message.client_message_id)) continue;
+
+      const key = outboundKey(message.conversation_id, message.text ?? "");
+      const pending = pendingOutbound.get(key);
+      if (!pending) {
+        messages.push(message);
+        continue;
+      }
+      if (pending.timeout) clearTimeout(pending.timeout);
+      pendingOutbound.delete(key);
+      messages.push({
+        ...message,
+        command_id: pending.commandId,
+        client_message_id: message.client_message_id ?? pending.clientMessageId,
       });
+    }
     if (!messages.length) return;
     const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
     log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
@@ -419,14 +493,24 @@
     }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
+        const pending = pendingApiSends.get(requestId);
+        if (!pending) return;
         pendingApiSends.delete(requestId);
-        if (text) clearTrackedOutbound(conversationId, text, requestId);
+        if (pending.echo?.id) {
+          resolve({ ok: true, provider_message_id: pending.echo.id });
+          return;
+        }
         resolve({ ok: false, error: "Shopee API reply timed out." });
       }, 30_000);
-      pendingApiSends.set(requestId, { resolve, timeout, conversationId, text, clientMessageId });
-      // Shopee can broadcast the echo before its HTTP sender resolves. Track first so
-      // the collector preserves the Admin optimistic message's client_message_id.
-      if (text) trackOutbound(conversationId, text, requestId, clientMessageId);
+      pendingApiSends.set(requestId, {
+        resolve,
+        timeout,
+        conversationId,
+        clientMessageId,
+        echo: null,
+        result: null,
+        providerIdTimeout: null,
+      });
       post({
         type: "send_api",
         ...message,
@@ -442,12 +526,8 @@
   function handleApiSendResult(message) {
     const pending = pendingApiSends.get(message.request_id);
     if (!pending) return;
-    pendingApiSends.delete(message.request_id);
-    clearTimeout(pending.timeout);
-    if (!message.ok && pending.text) clearTrackedOutbound(pending.conversationId, pending.text, message.request_id);
-    pending.resolve(message.ok
-      ? { ok: true, ...(message.provider_message_id ? { provider_message_id: message.provider_message_id } : {}) }
-      : { ok: false, error: message.error ? `Shopee API error: ${message.error}` : "Shopee API reply failed." });
+    pending.result = message;
+    finishPendingApiSend(message.request_id, pending);
   }
 
   window.addEventListener("message", (event) => {
