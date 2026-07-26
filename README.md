@@ -29,7 +29,7 @@ conversation and immediately returns success or an error.
 
 ## Demo video
 
-[![Watch the video](https://img.youtube.com/vi/eoJaO0jIv24/hqdefault.jpg)](https://youtu.be/eoJaO0jIv24)
+[![Watch the video](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)
 
 ## A simple analogy
 
