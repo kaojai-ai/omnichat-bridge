@@ -6,6 +6,8 @@
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
   let activeConversationId = null;
+  let realtimeConnected = false;
+  let lastRealtimeConnectedAt = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -523,8 +525,15 @@
     } else if (event.data.type === "active_conversation") {
       activeConversationId = typeof event.data.conversation_id === "string" ? event.data.conversation_id : null;
     } else if (event.data.type === "socket_connected") {
+      realtimeConnected = true;
+      lastRealtimeConnectedAt = new Date().toISOString();
       log("info", "socket_observed", "Shopee realtime socket detected.");
       requestResumeSync();
+    } else if (event.data.type === "provider_status") {
+      realtimeConnected = event.data.realtime_connected === true;
+      if (realtimeConnected) {
+        lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
+      }
     } else if (event.data.type === "diagnostic_log") {
       log(
         event.data.level,
@@ -560,6 +569,15 @@
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message?.type === "ping") {
       respond({ ok: true });
+      return false;
+    }
+    if (message?.type === "get_provider_status") {
+      respond({
+        ok: true,
+        realtime_connected: realtimeConnected,
+        last_realtime_connected_at: lastRealtimeConnectedAt,
+        page_visible: document.visibilityState === "visible",
+      });
       return false;
     }
     if (message?.type === "sync_now") {
