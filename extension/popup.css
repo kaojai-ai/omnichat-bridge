@@ -678,10 +678,17 @@ footer {
   border-top: 1px solid var(--line);
   color: #98a2b3;
   display: flex;
+  flex-direction: column;
   font-size: 10px;
-  gap: 5px;
+  gap: 4px;
   justify-content: center;
   padding-top: 12px;
+}
+
+.footer-links {
+  align-items: center;
+  display: flex;
+  gap: 5px;
 }
 
 footer a {
@@ -697,6 +704,10 @@ footer a {
   font-weight: 400;
   min-height: auto;
   padding: 0;
+}
+
+.installation-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 footer a:hover,

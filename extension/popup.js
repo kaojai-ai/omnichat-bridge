@@ -9,6 +9,7 @@ import { pruneLogs } from "./lib/logs.js";
 import {
   STORAGE,
   hasLocalConsent,
+  installationId,
   normalizeDeviceName,
   readAccountState,
   readStorage,
@@ -77,6 +78,7 @@ const clearLogsButton = document.querySelector("#clear-logs");
 const logLevel = document.querySelector("#log-level");
 const openPrivacyButton = document.querySelector("#open-privacy");
 const closePrivacyButton = document.querySelector("#close-privacy");
+const installationIdButton = document.querySelector("#installation-id");
 const consentRecord = document.querySelector("#consent-record");
 const consentIntroTitle = consentScreen.querySelector("h2");
 const consentIntroDescription = consentScreen.querySelector(".screen-intro p");
@@ -470,6 +472,9 @@ async function showSyncResult(result) {
 
 async function load() {
   document.querySelector("#version").textContent = `v${chrome.runtime.getManifest().version}`;
+  const installId = await installationId();
+  installationIdButton.dataset.installationId = installId;
+  installationIdButton.textContent = `Installation ID: ${installId}`;
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -754,6 +759,16 @@ accountButton.addEventListener("click", async () => {
   accountIdValue.textContent = "Copied";
   setTimeout(() => {
     accountIdValue.textContent = id;
+  }, 900);
+});
+
+installationIdButton.addEventListener("click", async () => {
+  const id = installationIdButton.dataset.installationId;
+  if (!id) return;
+  await navigator.clipboard.writeText(id);
+  installationIdButton.textContent = "Installation ID copied";
+  setTimeout(() => {
+    installationIdButton.textContent = `Installation ID: ${installationIdButton.dataset.installationId}`;
   }, 900);
 });
 
