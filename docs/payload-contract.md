@@ -92,6 +92,55 @@ and message participants match that account.
 The extension removes messages from its local queue only when the batch ID
 matches and accepted plus duplicate messages equals the number sent.
 
+## Connection status
+
+While its authenticated WebSocket is open, the extension sends
+`omnichat.connection_status` every 20 seconds. The envelope is provider-neutral:
+each provider adapter reports named checks and the common capture, delivery,
+sync, and queue timestamps. Shopee currently reports `provider_tab`,
+`content_bridge`, `provider_account`, and `provider_realtime`.
+
+```json
+{
+  "type": "connection_status",
+  "schema": "omnichat.connection_status",
+  "version": 1,
+  "provider": "shopee",
+  "provider_account_id": "123456789",
+  "installation_id": "22222222-2222-4222-8222-222222222222",
+  "device_name": "Front desk MacBook",
+  "extension_version": "0.4.0",
+  "reported_at": "2026-07-31T00:00:00.000Z",
+  "client": {
+    "platform": "MacIntel",
+    "language": "th"
+  },
+  "health": {
+    "reason_code": "healthy",
+    "checks": [
+      { "key": "provider_tab", "status": "pass" },
+      { "key": "content_bridge", "status": "pass" },
+      { "key": "provider_account", "status": "pass" },
+      { "key": "provider_realtime", "status": "pass" }
+    ],
+    "metrics": {
+      "provider_tabs": 1,
+      "pending_messages": 0
+    },
+    "last_capture_at": "2026-07-31T00:00:00.000Z",
+    "last_delivery_at": "2026-07-31T00:00:01.000Z",
+    "last_sync_at": "2026-07-31T00:00:01.000Z",
+    "last_error": null
+  }
+}
+```
+
+The server records its own `last_seen_at` and does not trust the client
+timestamp for liveness. A connection is stale after 90 seconds without a
+heartbeat. Connected and disconnected installation records expire after seven
+days. No IP address, browser user agent, cookies, login tokens, or passwords
+are included.
+
 ## Operational log batch
 
 An account may optionally configure `logs_url`. The extension sends safe

@@ -535,7 +535,8 @@ progress {
   font-weight: 650;
 }
 
-textarea {
+textarea,
+input[type="text"] {
   background: #fff;
   border: 1px solid #d0d5dd;
   border-radius: 8px;
@@ -545,7 +546,14 @@ textarea {
   width: 100%;
 }
 
-textarea:hover { border-color: #98a2b3; }
+textarea:hover,
+input[type="text"]:hover { border-color: #98a2b3; }
+
+.field > small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
 
 textarea {
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;

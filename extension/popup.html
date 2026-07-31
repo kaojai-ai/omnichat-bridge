@@ -32,7 +32,7 @@
           <p>Review what leaves this browser.</p>
         </div>
         <div class="consent-copy">
-          <p><strong>This extension transfers</strong> chat messages, media links, buyer profiles, IDs, and timestamps to the server you configure.</p>
+          <p><strong>This extension transfers</strong> chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.</p>
           <p><strong>It never collects or transfers</strong> passwords, cookies, login tokens, or other browser credentials.</p>
           <p id="privacy-github" class="privacy-github">Learn more about this extension on <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>.</p>
         </div>
@@ -103,6 +103,12 @@
             <p id="config-count">Current saved configuration</p>
           </div>
         </header>
+
+        <div class="field">
+          <label for="device-name">Device name</label>
+          <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
+          <small>Shown to KaoJai admins for connection diagnostics.</small>
+        </div>
 
         <div class="field">
           <div class="field-heading">

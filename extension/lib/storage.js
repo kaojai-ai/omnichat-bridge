@@ -3,6 +3,7 @@ export const STORAGE = {
   consent: "local_consent",
   detectedAccount: "detected_account",
   installationId: "installation_id",
+  deviceName: "device_name",
   pending: "pending_messages",
   status: "status",
   targetCursor: "target_sync_cursor",
@@ -46,4 +47,8 @@ export async function installationId() {
   const value = crypto.randomUUID();
   await writeStorage({ [STORAGE.installationId]: value });
   return value;
+}
+
+export function normalizeDeviceName(value) {
+  return typeof value === "string" ? value.trim().slice(0, 80) : "";
 }

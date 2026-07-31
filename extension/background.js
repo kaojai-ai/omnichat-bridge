@@ -1,5 +1,6 @@
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, findAccountConfig } from "./lib/config.js";
+import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   advanceConversationCursors,
   compareMessageCursor,
@@ -18,6 +19,7 @@ import {
   STORAGE,
   hasLocalConsent,
   installationId,
+  normalizeDeviceName,
   readAccountState,
   readStorage,
   writeAccountState,
@@ -721,6 +723,71 @@ async function signedLiveTicket(config, providerAccountId) {
   return { ticket: ticket.ticket, socketUrl };
 }
 
+async function connectionStatusSnapshot(context) {
+  const stored = await readStorage([
+    STORAGE.deviceName,
+    STORAGE.detectedAccount,
+    STORAGE.pending,
+    STORAGE.status,
+  ]);
+  const tabs = (await chrome.tabs.query({ url: SHOPEE_URL_PATTERN }))
+    .filter((tab) => tab.url?.startsWith(SHOPEE_CHAT_URL));
+  let providerStatus = null;
+  for (const tab of tabs) {
+    if (!tab.id) continue;
+    try {
+      const result = await chrome.tabs.sendMessage(tab.id, { type: "get_provider_status" });
+      if (result?.ok) {
+        providerStatus = result;
+        break;
+      }
+    } catch {
+      // A Shopee tab can exist while its content bridge is still loading.
+    }
+  }
+
+  const detected = stored[STORAGE.detectedAccount];
+  const accountDetected = detected?.provider === "shopee"
+    && typeof detected.provider_account_id === "string";
+  const accountMatches = accountDetected
+    && detected.provider_account_id === context.account.provider_account_id;
+  const status = readAccountState(stored[STORAGE.status], context.key, {});
+  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+  const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
+  const health = buildConnectionHealth({
+    tabCount: tabs.length,
+    contentReady: Boolean(providerStatus),
+    accountDetected,
+    accountMatches,
+    realtimeConnected: providerStatus?.realtime_connected === true,
+    lastRealtimeConnectedAt: providerStatus?.last_realtime_connected_at,
+    pendingMessages: pending.length,
+    status,
+  });
+
+  return {
+    type: "connection_status",
+    schema: "omnichat.connection_status",
+    version: 1,
+    provider: context.account.provider,
+    provider_account_id: context.account.provider_account_id,
+    installation_id: await installationId(),
+    device_name: deviceName || null,
+    extension_version: chrome.runtime.getManifest().version,
+    reported_at: new Date().toISOString(),
+    client: {
+      platform: String(navigator.platform ?? "").slice(0, 120),
+      language: String(navigator.language ?? "").slice(0, 32),
+    },
+    health,
+  };
+}
+
+async function sendConnectionStatus(socket, context) {
+  const status = await connectionStatusSnapshot(context);
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(status));
+}
+
 async function ensureLiveConnection() {
   const stored = await readStorage([
     STORAGE.config,
@@ -762,8 +829,13 @@ async function ensureLiveConnection() {
       void recordLog("info", "live", "connected", "Live command channel connected.");
       clearInterval(liveHeartbeatTimer);
       liveHeartbeatTimer = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
+        if (socket.readyState === WebSocket.OPEN) {
+          void sendConnectionStatus(socket, context)
+            .catch((error) => recordUnexpected("connection_status", error));
+        }
       }, 20_000);
+      void sendConnectionStatus(socket, context)
+        .catch((error) => recordUnexpected("connection_status", error));
       void getLiveState().catch((error) => recordUnexpected("leader_status", error));
     });
     socket.addEventListener("message", (event) => { void handleLiveCommand(event.data); });
@@ -815,6 +887,20 @@ async function handleLiveCommand(raw) {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccount]) void ensureLiveConnection();
+  if (
+    changes[STORAGE.deviceName]
+    || changes[STORAGE.detectedAccount]
+    || changes[STORAGE.status]
+    || changes[STORAGE.pending]
+  ) {
+    void readStorage([STORAGE.config, STORAGE.detectedAccount]).then((stored) => {
+      const context = currentAccountContext(stored);
+      if (context && liveSocket?.readyState === WebSocket.OPEN) {
+        return sendConnectionStatus(liveSocket, context);
+      }
+      return undefined;
+    }).catch((error) => recordUnexpected("connection_status", error));
+  }
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -963,6 +1049,7 @@ async function clearPersistedSync() {
         phase: null,
         caught_up: false,
         sync_error: null,
+        sync_error_at: null,
         completed_conversations: null,
         total_conversations: null,
         pending: readAccountState(stored[STORAGE.pending], key, []).length,
@@ -1005,6 +1092,7 @@ async function runUnifiedSync(trigger, control) {
       phase: "preparing",
       caught_up: false,
       sync_error: null,
+      sync_error_at: null,
       completed_conversations: null,
       total_conversations: null,
     });
@@ -1063,6 +1151,7 @@ async function runUnifiedSync(trigger, control) {
       last_sync_at: syncedAt,
       caught_up: result.pending === 0,
       sync_error: null,
+      sync_error_at: null,
       completed_conversations: null,
       total_conversations: null,
       last_result: result,
@@ -1091,6 +1180,7 @@ async function runUnifiedSync(trigger, control) {
       phase: null,
       caught_up: false,
       sync_error: cancelled ? null : message,
+      sync_error_at: cancelled ? null : new Date().toISOString(),
       completed_conversations: null,
       total_conversations: null,
       pending: pending.length,
@@ -1130,6 +1220,7 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
     STORAGE.targetCursor,
     STORAGE.lastResumeSyncAt,
     STORAGE.serverInitialized,
+    STORAGE.status,
   ]);
   const context = currentAccountContext(stored);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
@@ -1168,6 +1259,18 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
       stored[STORAGE.pending],
       context.key,
       [...pending, ...added],
+    );
+  }
+  if (eligible.length) {
+    const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+    writes[STORAGE.status] = writeAccountState(
+      stored[STORAGE.status],
+      context.key,
+      {
+        ...currentStatus,
+        last_capture_at: new Date().toISOString(),
+        pending: pending.length + added.length,
+      },
     );
   }
   if (!deferCursorAdvance && advanceCursor && added.length) {
@@ -1448,6 +1551,7 @@ async function flushBatch(signal) {
         : "watching",
       delivery_error: null,
       delivery_error_at: null,
+      last_delivery_at: new Date().toISOString(),
       pending: remaining.length,
     }),
   });

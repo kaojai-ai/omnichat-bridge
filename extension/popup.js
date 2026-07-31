@@ -6,7 +6,14 @@ import {
   validateConfigFile,
 } from "./lib/config.js";
 import { pruneLogs } from "./lib/logs.js";
-import { STORAGE, hasLocalConsent, readAccountState, readStorage, writeStorage } from "./lib/storage.js";
+import {
+  STORAGE,
+  hasLocalConsent,
+  normalizeDeviceName,
+  readAccountState,
+  readStorage,
+  writeStorage,
+} from "./lib/storage.js";
 
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const SYNC_PHASE_LABELS = {
@@ -55,6 +62,7 @@ const progressArea = document.querySelector("#progress-area");
 const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
 const configInput = document.querySelector("#config");
+const deviceNameInput = document.querySelector("#device-name");
 const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
 const leaderStatus = document.querySelector("#leader-status");
@@ -83,6 +91,7 @@ let pendingStates = null;
 let logs = [];
 let popupTabId = null;
 let storedConsent = null;
+let storedDeviceName = "";
 let viewingPrivacy = false;
 let isShopeeChatTab = false;
 
@@ -386,6 +395,7 @@ async function refreshStoredState() {
     STORAGE.pending,
     STORAGE.live,
     STORAGE.logs,
+    STORAGE.deviceName,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccount = stored[STORAGE.detectedAccount] ?? null;
@@ -394,6 +404,9 @@ async function refreshStoredState() {
   pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   logs = pruneLogs(stored[STORAGE.logs]);
+  storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
+    ? stored[STORAGE.deviceName]
+    : "";
   renderDashboard();
   renderLogs();
 }
@@ -419,6 +432,7 @@ async function detectAccount() {
 
 function renderConfigEditor() {
   const empty = storedConfig.accounts.length === 0;
+  deviceNameInput.value = storedDeviceName;
   configInput.value = empty ? "" : JSON.stringify(storedConfig, null, 2);
   configInput.placeholder = JSON.stringify(sampleConfig, null, 2);
   configInput.disabled = false;
@@ -465,6 +479,7 @@ async function load() {
     STORAGE.pending,
     STORAGE.live,
     STORAGE.logs,
+    STORAGE.deviceName,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
@@ -475,6 +490,9 @@ async function load() {
   pendingStates = stored[STORAGE.pending] ?? null;
   liveState = stored[STORAGE.live] ?? null;
   logs = pruneLogs(stored[STORAGE.logs]);
+  storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
+    ? stored[STORAGE.deviceName]
+    : "";
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   isShopeeChatTab = activeTab?.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations") ?? false;
@@ -633,13 +651,19 @@ clearLogsButton.addEventListener("click", async () => {
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
     const config = validateConfigFile(JSON.parse(configInput.value));
+    const deviceName = normalizeDeviceName(deviceNameInput.value);
+    const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
     await writeStorage({
       [STORAGE.config]: config,
-      [STORAGE.serverInitialized]: false,
-      [STORAGE.logUploadEnabled]: false,
-      [STORAGE.logOutbox]: [],
+      [STORAGE.deviceName]: deviceName,
+      ...(configurationChanged ? {
+        [STORAGE.serverInitialized]: false,
+        [STORAGE.logUploadEnabled]: false,
+        [STORAGE.logOutbox]: [],
+      } : {}),
     });
     storedConfig = config;
+    storedDeviceName = deviceName;
     logPopup("info", "configuration_saved", "Configuration saved.", {
       accounts: config.accounts.length,
       logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
@@ -713,7 +737,7 @@ document.querySelector("#export-config").addEventListener("click", () => {
 });
 
 clearButton.addEventListener("click", async () => {
-  if (!confirm("Erase all local extension data, including accounts, consent, pending messages, sync cursors, and logs?")) return;
+  if (!confirm("Erase all local extension data, including device name, accounts, consent, pending messages, sync cursors, and logs?")) return;
   await chrome.alarms.clear("omnichat-delivery-retry");
   await chrome.alarms.clear("omnichat-log-upload");
   await chrome.storage.local.clear();
@@ -735,7 +759,7 @@ accountButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
+  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
     void refreshStoredState();
   }
 });

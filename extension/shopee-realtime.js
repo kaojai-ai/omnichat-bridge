@@ -838,11 +838,34 @@
 
   function observeSocket() {
     const socket = window.__CHAT_GLOBAL__?.socket;
-    if (!socket?.on || state.socket === socket) return;
+    if (!socket?.on) {
+      post({ type: "provider_status", realtime_connected: false });
+      return;
+    }
+    const connected = typeof socket.connected === "boolean" ? socket.connected : true;
+    post({
+      type: "provider_status",
+      realtime_connected: connected,
+      ...(connected ? { connected_at: new Date().toISOString() } : {}),
+    });
+    if (state.socket === socket) return;
     state.socket = socket;
-    if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
-    post({ type: "socket_connected" });
-    postLog("info", "socket_connected", "Shopee realtime socket connected.");
+    if (document.documentElement) {
+      document.documentElement.dataset.omnichatRealtime = connected ? "connected" : "disconnected";
+    }
+    if (connected) {
+      post({ type: "socket_connected" });
+      postLog("info", "socket_connected", "Shopee realtime socket connected.");
+    }
+    socket.on("connect", () => {
+      if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
+      post({ type: "socket_connected" });
+      post({ type: "provider_status", realtime_connected: true, connected_at: new Date().toISOString() });
+    });
+    socket.on("disconnect", () => {
+      if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
+      post({ type: "provider_status", realtime_connected: false });
+    });
     socket.on("message", (event) => {
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
