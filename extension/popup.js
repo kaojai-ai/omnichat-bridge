@@ -419,17 +419,18 @@ async function detectAccount() {
     if (result?.ok) {
       detectedAccount = result.account;
       renderDashboard();
-      return;
+      return true;
     }
   } catch {
     // The retry state below remains available.
   }
-  if (accountButton.dataset.accountId) return;
+  if (accountButton.dataset.accountId) return false;
   accountIdValue.textContent = "Retry";
   accountButton.disabled = false;
   accountButton.title = "Try detecting the Shop ID again";
   setAccountStatus("Not detected", "warning");
   progressArea.hidden = true;
+  return false;
 }
 
 function renderConfigEditor() {
@@ -468,6 +469,28 @@ async function showSyncResult(result) {
   } else {
     await refreshStoredState();
   }
+}
+
+function reportConfigurationStatus(message, isError = false) {
+  if (configScreen.hidden) renderDashboard(message, isError);
+  else setConfigStatus(message, isError);
+}
+
+async function autoStartSync(config) {
+  if (!isShopeeChatTab) return false;
+  if (!(await detectAccount())) throw new Error("Could not detect the Shop ID. Try again from Shopee Seller Chat.");
+  const configuredAccount = config.accounts.some((account) => (
+    account.provider === detectedAccount?.provider
+    && account.provider_account_id === detectedAccount?.provider_account_id
+  ));
+  if (!configuredAccount) throw new Error("Saved configuration does not include the current Shop ID.");
+
+  void chrome.runtime.sendMessage({ type: "sync_now" }).then((result) => {
+    if (!result?.ok) reportConfigurationStatus(`Configuration saved. ${result?.error ?? "Sync failed."}`, true);
+  }).catch((error) => {
+    reportConfigurationStatus(`Configuration saved. ${error.message}`, true);
+  });
+  return true;
 }
 
 async function load() {
@@ -676,7 +699,14 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     renderConfigEditor();
     try {
       await requestTargetPermission(accountOrigins(config));
-      setConfigStatus("Configuration saved.");
+      const syncStarted = configurationChanged && await autoStartSync(config);
+      setConfigStatus(
+        syncStarted
+          ? "Configuration saved. Sync started."
+          : configurationChanged
+            ? "Configuration saved. Open Shopee Seller Chat to start sync."
+            : "Configuration saved.",
+      );
     } catch (error) {
       setConfigStatus(`Configuration saved. ${error.message}`, true);
     }
@@ -708,6 +738,8 @@ configFile.addEventListener("change", async () => {
     try {
       await requestTargetPermission(accountOrigins(config));
       message += " Server access approved.";
+      if (await autoStartSync(config)) message += " Sync started.";
+      else message += " Open Shopee Seller Chat to start sync.";
     } catch (error) {
       message += ` ${error.message}`;
       permissionError = true;

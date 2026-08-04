@@ -17,6 +17,21 @@ It works like like a **coppilot**, require **human-in-the-loop**, not a hosted b
 >   warnings, restrictions, suspension, or loss of access.
 > - You are responsible for evaluating the terms, privacy rules, and risk that apply to your use.
 
+## Why we built it
+
+Shopee told us that applications for Customer Service Apps from individual
+third parties and third-party partner platforms have been closed since
+November 18, 2024. This means shops cannot rely on getting new official app
+access to bring Shopee conversations into one shared customer-service workflow.
+
+![Shopee Agent response stating that applications for Customer Service Apps have been closed since November 18, 2024](docs/assets/shopee-customer-service-app-applications-closed.png)
+
+Omnichat Bridge gives shops a transparent, self-hostable browser-side bridge
+instead. It works only through an already authenticated, open provider tab; it
+does not bypass login, obtain private API access, or transfer browser
+credentials. See [Shopee Open Platform FAQ 56](https://open.shopee.com/faq/56)
+for the referenced notice.
+
 ## How it works
 
 ![Omnichat Bridge copies supported chat messages to your server without taking browser credentials](docs/assets/omnichat-bridge-how-it-work.png)

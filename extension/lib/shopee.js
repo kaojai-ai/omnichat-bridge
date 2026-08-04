@@ -61,6 +61,8 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
     ? ["image_url", "imageUrl", "media_url", "mediaUrl", "url"]
     : type === "video"
       ? ["video_url", "videoUrl", "media_url", "mediaUrl", "url"]
+      : type === "sticker"
+        ? ["sticker_url", "stickerUrl", "sticker_image", "stickerImage", "image_url", "imageUrl", "media_url", "mediaUrl", "thumbnail_url", "thumbnailUrl", "resource_url", "resourceUrl", "file_url", "fileUrl", "url", "src"]
       : [];
   for (const key of urlKeys) {
     const url = httpsUrl(item[key], type);
@@ -71,6 +73,8 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
     ? ["image", "image_info", "imageInfo", "media", "attachment", "content", "data"]
     : type === "video"
       ? ["video", "video_info", "videoInfo", "media", "attachment", "content", "data"]
+      : type === "sticker"
+        ? ["sticker", "sticker_info", "stickerInfo", "sticker_data", "stickerData", "image", "image_info", "imageInfo", "media", "attachment", "content", "data", "payload", "metadata"]
       : [];
   for (const key of nestedKeys) {
     const url = mediaUrl(item[key], type, depth + 1, seen);
@@ -79,9 +83,18 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
   return null;
 }
 
+function stickerCdnUrl(content) {
+  const stickerId = string(content?.sticker_id);
+  const packageId = string(content?.sticker_package_id);
+  const format = string(content?.format)?.toLowerCase() ?? "png";
+  if (!stickerId || !packageId || !/^[a-z0-9]{1,10}$/.test(format)) return null;
+  return `https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/${encodeURIComponent(packageId)}/${encodeURIComponent(stickerId)}@1x.${format}`;
+}
+
 function messageType(value) {
   const raw = string(value)?.toLowerCase() ?? "unknown";
-  if (raw === "text" || raw === "image" || raw === "video" || raw === "product") return { type: raw };
+  if (raw === "text" || raw === "image" || raw === "video" || raw === "sticker" || raw === "product") return { type: raw };
+  if (/(sticker|emoji)/.test(raw)) return { type: "sticker" };
   return { type: "unsupported", provider_type: raw };
 }
 
@@ -112,7 +125,9 @@ function parseShopeeMessages(payload, captureMethod) {
       ? string(content?.product_name) ?? ""
       : textContent(message.content);
     const clientMessageId = string(content?.uid);
-    const url = mediaUrl(message.content, parsedType.type) ?? mediaUrl(message, parsedType.type);
+    const url = mediaUrl(message.content, parsedType.type)
+      ?? (parsedType.type === "sticker" ? stickerCdnUrl(content) : null)
+      ?? mediaUrl(message, parsedType.type);
     if (!id || !conversationId || !senderId || !recipientId || (parsedType.type === "text" && (!text || text.length > 20_000))) continue;
     const key = `${conversationId}:${id}`;
     if (seen.has(key)) continue;
@@ -136,6 +151,7 @@ function parseShopeeMessages(payload, captureMethod) {
           product: {
             provider_product_id: string(content.product_id),
             product_name: string(content.product_name) ?? "Product",
+            ...(string(content.shop_id) ? { provider_account_id: string(content.shop_id) } : {}),
           },
         }
         : {}),
