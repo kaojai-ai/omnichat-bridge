@@ -566,6 +566,12 @@ textarea {
   gap: 14px;
 }
 
+.settings-installation {
+  color: #98a2b3;
+  display: flex;
+  justify-content: flex-start;
+}
+
 .delete-link {
   background: transparent;
   border: 0;
@@ -696,7 +702,13 @@ footer a {
   text-decoration: none;
 }
 
-.footer-link {
+.footer-copyright .brand-link {
+  color: #11BAA6;
+  font-weight: 700;
+}
+
+.footer-link,
+.settings-link {
   background: transparent;
   border: 0;
   color: inherit;
@@ -711,7 +723,8 @@ footer a {
 }
 
 footer a:hover,
-.footer-link:hover {
+.footer-link:hover,
+.settings-link:hover {
   background: transparent;
   color: var(--shopee-hover);
   text-decoration: underline;
