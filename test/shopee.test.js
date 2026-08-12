@@ -86,3 +86,39 @@ test("normalizes Shopee emoji payloads as stickers", () => {
   assert.equal(messages[0].type, "sticker");
   assert.equal(messages[0].media_url, "https://cdn.example.com/emoji.webp");
 });
+
+test("normalizes Shopee video media keys to the player URL", () => {
+  const messages = context.OmnichatShopee.parseShopeeMessages({
+    id: "video-1",
+    conversation_id: "conversation-1",
+    from_id: "buyer-1",
+    to_id: "shop-user-1",
+    to_shop_id: "11110133",
+    type: "video",
+    created_timestamp: 1_754_820_642,
+    content: { video_url: "th-11110133-6v8gu-mrpkn7hlghzc35" },
+  }, "realtime_socket");
+
+  assert.equal(
+    messages[0].media_url,
+    "https://down-ws-sg.vod.susercontent.com/api/v4/11110133/mms/th-11110133-6v8gu-mrpkn7hlghzc35.default.mp4",
+  );
+});
+
+test("prefers Shopee's player URL over a legacy video CDN URL", () => {
+  const playerUrl = "https://down-ws-sg.vod.susercontent.com/api/v4/11110133/mms/th-11110133-6v8gu-mrpkn7hlghzc35.default.mp4";
+  const messages = context.OmnichatShopee.parseShopeeMessages({
+    id: "video-2",
+    conversation_id: "conversation-1",
+    from_id: "buyer-1",
+    to_id: "shop-user-1",
+    type: "video",
+    created_timestamp: 1_754_820_642,
+    content: {
+      video_url: "https://down-tx-sg.vod.susercontent.com/f97f42183dcae470d3a3d29bfcbf4c94",
+      vid: "th-11110133-6v8gu-mrpkn7hlghzc35",
+    },
+  }, "realtime_socket");
+
+  assert.equal(messages[0].media_url, playerUrl);
+});

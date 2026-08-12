@@ -31,17 +31,42 @@ function contentRecord(value) {
   try { return record(JSON.parse(value)); } catch { return null; }
 }
 
-const SHOPEE_VIDEO_CDN_ORIGIN = "https://down-tx-sg.vod.susercontent.com/";
+const SHOPEE_LEGACY_VIDEO_CDN_ORIGIN = "https://down-tx-sg.vod.susercontent.com/";
+const SHOPEE_VIDEO_PLAYER_ORIGIN = "https://down-ws-sg.vod.susercontent.com";
+
+function isShopeeVideoPlayerUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.hostname === "down-ws-sg.vod.susercontent.com"
+      && /^\/api\/v4\/\d+\/mms\/[^/]+\.default\.mp4$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function shopeeVideoPlayerUrl(value) {
+  const raw = string(value);
+  if (!raw) return null;
+  const mediaKey = raw.replace(/^\/+/, "").replace(/\.default\.mp4$/i, "");
+  const match = mediaKey.match(/^th-(\d+)-[A-Za-z0-9_-]+$/);
+  if (!match) return null;
+  return `${SHOPEE_VIDEO_PLAYER_ORIGIN}/api/v4/${match[1]}/mms/${encodeURIComponent(mediaKey)}.default.mp4`;
+}
 
 function httpsUrl(value, type) {
   const raw = string(value);
   if (!raw) return null;
+  if (type === "video") {
+    const playerUrl = shopeeVideoPlayerUrl(raw);
+    if (playerUrl) return playerUrl;
+  }
   const normalized = raw.startsWith("//")
     ? `https:${raw}`
     : raw.includes("://")
       ? raw
       : type === "video"
-        ? new URL(raw.replace(/^\/+/, ""), SHOPEE_VIDEO_CDN_ORIGIN).toString()
+        ? new URL(raw.replace(/^\/+/, ""), SHOPEE_LEGACY_VIDEO_CDN_ORIGIN).toString()
       : /^[^/?#]+\.[^/?#]+(?:[/?#]|$)/.test(raw)
         ? `https://${raw}`
         : new URL(raw, globalThis.location?.origin ?? "https://seller.shopee.co.th").toString();
@@ -60,13 +85,16 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
   const urlKeys = type === "image"
     ? ["image_url", "imageUrl", "media_url", "mediaUrl", "url"]
     : type === "video"
-      ? ["video_url", "videoUrl", "media_url", "mediaUrl", "url"]
+      ? ["vid", "video_id", "videoId", "video_url", "videoUrl", "media_url", "mediaUrl", "url"]
       : type === "sticker"
         ? ["sticker_url", "stickerUrl", "sticker_image", "stickerImage", "image_url", "imageUrl", "media_url", "mediaUrl", "thumbnail_url", "thumbnailUrl", "resource_url", "resourceUrl", "file_url", "fileUrl", "url", "src"]
       : [];
+  let fallback = null;
   for (const key of urlKeys) {
     const url = httpsUrl(item[key], type);
-    if (url) return url;
+    if (!url) continue;
+    if (type === "video" && isShopeeVideoPlayerUrl(url)) return url;
+    fallback ??= url;
   }
 
   const nestedKeys = type === "image"
@@ -78,9 +106,11 @@ function mediaUrl(value, type, depth = 0, seen = new WeakSet()) {
       : [];
   for (const key of nestedKeys) {
     const url = mediaUrl(item[key], type, depth + 1, seen);
-    if (url) return url;
+    if (!url) continue;
+    if (type === "video" && isShopeeVideoPlayerUrl(url)) return url;
+    fallback ??= url;
   }
-  return null;
+  return fallback;
 }
 
 function stickerCdnUrl(content) {
@@ -125,9 +155,13 @@ function parseShopeeMessages(payload, captureMethod) {
       ? string(content?.product_name) ?? ""
       : textContent(message.content);
     const clientMessageId = string(content?.uid);
-    const url = mediaUrl(message.content, parsedType.type)
-      ?? (parsedType.type === "sticker" ? stickerCdnUrl(content) : null)
-      ?? mediaUrl(message, parsedType.type);
+    const contentUrl = mediaUrl(message.content, parsedType.type);
+    const messageUrl = mediaUrl(message, parsedType.type);
+    const url = parsedType.type === "video"
+      ? [contentUrl, messageUrl].find(isShopeeVideoPlayerUrl) ?? contentUrl ?? messageUrl
+      : contentUrl
+        ?? (parsedType.type === "sticker" ? stickerCdnUrl(content) : null)
+        ?? messageUrl;
     if (!id || !conversationId || !senderId || !recipientId || (parsedType.type === "text" && (!text || text.length > 20_000))) continue;
     const key = `${conversationId}:${id}`;
     if (seen.has(key)) continue;
