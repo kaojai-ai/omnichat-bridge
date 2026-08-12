@@ -10,6 +10,7 @@ function contentBridge() {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
+  let context;
   const window = {
     location: { origin: "https://seller.shopee.co.th" },
     addEventListener(type, listener) {
@@ -19,7 +20,7 @@ function contentBridge() {
       runtimeMessages.push(message);
     },
   };
-  const context = vm.createContext({
+  context = vm.createContext({
     window,
     document: {
       hidden: false,
@@ -66,7 +67,20 @@ function contentBridge() {
     await new Promise((resolve) => setImmediate(resolve));
   };
 
-  return { providerEvent, runtimeMessages, sendCommand };
+  const triggerWindowEvent = async (type) => {
+    for (const listener of windowListeners.get(type) ?? []) listener({});
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  return {
+    invalidateRuntime() {
+      context.chrome.runtime = undefined;
+    },
+    providerEvent,
+    runtimeMessages,
+    sendCommand,
+    triggerWindowEvent,
+  };
 }
 
 const command = {
@@ -116,5 +130,19 @@ test("queues an API echo after the provider result completes the send", async ()
   assert.deepEqual(
     plain(bridge.runtimeMessages.find((message) => message.type === "queue_messages")?.messages),
     [echo],
+  );
+});
+
+test("ignores best-effort messages after the extension context is invalidated", async () => {
+  const bridge = contentBridge();
+  bridge.invalidateRuntime();
+
+  await bridge.providerEvent({ type: "socket_connected" });
+  await bridge.triggerWindowEvent("pageshow");
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => ["record_log", "resume_sync"].includes(message.type)).length,
+    1,
   );
 });
