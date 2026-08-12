@@ -14,8 +14,22 @@
   const RECOVERY_INACTIVITY_TIMEOUT_MS = 60_000;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  function sendRuntimeMessage(message, onError) {
+    try {
+      const runtime = globalThis.chrome?.runtime;
+      if (typeof runtime?.sendMessage !== "function") return Promise.resolve(undefined);
+      return Promise.resolve(runtime.sendMessage(message)).catch((error) => {
+        onError?.(error);
+        return undefined;
+      });
+    } catch (error) {
+      onError?.(error);
+      return Promise.resolve(undefined);
+    }
+  }
+
   const log = (level, event, message, details = {}) => {
-    void chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: "record_log",
       level,
       area: "provider",
@@ -309,7 +323,7 @@
 
   function handleRecoveryProgress(message) {
     touchRecovery(message.request_id);
-    void chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: "sync_progress",
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
@@ -320,7 +334,7 @@
   function requestResumeSync() {
     clearTimeout(resumeSyncTimer);
     resumeSyncTimer = setTimeout(() => {
-      void chrome.runtime.sendMessage({ type: "resume_sync" }).catch((error) => {
+      void sendRuntimeMessage({ type: "resume_sync" }, (error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
         log("warn", "resume_failed", message);
@@ -553,7 +567,7 @@
       handleRecoveryProgress(event.data);
     } else if (event.data.type === "sync_plan") {
       touchRecovery(event.data.request_id);
-      void chrome.runtime.sendMessage({
+      void sendRuntimeMessage({
         type: "record_sync_plan",
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
