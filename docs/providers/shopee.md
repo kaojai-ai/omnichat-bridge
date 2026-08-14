@@ -35,7 +35,8 @@ messages after the seller returns.
 
 ## Optional live replies
 
-Your server can send one plain-text reply to the active seller browser. The
+Your server can send one text, image, or product reply to the active seller
+browser. Text and image replies may quote an existing provider message. The
 extension fills and submits Shopee's visible composer; it does not call a
 Shopee private message API and never transfers Shopee cookies, passwords, or
 login tokens.

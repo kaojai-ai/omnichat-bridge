@@ -165,6 +165,7 @@ Target server to extension:
   "provider_account_id": "shop-1",
   "conversation_id": "conversation-1",
   "client_message_id": "optional-client-message-id",
+  "reply_to_provider_message_id": "provider-message-1",
   "text": "Hello"
 }
 ```
@@ -181,7 +182,9 @@ Extension to target server:
 ```
 
 Failure includes an `error` string. The current Shopee path accepts one text,
-image, or product message. Shopee Seller Chat must be open and authenticated.
+image, or product message. Text and image commands may include the optional
+`reply_to_provider_message_id`; the extension maps it to Shopee's native
+`content.quoted_msg_id`. Shopee Seller Chat must be open and authenticated.
 
 ### Security and storage boundary
 

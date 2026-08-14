@@ -263,6 +263,20 @@
       : code ?? (typeof body?.error === "string" ? body.error : null);
   };
 
+  const quotedMessageId = (message) => {
+    if (message?.reply_to_provider_message_id === undefined) return null;
+    if (typeof message.reply_to_provider_message_id !== "string") {
+      throw new Error("Reply quote is invalid.");
+    }
+    const normalized = message.reply_to_provider_message_id.trim();
+    if (!normalized || normalized.length > 200) throw new Error("Reply quote is invalid.");
+    return normalized;
+  };
+
+  const withQuotedMessageId = (content, providerMessageId) => providerMessageId
+    ? { ...content, quoted_msg_id: providerMessageId }
+    : content;
+
   const captureShopeeSendError = async (request, response) => {
     const clientMessageId = new URL(request.url).searchParams.get("uuid");
     if (!clientMessageId) return;
@@ -360,11 +374,13 @@
       if (commandType === "send_text") {
         const text = String(message?.text ?? "").trim();
         if (!text) throw new Error("Reply text is invalid.");
+        const providerMessageId = quotedMessageId(message);
         payload.type = "text";
-        payload.content = { text, uid: clientMessageId };
+        payload.content = withQuotedMessageId({ text, uid: clientMessageId }, providerMessageId);
       } else if (commandType === "send_image") {
+        const providerMessageId = quotedMessageId(message);
         payload.type = "image";
-        payload.content = await uploadImage(message, routing);
+        payload.content = withQuotedMessageId(await uploadImage(message, routing), providerMessageId);
       } else {
         const providerProductId = String(message?.provider_product_id ?? "").trim();
         const productName = String(message?.product_name ?? "").trim();
