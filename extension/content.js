@@ -624,4 +624,7 @@
   });
 
   log("info", "content_loaded", "Shopee content bridge loaded.");
+  if (window.location.pathname.includes("/new-webchat/conversations")) {
+    requestResumeSync();
+  }
 })();
