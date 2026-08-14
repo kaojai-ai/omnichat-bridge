@@ -12,7 +12,10 @@ function contentBridge() {
   const runtimeMessages = [];
   let context;
   const window = {
-    location: { origin: "https://seller.shopee.co.th" },
+    location: {
+      origin: "https://seller.shopee.co.th",
+      pathname: "/new-webchat/conversations",
+    },
     addEventListener(type, listener) {
       windowListeners.set(type, [...(windowListeners.get(type) ?? []), listener]);
     },
@@ -143,6 +146,17 @@ test("ignores best-effort messages after the extension context is invalidated", 
 
   assert.equal(
     bridge.runtimeMessages.filter((message) => ["record_log", "resume_sync"].includes(message.type)).length,
+    1,
+  );
+});
+
+test("requests automatic sync when the chat bridge loads", async () => {
+  const bridge = contentBridge();
+
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
     1,
   );
 });
