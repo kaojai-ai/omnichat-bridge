@@ -116,6 +116,10 @@ function setHeaderActionsVisible(visible) {
   }
 }
 
+function setSettingsButtonVisible(visible) {
+  settingsButton.hidden = !visible;
+}
+
 function formatConsentDate(value) {
   const timestamp = Date.parse(value ?? "");
   if (!Number.isFinite(timestamp)) return "";
@@ -448,6 +452,7 @@ function renderConfigEditor() {
 
 function openConfig() {
   brandHeader.hidden = true;
+  hintScreen.hidden = true;
   dashboardScreen.hidden = true;
   logsScreen.hidden = true;
   configScreen.hidden = false;
@@ -460,9 +465,14 @@ function closeConfig() {
   brandHeader.hidden = false;
   configScreen.hidden = true;
   logsScreen.hidden = true;
-  dashboardScreen.hidden = false;
-  setHeaderActionsVisible(true);
-  renderDashboard();
+  const consented = hasLocalConsent(storedConsent);
+  const showHintScreen = consented && !isShopeeChatTab;
+  const showDashboard = consented && isShopeeChatTab;
+  hintScreen.hidden = !showHintScreen;
+  dashboardScreen.hidden = !showDashboard;
+  setHeaderActionsVisible(showDashboard);
+  setSettingsButtonVisible(consented);
+  if (showDashboard) renderDashboard();
 }
 
 async function showSyncResult(result) {
@@ -536,6 +546,7 @@ async function load() {
   configScreen.hidden = true;
   logsScreen.hidden = true;
   setHeaderActionsVisible(consented && isShopeeChatTab);
+  setSettingsButtonVisible(consented);
   viewingPrivacy = false;
   renderConsentScreen();
   renderDashboard();
@@ -585,6 +596,7 @@ closePrivacyButton.addEventListener("click", () => {
   hintScreen.hidden = !showHintScreen;
   dashboardScreen.hidden = !isShopeeChatTab || showConsentScreen;
   setHeaderActionsVisible(consented && isShopeeChatTab);
+  setSettingsButtonVisible(consented);
 });
 
 syncButton.addEventListener("click", async () => {
