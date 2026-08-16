@@ -15,6 +15,7 @@ import {
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
+import { participantForBatch } from "./lib/message-batch.js";
 import {
   STORAGE,
   hasLocalConsent,
@@ -1533,12 +1534,13 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
 function batchFor(messages, installId) {
   const conversations = new Map();
   for (const message of messages) {
+    const participant = participantForBatch(message.participant);
     const conversation = conversations.get(message.conversation_id) ?? {
       id: message.conversation_id,
-      ...(message.participant ? { participants: [message.participant] } : {}),
+      ...(participant ? { participants: [participant] } : {}),
       messages: []
     };
-    if (!conversation.participants && message.participant) conversation.participants = [message.participant];
+    if (!conversation.participants && participant) conversation.participants = [participant];
     conversation.messages.push({
       id: message.id,
       event_timestamp: message.event_timestamp,

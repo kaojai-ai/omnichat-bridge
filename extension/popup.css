@@ -365,6 +365,13 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.user-id-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .user-id-badge {
   border: 1px solid #d0d5dd;
   border-radius: 999px;
@@ -373,16 +380,6 @@ input[type="checkbox"] {
   font-size: 10px;
   line-height: 1.2;
   padding: 3px 7px;
-}
-
-.user-id-badge[data-kind="shopee"] {
-  background: #f2f4f7;
-}
-
-.user-id-badge[data-kind="shop"] {
-  background: #f5f3ff;
-  border-color: #ddd6fe;
-  color: #6941c6;
 }
 
 .account-list {
@@ -479,6 +476,22 @@ input[type="checkbox"] {
 .account-row-status[data-state="warning"] { color: var(--amber); }
 .account-row-status[data-state="error"] { color: var(--danger); }
 
+.account-row-status-link {
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+}
+
+.account-row-status-link:hover { color: inherit; }
+
+.account-row-status-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 .account-row-id {
   align-items: center;
   background: #e9fbf8;
@@ -568,6 +581,15 @@ input[type="checkbox"] {
   color: #475467;
   font-size: 11px;
 }
+
+.status-log-link {
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.status-log-link:hover { color: var(--danger); }
 
 progress {
   accent-color: var(--shopee);

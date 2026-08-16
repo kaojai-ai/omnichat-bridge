@@ -208,29 +208,34 @@ function showAccounts(accounts) {
       .filter((value) => typeof value === "string" || typeof value === "number")
       .map((value) => String(value).trim())
       .filter(Boolean),
-  )].join(", ");
-  setUserBadge(providerUserId, values("provider_user_id"));
-  setUserBadge(shopUserId, values("shop_user_id"));
+  )];
+  setUserBadges(providerUserId, values("provider_user_id"));
+  setUserBadges(shopUserId, values("shop_user_id"));
 }
 
-function setUserBadge(element, value) {
-  const normalized = typeof value === "string" || typeof value === "number"
-    ? String(value).trim()
-    : "";
+function setUserBadges(element, values) {
+  const normalized = Array.isArray(values)
+    ? values.map((value) => String(value).trim()).filter(Boolean)
+    : [];
   const row = element.closest(".account-identifier");
-  if (row) row.hidden = !normalized;
-  element.hidden = !normalized;
-  element.textContent = normalized;
+  if (row) row.hidden = normalized.length === 0;
+  element.hidden = normalized.length === 0;
+  element.replaceChildren(...normalized.map((value) => {
+    const badge = document.createElement("span");
+    badge.className = "user-id-badge";
+    badge.textContent = value;
+    return badge;
+  }));
 }
 
 function accountRowStatus(account) {
   const key = accountConfigKey(account);
   const config = findAccountConfig(storedConfig, account);
-  if (!config) return { label: "NEED CONFIG", state: "warning" };
+  if (!config) return { label: "NEED CONFIG", state: "warning", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
   const currentError = syncState?.delivery_error || syncState?.sync_error;
-  if (currentError) return { label: "Error · open Logs", state: "error" };
+  if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
   if (live?.socket === "connected") return { label: "CONNECTED", state: "ready" };
   if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: "OFFLINE", state: "warning" };
@@ -286,10 +291,27 @@ function renderDetectedAccounts() {
     copy.className = "account-row-copy";
     const name = document.createElement("strong");
     name.textContent = account.display_name || "Shopee shop";
-    const statusLabel = document.createElement("span");
+    const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
     statusLabel.textContent = cardState.label;
+    if (cardState.action) {
+      statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
+      statusLabel.classList.add("account-row-status-link");
+      statusLabel.title = cardState.action === "config" ? "Open settings" : "Open error logs";
+      statusLabel.setAttribute(
+        "aria-label",
+        cardState.action === "config"
+          ? `Open settings to configure ${account.display_name || "Shopee shop"}`
+          : `Open error logs for ${account.display_name || "Shopee shop"}`,
+      );
+      statusLabel.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (cardState.action === "config") openConfig();
+        else openLogs("error");
+      });
+    }
     copy.append(name, statusLabel);
     select.append(copy);
     const shopId = document.createElement("button");
@@ -309,6 +331,7 @@ function renderDetectedAccounts() {
 function renderDashboard(message = "", isError = false) {
   showAccounts(detectedAccounts);
   renderDetectedAccounts();
+  status.replaceChildren();
   status.classList.toggle("error", isError);
   lastSync.hidden = true;
   lastSync.textContent = "";
@@ -406,7 +429,20 @@ function renderDashboard(message = "", isError = false) {
       || formatSyncResult(latestResult);
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage;
-    status.textContent = resultMessage;
+    if (message || !anyError) {
+      status.textContent = resultMessage;
+    } else {
+      if (pendingTotal) status.append(`${pendingTotal} pending. `);
+      const logsLink = document.createElement("a");
+      logsLink.href = "#logs";
+      logsLink.className = "status-log-link";
+      logsLink.textContent = "Open Logs for details";
+      logsLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        openLogs("error");
+      });
+      status.append(logsLink);
+    }
   }
 }
 
@@ -733,11 +769,12 @@ leaderStatus.addEventListener("click", async () => {
   if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);
-function openLogs() {
+function openLogs(level = null) {
   brandHeader.hidden = true;
   dashboardScreen.hidden = true;
   setHeaderActionsVisible(false);
   logsScreen.hidden = false;
+  if (level) logLevel.value = level;
   renderLogs();
 }
 openLogsButton.addEventListener("click", openLogs);
