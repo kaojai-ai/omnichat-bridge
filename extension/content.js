@@ -1,5 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
+  const BRIDGE_PROTOCOL_VERSION = 2;
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
@@ -632,7 +633,7 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message?.type === "ping") {
-      respond({ ok: true });
+      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION });
       return false;
     }
     if (message?.type === "get_provider_status") {

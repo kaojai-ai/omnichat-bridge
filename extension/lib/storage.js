@@ -18,8 +18,27 @@ export const STORAGE = {
   logUploadEnabled: "operational_log_upload_enabled"
 };
 
+export const LEGACY_STORAGE = {
+  detectedAccount: "detected_account",
+};
+
 export const readStorage = (keys) => chrome.storage.local.get(keys);
 export const writeStorage = (values) => chrome.storage.local.set(values);
+
+export async function resetDetectedAccountsFromConfig() {
+  const stored = await readStorage([STORAGE.config]);
+  const accounts = Array.isArray(stored[STORAGE.config]?.accounts)
+    ? stored[STORAGE.config].accounts
+      .filter((account) => account?.provider === "shopee" && String(account.provider_account_id ?? "").trim())
+      .map((account) => ({
+        provider: "shopee",
+        provider_account_id: String(account.provider_account_id).trim(),
+      }))
+    : [];
+  if (!accounts.length) return false;
+  await writeStorage({ [STORAGE.detectedAccounts]: accounts });
+  return true;
+}
 
 export function readAccountState(container, key, fallback) {
   return key && container?.version === 2 && container.accounts?.[key] !== undefined

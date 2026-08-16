@@ -17,12 +17,14 @@ import {
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import {
+  LEGACY_STORAGE,
   STORAGE,
   hasLocalConsent,
   installationId,
   normalizeDeviceName,
   readAccountState,
   readStorage,
+  resetDetectedAccountsFromConfig,
   writeAccountState,
   writeStorage,
 } from "./lib/storage.js";
@@ -31,6 +33,8 @@ import "./lib/shopee-url.js";
 const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
 const SHOPEE_URL_PATTERN = "https://seller.shopee.co.th/*";
 const SHOPEE_CHAT_URL = "https://seller.shopee.co.th/new-webchat/conversations";
+const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
+const BRIDGE_PROTOCOL_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -989,9 +993,47 @@ chrome.runtime.onStartup.addListener(() => {
   void ensureLiveConnection();
   void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
 });
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "update" || !isVersionBefore(details.previousVersion, DETECTED_ACCOUNTS_RESET_VERSION)) return;
+  void reinitializeAfterUpgrade().catch((error) => {
+    void recordUnexpected("storage_upgrade", error);
+  });
+});
+
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
 void resumeLogUpload();
 void ensureLiveConnection();
+
+function isVersionBefore(value, target) {
+  const current = String(value ?? "").split(".").map(Number);
+  const expected = String(target).split(".").map(Number);
+  if (current.length !== expected.length || current.some((part) => !Number.isInteger(part))) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    if (current[index] !== expected[index]) return current[index] < expected[index];
+  }
+  return false;
+}
+
+async function reinitializeAfterUpgrade() {
+  if (!await resetDetectedAccountsFromConfig()) return;
+  const tabs = await chrome.tabs.query({ url: SHOPEE_URL_PATTERN });
+  const chatTabs = tabs.filter((tab) => tab.id && isShopeeChatUrl(tab.url));
+  let bridgesReady = true;
+  for (const tab of chatTabs) {
+    try {
+      await ensureShopeeBridge(tab.id);
+      const result = await chrome.tabs.sendMessage(tab.id, { type: "detect_account" });
+      if (!result?.ok) {
+        await recordLog("warn", "account", "detection_failed", "Shopee account was not detected after extension upgrade.");
+      }
+    } catch (error) {
+      bridgesReady = false;
+      await recordUnexpected("storage_upgrade", error);
+    }
+  }
+  if (bridgesReady) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
+}
 
 async function detectOpenShopeeAccount() {
   let tab = await findShopeeChatTab();
@@ -1020,7 +1062,7 @@ async function findShopeeChatTab() {
 async function ensureShopeeBridge(tabId) {
   try {
     const result = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-    if (result?.ok) {
+    if (result?.ok && result.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
       await recordLog("debug", "provider", "content_ready", "Shopee content bridge is ready.");
       return;
     }
