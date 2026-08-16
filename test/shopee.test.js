@@ -38,6 +38,37 @@ test("normalizes Shopee product echoes with provider product metadata", () => {
   });
 });
 
+test("keeps the Shopee Shop ID on normalized messages", () => {
+  const messages = context.OmnichatShopee.parseShopeeMessages({
+    id: "message-account",
+    conversation_id: "conversation-1",
+    from_id: "buyer-1",
+    to_id: "shop-user-1",
+    to_shop_id: 1549058683,
+    type: "text",
+    created_timestamp: 1_753_225_200,
+    content: { text: "Hello" },
+  }, "realtime_socket");
+
+  assert.equal(messages[0].provider_account_id, "1549058683");
+  assert.equal(messages[0].sender_account_id, undefined);
+  assert.equal(messages[0].recipient_account_id, "1549058683");
+});
+
+test("uses the product Shop ID when message routing metadata is absent", () => {
+  const messages = context.OmnichatShopee.parseShopeeMessages({
+    id: "message-product-account",
+    conversation_id: "conversation-1",
+    from_id: "buyer-1",
+    to_id: "shop-user-1",
+    type: "product",
+    created_timestamp: 1_753_225_200,
+    content: { product_id: 123, product_name: "Car cover", shop_id: 1549058683 },
+  }, "realtime_socket");
+
+  assert.equal(messages[0].provider_account_id, "1549058683");
+});
+
 test("normalizes Shopee stickers with a renderable media URL", () => {
   const messages = context.OmnichatShopee.parseShopeeMessages({
     id: "sticker-1",

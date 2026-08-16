@@ -152,6 +152,7 @@
       return syncState;
     }
     const requestId = crypto.randomUUID();
+    const stored = await chrome.storage.local.get("detected_account");
     const result = new Promise((resolve) => {
       recoveries.set(requestId, { resolve, timeout: null });
       touchRecovery(requestId);
@@ -160,6 +161,7 @@
       type: "sync",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
+      active_account_id: stored.detected_account?.provider_account_id ?? null,
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
       checkpoint_present: Boolean(syncState.checkpoint?.watermark),
@@ -193,28 +195,54 @@
     return result;
   }
 
-  async function handleAccountDetected(message) {
-    const accountId = String(message.provider_account_id ?? "").trim();
-    if (!accountId) return;
-    const stored = await chrome.storage.local.get("local_consent");
-    if (!stored.local_consent?.accepted_at) return;
-    const avatarUrl = typeof message.avatar_url === "string" && message.avatar_url.startsWith("https://")
+  function normalizedAccount(message) {
+    const accountId = String(message?.provider_account_id ?? "").trim();
+    if (!accountId) return null;
+    const avatarUrl = typeof message?.avatar_url === "string" && message.avatar_url.startsWith("https://")
       ? message.avatar_url
       : undefined;
-    const account = {
+    return {
       provider: "shopee",
       provider_account_id: accountId,
-      ...(typeof message.display_name === "string" && message.display_name.trim() ? { display_name: message.display_name.trim() } : {}),
+      ...(typeof message?.display_name === "string" && message.display_name.trim() ? { display_name: message.display_name.trim() } : {}),
       ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
-      detected_at: new Date().toISOString()
+      ...(typeof message?.provider_user_id === "string" && message.provider_user_id.trim()
+        ? { provider_user_id: message.provider_user_id.trim() }
+        : {}),
+      ...(typeof message?.shop_user_id === "string" && message.shop_user_id.trim()
+        ? { shop_user_id: message.shop_user_id.trim() }
+        : {}),
+      detected_at: new Date().toISOString(),
     };
-    await chrome.storage.local.set({ detected_account: account });
-    log("info", "account_detected", "Shopee account detected on provider page.");
+  }
+
+  async function handleAccountsDetected(message) {
+    const accounts = (Array.isArray(message?.accounts) ? message.accounts : [message])
+      .map(normalizedAccount)
+      .filter(Boolean);
+    if (!accounts.length) return;
+    const stored = await chrome.storage.local.get(["local_consent", "config", "detected_account"]);
+    if (!stored.local_consent?.accepted_at) return;
+    const previousId = stored.detected_account?.provider_account_id;
+    const configured = (account) => stored.config?.accounts?.some(
+      (config) => config.provider === "shopee"
+        && config.provider_account_id === account.provider_account_id,
+    );
+    const active = accounts.find((account) => account.provider_account_id === previousId && configured(account))
+      ?? accounts.find((account) => account.provider_account_id === message.active_account_id && configured(account))
+      ?? accounts.find(configured)
+      ?? accounts.find((account) => account.provider_account_id === message.active_account_id)
+      ?? accounts[0];
+    await chrome.storage.local.set({ detected_accounts: accounts, detected_account: active });
+    log("info", "account_detected", "Shopee shops detected on provider page.", {
+      accounts: accounts.length,
+      active_account_id: active.provider_account_id,
+    });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
-    pending.resolve({ ok: true, account });
+    pending.resolve({ ok: true, account: active, accounts });
   }
 
   function handleAccountDetectionFailed(message) {
@@ -233,6 +261,9 @@
       if (!conversationId || !id) continue;
       profilesByConversation.set(conversationId, {
         id,
+        ...(typeof profile.provider_account_id === "string" && profile.provider_account_id.trim()
+          ? { provider_account_id: profile.provider_account_id.trim() }
+          : {}),
         ...(typeof profile.display_name === "string" && profile.display_name.trim()
           ? { display_name: profile.display_name.trim() }
           : {}),
@@ -246,7 +277,13 @@
   function addConversationProfile(messages) {
     return messages.map((message) => {
       const profile = profilesByConversation.get(message.conversation_id);
-      return profile ? { ...message, participant: profile } : message;
+      return profile
+        ? {
+          ...message,
+          ...(profile.provider_account_id ? { provider_account_id: profile.provider_account_id } : {}),
+          participant: profile,
+        }
+        : message;
     });
   }
 
@@ -530,8 +567,8 @@
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
       void handleRealtimeEvent(event.data.body);
-    } else if (event.data.type === "account_detected") {
-      void handleAccountDetected(event.data);
+    } else if (event.data.type === "accounts_detected" || event.data.type === "account_detected") {
+      void handleAccountsDetected(event.data);
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
     } else if (event.data.type === "profiles_detected") {

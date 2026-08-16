@@ -80,9 +80,9 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose the `extension/` folder.
-3. Accept the disclosure and let the extension detect the Shop ID.
-4. Open **Configure**, add the detected Shop ID or import a configuration file,
-   and select **Sync messages**.
+3. Accept the disclosure and let the extension detect the available Shop IDs.
+4. Open **Configure**, add or import the Shop IDs you want to sync, select a
+   configured shop in the extension, and select **Sync messages**.
 
 ```json
 {
@@ -113,8 +113,9 @@ logs in signed HTTPS batches after **Sync messages** is selected. It never
 includes message text, message bodies, cookies, browser credentials, HMAC
 secrets, request headers, or URLs.
 
-Never commit a real connection setup. The destination server must map the
+Never commit a real connection setup. The destination server must map each
 detected Shop ID to the same HMAC secret. Import replaces the complete saved
 account list; export includes the HMAC secrets and must be stored securely.
+Shopee user IDs are display-only metadata and are never used as Shop IDs.
 
 See the main [safety and account-risk notice](../../README.md).

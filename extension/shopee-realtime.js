@@ -1,6 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
   const CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
+  const SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
+  const SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
   const LOGIN_PATH = "/webchat/api/coreapi/v1.2/login";
   const HISTORY_LIMIT = 100;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -14,6 +16,7 @@
     recoveryInFlight: false,
     socket: null,
     account: null,
+    accountsById: new Map(),
     profilesByConversation: new Map(),
     conversationsById: new Map(),
     sendTemplate: null,
@@ -26,6 +29,7 @@
   };
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
+  state.accountsById ??= new Map();
   state.sendErrorsByClientMessageId ??= new Map();
   state.nextRecoveryRequestAt ??= 0;
   state.recoveryRequestId ??= null;
@@ -54,38 +58,113 @@
     if (!url) return null;
     try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; }
   };
-  const accountFrom = (input, depth = 0, seen = new WeakSet()) => {
-    if (depth > 6 || !input || typeof input !== "object" || seen.has(input)) return null;
-    seen.add(input);
-    if (Array.isArray(input)) {
-      for (const item of input) {
-        const account = accountFrom(item, depth + 1, seen);
-        if (account) return account;
-      }
-      return null;
-    }
-    const item = input;
-    const id = firstValue(item, ["shop_id", "shopid", "shopId", "user_id", "userid", "userId"]);
-    const name = firstValue(item, ["shop_name", "shopname", "shopName", "user_name", "userName", "username", "nickname", "name"]);
-    const avatarUrl = httpsUrl(firstValue(item, ["shop_logo", "shop_avatar", "avatar", "avatar_url", "avatarUrl", "profile_image", "profile_picture"]));
-    if (id) return { provider_account_id: id, ...(name ? { display_name: name } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
-    for (const child of Object.values(item)) {
-      const account = accountFrom(child, depth + 1, seen);
-      if (account) return account;
-    }
-    return null;
+  const accountFromShop = (shop, user = null) => {
+    if (!shop || typeof shop !== "object" || Array.isArray(shop)) return null;
+    const id = firstValue(shop, ["id", "shop_id", "shopid", "shopId"]);
+    if (!id) return null;
+    const name = firstValue(shop, ["name", "shop_name", "shopname", "shopName", "nickname"]);
+    const avatarUrl = httpsUrl(firstValue(shop, ["logo", "shop_logo", "shop_avatar", "avatar", "avatar_url", "avatarUrl", "profile_image", "profile_picture"]));
+    const providerUserId = firstValue(user ?? {}, ["id"]);
+    const shopUserId = firstValue(shop, ["user_id"]);
+    return {
+      provider: "shopee",
+      provider_account_id: id,
+      ...(name ? { display_name: name } : {}),
+      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+      ...(providerUserId ? { provider_user_id: providerUserId } : {}),
+      ...(shopUserId ? { shop_user_id: shopUserId } : {}),
+    };
   };
-  const postAccount = (requestId) => {
-    if (!state.account) return false;
-    post({ type: "account_detected", ...state.account, ...(requestId ? { request_id: requestId } : {}) });
+  const accountFromConversation = (conversation) => {
+    if (!conversation || typeof conversation !== "object" || Array.isArray(conversation)) return null;
+    const id = firstValue(conversation, ["shop_id", "shopid", "shopId"]);
+    if (!id) return null;
+    const name = firstValue(conversation, ["shop_name", "shopname", "shopName"]);
+    return {
+      provider: "shopee",
+      provider_account_id: id,
+      ...(name ? { display_name: name } : {}),
+    };
+  };
+  const accountFromShopId = (id) => {
+    const normalized = value(id);
+    return normalized ? { provider: "shopee", provider_account_id: normalized } : null;
+  };
+  const shopListItems = (body) => {
+    if (Array.isArray(body)) {
+      return body.filter((item) => firstValue(item ?? {}, ["name", "shop_name", "shopname", "shopName"]));
+    }
+    for (const candidate of [body?.shops, body?.data?.shops, body?.shop_list, body?.data?.shop_list]) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+  };
+  const conversationItems = (body) => {
+    if (Array.isArray(body)) return body;
+    for (const candidate of [
+      body?.conversations,
+      body?.items,
+      body?.data?.conversations,
+      body?.data?.items,
+      body?.data,
+    ]) {
+      if (Array.isArray(candidate)) return candidate;
+    }
+    return [];
+  };
+  const accountsFromBody = (body) => {
+    const accounts = [];
+    const add = (account) => {
+      if (!account?.provider_account_id) return;
+      const existing = accounts.find((item) => item.provider_account_id === account.provider_account_id);
+      if (existing) {
+        Object.assign(existing, Object.fromEntries(Object.entries(account).filter(([, item]) => item)));
+      } else {
+        accounts.push(account);
+      }
+    };
+    add(accountFromShop(body?.shop, body?.user));
+    for (const shop of shopListItems(body)) add(accountFromShop(shop, body?.user));
+    for (const conversation of conversationItems(body)) add(accountFromConversation(conversation));
+    const shopIds = Array.isArray(body?.ShopIds)
+      ? body.ShopIds
+      : Array.isArray(body?.shop_ids) ? body.shop_ids : [];
+    for (const id of shopIds) add(accountFromShopId(id));
+    return accounts;
+  };
+  const postAccounts = (requestId) => {
+    const accounts = [...state.accountsById.values()];
+    if (!accounts.length) return false;
+    post({
+      type: "accounts_detected",
+      accounts,
+      active_account_id: state.account?.provider_account_id ?? null,
+      ...(requestId ? { request_id: requestId } : {}),
+    });
     return true;
+  };
+  const mergeAccounts = (accounts, activeAccountId = null, requestId) => {
+    for (const account of accounts) {
+      const id = value(account?.provider_account_id);
+      if (!id) continue;
+      const previous = state.accountsById.get(id) ?? {};
+      state.accountsById.set(id, { ...previous, ...account, provider: "shopee", provider_account_id: id });
+    }
+    const preferredId = value(activeAccountId) ?? state.account?.provider_account_id;
+    const active = preferredId ? state.accountsById.get(preferredId) : null;
+    state.account = active ?? state.account ?? [...state.accountsById.values()][0] ?? null;
+    postAccounts(requestId);
+    return state.account?.provider_account_id ?? null;
   };
   const captureAccount = (response) => {
     void response.clone().json().then((body) => {
-      const account = accountFrom(body);
-      if (!account) return;
-      state.account = account;
-      postAccount();
+      mergeAccounts(accountsFromBody(body), body?.shop?.id);
+    }).catch(() => undefined);
+  };
+  const captureAccounts = (response) => {
+    void response.clone().json().then((body) => {
+      mergeAccounts(accountsFromBody(body));
+      captureProfiles(conversationItems(body));
     }).catch(() => undefined);
   };
   const templateFrom = async (request) => ({
@@ -144,16 +223,11 @@
     });
   });
 
-  const detectAccount = (conversations, requestId) => {
-    const accountIds = [...new Set((Array.isArray(conversations) ? conversations : [])
-      .map((conversation) => String(conversation.shop_id ?? "").trim())
-      .filter(Boolean))];
-    if (accountIds.length !== 1) return null;
-    if (!state.account || state.account.provider_account_id !== accountIds[0]) {
-      state.account = { provider_account_id: accountIds[0] };
-    }
-    postAccount(requestId);
-    return state.account.provider_account_id;
+  const detectAccounts = (conversations, requestId) => {
+    const accounts = (Array.isArray(conversations) ? conversations : [])
+      .map(accountFromConversation)
+      .filter(Boolean);
+    return mergeAccounts(accounts, null, requestId);
   };
 
   const captureProfiles = (conversations) => {
@@ -179,6 +253,9 @@
       const profile = {
         conversation_id: conversationId,
         id,
+        ...(String(conversation.shop_id ?? "").trim()
+          ? { provider_account_id: String(conversation.shop_id).trim() }
+          : {}),
         ...(displayName ? { display_name: displayName } : {}),
         ...(avatarUrl ? { avatar_url: avatarUrl } : {})
       };
@@ -444,20 +521,6 @@
     return id ? `message:${id}` : null;
   };
 
-  const conversationItems = (body) => {
-    if (Array.isArray(body)) return body;
-    for (const candidate of [
-      body?.conversations,
-      body?.items,
-      body?.data?.conversations,
-      body?.data?.items,
-      body?.data,
-    ]) {
-      if (Array.isArray(candidate)) return candidate;
-    }
-    return [];
-  };
-
   const nextConversationUrl = (currentUrl, body, items) => {
     const url = new URL(currentUrl);
     const nextCursor = firstValue(body ?? {}, ["next_cursor", "nextCursor"])
@@ -484,19 +547,23 @@
     return null;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url) {
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null) {
     const response = await recoveryFetch(new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0)
     }));
     if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
     const body = await response.json();
-    const items = conversationItems(body);
-    detectAccount(items);
-    captureProfiles(items);
+    const allItems = conversationItems(body);
+    mergeAccounts(accountsFromBody(body));
+    captureProfiles(allItems);
+    const items = accountId
+      ? allItems.filter((conversation) => String(conversation?.shop_id ?? "").trim() === accountId)
+      : allItems;
     return {
       items,
-      next: nextConversationUrl(requestUrl, body, items),
+      raw_count: allItems.length,
+      next: nextConversationUrl(requestUrl, body, allItems),
     };
   }
 
@@ -508,6 +575,7 @@
     checkpointMs = 0,
     requiredIds = null,
     maxItems = null,
+    accountId = null,
   } = {}) {
     const conversations = [];
     const seenIds = new Set();
@@ -515,7 +583,7 @@
     let url = state.listTemplate.url;
     let firstPage = [];
     while (url) {
-      const page = await fetchConversationPage(url);
+      const page = await fetchConversationPage(url, accountId);
       if (!firstPage.length) firstPage = page.items;
       let added = 0;
       for (const conversation of page.items) {
@@ -533,20 +601,20 @@
       }, Number.POSITIVE_INFINITY);
       if (required && required.size === 0) break;
       if (!required && checkpointMs && oldest < checkpointMs) break;
-      if (!page.next || !added) break;
+      if (!page.next || (!added && !page.raw_count)) break;
       url = page.next;
     }
     return { conversations, firstPage };
   }
 
   async function detectCurrentAccount(requestId) {
-    if (postAccount(requestId)) {
+    if (postAccounts(requestId)) {
       return;
     }
     try {
       await waitForTemplate();
       const conversations = await fetchConversations();
-      if (!detectAccount(conversations, requestId)) throw new Error("Shopee Shop ID was not found.");
+      if (!detectAccounts(conversations, requestId)) throw new Error("Shopee Shop ID was not found.");
     } catch (error) {
       post({ type: "account_detection_failed", request_id: requestId, error: String(error) });
     }
@@ -631,6 +699,7 @@
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
+      const accountId = value(checkpoint?.active_account_id);
       const requiredIds = bootstrap && frozenBootstrap.length
         ? frozenBootstrap.map((conversation) => String(conversation.id))
         : null;
@@ -638,6 +707,7 @@
         checkpointMs: bootstrap ? 0 : watermarkMs,
         requiredIds,
         maxItems: bootstrap && !requiredIds ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
+        accountId,
       });
       const sorted = [...pages.conversations]
         .sort((left, right) => conversationTime(right) - conversationTime(left));
@@ -833,16 +903,15 @@
           postLog("info", "history_template_ready", "Shopee history request template captured.");
         });
       }
-      if (path === CONVERSATIONS_PATH) {
+      if ([CONVERSATIONS_PATH, SUBACCOUNT_CONVERSATIONS_PATH].includes(path)) {
         void templateFrom(request).then((template) => {
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
         });
-        void response.clone().json().then((body) => {
-          detectAccount(body);
-          captureProfiles(body);
-        }).catch(() => undefined);
+        captureAccounts(response);
+      } else if (path === SHOP_LIST_PATH) {
+        captureAccounts(response);
       } else if (path === LOGIN_PATH) {
         captureAccount(response);
       }
@@ -900,7 +969,13 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "sync") {
-      void recover(event.data.request_id, event.data.checkpoint ?? {});
+      const activeAccountId = value(event.data.active_account_id);
+      void recover(event.data.request_id, {
+        ...(event.data.checkpoint ?? {}),
+        ...(activeAccountId
+          ? { active_account_id: activeAccountId }
+          : {}),
+      });
     } else if (event.data.type === "cancel_sync") {
       if (state.recoveryRequestId === event.data.request_id) {
         state.recoveryAbortController?.abort();

@@ -172,6 +172,26 @@ function currentAccountContext(stored) {
   return key && config ? { key, config, account: stored[STORAGE.detectedAccount] } : null;
 }
 
+function messageProviderAccountId(message) {
+  const value = message?.provider_account_id;
+  return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+}
+
+async function setActiveAccount(providerAccountId) {
+  const id = typeof providerAccountId === "string" || typeof providerAccountId === "number"
+    ? String(providerAccountId).trim()
+    : "";
+  if (!id) throw new Error("Shop ID is required.");
+  const stored = await readStorage([STORAGE.detectedAccounts, STORAGE.detectedAccount]);
+  const accounts = Array.isArray(stored[STORAGE.detectedAccounts])
+    ? stored[STORAGE.detectedAccounts]
+    : stored[STORAGE.detectedAccount] ? [stored[STORAGE.detectedAccount]] : [];
+  const account = accounts.find((item) => item?.provider === "shopee" && item.provider_account_id === id);
+  if (!account) throw new Error("The selected Shop ID is not available on the current Shopee page.");
+  await writeStorage({ [STORAGE.detectedAccount]: account });
+  return { ok: true, account, accounts };
+}
+
 function hasServerInitialized(stored) {
   return stored[STORAGE.serverInitialized] === true;
 }
@@ -449,6 +469,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     void detectOpenShopeeAccount().then(
       (result) => respond(result),
       (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "set_active_account") {
+    void setActiveAccount(message.provider_account_id).then(
+      (result) => respond(result),
+      (error) => respond({ ok: false, error: String(error) }),
     );
     return true;
   }
@@ -1232,6 +1259,17 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
     });
     return { queued: 0, sent: 0, pending: 0 };
   }
+  const activeAccountId = context.account.provider_account_id;
+  const scopedMessages = (Array.isArray(messages) ? messages : []).filter(
+    (message) => messageProviderAccountId(message) === activeAccountId,
+  );
+  const missingAccountMessages = (Array.isArray(messages) ? messages : [])
+    .filter((message) => !messageProviderAccountId(message)).length;
+  if (missingAccountMessages) {
+    await recordLog("warn", "queue", "account_missing", "Captured messages were ignored because Shopee did not identify their Shop ID.", {
+      received: missingAccountMessages,
+    });
+  }
   let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const migrated = scanState?.version !== 1;
@@ -1246,7 +1284,7 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   const known = new Set(pending.map(messageKey));
   const eligible = [];
   const added = [];
-  for (const message of messages ?? []) {
+  for (const message of scopedMessages) {
     const cursor = scanState.conversations?.[message?.conversation_id];
     if (message?.provider !== "shopee"
       || !isAfterMessageCursor(message, cursor)) continue;
@@ -1297,7 +1335,7 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   const latestCursor = latestMessageCursor(eligible);
   if (!shouldFlush || !hasServerInitialized(stored)) {
     await recordLog("info", "queue", "stored", "Recovered messages stored for delivery.", {
-      received: Array.isArray(messages) ? messages.length : 0,
+      received: scopedMessages.length,
       queued: added.length,
       pending: pendingCount,
       deferred: deferCursorAdvance,
@@ -1312,7 +1350,7 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   }
   const delivered = await attemptDelivery({ resetBackoff: false });
   await recordLog("info", "queue", "realtime_processed", "Realtime messages processed.", {
-    received: Array.isArray(messages) ? messages.length : 0,
+    received: scopedMessages.length,
     queued: added.length,
     sent: delivered.sent,
     pending: delivered.pending,

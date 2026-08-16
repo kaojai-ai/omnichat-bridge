@@ -59,26 +59,32 @@
 
       <section id="dashboard-screen" class="screen" hidden>
         <section class="account-section" aria-labelledby="account-title">
-          <h2 id="account-title">Shopee account</h2>
-          <div class="account">
-            <img id="account-avatar" alt="" hidden>
-            <div class="account-profile">
-              <strong id="account-name">Detecting…</strong>
-              <div class="account-status-row">
-                <button id="account-status" class="status-pill" type="button" aria-live="polite" disabled>
-                  <i></i><span class="connection-status">Detecting</span>
-                </button>
-                <button id="leader-status" class="leader-badge" type="button" hidden>
-                  <span class="leader-current">Standby</span>
-                  <span class="leader-action">Set leader</span>
-                </button>
+          <div class="account-columns">
+            <div class="account-column">
+              <h2 id="account-title">Shopee Account</h2>
+              <div class="account-identifiers" aria-live="polite">
+                <div class="account-identifier" hidden>
+                  <span>UID:</span>
+                  <span id="provider-user-id" class="user-id-badge" data-kind="shopee" hidden></span>
+                </div>
+                <div class="account-identifier" hidden>
+                  <span>SID:</span>
+                  <span id="shop-user-id" class="user-id-badge" data-kind="shop" hidden></span>
+                </div>
               </div>
             </div>
-            <button id="account-id" class="account-id" type="button" disabled aria-label="Copy Shop ID">
-              <span id="account-id-value">Detecting…</span>
-              <svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8.5A2.5 2.5 0 0 1 11.5 6h6A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-6A2.5 2.5 0 0 1 9 16.5z"/><path d="M15 6V5.5A2.5 2.5 0 0 0 12.5 3h-6A2.5 2.5 0 0 0 4 5.5v8A2.5 2.5 0 0 0 6.5 16H9"/></svg>
-            </button>
+            <div class="account-column node-status-column">
+              <button id="leader-status" class="leader-status" type="button" aria-live="polite">
+                <i></i><span class="leader-current">NEED CONFIG</span>
+              </button>
+            </div>
           </div>
+        </section>
+
+        <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
+          <h2 id="detected-shops-title">Detected shops</h2>
+          <div id="account-list" class="account-list" aria-live="polite"></div>
+          <p id="account-list-empty" class="account-list-empty" hidden>No Shopee shops detected yet.</p>
         </section>
 
         <div class="sync-actions">

@@ -2,6 +2,7 @@ export const STORAGE = {
   config: "config",
   consent: "local_consent",
   detectedAccount: "detected_account",
+  detectedAccounts: "detected_accounts",
   installationId: "installation_id",
   deviceName: "device_name",
   pending: "pending_messages",

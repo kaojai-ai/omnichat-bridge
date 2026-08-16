@@ -149,7 +149,13 @@ function parseShopeeMessages(payload, captureMethod) {
     const conversationId = string(message.conversation_id);
     const senderId = string(message.from_id);
     const recipientId = string(message.to_id);
+    const senderAccountId = string(message.from_shop_id);
+    const recipientAccountId = string(message.to_shop_id);
     const content = contentRecord(message.content);
+    const providerAccountId = recipientAccountId
+      ?? senderAccountId
+      ?? string(message.shop_id)
+      ?? string(content?.shop_id);
     const parsedType = messageType(message.type ?? message.message_type);
     const text = parsedType.type === "product"
       ? string(content?.product_name) ?? ""
@@ -174,8 +180,9 @@ function parseShopeeMessages(payload, captureMethod) {
       observed_at: observedAt,
       sender_id: senderId,
       recipient_id: recipientId,
-      ...(string(message.from_shop_id) ? { sender_account_id: string(message.from_shop_id) } : {}),
-      ...(string(message.to_shop_id) ? { recipient_account_id: string(message.to_shop_id) } : {}),
+      ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
+      ...(senderAccountId ? { sender_account_id: senderAccountId } : {}),
+      ...(recipientAccountId ? { recipient_account_id: recipientAccountId } : {}),
       type: parsedType.type,
       ...(text && text.length <= 20_000 ? { text } : {}),
       ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
