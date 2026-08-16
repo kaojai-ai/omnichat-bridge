@@ -53,6 +53,10 @@ function createBridge() {
     await new Promise((resolve) => setImmediate(resolve));
   }
 
+  function setResponse(path, body) {
+    responses.set(path, body);
+  }
+
   async function detect(requestId = "detect-1") {
     for (const listener of listeners) {
       listener({
@@ -109,7 +113,7 @@ function createBridge() {
     throw new Error("Recovery did not complete in the test harness.");
   }
 
-  return { fetch, detect, sync, posts };
+  return { fetch, setResponse, detect, sync, posts };
 }
 
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {
@@ -129,6 +133,35 @@ test("uses shop.id as the provider account and keeps user IDs as metadata", asyn
     shop_user_id: "1549897350",
   });
   assert.equal(detection.accounts.some((account) => account.provider_account_id === "1549897350"), false);
+});
+
+test("actively detects all shops on initial account detection", async () => {
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", [
+    { id: "conversation-th", shop_id: 1549058683 },
+  ]);
+  bridge.setResponse("/webchat/api/v1.2/shop_list", {
+    shops: [
+      { id: 1549058683, name: "2Days Ago Badminton" },
+      { id: 1698999861, name: "2daysagobadminton.my" },
+      { id: 1698999856, name: "2daysagobadminton.ph" },
+    ],
+  });
+  bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
+    conversations: [
+      { id: "conversation-th", shop_id: 1549058683 },
+    ],
+  });
+
+  const detection = await bridge.detect();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
+    [
+      ["1549058683", "2Days Ago Badminton"],
+      ["1698999861", "2daysagobadminton.my"],
+      ["1698999856", "2daysagobadminton.ph"],
+    ],
+  );
 });
 
 test("merges shop-list names with the special multi-shop conversation endpoint", async () => {

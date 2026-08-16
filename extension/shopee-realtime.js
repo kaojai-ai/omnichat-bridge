@@ -141,14 +141,14 @@
     });
     return true;
   };
-  const mergeAccounts = (accounts, requestId) => {
+  const mergeAccounts = (accounts, requestId, publish = true) => {
     for (const account of accounts) {
       const id = value(account?.provider_account_id);
       if (!id) continue;
       const previous = state.accountsById.get(id) ?? {};
       state.accountsById.set(id, { ...previous, ...account, provider: "shopee", provider_account_id: id });
     }
-    postAccounts(requestId);
+    if (publish) postAccounts(requestId);
     return [...state.accountsById.values()];
   };
   const captureAccount = (response) => {
@@ -207,6 +207,25 @@
     if (!state.listTemplate || !state.getTemplate) throw new Error("Refresh Shopee Seller Chat once to initialize realtime sync.");
   };
 
+  async function fetchDetectionAccounts(path) {
+    const template = state.listTemplate ?? state.getTemplate;
+    if (!template) return [];
+    const url = new URL(template.url);
+    url.pathname = path;
+    const response = await state.nativeFetch(new Request(url, {
+      ...template.init,
+      method: "GET",
+      body: template.body?.slice(0),
+    }));
+    if (!response.ok) return [];
+    const body = await response.json().catch(() => null);
+    if (!body) return [];
+    const accounts = accountsFromBody(body);
+    mergeAccounts(accounts, null, false);
+    captureProfiles(conversationItems(body));
+    return accounts;
+  }
+
   const waitForAcknowledgement = (requestId) => new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       state.acknowledgements.delete(requestId);
@@ -217,13 +236,6 @@
       resolve(message);
     });
   });
-
-  const detectAccounts = (conversations, requestId) => {
-    const accounts = (Array.isArray(conversations) ? conversations : [])
-      .map(accountFromConversation)
-      .filter(Boolean);
-    return mergeAccounts(accounts, requestId);
-  };
 
   const captureProfiles = (conversations) => {
     const profiles = [];
@@ -542,7 +554,7 @@
     return null;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null) {
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true) {
     const response = await recoveryFetch(new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0)
@@ -550,7 +562,7 @@
     if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
     const body = await response.json();
     const allItems = conversationItems(body);
-    mergeAccounts(accountsFromBody(body));
+    mergeAccounts(accountsFromBody(body), null, publish);
     captureProfiles(allItems);
     const items = accountId
       ? allItems.filter((conversation) => String(conversation?.shop_id ?? "").trim() === accountId)
@@ -562,8 +574,8 @@
     };
   }
 
-  async function fetchConversations() {
-    return (await fetchConversationPage()).items;
+  async function fetchConversations(publish = true) {
+    return (await fetchConversationPage(state.listTemplate.url, null, publish)).items;
   }
 
   async function fetchConversationPages({
@@ -603,13 +615,12 @@
   }
 
   async function detectCurrentAccount(requestId) {
-    if (postAccounts(requestId)) {
-      return;
-    }
     try {
       await waitForTemplate();
-      const conversations = await fetchConversations();
-      if (!detectAccounts(conversations, requestId)) throw new Error("Shopee Shop ID was not found.");
+      await fetchDetectionAccounts(SHOP_LIST_PATH);
+      await fetchDetectionAccounts(SUBACCOUNT_CONVERSATIONS_PATH);
+      await fetchConversations(false);
+      if (!postAccounts(requestId)) throw new Error("Shopee Shop ID was not found.");
     } catch (error) {
       post({ type: "account_detection_failed", request_id: requestId, error: String(error) });
     }
