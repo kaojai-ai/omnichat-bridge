@@ -65,7 +65,7 @@ function createBridge() {
     return posts.findLast((post) => post.type === "accounts_detected" && post.request_id === requestId);
   }
 
-  async function sync(activeAccountId, requestId = "sync-1") {
+  async function sync(providerAccountId, requestId = "sync-1") {
     for (const listener of listeners) {
       listener({
         source: window,
@@ -75,7 +75,7 @@ function createBridge() {
           type: "sync",
           request_id: requestId,
           checkpoint: { watermark: "2026-08-01T00:00:00.000Z" },
-          active_account_id: activeAccountId,
+          provider_account_id: providerAccountId,
         },
       });
     }
@@ -158,7 +158,7 @@ test("merges shop-list names with the special multi-shop conversation endpoint",
   );
 });
 
-test("limits recovery to the selected Shop ID", async () => {
+test("limits recovery to the requested Shop ID", async () => {
   const bridge = createBridge();
   await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [

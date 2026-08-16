@@ -35,8 +35,8 @@ messages after the seller returns.
 
 ## Optional live replies
 
-Your server can send one text, image, or product reply to the active seller
-browser. Text and image replies may quote an existing provider message. The
+Your server can send one text, image, or product reply to a configured seller
+browser Shop ID. Text and image replies may quote an existing provider message. The
 extension fills and submits Shopee's visible composer; it does not call a
 Shopee private message API and never transfers Shopee cookies, passwords, or
 login tokens.
@@ -81,8 +81,11 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose the `extension/` folder.
 3. Accept the disclosure and let the extension detect the available Shop IDs.
-4. Open **Configure**, add or import the Shop IDs you want to sync, select a
-   configured shop in the extension, and select **Sync messages**.
+4. Open **Configure** and add or import the detected Shop IDs you want to sync.
+5. Select **Sync messages**. Every detected Shop ID with a matching
+   configuration is ready for realtime capture, recovery, delivery, and live
+   replies. Shops without a matching configuration remain visible as
+   **NEED CONFIG**.
 
 ```json
 {

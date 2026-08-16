@@ -15,7 +15,6 @@
     nativeFetch: window.fetch.bind(window),
     recoveryInFlight: false,
     socket: null,
-    account: null,
     accountsById: new Map(),
     profilesByConversation: new Map(),
     conversationsById: new Map(),
@@ -138,27 +137,23 @@
     post({
       type: "accounts_detected",
       accounts,
-      active_account_id: state.account?.provider_account_id ?? null,
       ...(requestId ? { request_id: requestId } : {}),
     });
     return true;
   };
-  const mergeAccounts = (accounts, activeAccountId = null, requestId) => {
+  const mergeAccounts = (accounts, requestId) => {
     for (const account of accounts) {
       const id = value(account?.provider_account_id);
       if (!id) continue;
       const previous = state.accountsById.get(id) ?? {};
       state.accountsById.set(id, { ...previous, ...account, provider: "shopee", provider_account_id: id });
     }
-    const preferredId = value(activeAccountId) ?? state.account?.provider_account_id;
-    const active = preferredId ? state.accountsById.get(preferredId) : null;
-    state.account = active ?? state.account ?? [...state.accountsById.values()][0] ?? null;
     postAccounts(requestId);
-    return state.account?.provider_account_id ?? null;
+    return [...state.accountsById.values()];
   };
   const captureAccount = (response) => {
     void response.clone().json().then((body) => {
-      mergeAccounts(accountsFromBody(body), body?.shop?.id);
+      mergeAccounts(accountsFromBody(body));
     }).catch(() => undefined);
   };
   const captureAccounts = (response) => {
@@ -227,7 +222,7 @@
     const accounts = (Array.isArray(conversations) ? conversations : [])
       .map(accountFromConversation)
       .filter(Boolean);
-    return mergeAccounts(accounts, null, requestId);
+    return mergeAccounts(accounts, requestId);
   };
 
   const captureProfiles = (conversations) => {
@@ -699,7 +694,7 @@
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
-      const accountId = value(checkpoint?.active_account_id);
+      const accountId = value(checkpoint?.provider_account_id);
       const requiredIds = bootstrap && frozenBootstrap.length
         ? frozenBootstrap.map((conversation) => String(conversation.id))
         : null;
@@ -723,6 +718,7 @@
         post({
           type: "recovery_bootstrap",
           request_id: bootstrapRequestId,
+          provider_account_id: accountId,
           conversations: recoveryConversations,
         });
         const acknowledgement = await waitForAcknowledgement(bootstrapRequestId);
@@ -770,6 +766,7 @@
       post({
         type: "sync_plan",
         request_id: requestId,
+        provider_account_id: accountId,
         mode: bootstrap ? "bootstrap" : "incremental",
         checkpoint: watermarkMs ? new Date(watermarkMs).toISOString() : null,
         conversations: classified.slice(0, 10).map(({ conversation, cursor, decision, reason }) => {
@@ -796,7 +793,7 @@
       });
       let completedConversations = 0;
       if (totalConversations) {
-        post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
+        post({ type: "recovery_progress", request_id: requestId, provider_account_id: accountId, completed_conversations: completedConversations, total_conversations: totalConversations });
       }
       for (const item of [...probes, ...recoveryJobs]) {
         const { conversation, cursor, token, decision } = item;
@@ -812,7 +809,7 @@
           bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined,
           async (messages, page) => {
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
-            post({ type: "recovery_batch", request_id: batchRequestId, body: messages });
+            post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
             const acknowledgement = await waitForAcknowledgement(batchRequestId);
             if (!acknowledgement.ok) {
               throw new Error(acknowledgement.error ?? "Could not queue recovered messages.");
@@ -834,6 +831,7 @@
           post({
             type: "recovery_cursor",
             request_id: cursorRequestId,
+            provider_account_id: accountId,
             conversation_id: String(conversation.id),
             cursor: completedCursor,
             summary_token: token,
@@ -844,7 +842,7 @@
           }
         }
         completedConversations += 1;
-        post({ type: "recovery_progress", request_id: requestId, completed_conversations: completedConversations, total_conversations: totalConversations });
+        post({ type: "recovery_progress", request_id: requestId, provider_account_id: accountId, completed_conversations: completedConversations, total_conversations: totalConversations });
         postLog("debug", "conversation_completed", "Conversation recovery check completed.", {
           position: checked,
           parsed: history.parsed,
@@ -855,6 +853,7 @@
       post({
         type: "recovery_complete",
         request_id: requestId,
+        provider_account_id: accountId,
         ok: true,
         recovered: parsed,
         queued,
@@ -969,12 +968,10 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "sync") {
-      const activeAccountId = value(event.data.active_account_id);
+      const providerAccountId = value(event.data.provider_account_id);
       void recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
-        ...(activeAccountId
-          ? { active_account_id: activeAccountId }
-          : {}),
+        ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
       });
     } else if (event.data.type === "cancel_sync") {
       if (state.recoveryRequestId === event.data.request_id) {

@@ -123,17 +123,20 @@
     });
   }
 
-  async function isConfigured() {
+  async function isConfigured(providerAccountId) {
     const stored = await chrome.storage.local.get([
       "config",
-      "detected_account",
+      "detected_accounts",
       "local_consent",
     ]);
-    const accountId = stored.detected_account?.provider_account_id;
+    const accountId = String(providerAccountId ?? "").trim();
     return Boolean(
       stored.local_consent?.accepted_at
-      && stored.detected_account?.provider === "shopee"
       && accountId
+      && stored.detected_accounts?.some(
+        (account) => account?.provider === "shopee"
+          && account.provider_account_id === accountId,
+      )
       && stored.config?.accounts?.some(
         (account) => account.provider === "shopee"
           && account.provider_account_id === accountId,
@@ -141,18 +144,23 @@
     );
   }
 
-  async function requestRecovery() {
-    if (!await isConfigured()) {
-      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.");
+  async function requestRecovery(providerAccountId) {
+    const accountId = String(providerAccountId ?? "").trim();
+    if (!await isConfigured(accountId)) {
+      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
+        provider_account_id: accountId,
+      });
       return { ok: false, error: "Extension setup is required." };
     }
-    const syncState = await chrome.runtime.sendMessage({ type: "get_sync_state" });
+    const syncState = await chrome.runtime.sendMessage({
+      type: "get_sync_state",
+      provider_account_id: accountId,
+    });
     if (!syncState?.ok) {
       log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
       return syncState;
     }
     const requestId = crypto.randomUUID();
-    const stored = await chrome.storage.local.get("detected_account");
     const result = new Promise((resolve) => {
       recoveries.set(requestId, { resolve, timeout: null });
       touchRecovery(requestId);
@@ -161,9 +169,10 @@
       type: "sync",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
-      active_account_id: stored.detected_account?.provider_account_id ?? null,
+      provider_account_id: accountId,
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
+      provider_account_id: accountId,
       checkpoint_present: Boolean(syncState.checkpoint?.watermark),
     });
     return result;
@@ -221,28 +230,17 @@
       .map(normalizedAccount)
       .filter(Boolean);
     if (!accounts.length) return;
-    const stored = await chrome.storage.local.get(["local_consent", "config", "detected_account"]);
+    const stored = await chrome.storage.local.get(["local_consent"]);
     if (!stored.local_consent?.accepted_at) return;
-    const previousId = stored.detected_account?.provider_account_id;
-    const configured = (account) => stored.config?.accounts?.some(
-      (config) => config.provider === "shopee"
-        && config.provider_account_id === account.provider_account_id,
-    );
-    const active = accounts.find((account) => account.provider_account_id === previousId && configured(account))
-      ?? accounts.find((account) => account.provider_account_id === message.active_account_id && configured(account))
-      ?? accounts.find(configured)
-      ?? accounts.find((account) => account.provider_account_id === message.active_account_id)
-      ?? accounts[0];
-    await chrome.storage.local.set({ detected_accounts: accounts, detected_account: active });
+    await chrome.storage.local.set({ detected_accounts: accounts });
     log("info", "account_detected", "Shopee shops detected on provider page.", {
       accounts: accounts.length,
-      active_account_id: active.provider_account_id,
     });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
-    pending.resolve({ ok: true, account: active, accounts });
+    pending.resolve({ ok: true, accounts });
   }
 
   function handleAccountDetectionFailed(message) {
@@ -292,7 +290,12 @@
     try {
       const messages = addConversationProfile(
         globalThis.OmnichatShopee.parseShopeeMessages(message.body, "history_recovery")
-      );
+      ).map((item) => ({
+        ...item,
+        ...(item.provider_account_id || !message.provider_account_id
+          ? {}
+          : { provider_account_id: message.provider_account_id }),
+      }));
       const result = await chrome.runtime.sendMessage({
         type: "queue_messages",
         messages,
@@ -311,11 +314,14 @@
       log(result?.ok ? "debug" : "error", "recovery_batch_processed", result?.ok
         ? "Recovered message page processed."
         : result?.error ?? "Recovered message page failed.", {
+        provider_account_id: message.provider_account_id,
         parsed: messages.length,
         queued: Number(result?.queued) || 0,
       });
     } catch (error) {
-      log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error));
+      log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error), {
+        provider_account_id: message.provider_account_id,
+      });
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -325,6 +331,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "advance_scan_cursor",
+        provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
         cursor: message.cursor,
         summary_token: message.summary_token,
@@ -345,6 +352,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "save_bootstrap",
+        provider_account_id: message.provider_account_id,
         conversations: message.conversations,
       });
       post({
@@ -362,6 +370,7 @@
     touchRecovery(message.request_id);
     void sendRuntimeMessage({
       type: "sync_progress",
+      provider_account_id: message.provider_account_id,
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
       total_conversations: message.total_conversations
@@ -374,7 +383,7 @@
       void sendRuntimeMessage({ type: "resume_sync" }, (error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
-        log("warn", "resume_failed", message);
+      log("warn", "resume_failed", message);
       });
     }, 500);
   }
@@ -424,7 +433,9 @@
     const pending = recoveries.get(message.request_id);
     if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
-      log("error", "recovery_failed", message.error ?? "Provider recovery failed.");
+      log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
+        provider_account_id: message.provider_account_id,
+      });
       if (pending) {
         recoveries.delete(message.request_id);
         pending.resolve(message);
@@ -448,6 +459,7 @@
       pending.resolve(result);
     }
     log("info", "recovery_completed", "Provider recovery completed.", {
+      provider_account_id: message.provider_account_id,
       recovered: result.recovered,
       queued: result.queued,
     });
@@ -606,6 +618,7 @@
       touchRecovery(event.data.request_id);
       void sendRuntimeMessage({
         type: "record_sync_plan",
+        provider_account_id: event.data.provider_account_id,
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
         conversations: event.data.conversations,
@@ -632,7 +645,7 @@
       return false;
     }
     if (message?.type === "sync_now") {
-      void requestRecovery().then(respond, (error) => respond({ ok: false, error: String(error) }));
+      void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "cancel_sync") {
