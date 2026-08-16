@@ -10,10 +10,12 @@ function createBridge() {
   const listeners = [];
   const posts = [];
   const responses = new Map();
+  const requests = [];
   const window = {
     location: { origin, href: `${origin}/webchat/conversations` },
     fetch: async (input) => {
       const path = new URL(input.url ?? input, origin).pathname;
+      requests.push(path);
       const body = responses.get(path) ?? {};
       return new Response(JSON.stringify(body), {
         status: 200,
@@ -49,7 +51,16 @@ function createBridge() {
 
   async function fetch(path, body) {
     responses.set(path, body);
-    await window.fetch(`${origin}${path}`);
+    const isConversationList = [
+      "/webchat/api/v1.2/conversations",
+      "/webchat/api/v1.2/subaccount/serving_mode/conversations",
+    ].includes(path);
+    await window.fetch(isConversationList
+      ? new Request(`${origin}${path}`, { method: "POST", body: "{}" })
+      : `${origin}${path}`);
+    if (isConversationList) {
+      await window.fetch(`${origin}/webchat/api/v1.2/conversation/serving_mode/attr`);
+    }
     await new Promise((resolve) => setImmediate(resolve));
   }
 
@@ -65,8 +76,23 @@ function createBridge() {
         data: { source: "omnichat-realtime-bridge", type: "detect_account", request_id: requestId },
       });
     }
-    await new Promise((resolve) => setImmediate(resolve));
-    return posts.findLast((post) => post.type === "accounts_detected" && post.request_id === requestId);
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const detection = posts.findLast((post) => post.type === "accounts_detected" && post.request_id === requestId);
+      if (detection) return detection;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return undefined;
+  }
+
+  async function waitForAutomaticDetection() {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const detection = posts.findLast((post) => post.type === "accounts_detected"
+        && !post.request_id
+        && post.accounts?.length > 1);
+      if (detection) return detection;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return null;
   }
 
   async function sync(providerAccountId, requestId = "sync-1") {
@@ -113,7 +139,7 @@ function createBridge() {
     throw new Error("Recovery did not complete in the test harness.");
   }
 
-  return { fetch, setResponse, detect, sync, posts };
+  return { fetch, setResponse, detect, waitForAutomaticDetection, sync, posts, requests };
 }
 
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {
@@ -154,6 +180,7 @@ test("actively detects all shops on initial account detection", async () => {
   });
 
   const detection = await bridge.detect();
+  assert.ok(detection, JSON.stringify({ posts: bridge.posts, requests: bridge.requests }));
   assert.deepEqual(
     JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
     [
@@ -161,6 +188,43 @@ test("actively detects all shops on initial account detection", async () => {
       ["1698999861", "2daysagobadminton.my"],
       ["1698999856", "2daysagobadminton.ph"],
     ],
+  );
+});
+
+test("automatically detects all shops when the chat page initializes", async () => {
+  const bridge = createBridge();
+  bridge.setResponse("/webchat/api/v1.2/shop_list", {
+    shops: [
+      { id: 1549058683, name: "2Days Ago Badminton" },
+      { id: 1698999861, name: "2daysagobadminton.my" },
+      { id: 1698999856, name: "2daysagobadminton.ph" },
+    ],
+  });
+  bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
+    conversations: [
+      { id: "conversation-th", shop_id: 1549058683 },
+    ],
+  });
+  await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
+    conversations: [
+      { id: "conversation-th", shop_id: 1549058683 },
+    ],
+  });
+
+  const detection = await bridge.waitForAutomaticDetection();
+  assert.ok(detection, JSON.stringify({ posts: bridge.posts, requests: bridge.requests }));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
+    [
+      ["1549058683", "2Days Ago Badminton"],
+      ["1698999861", "2daysagobadminton.my"],
+      ["1698999856", "2daysagobadminton.ph"],
+    ],
+  );
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/shop_list"), true);
+  assert.equal(
+    bridge.requests.filter((path) => path === "/webchat/api/v1.2/subaccount/serving_mode/conversations").length,
+    2,
   );
 });
 

@@ -7,6 +7,8 @@
   const HISTORY_LIMIT = 100;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
+  const ACCOUNT_DISCOVERY_RETRY_DELAY_MS = 2_000;
+  const ACCOUNT_DISCOVERY_MAX_ATTEMPTS = 2;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const state = window.__omnichatRealtimeState ??= {
@@ -24,7 +26,9 @@
     acknowledgements: new Map(),
     nextRecoveryRequestAt: 0,
     recoveryRequestId: null,
-    recoveryAbortController: null
+    recoveryAbortController: null,
+    accountDiscoveryPromise: null,
+    automaticAccountDiscoveryStarted: false,
   };
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
@@ -33,6 +37,8 @@
   state.nextRecoveryRequestAt ??= 0;
   state.recoveryRequestId ??= null;
   state.recoveryAbortController ??= null;
+  state.accountDiscoveryPromise ??= null;
+  state.automaticAccountDiscoveryStarted ??= false;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
   const postLog = (level, event, message, details = {}) => post({
@@ -207,16 +213,14 @@
     if (!state.listTemplate || !state.getTemplate) throw new Error("Refresh Shopee Seller Chat once to initialize realtime sync.");
   };
 
-  async function fetchDetectionAccounts(path) {
+  async function fetchShopList() {
     const template = state.listTemplate ?? state.getTemplate;
     if (!template) return [];
     const url = new URL(template.url);
-    url.pathname = path;
-    const response = await state.nativeFetch(new Request(url, {
-      ...template.init,
-      method: "GET",
-      body: template.body?.slice(0),
-    }));
+    url.pathname = SHOP_LIST_PATH;
+    const init = { ...template.init, method: "GET" };
+    delete init.body;
+    const response = await state.nativeFetch(new Request(url, init));
     if (!response.ok) return [];
     const body = await response.json().catch(() => null);
     if (!body) return [];
@@ -225,6 +229,60 @@
     captureProfiles(conversationItems(body));
     return accounts;
   }
+
+  const isShopeeChatPage = () => {
+    const pathname = window.location.pathname ?? new URL(window.location.href).pathname;
+    return ["/webchat/conversations", "/new-webchat/conversations"]
+      .some((path) => pathname === path || pathname.startsWith(`${path}/`));
+  };
+
+  async function discoverAccounts() {
+    if (state.accountDiscoveryPromise) return state.accountDiscoveryPromise;
+    state.accountDiscoveryPromise = (async () => {
+      let lastResult = null;
+      let lastError = null;
+      for (let attempt = 0; attempt < ACCOUNT_DISCOVERY_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await waitForTemplate();
+          const shopListAccounts = await fetchShopList();
+          await fetchConversations(false);
+          lastResult = {
+            accounts: [...state.accountsById.values()],
+            shopListAccounts,
+          };
+          if (shopListAccounts.length || attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) {
+            if (!shopListAccounts.length) {
+              postLog("warn", "shop_discovery_incomplete", "Shopee shop list was empty after account discovery.");
+            }
+            postAccounts();
+            return lastResult.accounts;
+          }
+        } catch (error) {
+          lastError = error;
+          if (attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) throw error;
+          postLog("warn", "shop_discovery_retry", "Shopee shop discovery will retry after page startup.", {
+            error_type: error instanceof Error ? error.constructor.name : "Error",
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, ACCOUNT_DISCOVERY_RETRY_DELAY_MS));
+      }
+      if (lastError) throw lastError;
+      return lastResult?.accounts ?? [];
+    })().finally(() => {
+      state.accountDiscoveryPromise = null;
+    });
+    return state.accountDiscoveryPromise;
+  }
+
+  const startAutomaticAccountDiscovery = () => {
+    if (!isShopeeChatPage() || state.automaticAccountDiscoveryStarted) return;
+    state.automaticAccountDiscoveryStarted = true;
+    void discoverAccounts().catch((error) => {
+      postLog("warn", "shop_discovery_failed", "Shopee shop discovery failed during page startup.", {
+        error_type: error instanceof Error ? error.constructor.name : "Error",
+      });
+    });
+  };
 
   const waitForAcknowledgement = (requestId) => new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -616,10 +674,7 @@
 
   async function detectCurrentAccount(requestId) {
     try {
-      await waitForTemplate();
-      await fetchDetectionAccounts(SHOP_LIST_PATH);
-      await fetchDetectionAccounts(SUBACCOUNT_CONVERSATIONS_PATH);
-      await fetchConversations(false);
+      await discoverAccounts();
       if (!postAccounts(requestId)) throw new Error("Shopee Shop ID was not found.");
     } catch (error) {
       post({ type: "account_detection_failed", request_id: requestId, error: String(error) });
@@ -918,6 +973,7 @@
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
+          startAutomaticAccountDiscovery();
         });
         captureAccounts(response);
       } else if (path === SHOP_LIST_PATH) {

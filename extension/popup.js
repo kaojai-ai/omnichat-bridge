@@ -777,7 +777,7 @@ function openLogs(level = null) {
   if (level) logLevel.value = level;
   renderLogs();
 }
-openLogsButton.addEventListener("click", openLogs);
+openLogsButton.addEventListener("click", () => openLogs("all"));
 document.querySelector("#close-logs").addEventListener("click", () => {
   brandHeader.hidden = false;
   logsScreen.hidden = true;
