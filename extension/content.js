@@ -1,5 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
+  const BRIDGE_PROTOCOL_VERSION = 2;
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
@@ -123,17 +124,20 @@
     });
   }
 
-  async function isConfigured() {
+  async function isConfigured(providerAccountId) {
     const stored = await chrome.storage.local.get([
       "config",
-      "detected_account",
+      "detected_accounts",
       "local_consent",
     ]);
-    const accountId = stored.detected_account?.provider_account_id;
+    const accountId = String(providerAccountId ?? "").trim();
     return Boolean(
       stored.local_consent?.accepted_at
-      && stored.detected_account?.provider === "shopee"
       && accountId
+      && stored.detected_accounts?.some(
+        (account) => account?.provider === "shopee"
+          && account.provider_account_id === accountId,
+      )
       && stored.config?.accounts?.some(
         (account) => account.provider === "shopee"
           && account.provider_account_id === accountId,
@@ -141,12 +145,18 @@
     );
   }
 
-  async function requestRecovery() {
-    if (!await isConfigured()) {
-      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.");
+  async function requestRecovery(providerAccountId) {
+    const accountId = String(providerAccountId ?? "").trim();
+    if (!await isConfigured(accountId)) {
+      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
+        provider_account_id: accountId,
+      });
       return { ok: false, error: "Extension setup is required." };
     }
-    const syncState = await chrome.runtime.sendMessage({ type: "get_sync_state" });
+    const syncState = await chrome.runtime.sendMessage({
+      type: "get_sync_state",
+      provider_account_id: accountId,
+    });
     if (!syncState?.ok) {
       log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
       return syncState;
@@ -160,8 +170,10 @@
       type: "sync",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
+      provider_account_id: accountId,
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
+      provider_account_id: accountId,
       checkpoint_present: Boolean(syncState.checkpoint?.watermark),
     });
     return result;
@@ -193,28 +205,43 @@
     return result;
   }
 
-  async function handleAccountDetected(message) {
-    const accountId = String(message.provider_account_id ?? "").trim();
-    if (!accountId) return;
-    const stored = await chrome.storage.local.get("local_consent");
-    if (!stored.local_consent?.accepted_at) return;
-    const avatarUrl = typeof message.avatar_url === "string" && message.avatar_url.startsWith("https://")
+  function normalizedAccount(message) {
+    const accountId = String(message?.provider_account_id ?? "").trim();
+    if (!accountId) return null;
+    const avatarUrl = typeof message?.avatar_url === "string" && message.avatar_url.startsWith("https://")
       ? message.avatar_url
       : undefined;
-    const account = {
+    return {
       provider: "shopee",
       provider_account_id: accountId,
-      ...(typeof message.display_name === "string" && message.display_name.trim() ? { display_name: message.display_name.trim() } : {}),
+      ...(typeof message?.display_name === "string" && message.display_name.trim() ? { display_name: message.display_name.trim() } : {}),
       ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
-      detected_at: new Date().toISOString()
+      ...(typeof message?.provider_user_id === "string" && message.provider_user_id.trim()
+        ? { provider_user_id: message.provider_user_id.trim() }
+        : {}),
+      ...(typeof message?.shop_user_id === "string" && message.shop_user_id.trim()
+        ? { shop_user_id: message.shop_user_id.trim() }
+        : {}),
+      detected_at: new Date().toISOString(),
     };
-    await chrome.storage.local.set({ detected_account: account });
-    log("info", "account_detected", "Shopee account detected on provider page.");
+  }
+
+  async function handleAccountsDetected(message) {
+    const accounts = (Array.isArray(message?.accounts) ? message.accounts : [message])
+      .map(normalizedAccount)
+      .filter(Boolean);
+    if (!accounts.length) return;
+    const stored = await chrome.storage.local.get(["local_consent"]);
+    if (!stored.local_consent?.accepted_at) return;
+    await chrome.storage.local.set({ detected_accounts: accounts });
+    log("info", "account_detected", "Shopee shops detected on provider page.", {
+      accounts: accounts.length,
+    });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
-    pending.resolve({ ok: true, account });
+    pending.resolve({ ok: true, accounts });
   }
 
   function handleAccountDetectionFailed(message) {
@@ -233,6 +260,9 @@
       if (!conversationId || !id) continue;
       profilesByConversation.set(conversationId, {
         id,
+        ...(typeof profile.provider_account_id === "string" && profile.provider_account_id.trim()
+          ? { provider_account_id: profile.provider_account_id.trim() }
+          : {}),
         ...(typeof profile.display_name === "string" && profile.display_name.trim()
           ? { display_name: profile.display_name.trim() }
           : {}),
@@ -246,7 +276,13 @@
   function addConversationProfile(messages) {
     return messages.map((message) => {
       const profile = profilesByConversation.get(message.conversation_id);
-      return profile ? { ...message, participant: profile } : message;
+      return profile
+        ? {
+          ...message,
+          ...(profile.provider_account_id ? { provider_account_id: profile.provider_account_id } : {}),
+          participant: profile,
+        }
+        : message;
     });
   }
 
@@ -255,7 +291,12 @@
     try {
       const messages = addConversationProfile(
         globalThis.OmnichatShopee.parseShopeeMessages(message.body, "history_recovery")
-      );
+      ).map((item) => ({
+        ...item,
+        ...(item.provider_account_id || !message.provider_account_id
+          ? {}
+          : { provider_account_id: message.provider_account_id }),
+      }));
       const result = await chrome.runtime.sendMessage({
         type: "queue_messages",
         messages,
@@ -274,11 +315,14 @@
       log(result?.ok ? "debug" : "error", "recovery_batch_processed", result?.ok
         ? "Recovered message page processed."
         : result?.error ?? "Recovered message page failed.", {
+        provider_account_id: message.provider_account_id,
         parsed: messages.length,
         queued: Number(result?.queued) || 0,
       });
     } catch (error) {
-      log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error));
+      log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error), {
+        provider_account_id: message.provider_account_id,
+      });
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -288,6 +332,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "advance_scan_cursor",
+        provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
         cursor: message.cursor,
         summary_token: message.summary_token,
@@ -308,6 +353,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "save_bootstrap",
+        provider_account_id: message.provider_account_id,
         conversations: message.conversations,
       });
       post({
@@ -325,6 +371,7 @@
     touchRecovery(message.request_id);
     void sendRuntimeMessage({
       type: "sync_progress",
+      provider_account_id: message.provider_account_id,
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
       total_conversations: message.total_conversations
@@ -337,7 +384,7 @@
       void sendRuntimeMessage({ type: "resume_sync" }, (error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
-        log("warn", "resume_failed", message);
+      log("warn", "resume_failed", message);
       });
     }, 500);
   }
@@ -387,7 +434,9 @@
     const pending = recoveries.get(message.request_id);
     if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
-      log("error", "recovery_failed", message.error ?? "Provider recovery failed.");
+      log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
+        provider_account_id: message.provider_account_id,
+      });
       if (pending) {
         recoveries.delete(message.request_id);
         pending.resolve(message);
@@ -411,6 +460,7 @@
       pending.resolve(result);
     }
     log("info", "recovery_completed", "Provider recovery completed.", {
+      provider_account_id: message.provider_account_id,
       recovered: result.recovered,
       queued: result.queued,
     });
@@ -530,8 +580,8 @@
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
       void handleRealtimeEvent(event.data.body);
-    } else if (event.data.type === "account_detected") {
-      void handleAccountDetected(event.data);
+    } else if (event.data.type === "accounts_detected" || event.data.type === "account_detected") {
+      void handleAccountsDetected(event.data);
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
     } else if (event.data.type === "profiles_detected") {
@@ -569,6 +619,7 @@
       touchRecovery(event.data.request_id);
       void sendRuntimeMessage({
         type: "record_sync_plan",
+        provider_account_id: event.data.provider_account_id,
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
         conversations: event.data.conversations,
@@ -582,7 +633,7 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message?.type === "ping") {
-      respond({ ok: true });
+      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION });
       return false;
     }
     if (message?.type === "get_provider_status") {
@@ -595,7 +646,7 @@
       return false;
     }
     if (message?.type === "sync_now") {
-      void requestRecovery().then(respond, (error) => respond({ ok: false, error: String(error) }));
+      void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "cancel_sync") {

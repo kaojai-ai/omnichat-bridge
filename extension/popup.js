@@ -51,12 +51,10 @@ const clearButton = document.querySelector("#clear");
 const settingsButton = document.querySelector("#open-config");
 const importButton = document.querySelector("#import-config");
 const exportButton = document.querySelector("#export-config");
-const accountButton = document.querySelector("#account-id");
-const accountIdValue = document.querySelector("#account-id-value");
-const accountName = document.querySelector("#account-name");
-const accountAvatar = document.querySelector("#account-avatar");
-const accountStatus = document.querySelector("#account-status");
-const connectionStatus = accountStatus.querySelector(".connection-status");
+const providerUserId = document.querySelector("#provider-user-id");
+const shopUserId = document.querySelector("#shop-user-id");
+const accountList = document.querySelector("#account-list");
+const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
 const cancelSyncButton = document.querySelector("#cancel-sync");
@@ -87,7 +85,7 @@ const consentIntroDescription = consentScreen.querySelector(".screen-intro p");
 const consentLabel = consentScreen.querySelector(".consent");
 
 let storedConfig = emptyConfig();
-let detectedAccount = null;
+let detectedAccounts = [];
 let storedStatus = null;
 let liveState = null;
 let scanStates = null;
@@ -165,16 +163,17 @@ async function requestTargetPermission(urls) {
   }
 }
 
-function setAccountStatus(label, state, action = "") {
-  accountStatus.dataset.state = state;
-  accountStatus.dataset.action = action;
-  connectionStatus.textContent = label;
-  accountStatus.disabled = !action;
-  accountStatus.title = action === "config"
+function setLeaderStatus(label, state, action, isLeader = false) {
+  leaderStatus.dataset.state = state;
+  leaderStatus.dataset.action = action;
+  leaderStatus.dataset.leader = String(isLeader);
+  leaderCurrent.textContent = label;
+  leaderStatus.setAttribute("aria-label", label);
+  leaderStatus.title = action === "config"
     ? "Open settings"
-    : action === "logs"
-      ? "Open logs"
-      : "";
+    : isLeader
+      ? "Unset this installation as leader"
+      : "Set this tab as leader";
 }
 
 function setConfigStatus(message, isError = false) {
@@ -202,48 +201,173 @@ function formatSyncResult(result) {
   return "No new messages.";
 }
 
-function showAccount(account) {
-  const id = account?.provider === "shopee" ? account.provider_account_id : null;
-  const name = typeof account?.display_name === "string" && account.display_name.trim()
-    ? account.display_name.trim()
-    : "Shopee account";
-  const avatarUrl = typeof account?.avatar_url === "string" && account.avatar_url.startsWith("https://")
-    ? account.avatar_url
-    : "";
-  accountName.textContent = id ? name : "Detecting…";
-  accountAvatar.src = avatarUrl;
-  accountAvatar.hidden = !avatarUrl;
-  accountAvatar.alt = avatarUrl ? `${name} avatar` : "";
-  accountIdValue.textContent = id || "Detecting…";
-  accountButton.disabled = !id;
-  accountButton.dataset.accountId = id || "";
-  accountButton.title = id ? "Copy Shop ID" : "";
+function showAccounts(accounts) {
+  const values = (key) => [...new Set(
+    accounts
+      .map((account) => account?.[key])
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .map((value) => String(value).trim())
+      .filter(Boolean),
+  )];
+  setUserBadges(providerUserId, values("provider_user_id"));
+  setUserBadges(shopUserId, values("shop_user_id"));
+}
+
+function setUserBadges(element, values) {
+  const normalized = Array.isArray(values)
+    ? values.map((value) => String(value).trim()).filter(Boolean)
+    : [];
+  const row = element.closest(".account-identifier");
+  if (row) row.hidden = normalized.length === 0;
+  element.hidden = normalized.length === 0;
+  element.replaceChildren(...normalized.map((value) => {
+    const badge = document.createElement("span");
+    badge.className = "user-id-badge";
+    badge.textContent = value;
+    return badge;
+  }));
+}
+
+function accountRowStatus(account) {
+  const key = accountConfigKey(account);
+  const config = findAccountConfig(storedConfig, account);
+  if (!config) return { label: "NEED CONFIG", state: "warning", action: "config" };
+  const syncState = readAccountState(storedStatus, key, null);
+  const live = readAccountState(liveState, key, null);
+  const currentError = syncState?.delivery_error || syncState?.sync_error;
+  if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
+  if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
+  if (live?.socket === "connected") return { label: "CONNECTED", state: "ready" };
+  if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: "OFFLINE", state: "warning" };
+  return { label: "READY", state: "ready" };
+}
+
+async function copyShopId(providerAccountId, button, valueElement) {
+  try {
+    await navigator.clipboard.writeText(providerAccountId);
+    valueElement.textContent = "Copied";
+    button.title = "Copied";
+  } catch {
+    valueElement.textContent = "Could not copy";
+    button.title = "Could not copy Shop ID";
+  }
+  setTimeout(() => {
+    valueElement.textContent = providerAccountId;
+    button.title = "Copy Shop ID";
+  }, 900);
+}
+
+function createCopyIcon() {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.classList.add("copy-icon");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  for (const d of [
+    "M9 8.5A2.5 2.5 0 0 1 11.5 6h6A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-6A2.5 2.5 0 0 1 9 16.5z",
+    "M15 6V5.5A2.5 2.5 0 0 0 12.5 3h-6A2.5 2.5 0 0 0 4 5.5v8A2.5 2.5 0 0 0 6.5 16H9",
+  ]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    icon.append(path);
+  }
+  return icon;
+}
+
+function renderDetectedAccounts() {
+  const accounts = detectedAccounts;
+  accountList.replaceChildren();
+  accountListEmpty.hidden = accounts.length !== 0;
+  for (const account of accounts) {
+    const id = account.provider === "shopee" ? String(account.provider_account_id ?? "").trim() : "";
+    if (!id) continue;
+    const cardState = accountRowStatus(account);
+    const card = document.createElement("div");
+    card.className = "account-row";
+    card.dataset.accountId = id;
+    card.dataset.state = cardState.state;
+    const select = document.createElement("div");
+    select.className = "account-row-select";
+    const copy = document.createElement("span");
+    copy.className = "account-row-copy";
+    const name = document.createElement("strong");
+    name.textContent = account.display_name || "Shopee shop";
+    const statusLabel = document.createElement(cardState.action ? "a" : "span");
+    statusLabel.className = "account-row-status";
+    statusLabel.dataset.state = cardState.state;
+    statusLabel.textContent = cardState.label;
+    if (cardState.action) {
+      statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
+      statusLabel.classList.add("account-row-status-link");
+      statusLabel.title = cardState.action === "config" ? "Open settings" : "Open error logs";
+      statusLabel.setAttribute(
+        "aria-label",
+        cardState.action === "config"
+          ? `Open settings to configure ${account.display_name || "Shopee shop"}`
+          : `Open error logs for ${account.display_name || "Shopee shop"}`,
+      );
+      statusLabel.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (cardState.action === "config") openConfig();
+        else openLogs("error");
+      });
+    }
+    copy.append(name, statusLabel);
+    select.append(copy);
+    const shopId = document.createElement("button");
+    shopId.type = "button";
+    shopId.className = "account-row-id";
+    shopId.title = "Copy Shop ID";
+    shopId.setAttribute("aria-label", `Copy Shop ID ${id}`);
+    const shopIdValue = document.createElement("span");
+    shopIdValue.textContent = id;
+    shopId.append(shopIdValue, createCopyIcon());
+    shopId.addEventListener("click", () => void copyShopId(id, shopId, shopIdValue));
+    card.append(select, shopId);
+    accountList.append(card);
+  }
 }
 
 function renderDashboard(message = "", isError = false) {
-  showAccount(detectedAccount);
+  showAccounts(detectedAccounts);
+  renderDetectedAccounts();
+  status.replaceChildren();
   status.classList.toggle("error", isError);
   lastSync.hidden = true;
   lastSync.textContent = "";
-  const key = accountConfigKey(detectedAccount);
-  const config = findAccountConfig(storedConfig, detectedAccount);
-  const syncState = readAccountState(storedStatus, key, null);
-  const scanState = readAccountState(scanStates, key, null);
-  const pending = readAccountState(pendingStates, key, []);
-  const hasCheckpoint = Boolean(scanState?.watermark);
-  const live = readAccountState(liveState, key, null);
-  const isLeader = Boolean(live?.leader);
-  const socketConnected = live?.socket === "connected";
-  leaderStatus.hidden = !key || !config;
-  leaderCurrent.textContent = isLeader ? "Leader" : "Standby";
-  leaderStatus.querySelector(".leader-action").textContent = isLeader ? "Unset leader" : "Set leader";
-  leaderStatus.dataset.leader = String(isLeader);
-  leaderStatus.title = isLeader ? "Unset this installation as leader" : "Set this tab as leader";
+  const accountStates = detectedAccounts.map((account) => {
+    const key = accountConfigKey(account);
+    return {
+      account,
+      key,
+      config: findAccountConfig(storedConfig, account),
+      syncState: readAccountState(storedStatus, key, null),
+      scanState: readAccountState(scanStates, key, null),
+      pending: readAccountState(pendingStates, key, []),
+      live: readAccountState(liveState, key, null),
+    };
+  });
+  const configuredStates = accountStates.filter((item) => item.config);
+  const anySyncing = configuredStates.some((item) => ["discovering", "syncing"].includes(item.syncState?.state));
+  const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
+  const anyError = configuredStates.some((item) => item.syncState?.delivery_error || item.syncState?.sync_error);
+  const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
+  const progressState = configuredStates.find((item) => ["discovering", "syncing"].includes(item.syncState?.state))?.syncState;
+  const latestResult = configuredStates
+    .map((item) => item.syncState?.last_result)
+    .filter(Boolean)
+    .at(-1);
+  const anyLeader = configuredStates.some((item) => item.live?.leader);
+  const latestSync = configuredStates
+    .map((item) => item.syncState?.last_sync_at)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
 
-  if (!key) {
+  if (!detectedAccounts.length) {
     const openSellerChat = !isShopeeChatTab;
-    setAccountStatus(openSellerChat ? "Open Seller Chat" : "Detecting", openSellerChat ? "warning" : "neutral");
-    status.textContent = message || (openSellerChat ? "Open Shopee Seller Chat to detect your Shop ID." : "");
+    setLeaderStatus("NEED CONFIG", "warning", "config");
+    status.textContent = message || (openSellerChat ? "Open Shopee Seller Chat to detect your Shop IDs." : "");
     syncButton.disabled = true;
     syncButton.dataset.action = "";
     syncButton.textContent = "Sync messages";
@@ -255,8 +379,8 @@ function renderDashboard(message = "", isError = false) {
     return;
   }
 
-  if (!config) {
-    setAccountStatus("Need config", "warning", "config");
+  if (!configuredStates.length) {
+    setLeaderStatus("NEED CONFIG", "warning", "config");
     status.textContent = message;
     syncButton.disabled = false;
     syncButton.dataset.action = "configure";
@@ -269,58 +393,56 @@ function renderDashboard(message = "", isError = false) {
     return;
   }
 
-  const deliveryError = typeof syncState?.delivery_error === "string" && syncState.delivery_error;
-  const syncError = typeof syncState?.sync_error === "string" && syncState.sync_error;
-  const currentError = deliveryError || syncError;
-  status.classList.toggle("error", isError || Boolean(currentError));
-  const syncing = ["discovering", "syncing"].includes(syncState?.state);
-  const needsRetry = pending.length > 0 || scanState?.in_progress || currentError;
-  setAccountStatus(
-    currentError
-      ? `Error${pending.length ? ` · ${pending.length} pending` : ""}`
-      : socketConnected
-        ? "Connected"
-        : ["disconnected", "reconnecting"].includes(live?.socket)
-          ? "Offline"
-          : "Connecting",
-    currentError ? "error" : socketConnected ? "ready" : "neutral",
-    currentError ? "logs" : "",
-  );
-  syncButton.disabled = syncing;
+  status.classList.toggle("error", isError || anyError);
+  setLeaderStatus(anyLeader ? "LEADER" : "STANDBY", anyLeader ? "ready" : "neutral", "leader", anyLeader);
+  syncButton.disabled = anySyncing;
   syncButton.dataset.action = "sync";
-  syncButton.textContent = syncing ? "Syncing…" : needsRetry ? "Retry now" : "Sync messages";
+  syncButton.textContent = anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
   syncButton.setAttribute("aria-label", syncButton.textContent);
   syncButton.title = "";
-  cancelSyncButton.hidden = !syncing;
+  cancelSyncButton.hidden = !anySyncing;
   cancelSyncButton.disabled = false;
   cancelSyncButton.textContent = "Cancel sync";
-  const lastSyncText = formatLastSync(syncState?.last_sync_at);
-  if (hasCheckpoint && lastSyncText) {
+  const lastSyncText = formatLastSync(latestSync);
+  if (lastSyncText) {
     lastSync.textContent = lastSyncText;
     lastSync.hidden = false;
   }
 
-  if (syncState?.state === "syncing") {
-    const completed = Number(syncState.completed_conversations) || 0;
-    const total = Number(syncState.total_conversations) || 0;
+  if (progressState?.state === "syncing") {
+    const completed = Number(progressState.completed_conversations) || 0;
+    const total = Number(progressState.total_conversations) || 0;
     const percentage = total ? Math.round((completed / total) * 100) : 0;
     syncProgress.hidden = false;
     syncProgress.value = percentage;
     progressArea.hidden = false;
     status.textContent = `Checking conversation ${completed} of ${total} · ${percentage}%`;
-  } else if (syncState?.state === "discovering") {
+  } else if (progressState?.state === "discovering") {
     syncProgress.hidden = true;
     progressArea.hidden = false;
-    status.textContent = SYNC_PHASE_LABELS[syncState.phase] ?? "Starting sync…";
+    status.textContent = SYNC_PHASE_LABELS[progressState.phase] ?? "Starting sync…";
   } else {
     const resultMessage = message
-      || (currentError
-        ? `${pending.length ? `${pending.length} pending. ` : ""}Open Logs for details.`
+      || (anyError
+        ? `${pendingTotal ? `${pendingTotal} pending. ` : ""}Open Logs for details.`
         : "")
-      || (hasCheckpoint ? formatSyncResult(syncState?.last_result) : "");
+      || formatSyncResult(latestResult);
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage;
-    status.textContent = resultMessage;
+    if (message || !anyError) {
+      status.textContent = resultMessage;
+    } else {
+      if (pendingTotal) status.append(`${pendingTotal} pending. `);
+      const logsLink = document.createElement("a");
+      logsLink.href = "#logs";
+      logsLink.className = "status-log-link";
+      logsLink.textContent = "Open Logs for details";
+      logsLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        openLogs("error");
+      });
+      status.append(logsLink);
+    }
   }
 }
 
@@ -358,8 +480,8 @@ function safeFilenamePart(value, fallback) {
 }
 
 function logsFilename() {
-  const provider = safeFilenamePart(detectedAccount?.provider, "unknown-provider");
-  const accountId = safeFilenamePart(detectedAccount?.provider_account_id, "unknown-account");
+  const provider = "shopee";
+  const accountId = "all-shops";
   const version = safeFilenamePart(chrome.runtime.getManifest().version, "unknown");
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   return `omnichat-bridge-${provider}-${accountId}-v${version}-logs-${timestamp}.log`;
@@ -397,7 +519,7 @@ function renderLogs() {
 async function refreshStoredState() {
   const stored = await readStorage([
     STORAGE.config,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -406,7 +528,9 @@ async function refreshStoredState() {
     STORAGE.deviceName,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  detectedAccount = stored[STORAGE.detectedAccount] ?? null;
+  detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
+    ? stored[STORAGE.detectedAccounts]
+    : [];
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -423,18 +547,14 @@ async function detectAccount() {
   try {
     const result = await chrome.runtime.sendMessage({ type: "detect_account" });
     if (result?.ok) {
-      detectedAccount = result.account;
+      detectedAccounts = Array.isArray(result.accounts) ? result.accounts : [];
       renderDashboard();
       return true;
     }
   } catch {
     // The retry state below remains available.
   }
-  if (accountButton.dataset.accountId) return false;
-  accountIdValue.textContent = "Retry";
-  accountButton.disabled = false;
-  accountButton.title = "Try detecting the Shop ID again";
-  setAccountStatus("Not detected", "warning");
+  setLeaderStatus("NEED CONFIG", "warning", "config");
   progressArea.hidden = true;
   return false;
 }
@@ -490,12 +610,12 @@ function reportConfigurationStatus(message, isError = false) {
 
 async function autoStartSync(config) {
   if (!isShopeeChatTab) return false;
-  if (!(await detectAccount())) throw new Error("Could not detect the Shop ID. Try again from Shopee Seller Chat.");
-  const configuredAccount = config.accounts.some((account) => (
-    account.provider === detectedAccount?.provider
-    && account.provider_account_id === detectedAccount?.provider_account_id
-  ));
-  if (!configuredAccount) throw new Error("Saved configuration does not include the current Shop ID.");
+  if (!(await detectAccount())) throw new Error("Could not detect Shopee Shop IDs. Try again from Shopee Seller Chat.");
+  const configuredAccount = detectedAccounts.some((account) => config.accounts.some((configured) => (
+    configured.provider === account.provider
+      && configured.provider_account_id === account.provider_account_id
+  )));
+  if (!configuredAccount) throw new Error("Saved configuration does not include any detected Shop ID.");
 
   void chrome.runtime.sendMessage({ type: "sync_now" }).then((result) => {
     if (!result?.ok) reportConfigurationStatus(`Configuration saved. ${result?.error ?? "Sync failed."}`, true);
@@ -513,7 +633,7 @@ async function load() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -524,7 +644,9 @@ async function load() {
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  detectedAccount = stored[STORAGE.detectedAccount] ?? null;
+  detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
+    ? stored[STORAGE.detectedAccounts]
+    : [];
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -626,7 +748,7 @@ cancelSyncButton.addEventListener("click", async () => {
     const result = await chrome.runtime.sendMessage({ type: "cancel_sync" });
     await refreshStoredState();
     renderDashboard(
-      result?.ok && result.cancelled ? "Sync cancelled." : result?.error ?? "No active sync.",
+      result?.ok && result.cancelled ? "Sync cancelled." : result?.error ?? "No sync in progress.",
       !result?.ok,
     );
   } catch (error) {
@@ -635,11 +757,11 @@ cancelSyncButton.addEventListener("click", async () => {
 });
 
 document.querySelector("#open-config").addEventListener("click", openConfig);
-accountStatus.addEventListener("click", () => {
-  if (accountStatus.dataset.action === "config") openConfig();
-  else if (accountStatus.dataset.action === "logs") openLogs();
-});
 leaderStatus.addEventListener("click", async () => {
+  if (leaderStatus.dataset.action === "config") {
+    openConfig();
+    return;
+  }
   const isLeader = leaderStatus.dataset.leader === "true";
   const result = await chrome.runtime.sendMessage(isLeader
     ? { type: "release_leader" }
@@ -647,14 +769,15 @@ leaderStatus.addEventListener("click", async () => {
   if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);
-function openLogs() {
+function openLogs(level = null) {
   brandHeader.hidden = true;
   dashboardScreen.hidden = true;
   setHeaderActionsVisible(false);
   logsScreen.hidden = false;
+  if (level) logLevel.value = level;
   renderLogs();
 }
-openLogsButton.addEventListener("click", openLogs);
+openLogsButton.addEventListener("click", () => openLogs("all"));
 document.querySelector("#close-logs").addEventListener("click", () => {
   brandHeader.hidden = false;
   logsScreen.hidden = true;
@@ -795,19 +918,6 @@ clearButton.addEventListener("click", async () => {
   await load();
 });
 
-accountButton.addEventListener("click", async () => {
-  const id = accountButton.dataset.accountId;
-  if (!id) {
-    await detectAccount();
-    return;
-  }
-  await navigator.clipboard.writeText(id);
-  accountIdValue.textContent = "Copied";
-  setTimeout(() => {
-    accountIdValue.textContent = id;
-  }, 900);
-});
-
 installationIdButton.addEventListener("click", async () => {
   const id = installationIdButton.dataset.installationId;
   if (!id) return;
@@ -820,7 +930,7 @@ installationIdButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccount] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
+  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
     void refreshStoredState();
   }
 });

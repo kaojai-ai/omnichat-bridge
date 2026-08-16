@@ -15,13 +15,16 @@ import {
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
+import { participantForBatch } from "./lib/message-batch.js";
 import {
+  LEGACY_STORAGE,
   STORAGE,
   hasLocalConsent,
   installationId,
   normalizeDeviceName,
   readAccountState,
   readStorage,
+  resetDetectedAccountsFromConfig,
   writeAccountState,
   writeStorage,
 } from "./lib/storage.js";
@@ -30,6 +33,8 @@ import "./lib/shopee-url.js";
 const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
 const SHOPEE_URL_PATTERN = "https://seller.shopee.co.th/*";
 const SHOPEE_CHAT_URL = "https://seller.shopee.co.th/new-webchat/conversations";
+const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
+const BRIDGE_PROTOCOL_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -71,11 +76,7 @@ let mutationQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
-let liveSocket = null;
-let liveReconnectTimer = null;
-let liveHeartbeatTimer = null;
-let liveReconnectAttempt = 0;
-let liveConnectionKey = null;
+const liveConnections = new Map();
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -113,9 +114,9 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         STORAGE.serverInitialized,
         STORAGE.logUploadEnabled,
         STORAGE.config,
-        STORAGE.detectedAccount,
+        STORAGE.detectedAccounts,
       ]);
-      const context = currentAccountContext(stored);
+      const context = accountContextFor(stored, details?.provider_account_id);
       const entry = createLogEntry({
         level,
         area,
@@ -162,14 +163,43 @@ function diagnosticErrorDetails(error) {
   };
 }
 
-async function recordUnexpected(scope, error) {
-  await recordLog("error", scope, "failed", "Extension operation failed.", diagnosticErrorDetails(error));
+async function recordUnexpected(scope, error, details = {}) {
+  await recordLog("error", scope, "failed", "Extension operation failed.", {
+    ...diagnosticErrorDetails(error),
+    ...details,
+  });
 }
 
-function currentAccountContext(stored) {
-  const key = accountConfigKey(stored[STORAGE.detectedAccount]);
-  const config = findAccountConfig(stored[STORAGE.config], stored[STORAGE.detectedAccount]);
-  return key && config ? { key, config, account: stored[STORAGE.detectedAccount] } : null;
+function detectedAccounts(stored) {
+  return Array.isArray(stored[STORAGE.detectedAccounts])
+    ? stored[STORAGE.detectedAccounts].filter((account) => account?.provider === "shopee")
+    : [];
+}
+
+function accountContextFor(stored, providerAccountId) {
+  const id = typeof providerAccountId === "string" || typeof providerAccountId === "number"
+    ? String(providerAccountId).trim()
+    : "";
+  if (!id) return null;
+  const account = detectedAccounts(stored).find((item) => item.provider_account_id === id);
+  const config = findAccountConfig(stored[STORAGE.config], {
+    provider: "shopee",
+    provider_account_id: id,
+  });
+  if (!account) return null;
+  const key = accountConfigKey(account);
+  return key && config ? { key, config, account } : null;
+}
+
+function configuredAccountContexts(stored) {
+  return detectedAccounts(stored)
+    .map((account) => accountContextFor(stored, account.provider_account_id))
+    .filter(Boolean);
+}
+
+function messageProviderAccountId(message) {
+  const value = message?.provider_account_id;
+  return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
 }
 
 function hasServerInitialized(stored) {
@@ -199,17 +229,17 @@ async function updateLiveState(context, patch) {
   });
 }
 
-async function getAccountScanState() {
+async function getAccountScanState(providerAccountId) {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.pending,
     STORAGE.scanState,
     STORAGE.targetCursor,
     STORAGE.lastResumeSyncAt,
   ]);
-  const context = currentAccountContext(stored);
+  const context = accountContextFor(stored, providerAccountId);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
     throw new Error("Shopee browser bridge is not configured.");
   }
@@ -260,8 +290,8 @@ function bootstrapConversation(value) {
   };
 }
 
-async function saveBootstrapSelection(conversations) {
-  const { context, state, stored } = await getAccountScanState();
+async function saveBootstrapSelection(providerAccountId, conversations) {
+  const { context, state, stored } = await getAccountScanState(providerAccountId);
   if (state.watermark || state.bootstrap?.conversations?.length) return;
   const selected = (Array.isArray(conversations) ? conversations : [])
     .map(bootstrapConversation)
@@ -275,10 +305,10 @@ async function saveBootstrapSelection(conversations) {
   }, stored[STORAGE.scanState]);
 }
 
-async function advanceScanCursor(conversationId, cursor, summaryToken) {
+async function advanceScanCursor(providerAccountId, conversationId, cursor, summaryToken) {
   const id = String(conversationId ?? "").trim();
   if (!id) return;
-  const { context, state, stored } = await getAccountScanState();
+  const { context, state, stored } = await getAccountScanState(providerAccountId);
   const previous = state.conversations?.[id];
   const next = cursor && compareMessageCursor(cursor, previous) > 0
     ? {
@@ -336,7 +366,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "get_sync_state") {
-    void exclusive(() => getAccountScanState()).then(
+    void exclusive(() => getAccountScanState(message.provider_account_id)).then(
       ({ state }) => respond({ ok: true, checkpoint: state }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -354,7 +384,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "flush_now") {
-    void exclusive(() => attemptDelivery({ resetBackoff: true })).then(
+    void exclusive(() => attemptAllDeliveries({ resetBackoff: true })).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -389,8 +419,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_progress") {
-    void exclusive(() => readStorage([STORAGE.detectedAccount, STORAGE.status]).then((stored) => {
-      const key = accountConfigKey(stored[STORAGE.detectedAccount]);
+    void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
+      const context = accountContextFor(stored, message.provider_account_id);
+      const key = context?.key;
       if (!key) throw new Error("Shopee account is not detected.");
       const current = readAccountState(stored[STORAGE.status], key, {});
       if (!["discovering", "syncing"].includes(current.state)) return;
@@ -402,6 +433,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       });
     })).then(
       () => recordLog("info", "sync", "progress", "Sync progress updated.", {
+        provider_account_id: message.provider_account_id,
         completed: Number(message.completed_conversations) || 0,
         total: Number(message.total_conversations) || 0,
       }),
@@ -420,6 +452,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       probes: conversations.filter((item) => item?.decision === "probe").length,
       skipped: conversations.filter((item) => item?.decision === "skip").length,
       checkpoint_present: Boolean(message.checkpoint),
+      provider_account_id: message.provider_account_id,
     };
     void recordLog("info", "sync", "plan_created", "Sync plan created.", details).then(
       () => respond({ ok: true }),
@@ -429,6 +462,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "advance_scan_cursor") {
     void exclusive(() => advanceScanCursor(
+      message.provider_account_id,
       message.conversation_id,
       message.cursor,
       message.summary_token,
@@ -439,7 +473,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "save_bootstrap") {
-    void exclusive(() => saveBootstrapSelection(message.conversations)).then(
+    void exclusive(() => saveBootstrapSelection(message.provider_account_id, message.conversations)).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -456,7 +490,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     void sendViaShopeeApi(message).then(
       (result) => respond(result),
       async (error) => {
-        await recordUnexpected("send_message", error);
+        await recordUnexpected("send_message", error, {
+          provider_account_id: messageProviderAccountId(message),
+        });
         respond({ ok: false, error: String(error) });
       }
     );
@@ -529,8 +565,8 @@ async function sendViaShopeeApi(message) {
   if (!requestId || !conversationId || !["send_text", "send_image", "send_product"].includes(commandType)) {
     return { ok: false, error: "Reply command is invalid." };
   }
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-  const context = currentAccountContext(stored);
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const context = accountContextFor(stored, messageProviderAccountId(message));
   if (!context) return { ok: false, error: "Shopee browser bridge is not configured." };
   const tab = await commandTab(context);
   await ensureShopeeBridge(tab.id);
@@ -577,8 +613,8 @@ async function sendViaShopeeApi(message) {
 // WIP alternative only. Do not call this from the command path: it needs the target
 // conversation open and competes with the user's Shopee UI.
 async function sendTextByUiClick_WIP(message) {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-  const context = currentAccountContext(stored);
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const context = accountContextFor(stored, messageProviderAccountId(message));
   if (!context) return { ok: false, error: "Shopee browser bridge is not configured." };
   const tab = await commandTab(context);
   await ensureShopeeBridge(tab.id);
@@ -598,15 +634,11 @@ function leaderEndpoint(config) {
   return url;
 }
 
-async function signedLeaderRequest(action) {
-  const stored = await readStorage([
-    STORAGE.config,
-    STORAGE.detectedAccount,
-    STORAGE.serverInitialized,
-  ]);
-  if (!hasServerInitialized(stored)) throw new Error("Sync messages before using live replies.");
-  const context = currentAccountContext(stored);
-  const url = leaderEndpoint(context?.config);
+async function signedLeaderRequest(context, action) {
+  if (!context) throw new Error("Shopee browser bridge is not configured.");
+  const initialized = await readStorage([STORAGE.serverInitialized]);
+  if (!hasServerInitialized(initialized)) throw new Error("Sync messages before using live replies.");
+  const url = leaderEndpoint(context.config);
   if (!context || !url) throw new Error("Leader endpoint is not configured.");
   const body = JSON.stringify({
     provider: "shopee",
@@ -630,44 +662,67 @@ async function signedLeaderRequest(action) {
   });
   if (!response.ok) throw new Error(`Leader endpoint returned ${response.status}.`);
   const result = await response.json();
+  const connection = liveConnections.get(context.key);
   await updateLiveState(context, {
-    socket: liveSocket?.readyState === WebSocket.OPEN ? "connected" : "connecting",
+    socket: connection?.socket?.readyState === WebSocket.OPEN ? "connected" : "connecting",
     leader: result?.leader_installation_id === await installationId(),
     leader_installation_id: result?.leader_installation_id ?? null,
   });
   return { ok: true, ...result };
 }
 
-async function getLiveState() {
-  try { return await signedLeaderRequest("status"); }
-  catch (error) {
-    const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-    const context = currentAccountContext(stored);
-    if (context) await updateLiveState(context, {
-      socket: liveSocket?.readyState === WebSocket.OPEN ? "connected" : "reconnecting",
-      leader: false,
-    });
-    throw error;
+async function getLiveState(providerAccountId) {
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.serverInitialized]);
+  const contexts = providerAccountId
+    ? [accountContextFor(stored, providerAccountId)].filter(Boolean)
+    : configuredAccountContexts(stored);
+  if (!contexts.length) return { ok: false, error: "No configured Shopee shops are detected." };
+  const results = [];
+  for (const context of contexts) {
+    try {
+      results.push(await signedLeaderRequest(context, "status"));
+    } catch (error) {
+      const connection = liveConnections.get(context.key);
+      await updateLiveState(context, {
+        socket: connection?.socket?.readyState === WebSocket.OPEN ? "connected" : "reconnecting",
+        leader: false,
+      });
+      if (providerAccountId) throw error;
+      results.push({ ok: false, provider_account_id: context.account.provider_account_id, error: String(error) });
+    }
   }
+  if (providerAccountId) return results[0];
+  return {
+    ok: results.some((result) => result.ok),
+    leader: results.some((result) => result.leader),
+    accounts: results,
+  };
 }
 
 async function claimLeader(tabId) {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-  const context = currentAccountContext(stored);
-  if (!context) throw new Error("Shopee browser bridge is not configured.");
-  await selectCommandTab(context, tabId);
-  return signedLeaderRequest("claim");
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const contexts = configuredAccountContexts(stored);
+  if (!contexts.length) throw new Error("Shopee browser bridge is not configured.");
+  const results = [];
+  for (const context of contexts) {
+    await selectCommandTab(context, tabId);
+    results.push(await signedLeaderRequest(context, "claim"));
+  }
+  return results.at(-1) ?? { ok: true };
 }
 
 async function releaseLeader() {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-  if (!currentAccountContext(stored)) throw new Error("Shopee browser bridge is not configured.");
-  return signedLeaderRequest("release");
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const contexts = configuredAccountContexts(stored);
+  if (!contexts.length) throw new Error("Shopee browser bridge is not configured.");
+  const results = [];
+  for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
+  return results.at(-1) ?? { ok: true };
 }
 
 async function openCommandTab() {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccount]);
-  const context = currentAccountContext(stored);
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const context = configuredAccountContexts(stored)[0];
   if (!context) throw new Error("Shopee browser bridge is not configured.");
   const tab = await commandTab(context);
   if (!tab.id) throw new Error("Shopee Seller Chat tab is unavailable.");
@@ -677,20 +732,21 @@ async function openCommandTab() {
 }
 
 function stopLiveConnection() {
-  clearTimeout(liveReconnectTimer);
-  clearInterval(liveHeartbeatTimer);
-  liveReconnectTimer = null;
-  liveHeartbeatTimer = null;
-  liveSocket?.close();
-  liveSocket = null;
-  liveConnectionKey = null;
+  for (const connection of liveConnections.values()) {
+    clearTimeout(connection.reconnectTimer);
+    clearInterval(connection.heartbeatTimer);
+    connection.socket?.close();
+  }
+  liveConnections.clear();
 }
 
-function scheduleLiveReconnect() {
-  clearTimeout(liveReconnectTimer);
-  const delay = Math.min(60_000, 1_000 * 2 ** Math.min(liveReconnectAttempt, 6));
-  liveReconnectAttempt += 1;
-  liveReconnectTimer = setTimeout(() => { void ensureLiveConnection(); }, delay);
+function scheduleLiveReconnect(context) {
+  const connection = liveConnections.get(context.key);
+  if (!connection) return;
+  clearTimeout(connection.reconnectTimer);
+  const delay = Math.min(60_000, 1_000 * 2 ** Math.min(connection.reconnectAttempt, 6));
+  connection.reconnectAttempt += 1;
+  connection.reconnectTimer = setTimeout(() => { void ensureAccountLiveConnection(context); }, delay);
 }
 
 async function signedLiveTicket(config, providerAccountId) {
@@ -728,7 +784,7 @@ async function signedLiveTicket(config, providerAccountId) {
 async function connectionStatusSnapshot(context) {
   const stored = await readStorage([
     STORAGE.deviceName,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.pending,
     STORAGE.status,
   ]);
@@ -748,11 +804,10 @@ async function connectionStatusSnapshot(context) {
     }
   }
 
-  const detected = stored[STORAGE.detectedAccount];
-  const accountDetected = detected?.provider === "shopee"
-    && typeof detected.provider_account_id === "string";
-  const accountMatches = accountDetected
-    && detected.provider_account_id === context.account.provider_account_id;
+  const accountDetected = detectedAccounts(stored).some(
+    (account) => account.provider_account_id === context.account.provider_account_id,
+  );
+  const accountMatches = accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
@@ -794,28 +849,48 @@ async function ensureLiveConnection() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
   ]);
-  const context = currentAccountContext(stored);
-  const endpoint = liveEndpoint(context?.config);
+  const contexts = configuredAccountContexts(stored);
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
-    || !context
-    || !endpoint) {
+    || !contexts.length) {
     stopLiveConnection();
     void recordLog("debug", "live", "not_started", "Live connection is not ready.", {
       consented: hasLocalConsent(stored[STORAGE.consent]),
-      configured: Boolean(context),
-      endpoint_configured: Boolean(endpoint),
+      configured: contexts.length > 0,
     });
     return;
   }
-  const connectionKey = `${context.key}:${endpoint}`;
-  if (liveConnectionKey && liveConnectionKey !== connectionKey) stopLiveConnection();
-  if (liveSocket?.readyState === WebSocket.OPEN || liveSocket?.readyState === WebSocket.CONNECTING) return;
+  const contextKeys = new Set(contexts.map((context) => context.key));
+  for (const [key, connection] of liveConnections) {
+    if (contextKeys.has(key)) continue;
+    clearTimeout(connection.reconnectTimer);
+    clearInterval(connection.heartbeatTimer);
+    connection.socket?.close();
+    liveConnections.delete(key);
+  }
+  for (const context of contexts) await ensureAccountLiveConnection(context);
+}
+
+async function ensureAccountLiveConnection(context) {
+  const endpoint = liveEndpoint(context.config);
+  if (!endpoint) return;
+  const existing = liveConnections.get(context.key) ?? {
+    socket: null,
+    reconnectTimer: null,
+    heartbeatTimer: null,
+    reconnectAttempt: 0,
+  };
+  liveConnections.set(context.key, existing);
+  if (existing.socket?.readyState === WebSocket.OPEN || existing.socket?.readyState === WebSocket.CONNECTING) return;
+  clearTimeout(existing.reconnectTimer);
+  existing.reconnectTimer = null;
   await updateLiveState(context, { socket: "connecting" });
-  await recordLog("info", "live", "connecting", "Connecting live command channel.");
+  await recordLog("info", "live", "connecting", "Connecting live command channel.", {
+    provider_account_id: context.account.provider_account_id,
+  });
   try {
     const { ticket, socketUrl } = await signedLiveTicket(
       context.config,
@@ -823,59 +898,70 @@ async function ensureLiveConnection() {
     );
     socketUrl.searchParams.set("ticket", ticket);
     const socket = new WebSocket(socketUrl);
-    liveSocket = socket;
-    liveConnectionKey = connectionKey;
+    existing.socket = socket;
     socket.addEventListener("open", () => {
-      liveReconnectAttempt = 0;
+      existing.reconnectAttempt = 0;
       void updateLiveState(context, { socket: "connected" });
-      void recordLog("info", "live", "connected", "Live command channel connected.");
-      clearInterval(liveHeartbeatTimer);
-      liveHeartbeatTimer = setInterval(() => {
+      void recordLog("info", "live", "connected", "Live command channel connected.", {
+        provider_account_id: context.account.provider_account_id,
+      });
+      clearInterval(existing.heartbeatTimer);
+      existing.heartbeatTimer = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) {
           void sendConnectionStatus(socket, context)
-            .catch((error) => recordUnexpected("connection_status", error));
+            .catch((error) => recordUnexpected("connection_status", error, {
+              provider_account_id: context.account.provider_account_id,
+            }));
         }
       }, 20_000);
       void sendConnectionStatus(socket, context)
-        .catch((error) => recordUnexpected("connection_status", error));
-      void getLiveState().catch((error) => recordUnexpected("leader_status", error));
+        .catch((error) => recordUnexpected("connection_status", error, {
+          provider_account_id: context.account.provider_account_id,
+        }));
+      void getLiveState(context.account.provider_account_id).catch((error) => recordUnexpected("leader_status", error, {
+        provider_account_id: context.account.provider_account_id,
+      }));
     });
-    socket.addEventListener("message", (event) => { void handleLiveCommand(event.data); });
+    socket.addEventListener("message", (event) => { void handleLiveCommand(event.data, context, socket); });
     socket.addEventListener("close", () => {
-      if (liveSocket === socket) {
-        liveSocket = null;
-        liveConnectionKey = null;
-        clearInterval(liveHeartbeatTimer);
+      if (liveConnections.get(context.key)?.socket === socket) {
+        existing.socket = null;
+        clearInterval(existing.heartbeatTimer);
+        existing.heartbeatTimer = null;
         void updateLiveState(context, { socket: "reconnecting", leader: false });
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
-          reconnect_attempt: liveReconnectAttempt + 1,
+          provider_account_id: context.account.provider_account_id,
+          reconnect_attempt: existing.reconnectAttempt + 1,
         });
-        scheduleLiveReconnect();
+        scheduleLiveReconnect(context);
       }
     });
     socket.addEventListener("error", () => socket.close());
   } catch (error) {
     await updateLiveState(context, { socket: "reconnecting" });
-    await recordUnexpected("live_connection", error);
-    scheduleLiveReconnect();
+    await recordUnexpected("live_connection", error, {
+      provider_account_id: context.account.provider_account_id,
+    });
+    scheduleLiveReconnect(context);
   }
 }
 
-async function handleLiveCommand(raw) {
+async function handleLiveCommand(raw, context, socket) {
   let command;
   try { command = JSON.parse(raw); } catch { return; }
   if (!["send_text", "send_image", "send_product"].includes(command?.type) || command.provider !== "shopee") return;
-  const stored = await readStorage([STORAGE.detectedAccount]);
-  if (stored[STORAGE.detectedAccount]?.provider_account_id !== command.provider_account_id) return;
+  if (messageProviderAccountId(command) !== context.account.provider_account_id) return;
   let result;
   try {
     result = await exclusive(() => sendViaShopeeApi(command));
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.");
-  if (liveSocket?.readyState === WebSocket.OPEN) {
-    liveSocket.send(JSON.stringify({
+  if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
+    provider_account_id: context.account.provider_account_id,
+  });
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
       type: "send_result",
       request_id: command.request_id,
       ok: Boolean(result?.ok),
@@ -888,18 +974,14 @@ async function handleLiveCommand(raw) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccount]) void ensureLiveConnection();
+  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccounts]) void ensureLiveConnection();
   if (
     changes[STORAGE.deviceName]
-    || changes[STORAGE.detectedAccount]
+    || changes[STORAGE.detectedAccounts]
     || changes[STORAGE.status]
     || changes[STORAGE.pending]
   ) {
-    void readStorage([STORAGE.config, STORAGE.detectedAccount]).then((stored) => {
-      const context = currentAccountContext(stored);
-      if (context && liveSocket?.readyState === WebSocket.OPEN) {
-        return sendConnectionStatus(liveSocket, context);
-      }
+    void ensureLiveConnection().then(() => {
       return undefined;
     }).catch((error) => recordUnexpected("connection_status", error));
   }
@@ -909,11 +991,49 @@ chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
   void resumeLogUpload();
   void ensureLiveConnection();
-  void exclusive(() => attemptDelivery({ resetBackoff: false }));
+  void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
 });
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "update" || !isVersionBefore(details.previousVersion, DETECTED_ACCOUNTS_RESET_VERSION)) return;
+  void reinitializeAfterUpgrade().catch((error) => {
+    void recordUnexpected("storage_upgrade", error);
+  });
+});
+
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
 void resumeLogUpload();
 void ensureLiveConnection();
+
+function isVersionBefore(value, target) {
+  const current = String(value ?? "").split(".").map(Number);
+  const expected = String(target).split(".").map(Number);
+  if (current.length !== expected.length || current.some((part) => !Number.isInteger(part))) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    if (current[index] !== expected[index]) return current[index] < expected[index];
+  }
+  return false;
+}
+
+async function reinitializeAfterUpgrade() {
+  if (!await resetDetectedAccountsFromConfig()) return;
+  const tabs = await chrome.tabs.query({ url: SHOPEE_URL_PATTERN });
+  const chatTabs = tabs.filter((tab) => tab.id && isShopeeChatUrl(tab.url));
+  let bridgesReady = true;
+  for (const tab of chatTabs) {
+    try {
+      await ensureShopeeBridge(tab.id);
+      const result = await chrome.tabs.sendMessage(tab.id, { type: "detect_account" });
+      if (!result?.ok) {
+        await recordLog("warn", "account", "detection_failed", "Shopee account was not detected after extension upgrade.");
+      }
+    } catch (error) {
+      bridgesReady = false;
+      await recordUnexpected("storage_upgrade", error);
+    }
+  }
+  if (bridgesReady) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
+}
 
 async function detectOpenShopeeAccount() {
   let tab = await findShopeeChatTab();
@@ -942,7 +1062,7 @@ async function findShopeeChatTab() {
 async function ensureShopeeBridge(tabId) {
   try {
     const result = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-    if (result?.ok) {
+    if (result?.ok && result.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
       await recordLog("debug", "provider", "content_ready", "Shopee content bridge is ready.");
       return;
     }
@@ -979,7 +1099,7 @@ function throwIfSyncCancelled(signal) {
   if (signal?.aborted) throw syncCancelledError();
 }
 
-async function syncOpenShopee(control) {
+async function syncOpenShopee(control, providerAccountId) {
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
   const tab = await findShopeeChatTab();
@@ -987,7 +1107,10 @@ async function syncOpenShopee(control) {
   control.tabId = tab.id;
   await ensureShopeeBridge(tab.id);
   throwIfSyncCancelled(signal);
-  const result = await chrome.tabs.sendMessage(tab.id, { type: "sync_now" });
+  const result = await chrome.tabs.sendMessage(tab.id, {
+    type: "sync_now",
+    provider_account_id: providerAccountId,
+  });
   throwIfSyncCancelled(signal);
   if (!result?.ok) throw new Error(result?.error ?? "Shopee recovery failed.");
   return result;
@@ -1032,49 +1155,62 @@ async function cancelActiveSync() {
 async function clearPersistedSync() {
   return exclusive(async () => {
     const stored = await readStorage([
-      STORAGE.detectedAccount,
+      STORAGE.config,
+      STORAGE.consent,
+      STORAGE.detectedAccounts,
       STORAGE.pending,
       STORAGE.scanState,
       STORAGE.status,
     ]);
-    const key = accountConfigKey(stored[STORAGE.detectedAccount]);
-    if (!key) return false;
-    const scanState = readAccountState(stored[STORAGE.scanState], key, null);
-    const status = readAccountState(stored[STORAGE.status], key, {});
-    if (!scanState?.in_progress && !["discovering", "syncing"].includes(status.state)) {
-      return false;
+    const contexts = configuredAccountContexts(stored);
+    if (!contexts.length) return false;
+    const writes = {};
+    let cancelled = false;
+    for (const context of contexts) {
+      const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+      const status = readAccountState(stored[STORAGE.status], context.key, {});
+      if (!scanState?.in_progress && !["discovering", "syncing"].includes(status.state)) continue;
+      cancelled = true;
+      writes[STORAGE.status] = writeAccountState(
+        writes[STORAGE.status] ?? stored[STORAGE.status],
+        context.key,
+        {
+          ...status,
+          state: "watching",
+          phase: null,
+          caught_up: false,
+          sync_error: null,
+          sync_error_at: null,
+          completed_conversations: null,
+          total_conversations: null,
+          pending: readAccountState(stored[STORAGE.pending], context.key, []).length,
+        },
+      );
+      if (scanState) {
+        writes[STORAGE.scanState] = writeAccountState(
+          writes[STORAGE.scanState] ?? stored[STORAGE.scanState],
+          context.key,
+          {
+            ...scanState,
+            in_progress: false,
+            cancelled_at: new Date().toISOString(),
+          },
+        );
+      }
     }
-    const writes = {
-      [STORAGE.status]: writeAccountState(stored[STORAGE.status], key, {
-        ...status,
-        state: "watching",
-        phase: null,
-        caught_up: false,
-        sync_error: null,
-        sync_error_at: null,
-        completed_conversations: null,
-        total_conversations: null,
-        pending: readAccountState(stored[STORAGE.pending], key, []).length,
-      }),
-    };
-    if (scanState) {
-      writes[STORAGE.scanState] = writeAccountState(stored[STORAGE.scanState], key, {
-        ...scanState,
-        in_progress: false,
-        cancelled_at: new Date().toISOString(),
-      });
-    }
+    if (!cancelled) return false;
     await writeStorage(writes);
     return true;
   });
 }
 
-async function runUnifiedSync(trigger, control) {
+async function runAccountSync(trigger, control, context) {
   const { signal } = control.controller;
   const automatic = trigger === "automatic";
+  const providerAccountId = context.account.provider_account_id;
   const prepared = await exclusive(async () => {
     throwIfSyncCancelled(signal);
-    const { context, state, stored } = await getAccountScanState();
+    const { state, stored } = await getAccountScanState(providerAccountId);
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
     if (automatic
       && !state.in_progress
@@ -1102,28 +1238,36 @@ async function runUnifiedSync(trigger, control) {
   });
   if (prepared.skipped) {
     await recordLog("debug", "sync", "skipped", "Automatic sync skipped during cooldown.", {
+      provider_account_id: providerAccountId,
       reason: prepared.skipped,
     });
-    return prepared;
+    return { provider_account_id: providerAccountId, ...prepared };
   }
-  await recordLog("info", "sync", "started", "Sync started.", { trigger });
+  await recordLog("info", "sync", "started", "Sync started.", {
+    provider_account_id: providerAccountId,
+    trigger,
+  });
 
   try {
     throwIfSyncCancelled(signal);
-    await updateScopedState(STORAGE.status, prepared.context.key, {
+    await updateScopedState(STORAGE.status, context.key, {
       phase: "sending_pending",
     });
-    await recordLog("debug", "delivery", "pre_sync_flush", "Checking queued messages before recovery.");
-    await exclusive(() => attemptDelivery({ resetBackoff: true, signal }));
+    await recordLog("debug", "delivery", "pre_sync_flush", "Checking queued messages before recovery.", {
+      provider_account_id: providerAccountId,
+    });
+    await attemptDelivery(context, { resetBackoff: true, signal });
     throwIfSyncCancelled(signal);
-    await updateScopedState(STORAGE.status, prepared.context.key, {
+    await updateScopedState(STORAGE.status, context.key, {
       phase: "loading_conversations",
     });
-    await recordLog("info", "sync", "provider_recovery", "Requesting missed messages from Shopee.");
-    const recovered = await syncOpenShopee(control);
+    await recordLog("info", "sync", "provider_recovery", "Requesting missed messages from Shopee.", {
+      provider_account_id: providerAccountId,
+    });
+    const recovered = await syncOpenShopee(control, providerAccountId);
     throwIfSyncCancelled(signal);
     await exclusive(async () => {
-      const { context, state, stored } = await getAccountScanState();
+      const { state, stored } = await getAccountScanState(providerAccountId);
       await writeAccountScanState(context, {
         ...state,
         watermark: recovered.watermark ?? state.watermark,
@@ -1132,25 +1276,25 @@ async function runUnifiedSync(trigger, control) {
         completed_at: new Date().toISOString(),
       }, stored[STORAGE.scanState]);
     });
-    await updateScopedState(STORAGE.status, prepared.context.key, {
+    await updateScopedState(STORAGE.status, context.key, {
       state: "discovering",
       phase: "sending_recovered",
       completed_conversations: null,
       total_conversations: null,
     });
-    const delivered = await exclusive(() => attemptDelivery({ resetBackoff: true, signal }));
+    const delivered = await attemptDelivery(context, { resetBackoff: true, signal });
     throwIfSyncCancelled(signal);
     const result = {
+      provider_account_id: providerAccountId,
       recovered: recovered.recovered ?? 0,
       queued: recovered.queued ?? 0,
       sent: delivered.sent,
       pending: delivered.pending,
     };
-    const syncedAt = new Date().toISOString();
-    await updateScopedState(STORAGE.status, prepared.context.key, {
+    await updateScopedState(STORAGE.status, context.key, {
       state: "watching",
       phase: null,
-      last_sync_at: syncedAt,
+      last_sync_at: new Date().toISOString(),
       caught_up: result.pending === 0,
       sync_error: null,
       sync_error_at: null,
@@ -1166,10 +1310,10 @@ async function runUnifiedSync(trigger, control) {
       ? "Sync cancelled."
       : error instanceof Error ? error.message : String(error);
     const stored = await readStorage([STORAGE.pending, STORAGE.scanState]);
-    const pending = readAccountState(stored[STORAGE.pending], prepared.context.key, []);
-    const state = readAccountState(stored[STORAGE.scanState], prepared.context.key, null);
+    const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+    const state = readAccountState(stored[STORAGE.scanState], context.key, null);
     if (state) {
-      await writeAccountScanState(prepared.context, {
+      await writeAccountScanState(context, {
         ...state,
         in_progress: false,
         ...(cancelled
@@ -1177,7 +1321,7 @@ async function runUnifiedSync(trigger, control) {
           : { failed_at: new Date().toISOString() }),
       }, stored[STORAGE.scanState]);
     }
-    await updateScopedState(STORAGE.status, prepared.context.key, {
+    await updateScopedState(STORAGE.status, context.key, {
       state: cancelled ? "watching" : "error",
       phase: null,
       caught_up: false,
@@ -1188,12 +1332,55 @@ async function runUnifiedSync(trigger, control) {
       pending: pending.length,
     });
     if (cancelled) {
-      await recordLog("info", "sync", "cancelled", "Sync cancelled by user.");
+      await recordLog("info", "sync", "cancelled", "Sync cancelled by user.", {
+        provider_account_id: providerAccountId,
+      });
       throw syncCancelledError();
     }
-    await recordUnexpected("message_sync", error);
-    throw error;
+    await recordUnexpected("message_sync", error, {
+      provider_account_id: providerAccountId,
+    });
+    return {
+      provider_account_id: providerAccountId,
+      recovered: 0,
+      queued: 0,
+      sent: 0,
+      pending: pending.length,
+      error: message,
+    };
   }
+}
+
+async function runUnifiedSync(trigger, control) {
+  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) {
+    throw new Error("Shopee browser bridge is not configured.");
+  }
+  const contexts = configuredAccountContexts(stored);
+  if (!contexts.length) throw new Error("No configured Shopee shops are detected.");
+  const accounts = [];
+  for (const context of contexts) {
+    throwIfSyncCancelled(control.controller.signal);
+    accounts.push(await runAccountSync(trigger, control, context));
+  }
+  const errors = accounts.filter((account) => account.error);
+  const result = {
+    recovered: accounts.reduce((total, account) => total + (Number(account.recovered) || 0), 0),
+    queued: accounts.reduce((total, account) => total + (Number(account.queued) || 0), 0),
+    sent: accounts.reduce((total, account) => total + (Number(account.sent) || 0), 0),
+    pending: accounts.reduce((total, account) => total + (Number(account.pending) || 0), 0),
+    accounts,
+    ...(errors.length ? { errors } : {}),
+  };
+  await recordLog("info", "sync", "all_completed", "All configured Shopee shop syncs completed.", {
+    accounts: accounts.length,
+    errors: errors.length,
+    recovered: result.recovered,
+    queued: result.queued,
+    sent: result.sent,
+    pending: result.pending,
+  });
+  return result;
 }
 
 async function resumeSync() {
@@ -1212,11 +1399,9 @@ function messageKey(message) {
   return `${message.provider}:${message.conversation_id}:${message.id}`;
 }
 
-async function queueMessages(messages, shouldFlush, advanceCursor = true) {
+async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
   const stored = await readStorage([
-    STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccount,
     STORAGE.pending,
     STORAGE.scanState,
     STORAGE.targetCursor,
@@ -1224,14 +1409,14 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
     STORAGE.serverInitialized,
     STORAGE.status,
   ]);
-  const context = currentAccountContext(stored);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+  if (!hasLocalConsent(stored[STORAGE.consent])) {
     await recordLog("debug", "queue", "ignored", "Captured messages were ignored because setup is incomplete.", {
       consented: hasLocalConsent(stored[STORAGE.consent]),
-      configured: Boolean(context),
+      provider_account_id: context.account.provider_account_id,
     });
     return { queued: 0, sent: 0, pending: 0 };
   }
+  const scopedMessages = Array.isArray(messages) ? messages : [];
   let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const migrated = scanState?.version !== 1;
@@ -1246,7 +1431,7 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   const known = new Set(pending.map(messageKey));
   const eligible = [];
   const added = [];
-  for (const message of messages ?? []) {
+  for (const message of scopedMessages) {
     const cursor = scanState.conversations?.[message?.conversation_id];
     if (message?.provider !== "shopee"
       || !isAfterMessageCursor(message, cursor)) continue;
@@ -1297,7 +1482,8 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   const latestCursor = latestMessageCursor(eligible);
   if (!shouldFlush || !hasServerInitialized(stored)) {
     await recordLog("info", "queue", "stored", "Recovered messages stored for delivery.", {
-      received: Array.isArray(messages) ? messages.length : 0,
+      provider_account_id: context.account.provider_account_id,
+      received: scopedMessages.length,
       queued: added.length,
       pending: pendingCount,
       deferred: deferCursorAdvance,
@@ -1310,9 +1496,10 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
       latest_cursor: latestCursor,
     };
   }
-  const delivered = await attemptDelivery({ resetBackoff: false });
+  const delivered = await attemptDelivery(context, { resetBackoff: false });
   await recordLog("info", "queue", "realtime_processed", "Realtime messages processed.", {
-    received: Array.isArray(messages) ? messages.length : 0,
+    provider_account_id: context.account.provider_account_id,
+    received: scopedMessages.length,
     queued: added.length,
     sent: delivered.sent,
     pending: delivered.pending,
@@ -1326,15 +1513,76 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
   };
 }
 
+async function queueMessages(messages, shouldFlush, advanceCursor = true) {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+  ]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) {
+    await recordLog("debug", "queue", "ignored", "Captured messages were ignored because setup is incomplete.", {
+      consented: false,
+    });
+    return { queued: 0, sent: 0, pending: 0 };
+  }
+  const contexts = new Map(
+    configuredAccountContexts(stored).map((context) => [context.account.provider_account_id, context]),
+  );
+  const groups = new Map();
+  let missingAccountMessages = 0;
+  let unconfiguredAccountMessages = 0;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const providerAccountId = messageProviderAccountId(message);
+    if (!providerAccountId) {
+      missingAccountMessages += 1;
+      continue;
+    }
+    if (!contexts.has(providerAccountId)) {
+      unconfiguredAccountMessages += 1;
+      continue;
+    }
+    const group = groups.get(providerAccountId) ?? [];
+    group.push(message);
+    groups.set(providerAccountId, group);
+  }
+  if (missingAccountMessages) {
+    await recordLog("warn", "queue", "account_missing", "Captured messages were ignored because Shopee did not identify their Shop ID.", {
+      received: missingAccountMessages,
+    });
+  }
+  if (unconfiguredAccountMessages) {
+    await recordLog("warn", "queue", "account_not_configured", "Captured messages were ignored because their Shop ID is not configured.", {
+      received: unconfiguredAccountMessages,
+    });
+  }
+  const results = [];
+  for (const [providerAccountId, group] of groups) {
+    results.push(await queueMessagesForContext(
+      group,
+      contexts.get(providerAccountId),
+      shouldFlush,
+      advanceCursor,
+    ));
+  }
+  return {
+    queued: results.reduce((total, result) => total + (Number(result.queued) || 0), 0),
+    sent: results.reduce((total, result) => total + (Number(result.sent) || 0), 0),
+    pending: results.reduce((total, result) => total + (Number(result.pending) || 0), 0),
+    deferred: results.some((result) => result.deferred),
+    ...(results.length === 1 ? { latest_cursor: results[0].latest_cursor } : {}),
+  };
+}
+
 function batchFor(messages, installId) {
   const conversations = new Map();
   for (const message of messages) {
+    const participant = participantForBatch(message.participant);
     const conversation = conversations.get(message.conversation_id) ?? {
       id: message.conversation_id,
-      ...(message.participant ? { participants: [message.participant] } : {}),
+      ...(participant ? { participants: [participant] } : {}),
       messages: []
     };
-    if (!conversation.participants && message.participant) conversation.participants = [message.participant];
+    if (!conversation.participants && participant) conversation.participants = [participant];
     conversation.messages.push({
       id: message.id,
       event_timestamp: message.event_timestamp,
@@ -1456,60 +1704,61 @@ async function flushLogBatch() {
     STORAGE.logs,
     STORAGE.logOutbox,
     STORAGE.config,
-    STORAGE.detectedAccount,
+    STORAGE.detectedAccounts,
     STORAGE.consent,
     STORAGE.serverInitialized,
     STORAGE.logUploadEnabled,
   ]);
-  const context = currentAccountContext(stored);
   if (!hasLocalConsent(stored[STORAGE.consent])
     || !hasServerInitialized(stored)
-    || stored[STORAGE.logUploadEnabled] !== true
-    || !context?.config.logs_url) return;
+    || stored[STORAGE.logUploadEnabled] !== true) return;
+  const contexts = configuredAccountContexts(stored).filter((context) => context.config.logs_url);
+  if (!contexts.length) return;
   const queuedIds = new Set(Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []);
-  const selected = pruneLogs(stored[STORAGE.logs])
-    .filter((entry) => entry.account_key === context.key && queuedIds.has(entry.id))
-    .reverse()
-    .slice(0, MAX_LOG_UPLOAD_BATCH);
-  if (!selected.length) return;
-
-  try {
-    await sendLogBatch(context, selected);
-    const deliveredIds = new Set(selected.map((entry) => entry.id));
-    let remaining = 0;
-    await mutateLogs(async () => {
-      const current = await readStorage([STORAGE.logOutbox]);
-      const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
-        .filter((id) => !deliveredIds.has(id));
-      remaining = outbox.length;
-      await writeStorage({ [STORAGE.logOutbox]: outbox });
-    });
-    await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
-      count: selected.length,
-    }, { remote: false });
-    if (remaining) void scheduleLogUpload();
-  } catch (error) {
-    await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", diagnosticErrorDetails(error), {
-      remote: false,
-    });
-    void scheduleLogUpload(5);
+  const entries = pruneLogs(stored[STORAGE.logs]);
+  let remaining = queuedIds.size;
+  for (const context of contexts) {
+    const selected = entries
+      .filter((entry) => entry.account_key === context.key && queuedIds.has(entry.id))
+      .reverse()
+      .slice(0, MAX_LOG_UPLOAD_BATCH);
+    if (!selected.length) continue;
+    try {
+      await sendLogBatch(context, selected);
+      const deliveredIds = new Set(selected.map((entry) => entry.id));
+      await mutateLogs(async () => {
+        const current = await readStorage([STORAGE.logOutbox]);
+        const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
+          .filter((id) => !deliveredIds.has(id));
+        remaining = outbox.length;
+        await writeStorage({ [STORAGE.logOutbox]: outbox });
+      });
+      await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
+        provider_account_id: context.account.provider_account_id,
+        count: selected.length,
+      }, { remote: false });
+    } catch (error) {
+      await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
+        provider_account_id: context.account.provider_account_id,
+        ...diagnosticErrorDetails(error),
+      }, { remote: false });
+    }
   }
+  if (remaining) void scheduleLogUpload(5);
 }
 
-async function flushBatch(signal) {
+async function flushBatch(context, signal) {
   const stored = await readStorage([
-    STORAGE.config,
     STORAGE.consent,
     STORAGE.pending,
-    STORAGE.detectedAccount,
     STORAGE.status,
   ]);
-  const context = currentAccountContext(stored);
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !pending.length) {
     return { sent: 0, pending: pending.length };
   }
   await recordLog("debug", "delivery", "batch_preparing", "Preparing queued message batch.", {
+    provider_account_id: context.account.provider_account_id,
     pending: pending.length,
   });
   let selected;
@@ -1538,7 +1787,9 @@ async function flushBatch(signal) {
       delivery_error: message,
       delivery_error_at: new Date().toISOString(),
     });
-    await recordUnexpected("message_delivery", error);
+    await recordUnexpected("message_delivery", error, {
+      provider_account_id: context.account.provider_account_id,
+    });
     throw error;
   }
   const deliveredKeys = new Set(selected.map(messageKey));
@@ -1558,18 +1809,19 @@ async function flushBatch(signal) {
     }),
   });
   await recordLog("info", "delivery", "batch_sent", "Message batch accepted by target server.", {
+    provider_account_id: context.account.provider_account_id,
     sent: selected.length,
     pending: remaining.length,
   });
   return { sent: selected.length, pending: remaining.length };
 }
 
-async function flushAll(signal) {
+async function flushAll(context, signal) {
   let sent = 0;
   let pending = 0;
   for (let batch = 0; batch < MAX_FLUSH_BATCHES; batch += 1) {
     throwIfSyncCancelled(signal);
-    const result = await flushBatch(signal);
+    const result = await flushBatch(context, signal);
     sent += result.sent;
     pending = result.pending;
     if (!pending || !result.sent) break;
@@ -1578,7 +1830,6 @@ async function flushAll(signal) {
 }
 
 async function resetDeliveryRetry(context) {
-  await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
   const stored = await readStorage([STORAGE.deliveryRetry]);
   await writeStorage({
     [STORAGE.deliveryRetry]: writeAccountState(
@@ -1587,6 +1838,10 @@ async function resetDeliveryRetry(context) {
       { attempt: 0, next_at: null },
     ),
   });
+}
+
+async function clearDeliveryRetryAlarm() {
+  await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
 }
 
 async function clearDeliveryRetry(context) {
@@ -1613,22 +1868,23 @@ async function scheduleDeliveryRetry(context) {
       },
     ),
   });
-  chrome.alarms.create(DELIVERY_RETRY_ALARM, { when: nextAt });
+  const existingAlarm = await chrome.alarms.get(DELIVERY_RETRY_ALARM);
+  if (!existingAlarm || Number(existingAlarm.scheduledTime) > nextAt) {
+    chrome.alarms.create(DELIVERY_RETRY_ALARM, { when: nextAt });
+  }
   await recordLog("warn", "delivery", "retry_scheduled", "Message delivery retry scheduled.", {
+    provider_account_id: context.account.provider_account_id,
     attempt: attempt + 1,
     delay_ms: deliveryRetryDelay(attempt),
   });
 }
 
-async function attemptDelivery({ resetBackoff, signal }) {
+async function attemptDelivery(context, { resetBackoff, signal }) {
   const stored = await readStorage([
-    STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccount,
     STORAGE.pending,
     STORAGE.serverInitialized,
   ]);
-  const context = currentAccountContext(stored);
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
@@ -1642,7 +1898,7 @@ async function attemptDelivery({ resetBackoff, signal }) {
     return { sent: 0, pending: 0 };
   }
   try {
-    const result = await flushAll(signal);
+    const result = await flushAll(context, signal);
     if (result.pending) await scheduleDeliveryRetry(context);
     else await clearDeliveryRetry(context);
     await updateScopedState(STORAGE.status, context.key, { pending: result.pending });
@@ -1658,10 +1914,26 @@ async function attemptDelivery({ resetBackoff, signal }) {
   }
 }
 
+async function attemptAllDeliveries(options) {
+  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+  const contexts = configuredAccountContexts(stored);
+  const results = [];
+  for (const context of contexts) {
+    results.push(await attemptDelivery(context, options));
+  }
+  const pending = results.reduce((total, result) => total + (Number(result.pending) || 0), 0);
+  if (!pending) await clearDeliveryRetryAlarm();
+  return {
+    sent: results.reduce((total, result) => total + (Number(result.sent) || 0), 0),
+    pending,
+    accounts: results.length,
+  };
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === DELIVERY_RETRY_ALARM) {
     void recordLog("info", "delivery", "retry_started", "Retrying queued message delivery.");
-    void exclusive(() => attemptDelivery({ resetBackoff: false }));
+    void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
   } else if (alarm.name === LOG_UPLOAD_ALARM) {
     void flushLogBatch();
   }

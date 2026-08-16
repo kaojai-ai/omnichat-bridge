@@ -91,10 +91,12 @@ messages from its local queue only when the counts cover every message sent.
 - **Contract checks are split across repositories.** A shared conformance suite
   should verify signing, limits, acknowledgement, deduplication, and schema
   compatibility against every target implementation.
-- **One active account per browser context.** A version 2 configuration can
-  contain multiple shops, and local delivery state is partitioned per shop, but
-  the extension operates only the account that Shopee currently exposes in
-  that Chrome profile.
+- **Shop configuration still requires operator setup.** A version 2
+  configuration can contain multiple shops, and the extension can discover and
+  display all shops Shopee exposes in that Chrome profile. Every detected shop
+  with a matching configuration is synced and connected independently; local
+  delivery, scan, and live state remain partitioned per shop. Detected shops
+  without a matching configuration remain visible as `NEED CONFIG`.
 
 ## Flow 2: Reply back to the messaging provider
 

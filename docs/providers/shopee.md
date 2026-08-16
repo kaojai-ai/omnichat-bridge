@@ -35,8 +35,8 @@ messages after the seller returns.
 
 ## Optional live replies
 
-Your server can send one text, image, or product reply to the active seller
-browser. Text and image replies may quote an existing provider message. The
+Your server can send one text, image, or product reply to a configured seller
+browser Shop ID. Text and image replies may quote an existing provider message. The
 extension fills and submits Shopee's visible composer; it does not call a
 Shopee private message API and never transfers Shopee cookies, passwords, or
 login tokens.
@@ -80,9 +80,12 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose the `extension/` folder.
-3. Accept the disclosure and let the extension detect the Shop ID.
-4. Open **Configure**, add the detected Shop ID or import a configuration file,
-   and select **Sync messages**.
+3. Accept the disclosure and let the extension detect the available Shop IDs.
+4. Open **Configure** and add or import the detected Shop IDs you want to sync.
+5. Select **Sync messages**. Every detected Shop ID with a matching
+   configuration is ready for realtime capture, recovery, delivery, and live
+   replies. Shops without a matching configuration remain visible as
+   **NEED CONFIG**.
 
 ```json
 {
@@ -113,8 +116,9 @@ logs in signed HTTPS batches after **Sync messages** is selected. It never
 includes message text, message bodies, cookies, browser credentials, HMAC
 secrets, request headers, or URLs.
 
-Never commit a real connection setup. The destination server must map the
+Never commit a real connection setup. The destination server must map each
 detected Shop ID to the same HMAC secret. Import replaces the complete saved
 account list; export includes the HMAC secrets and must be stored securely.
+Shopee user IDs are display-only metadata and are never used as Shop IDs.
 
 See the main [safety and account-risk notice](../../README.md).
