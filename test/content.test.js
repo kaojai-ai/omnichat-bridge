@@ -4,9 +4,10 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/content.js", import.meta.url), "utf8");
+const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge() {
+function contentBridge(pathname = "/new-webchat/conversations") {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
@@ -14,7 +15,7 @@ function contentBridge() {
   const window = {
     location: {
       origin: "https://seller.shopee.co.th",
-      pathname: "/new-webchat/conversations",
+      pathname,
     },
     addEventListener(type, listener) {
       windowListeners.set(type, [...(windowListeners.get(type) ?? []), listener]);
@@ -54,6 +55,7 @@ function contentBridge() {
     atob,
   });
   window.window = window;
+  vm.runInContext(urlSource, context);
   vm.runInContext(source, context);
 
   const sendCommand = (message) => new Promise((resolve) => {
@@ -150,13 +152,15 @@ test("ignores best-effort messages after the extension context is invalidated", 
   );
 });
 
-test("requests automatic sync when the chat bridge loads", async () => {
-  const bridge = contentBridge();
+for (const pathname of ["/new-webchat/conversations", "/webchat/conversations"]) {
+  test(`requests automatic sync when ${pathname} loads`, async () => {
+    const bridge = contentBridge(pathname);
 
-  await new Promise((resolve) => setTimeout(resolve, 550));
+    await new Promise((resolve) => setTimeout(resolve, 550));
 
-  assert.equal(
-    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
-    1,
-  );
-});
+    assert.equal(
+      bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
+      1,
+    );
+  });
+}

@@ -25,7 +25,9 @@ import {
   writeAccountState,
   writeStorage,
 } from "./lib/storage.js";
+import "./lib/shopee-url.js";
 
+const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
 const SHOPEE_URL_PATTERN = "https://seller.shopee.co.th/*";
 const SHOPEE_CHAT_URL = "https://seller.shopee.co.th/new-webchat/conversations";
 const MAX_BATCH_MESSAGES = 500;
@@ -512,7 +514,7 @@ async function commandTab(context) {
 async function selectCommandTab(context, tabId) {
   if (!Number.isInteger(tabId)) return;
   const tab = await chrome.tabs.get(tabId);
-  if (!Number.isInteger(tab.id) || !tab.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations")) {
+  if (!Number.isInteger(tab.id) || !isShopeeChatUrl(tab.url)) {
     throw new Error("Open Shopee Seller Chat in this tab first.");
   }
   const stored = await readStorage([STORAGE.commandTab]);
@@ -731,7 +733,7 @@ async function connectionStatusSnapshot(context) {
     STORAGE.status,
   ]);
   const tabs = (await chrome.tabs.query({ url: SHOPEE_URL_PATTERN }))
-    .filter((tab) => tab.url?.startsWith(SHOPEE_CHAT_URL));
+    .filter((tab) => isShopeeChatUrl(tab.url));
   let providerStatus = null;
   for (const tab of tabs) {
     if (!tab.id) continue;
@@ -934,7 +936,7 @@ async function detectOpenShopeeAccount() {
 
 async function findShopeeChatTab() {
   const tabs = await chrome.tabs.query({ url: SHOPEE_URL_PATTERN });
-  return tabs.find((item) => item.id && item.url?.includes("/new-webchat/conversations"));
+  return tabs.find((item) => item.id && isShopeeChatUrl(item.url));
 }
 
 async function ensureShopeeBridge(tabId) {

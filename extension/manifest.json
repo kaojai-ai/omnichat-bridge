@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Omnichat Bridge",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Syncs Shopee seller chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "storage"],
   "host_permissions": ["https://seller.shopee.co.th/*"],
@@ -16,7 +16,7 @@
     },
     {
       "matches": ["https://seller.shopee.co.th/*"],
-      "js": ["lib/shopee.js", "content.js"],
+      "js": ["lib/shopee-url.js", "lib/shopee.js", "content.js"],
       "run_at": "document_start"
     }
   ],

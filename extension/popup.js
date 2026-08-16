@@ -15,7 +15,9 @@ import {
   readStorage,
   writeStorage,
 } from "./lib/storage.js";
+import "./lib/shopee-url.js";
 
+const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const SYNC_PHASE_LABELS = {
   preparing: "Preparing sync…",
@@ -523,7 +525,7 @@ async function load() {
     : "";
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
-  isShopeeChatTab = activeTab?.url?.startsWith("https://seller.shopee.co.th/new-webchat/conversations") ?? false;
+  isShopeeChatTab = isShopeeChatUrl(activeTab?.url);
   const showConsentScreen = !consented;
   const showHintScreen = consented && !isShopeeChatTab;
   const showDashboard = consented && isShopeeChatTab;
