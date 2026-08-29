@@ -1,6 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
   const BRIDGE_PROTOCOL_VERSION = 2;
+  const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
+  if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
@@ -135,17 +137,20 @@
       stored.local_consent?.accepted_at
       && accountId
       && stored.detected_accounts?.some(
-        (account) => account?.provider === "shopee"
+        (account) => account?.provider === providerAdapter.id
           && account.provider_account_id === accountId,
       )
       && stored.config?.accounts?.some(
-        (account) => account.provider === "shopee"
+        (account) => account.provider === providerAdapter.id
           && account.provider_account_id === accountId,
       ),
     );
   }
 
   async function requestRecovery(providerAccountId) {
+    if (!providerAdapter.supports("message_recovery")) {
+      return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
+    }
     const accountId = String(providerAccountId ?? "").trim();
     if (!await isConfigured(accountId)) {
       log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
@@ -192,6 +197,9 @@
   }
 
   async function requestAccountDetection() {
+    if (!providerAdapter.supports("account_detection")) {
+      return { ok: false, error: `${providerAdapter.displayName} does not support account detection.` };
+    }
     const requestId = crypto.randomUUID();
     const result = new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -206,24 +214,7 @@
   }
 
   function normalizedAccount(message) {
-    const accountId = String(message?.provider_account_id ?? "").trim();
-    if (!accountId) return null;
-    const avatarUrl = typeof message?.avatar_url === "string" && message.avatar_url.startsWith("https://")
-      ? message.avatar_url
-      : undefined;
-    return {
-      provider: "shopee",
-      provider_account_id: accountId,
-      ...(typeof message?.display_name === "string" && message.display_name.trim() ? { display_name: message.display_name.trim() } : {}),
-      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
-      ...(typeof message?.provider_user_id === "string" && message.provider_user_id.trim()
-        ? { provider_user_id: message.provider_user_id.trim() }
-        : {}),
-      ...(typeof message?.shop_user_id === "string" && message.shop_user_id.trim()
-        ? { shop_user_id: message.shop_user_id.trim() }
-        : {}),
-      detected_at: new Date().toISOString(),
-    };
+    return providerAdapter.normalizeAccount(message);
   }
 
   async function handleAccountsDetected(message) {
@@ -290,7 +281,7 @@
     touchRecovery(message.request_id);
     try {
       const messages = addConversationProfile(
-        globalThis.OmnichatShopee.parseShopeeMessages(message.body, "history_recovery")
+        providerAdapter.normalizeMessages(message.body, "history_recovery")
       ).map((item) => ({
         ...item,
         ...(item.provider_account_id || !message.provider_account_id
@@ -391,7 +382,7 @@
 
   async function handleRealtimeEvent(body) {
     const messages = [];
-    for (const message of addConversationProfile(globalThis.OmnichatShopee.parseShopeeMessages(body, "realtime_socket"))) {
+    for (const message of addConversationProfile(providerAdapter.normalizeMessages(body, "realtime_socket"))) {
       const apiSend = findPendingApiSend(message);
       if (apiSend) {
         apiSend.pending.echo = message;
@@ -534,7 +525,7 @@
       }
       imagePayload = { image_bytes: imageBytes, image_type: imageType };
     }
-    if (!["send_text", "send_image", "send_product"].includes(commandType)) {
+    if (!providerAdapter.supportsSend(commandType)) {
       return { ok: false, error: "Unsupported Shopee reply command." };
     }
     return new Promise((resolve) => {

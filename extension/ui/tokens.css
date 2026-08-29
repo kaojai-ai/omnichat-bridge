@@ -1,0 +1,19 @@
+:root {
+  color-scheme: light;
+  --bridge-color-accent: #ee4d2d;
+  --bridge-color-accent-hover: #d93f20;
+  --bridge-color-text: #182230;
+  --bridge-color-text-muted: #667085;
+  --bridge-color-border: #e4e7ec;
+  --bridge-color-surface: #ffffff;
+  --bridge-color-surface-subtle: #f8fafc;
+  --bridge-color-accent-soft: #fff4f0;
+  --bridge-color-success: #067647;
+  --bridge-color-success-soft: #ecfdf3;
+  --bridge-color-warning: #b54708;
+  --bridge-color-warning-soft: #fffaeb;
+  --bridge-color-danger: #b42318;
+  --bridge-radius-control: 8px;
+  --bridge-radius-card: 10px;
+  --bridge-font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}

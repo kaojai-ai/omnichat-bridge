@@ -5,6 +5,8 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/content.js", import.meta.url), "utf8");
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
+const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
+const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function contentBridge(pathname = "/new-webchat/conversations") {
@@ -56,6 +58,8 @@ function contentBridge(pathname = "/new-webchat/conversations") {
   });
   window.window = window;
   vm.runInContext(urlSource, context);
+  vm.runInContext(adaptersSource, context);
+  vm.runInContext(shopeeAdapterSource, context);
   vm.runInContext(source, context);
 
   const sendCommand = (message) => new Promise((resolve) => {

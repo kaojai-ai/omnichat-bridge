@@ -29,10 +29,14 @@ import {
   writeStorage,
 } from "./lib/storage.js";
 import "./lib/shopee-url.js";
+import "./lib/provider-adapters.js";
+import "./lib/shopee-adapter.js";
 
-const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
-const SHOPEE_URL_PATTERN = "https://seller.shopee.co.th/*";
-const SHOPEE_CHAT_URL = "https://seller.shopee.co.th/new-webchat/conversations";
+const providerAdapters = globalThis.OmnichatProviderAdapters;
+const shopeeAdapter = providerAdapters.get("shopee");
+const isShopeeChatUrl = shopeeAdapter.matchesUrl;
+const SHOPEE_URL_PATTERN = shopeeAdapter.tabQueryPattern;
+const SHOPEE_CHAT_URL = shopeeAdapter.chatUrl;
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
@@ -486,8 +490,8 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
-  if (["send_text", "send_image", "send_product"].includes(message?.type)) {
-    void sendViaShopeeApi(message).then(
+  if (providerAdapterForCommand(message)?.supportsSend(message?.type)) {
+    void sendViaProvider(message).then(
       (result) => respond(result),
       async (error) => {
         await recordUnexpected("send_message", error, {
@@ -547,6 +551,20 @@ async function commandTab(context) {
   return tab;
 }
 
+function providerAdapterForCommand(message) {
+  const provider = typeof message?.provider === "string" && message.provider.trim()
+    ? message.provider.trim()
+    : "shopee";
+  return providerAdapters.get(provider);
+}
+
+async function sendViaProvider(message) {
+  const adapter = providerAdapterForCommand(message);
+  if (!adapter?.supportsSend(message?.type)) return { ok: false, error: "Unsupported provider reply command." };
+  if (adapter.id === shopeeAdapter.id) return sendViaShopeeApi(message);
+  return { ok: false, error: `${adapter.displayName} replies are not implemented.` };
+}
+
 async function selectCommandTab(context, tabId) {
   if (!Number.isInteger(tabId)) return;
   const tab = await chrome.tabs.get(tabId);
@@ -562,7 +580,7 @@ async function sendViaShopeeApi(message) {
   const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
   const clientMessageId = typeof message?.client_message_id === "string" ? message.client_message_id : "";
   const commandType = typeof message?.type === "string" ? message.type : "";
-  if (!requestId || !conversationId || !["send_text", "send_image", "send_product"].includes(commandType)) {
+  if (!requestId || !conversationId || !shopeeAdapter.supportsSend(commandType)) {
     return { ok: false, error: "Reply command is invalid." };
   }
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
@@ -949,11 +967,12 @@ async function ensureAccountLiveConnection(context) {
 async function handleLiveCommand(raw, context, socket) {
   let command;
   try { command = JSON.parse(raw); } catch { return; }
-  if (!["send_text", "send_image", "send_product"].includes(command?.type) || command.provider !== "shopee") return;
+  const adapter = providerAdapterForCommand(command);
+  if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== context.account.provider_account_id) return;
   let result;
   try {
-    result = await exclusive(() => sendViaShopeeApi(command));
+    result = await exclusive(() => sendViaProvider(command));
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -1100,6 +1119,9 @@ function throwIfSyncCancelled(signal) {
 }
 
 async function syncOpenShopee(control, providerAccountId) {
+  if (!shopeeAdapter.supports("message_recovery")) {
+    throw new Error(`${shopeeAdapter.displayName} does not support message recovery.`);
+  }
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
   const tab = await findShopeeChatTab();

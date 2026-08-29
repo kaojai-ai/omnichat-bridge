@@ -40,6 +40,10 @@
   state.accountDiscoveryPromise ??= null;
   state.automaticAccountDiscoveryStarted ??= false;
 
+  const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
+  if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
+  const { accountsFromPayload, conversationItems } = providerAdapter;
+
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
   const postLog = (level, event, message, details = {}) => post({
     type: "diagnostic_log",
@@ -57,86 +61,7 @@
     const normalized = String(input).trim();
     return normalized || null;
   };
-  const firstValue = (item, keys) => keys.map((key) => value(item[key])).find(Boolean) ?? null;
-  const httpsUrl = (input) => {
-    const url = value(input);
-    if (!url) return null;
-    try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; }
-  };
-  const accountFromShop = (shop, user = null) => {
-    if (!shop || typeof shop !== "object" || Array.isArray(shop)) return null;
-    const id = firstValue(shop, ["id", "shop_id", "shopid", "shopId"]);
-    if (!id) return null;
-    const name = firstValue(shop, ["name", "shop_name", "shopname", "shopName", "nickname"]);
-    const avatarUrl = httpsUrl(firstValue(shop, ["logo", "shop_logo", "shop_avatar", "avatar", "avatar_url", "avatarUrl", "profile_image", "profile_picture"]));
-    const providerUserId = firstValue(user ?? {}, ["id"]);
-    const shopUserId = firstValue(shop, ["user_id"]);
-    return {
-      provider: "shopee",
-      provider_account_id: id,
-      ...(name ? { display_name: name } : {}),
-      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
-      ...(providerUserId ? { provider_user_id: providerUserId } : {}),
-      ...(shopUserId ? { shop_user_id: shopUserId } : {}),
-    };
-  };
-  const accountFromConversation = (conversation) => {
-    if (!conversation || typeof conversation !== "object" || Array.isArray(conversation)) return null;
-    const id = firstValue(conversation, ["shop_id", "shopid", "shopId"]);
-    if (!id) return null;
-    const name = firstValue(conversation, ["shop_name", "shopname", "shopName"]);
-    return {
-      provider: "shopee",
-      provider_account_id: id,
-      ...(name ? { display_name: name } : {}),
-    };
-  };
-  const accountFromShopId = (id) => {
-    const normalized = value(id);
-    return normalized ? { provider: "shopee", provider_account_id: normalized } : null;
-  };
-  const shopListItems = (body) => {
-    if (Array.isArray(body)) {
-      return body.filter((item) => firstValue(item ?? {}, ["name", "shop_name", "shopname", "shopName"]));
-    }
-    for (const candidate of [body?.shops, body?.data?.shops, body?.shop_list, body?.data?.shop_list]) {
-      if (Array.isArray(candidate)) return candidate;
-    }
-    return [];
-  };
-  const conversationItems = (body) => {
-    if (Array.isArray(body)) return body;
-    for (const candidate of [
-      body?.conversations,
-      body?.items,
-      body?.data?.conversations,
-      body?.data?.items,
-      body?.data,
-    ]) {
-      if (Array.isArray(candidate)) return candidate;
-    }
-    return [];
-  };
-  const accountsFromBody = (body) => {
-    const accounts = [];
-    const add = (account) => {
-      if (!account?.provider_account_id) return;
-      const existing = accounts.find((item) => item.provider_account_id === account.provider_account_id);
-      if (existing) {
-        Object.assign(existing, Object.fromEntries(Object.entries(account).filter(([, item]) => item)));
-      } else {
-        accounts.push(account);
-      }
-    };
-    add(accountFromShop(body?.shop, body?.user));
-    for (const shop of shopListItems(body)) add(accountFromShop(shop, body?.user));
-    for (const conversation of conversationItems(body)) add(accountFromConversation(conversation));
-    const shopIds = Array.isArray(body?.ShopIds)
-      ? body.ShopIds
-      : Array.isArray(body?.shop_ids) ? body.shop_ids : [];
-    for (const id of shopIds) add(accountFromShopId(id));
-    return accounts;
-  };
+  const firstValue = (item, keys) => keys.map((key) => value(item?.[key])).find(Boolean) ?? null;
   const postAccounts = (requestId) => {
     const accounts = [...state.accountsById.values()];
     if (!accounts.length) return false;
@@ -159,12 +84,12 @@
   };
   const captureAccount = (response) => {
     void response.clone().json().then((body) => {
-      mergeAccounts(accountsFromBody(body));
+      mergeAccounts(accountsFromPayload(body));
     }).catch(() => undefined);
   };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
-      mergeAccounts(accountsFromBody(body));
+      mergeAccounts(accountsFromPayload(body));
       captureProfiles(conversationItems(body));
     }).catch(() => undefined);
   };
@@ -224,7 +149,7 @@
     if (!response.ok) return [];
     const body = await response.json().catch(() => null);
     if (!body) return [];
-    const accounts = accountsFromBody(body);
+    const accounts = accountsFromPayload(body);
     mergeAccounts(accounts, null, false);
     captureProfiles(conversationItems(body));
     return accounts;
@@ -481,7 +406,7 @@
     const commandType = String(message?.command_type ?? "").trim();
     const clientMessageId = String(message?.client_message_id ?? requestId).trim();
     let routing = state.conversationsById.get(conversationId);
-    if (!requestId || !conversationId || !clientMessageId || !["send_text", "send_image", "send_product"].includes(commandType)) {
+    if (!requestId || !conversationId || !clientMessageId || !providerAdapter.supportsSend(commandType)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
     }
@@ -620,7 +545,7 @@
     if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
     const body = await response.json();
     const allItems = conversationItems(body);
-    mergeAccounts(accountsFromBody(body), null, publish);
+    mergeAccounts(accountsFromPayload(body), null, publish);
     captureProfiles(allItems);
     const items = accountId
       ? allItems.filter((conversation) => String(conversation?.shop_id ?? "").trim() === accountId)

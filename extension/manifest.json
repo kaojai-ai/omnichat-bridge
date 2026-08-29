@@ -10,13 +10,13 @@
   "content_scripts": [
     {
       "matches": ["https://seller.shopee.co.th/*"],
-      "js": ["shopee-realtime.js"],
+      "js": ["lib/shopee-url.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "shopee-realtime.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["https://seller.shopee.co.th/*"],
-      "js": ["lib/shopee-url.js", "lib/shopee.js", "content.js"],
+      "js": ["lib/shopee-url.js", "lib/shopee.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "content.js"],
       "run_at": "document_start"
     }
   ],

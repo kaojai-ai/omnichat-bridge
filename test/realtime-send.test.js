@@ -4,6 +4,9 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
+const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
+const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
+const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
@@ -64,6 +67,9 @@ function createBridge() {
     setTimeout,
     clearTimeout,
   });
+  vm.runInContext(urlSource, context);
+  vm.runInContext(adaptersSource, context);
+  vm.runInContext(shopeeAdapterSource, context);
   vm.runInContext(source, context);
 
   async function send(message) {

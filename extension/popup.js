@@ -16,8 +16,11 @@ import {
   writeStorage,
 } from "./lib/storage.js";
 import "./lib/shopee-url.js";
+import "./lib/provider-adapters.js";
+import "./lib/shopee-adapter.js";
 
-const { isShopeeChatUrl } = globalThis.OmnichatShopeeUrl;
+const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
+const isShopeeChatUrl = shopeeAdapter.matchesUrl;
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const SYNC_PHASE_LABELS = {
   preparing: "Preparing sync…",
@@ -29,7 +32,7 @@ const SYNC_PHASE_LABELS = {
 const sampleConfig = {
   version: CONFIG_VERSION,
   accounts: [{
-    provider: "shopee",
+    provider: shopeeAdapter.id,
     provider_account_id: "123456789",
     events_url: "https://your-server.example.com/omnichat/events",
     commands_url: "https://your-server.example.com/omnichat/tickets",
@@ -278,7 +281,7 @@ function renderDetectedAccounts() {
   accountList.replaceChildren();
   accountListEmpty.hidden = accounts.length !== 0;
   for (const account of accounts) {
-    const id = account.provider === "shopee" ? String(account.provider_account_id ?? "").trim() : "";
+    const id = account.provider === shopeeAdapter.id ? String(account.provider_account_id ?? "").trim() : "";
     if (!id) continue;
     const cardState = accountRowStatus(account);
     const card = document.createElement("div");
@@ -290,7 +293,7 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const name = document.createElement("strong");
-    name.textContent = account.display_name || "Shopee shop";
+    name.textContent = account.display_name || shopeeAdapter.accountName;
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -302,8 +305,8 @@ function renderDetectedAccounts() {
       statusLabel.setAttribute(
         "aria-label",
         cardState.action === "config"
-          ? `Open settings to configure ${account.display_name || "Shopee shop"}`
-          : `Open error logs for ${account.display_name || "Shopee shop"}`,
+          ? `Open settings to configure ${account.display_name || shopeeAdapter.accountName}`
+          : `Open error logs for ${account.display_name || shopeeAdapter.accountName}`,
       );
       statusLabel.addEventListener("click", (event) => {
         event.preventDefault();
@@ -480,7 +483,7 @@ function safeFilenamePart(value, fallback) {
 }
 
 function logsFilename() {
-  const provider = "shopee";
+  const provider = shopeeAdapter.id;
   const accountId = "all-shops";
   const version = safeFilenamePart(chrome.runtime.getManifest().version, "unknown");
   const timestamp = new Date().toISOString().replaceAll(":", "-");
