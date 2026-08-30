@@ -1,4 +1,5 @@
 export const CONFIG_VERSION = 2;
+const SUPPORTED_PROVIDER = "shopee";
 
 function requiredString(value, message) {
   if (typeof value !== "string" || !value.trim()) throw new Error(message);
@@ -26,7 +27,7 @@ export function validateAccountConfig(value) {
     throw new Error("Account configuration must be an object.");
   }
   const provider = requiredString(value.provider, "Account provider is required.");
-  if (provider !== "shopee") throw new Error("Only Shopee is supported.");
+  if (provider !== SUPPORTED_PROVIDER) throw new Error("Only Shopee is supported.");
   const provider_account_id = requiredString(value.provider_account_id, "Shop ID is required.");
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
@@ -52,7 +53,16 @@ export function validateConfigFile(value) {
   if (value?.version !== CONFIG_VERSION || !Array.isArray(value.accounts)) {
     throw new Error(`Configuration file must be version ${CONFIG_VERSION} with an accounts list.`);
   }
-  const accounts = value.accounts.map(validateAccountConfig);
+  const accounts = value.accounts
+    .filter((account) => (
+      !account
+      || typeof account !== "object"
+      || Array.isArray(account)
+      || !Object.hasOwn(account, "provider")
+      || account.provider === undefined
+      || account.provider === SUPPORTED_PROVIDER
+    ))
+    .map(validateAccountConfig);
   const keys = accounts.map((account) => accountKey(account.provider, account.provider_account_id));
   if (new Set(keys).size !== keys.length) throw new Error("Configuration contains duplicate accounts.");
   return { version: CONFIG_VERSION, accounts };

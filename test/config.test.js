@@ -3,6 +3,44 @@ import test from "node:test";
 
 import { accountOrigins, validateConfigFile } from "../extension/lib/config.js";
 
+test("accepts the shared configuration and ignores other providers and extra fields", () => {
+  const config = validateConfigFile({
+    version: 2,
+    generated_by: "admin",
+    accounts: [
+      {
+        provider: "line_oa",
+        provider_account_id: "channel-1",
+        tenant_id: "tenant-1",
+        bot_id: "bot-1",
+        sync_key_url: "https://sync.kaojai.ai/api/line-oa-sync/v3",
+        hmac_secret: "line-secret",
+      },
+      {
+        provider: "shopee",
+        provider_account_id: "123",
+        events_url: "https://collector.example.com/omnichat/events",
+        commands_url: "https://admin.example.com/omnichat/tickets",
+        hmac_secret: "local-secret",
+        tenant_id: "tenant-1",
+        bot_id: "bot-1",
+        unknown_field: "ignored",
+      },
+    ],
+  });
+
+  assert.deepEqual(config, {
+    version: 2,
+    accounts: [{
+      provider: "shopee",
+      provider_account_id: "123",
+      events_url: "https://collector.example.com/omnichat/events",
+      commands_url: "https://admin.example.com/omnichat/tickets",
+      hmac_secret: "local-secret",
+    }],
+  });
+});
+
 test("optional image and logs URLs are validated and included in requested origins", () => {
   const config = validateConfigFile({
     version: 2,

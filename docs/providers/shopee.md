@@ -116,6 +116,11 @@ logs in signed HTTPS batches after **Sync messages** is selected. It never
 includes message text, message bodies, cookies, browser credentials, HMAC
 secrets, request headers, or URLs.
 
+The shared configuration may also contain LINE OA accounts and other provider
+fields. Omnichat Bridge skips accounts for unsupported providers and ignores
+unknown fields. For each Shopee account, `provider`, `provider_account_id`,
+`events_url`, `commands_url`, and `hmac_secret` remain required.
+
 Never commit a real connection setup. The destination server must map each
 detected Shop ID to the same HMAC secret. Import replaces the complete saved
 account list; export includes the HMAC secrets and must be stored securely.
