@@ -12,10 +12,12 @@ import {
 } from "./lib/sync-state.js";
 import {
   createLogEntry,
+  diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
+import { deliverWithIsolation } from "./lib/delivery-isolation.js";
 import {
   LEGACY_STORAGE,
   STORAGE,
@@ -49,7 +51,11 @@ const INBOUND_LOG_MESSAGES = {
   "popup.configuration_saved": "Configuration saved.",
   "popup.configuration_imported": "Configuration imported.",
   "popup.configuration_exported": "Configuration exported.",
+  "popup.async_error": "Extension async operation failed.",
+  "popup.uncaught_error": "Unhandled popup error.",
   "provider.content_loaded": "Shopee content bridge loaded.",
+  "provider.async_error": "Extension async operation failed.",
+  "provider.uncaught_error": "Unhandled provider error.",
   "provider.recovery_not_configured": "Provider recovery could not start because setup is incomplete.",
   "provider.checkpoint_failed": "Could not load the sync checkpoint.",
   "provider.recovery_requested": "Provider recovery request sent.",
@@ -145,30 +151,28 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
   }
 }
 
-function diagnosticErrorDetails(error) {
-  const text = error instanceof Error ? error.message : String(error);
-  const status = text.match(/\b([1-5]\d{2})\b/)?.[1];
-  let category = "unknown";
-  if (/not configured|setup is required/i.test(text)) category = "not_configured";
-  else if (/timed out|timeout/i.test(text)) category = "timeout";
-  else if (/429|rate limit/i.test(text)) category = "rate_limited";
-  else if (/401|403|unauthorized|forbidden/i.test(text)) category = "unauthorized";
-  else if (/acknowledgement is invalid/i.test(text)) category = "invalid_acknowledgement";
-  else if (/refresh|loading|initializ/i.test(text)) category = "provider_not_ready";
-  else if (/returned [5]\d{2}|unavailable|network|fetch/i.test(text)) category = "network";
-  return {
-    category,
-    ...(status ? { http_status: Number(status) } : {}),
-    ...(error instanceof Error ? { error_type: error.name } : {}),
-  };
-}
-
 async function recordUnexpected(scope, error, details = {}) {
   await recordLog("error", scope, "failed", "Extension operation failed.", {
     ...diagnosticErrorDetails(error),
     ...details,
   });
 }
+
+function registerGlobalErrorHandlers() {
+  if (typeof globalThis.addEventListener !== "function") return;
+  globalThis.addEventListener("error", (event) => {
+    void recordUnexpected("runtime", event?.error ?? event?.message ?? "Unhandled runtime error.", {
+      error_kind: "error_event",
+    });
+  });
+  globalThis.addEventListener("unhandledrejection", (event) => {
+    void recordUnexpected("runtime", event?.reason ?? "Unhandled promise rejection.", {
+      error_kind: "unhandled_rejection",
+    });
+  });
+}
+
+registerGlobalErrorHandlers();
 
 function detectedAccounts(stored) {
   return Array.isArray(stored[STORAGE.detectedAccounts])
@@ -1653,11 +1657,18 @@ async function signedRequest(config, providerAccountId, payload, signal) {
     let code = "";
     try {
       const error = await response.json();
-      if (typeof error?.error === "string") code = `: ${error.error}`;
+      code = [error?.error, error?.error_code, error?.code]
+        .find((value) => typeof value === "string" && value.trim())
+        ?.trim() ?? "";
     } catch {
       // The HTTP status remains actionable when the target has no JSON error body.
     }
-    throw new Error(`Target server returned ${response.status}${code}`);
+    const failure = new Error(
+      "Target server returned " + response.status + (code ? ": " + code : ""),
+    );
+    failure.http_status = response.status;
+    if (code) failure.server_error_code = code;
+    throw failure;
   }
   return response.json();
 }
@@ -1747,6 +1758,43 @@ async function flushLogBatch() {
   if (remaining) void scheduleLogUpload(5);
 }
 
+function isMessageScopedDeliveryError(error) {
+  return error?.server_error_code === "provider_account_not_participant"
+    || error?.server_error_code === "batch_too_large";
+}
+
+function messageIdentifier(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function messageReference(message) {
+  return `${message.conversation_id}\u0000${message.id}`;
+}
+
+async function deliveryMessageDetails(context, message, index) {
+  const details = {
+    provider_account_id: context.account.provider_account_id,
+    message_key: messageKey(message),
+    message_id: messageIdentifier(message.id),
+    conversation_id: messageIdentifier(message.conversation_id),
+    sender_id: messageIdentifier(message.sender_id),
+    recipient_id: messageIdentifier(message.recipient_id),
+    sender_account_id: messageIdentifier(message.sender_account_id),
+    recipient_account_id: messageIdentifier(message.recipient_account_id),
+    type: messageIdentifier(message.type),
+    event_timestamp: messageIdentifier(message.event_timestamp),
+    capture_method: messageIdentifier(message.capture_method),
+    message_index: index + 1,
+  };
+  try {
+    details.message_fingerprint = await sha256Hex(JSON.stringify(details));
+  } catch {
+    // The identifiers above are still useful if Web Crypto is unavailable.
+  }
+  return details;
+}
+
 async function flushBatch(context, signal) {
   const stored = await readStorage([
     STORAGE.consent,
@@ -1762,24 +1810,11 @@ async function flushBatch(context, signal) {
     pending: pending.length,
   });
   let selected;
-  let payload;
+  let installId;
   try {
-    const installId = await installationId();
+    installId = await installationId();
     selected = selectBatchMessages(pending);
     if (!selected.length) return { sent: 0, pending: pending.length };
-    payload = batchFor(selected, installId);
-    if (JSON.stringify(payload).length > 1_000_000) throw new Error("Queued batch exceeds the 1 MiB limit.");
-    const acknowledgement = await signedRequest(
-      context.config,
-      context.account.provider_account_id,
-      payload,
-      signal,
-    );
-    if (acknowledgement.schema !== "omnichat.message_batch_ack"
-      || acknowledgement.batch_id !== payload.batch_id
-      || acknowledgement.accepted_messages + acknowledgement.duplicate_messages !== selected.length) {
-      throw new Error("Target server acknowledgement is invalid.");
-    }
   } catch (error) {
     if (signal?.aborted) throw syncCancelledError();
     const message = error instanceof Error ? error.message : String(error);
@@ -1787,14 +1822,62 @@ async function flushBatch(context, signal) {
       delivery_error: message,
       delivery_error_at: new Date().toISOString(),
     });
-    await recordUnexpected("message_delivery", error, {
-      provider_account_id: context.account.provider_account_id,
-    });
     throw error;
   }
-  const deliveredKeys = new Set(selected.map(messageKey));
+  const outcome = await deliverWithIsolation(
+    selected,
+    async (messages) => {
+      const payload = batchFor(messages, installId);
+      if (JSON.stringify(payload).length > 1_000_000) {
+        const error = new Error("Queued batch exceeds the 1 MiB limit.");
+        error.server_error_code = "batch_too_large";
+        throw error;
+      }
+      const acknowledgement = await signedRequest(
+        context.config,
+        context.account.provider_account_id,
+        payload,
+        signal,
+      );
+      if (acknowledgement.schema !== "omnichat.message_batch_ack"
+        || acknowledgement.batch_id !== payload.batch_id
+        || !Number.isInteger(acknowledgement.accepted_messages)
+        || !Number.isInteger(acknowledgement.duplicate_messages)) {
+        throw new Error("Target server acknowledgement is invalid.");
+      }
+      const skippedMessages = Array.isArray(acknowledgement.skipped_messages)
+        ? acknowledgement.skipped_messages
+        : [];
+      const groupReferences = new Set(messages.map(messageReference));
+      const skippedByReference = new Map();
+      for (const skipped of skippedMessages) {
+        const reference = `${skipped?.conversation_id ?? ""}\u0000${skipped?.message_id ?? ""}`;
+        if (!skipped?.conversation_id
+          || !skipped?.message_id
+          || !groupReferences.has(reference)
+          || skippedByReference.has(reference)) {
+          throw new Error("Target server acknowledgement is invalid.");
+        }
+        skippedByReference.set(reference, skipped);
+      }
+      if (acknowledgement.accepted_messages
+        + acknowledgement.duplicate_messages
+        + skippedMessages.length !== messages.length) {
+        throw new Error("Target server acknowledgement is invalid.");
+      }
+      return {
+        skipped: messages.filter((message) => skippedByReference.has(messageReference(message))),
+      };
+    },
+    isMessageScopedDeliveryError,
+  );
+  const deliveredKeys = new Set(outcome.delivered.map(messageKey));
+  for (const message of outcome.skipped) deliveredKeys.add(messageKey(message));
   const remaining = pending.filter((message) => !deliveredKeys.has(messageKey(message)));
   const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+  const failure = outcome.failed[0]?.error ?? outcome.blocked?.error ?? null;
+  const failureMessage = failure instanceof Error ? failure.message : String(failure ?? "");
+  const now = new Date().toISOString();
   await writeStorage({
     [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, remaining),
     [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, {
@@ -1802,18 +1885,47 @@ async function flushBatch(context, signal) {
       state: ["discovering", "syncing"].includes(currentStatus.state)
         ? currentStatus.state
         : "watching",
-      delivery_error: null,
-      delivery_error_at: null,
-      last_delivery_at: new Date().toISOString(),
+      delivery_error: failureMessage || null,
+      delivery_error_at: failureMessage ? now : null,
+      ...(outcome.delivered.length ? { last_delivery_at: now } : {}),
       pending: remaining.length,
     }),
   });
-  await recordLog("info", "delivery", "batch_sent", "Message batch accepted by target server.", {
-    provider_account_id: context.account.provider_account_id,
-    sent: selected.length,
+  for (const failed of outcome.failed) {
+    await recordUnexpected("message_delivery", failed.error, {
+      ...(await deliveryMessageDetails(
+        context,
+        failed.message,
+        selected.indexOf(failed.message),
+      )),
+    });
+  }
+  for (const message of outcome.skipped) {
+    await recordLog("error", "message_delivery", "server_skipped", "Target server skipped a malformed message.", {
+      ...(await deliveryMessageDetails(context, message, selected.indexOf(message))),
+      server_error_code: "provider_account_not_participant",
+    });
+  }
+  if (outcome.blocked) {
+    await recordUnexpected("message_delivery", outcome.blocked.error, {
+      provider_account_id: context.account.provider_account_id,
+      batch_size: outcome.blocked.messages.length,
+    });
+  }
+  if (outcome.delivered.length) {
+    await recordLog("info", "delivery", "batch_sent", "Message batch accepted by target server.", {
+      provider_account_id: context.account.provider_account_id,
+      sent: outcome.delivered.length,
+      pending: remaining.length,
+    });
+  }
+  return {
+    sent: outcome.delivered.length,
     pending: remaining.length,
-  });
-  return { sent: selected.length, pending: remaining.length };
+    skipped: outcome.skipped.length,
+    failed: outcome.failed.length,
+    blocked: Boolean(outcome.blocked),
+  };
 }
 
 async function flushAll(context, signal) {
@@ -1824,7 +1936,7 @@ async function flushAll(context, signal) {
     const result = await flushBatch(context, signal);
     sent += result.sent;
     pending = result.pending;
-    if (!pending || !result.sent) break;
+    if (!pending || (!result.sent && !result.skipped) || result.failed || result.blocked) break;
   }
   return { sent, pending };
 }
@@ -1905,6 +2017,9 @@ async function attemptDelivery(context, { resetBackoff, signal }) {
     return result;
   } catch (error) {
     if (signal?.aborted) throw syncCancelledError();
+    await recordUnexpected("message_delivery", error, {
+      provider_account_id: context.account.provider_account_id,
+    });
     await scheduleDeliveryRetry(context);
     return {
       sent: 0,

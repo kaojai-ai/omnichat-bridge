@@ -48,6 +48,46 @@
     message,
     details,
   });
+
+  function errorDetails(error) {
+    return {
+      error_type: typeof error?.name === "string" && error.name.trim() ? error.name : "Error",
+      error_message: typeof error?.message === "string" && error.message.trim()
+        ? error.message
+        : String(error ?? "Unknown error."),
+      ...(typeof error?.stack === "string" && error.stack.trim() ? { error_stack: error.stack } : {}),
+    };
+  }
+
+  function logAsyncError(scope, error, details = {}) {
+    postLog("error", "async_error", "Extension async operation failed.", {
+      scope,
+      ...errorDetails(error),
+      ...details,
+    });
+  }
+
+  function observeAsync(scope, task, details = {}) {
+    return Promise.resolve()
+      .then(task)
+      .catch((error) => logAsyncError(scope, error, details));
+  }
+
+  window.addEventListener("error", (event) => {
+    postLog("error", "uncaught_error", "Unhandled provider error.", {
+      scope: "provider",
+      error_kind: "error_event",
+      ...errorDetails(event?.error ?? event?.message),
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    postLog("error", "uncaught_error", "Unhandled provider error.", {
+      scope: "provider",
+      error_kind: "unhandled_rejection",
+      ...errorDetails(event?.reason),
+    });
+  });
+
   const pathOf = (url) => {
     try { return new URL(url, window.location.href).pathname; }
     catch { return ""; }
@@ -160,13 +200,13 @@
   const captureAccount = (response) => {
     void response.clone().json().then((body) => {
       mergeAccounts(accountsFromBody(body));
-    }).catch(() => undefined);
+    }).catch((error) => logAsyncError("account_capture", error));
   };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
       mergeAccounts(accountsFromBody(body));
       captureProfiles(conversationItems(body));
-    }).catch(() => undefined);
+    }).catch((error) => logAsyncError("accounts_capture", error));
   };
   const templateFrom = async (request) => ({
     url: request.url,
@@ -222,7 +262,13 @@
     delete init.body;
     const response = await state.nativeFetch(new Request(url, init));
     if (!response.ok) return [];
-    const body = await response.json().catch(() => null);
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      logAsyncError("shop_list_response_parse", error);
+      return [];
+    }
     if (!body) return [];
     const accounts = accountsFromBody(body);
     mergeAccounts(accounts, null, false);
@@ -279,7 +325,7 @@
     state.automaticAccountDiscoveryStarted = true;
     void discoverAccounts().catch((error) => {
       postLog("warn", "shop_discovery_failed", "Shopee shop discovery failed during page startup.", {
-        error_type: error instanceof Error ? error.constructor.name : "Error",
+        ...errorDetails(error),
       });
     });
   };
@@ -339,7 +385,9 @@
         headers: Object.fromEntries(request.headers.entries()),
         payload,
       };
-    } catch { /* Ignore malformed non-message requests. */ }
+    } catch (error) {
+      logAsyncError("send_template_capture", error);
+    }
   };
 
   const senderTemplate = (routing, requestId, clientMessageId) => {
@@ -422,7 +470,12 @@
   const captureShopeeSendError = async (request, response) => {
     const clientMessageId = new URL(request.url).searchParams.get("uuid");
     if (!clientMessageId) return;
-    const body = await response.clone().json().catch(() => null);
+    let body = null;
+    try {
+      body = await response.clone().json();
+    } catch (error) {
+      logAsyncError("send_error_response_parse", error);
+    }
     const error = shopeeError(body);
     if (!error) return;
     state.sendErrorsByClientMessageId.set(clientMessageId, error);
@@ -490,7 +543,8 @@
         await waitForTemplate();
         await fetchConversations();
         routing = state.conversationsById.get(conversationId);
-      } catch {
+      } catch (error) {
+        logAsyncError("send_routing", error, { conversation_id: conversationId });
         // The routing error below gives the user the actionable next step.
       }
     }
@@ -540,9 +594,15 @@
       const url = new URL(template.url);
       url.searchParams.set("uuid", clientMessageId);
       const response = await poster(url.toString(), payload, { headers: template.headers });
-      const body = typeof response?.clone === "function"
-        ? await response.clone().json().catch(() => null)
-        : response;
+      let body = response;
+      if (typeof response?.clone === "function") {
+        try {
+          body = await response.clone().json();
+        } catch (error) {
+          logAsyncError("send_response_parse", error);
+          body = null;
+        }
+      }
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId) ?? shopeeError(body);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
       if (response?.ok === false || providerReason) {
@@ -561,6 +621,10 @@
     } catch (error) {
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
+      logAsyncError("send_api", error, {
+        conversation_id: conversationId,
+        command_type: commandType,
+      });
       post({ type: "api_send_result", request_id: requestId, ok: false, error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
     }
   };
@@ -677,6 +741,7 @@
       await discoverAccounts();
       if (!postAccounts(requestId)) throw new Error("Shopee Shop ID was not found.");
     } catch (error) {
+      logAsyncError("account_detection", error);
       post({ type: "account_detection_failed", request_id: requestId, error: String(error) });
     }
   }
@@ -938,6 +1003,7 @@
       postLog("error", "recovery_failed", error instanceof Error ? error.message : String(error), {
         conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
+        ...errorDetails(error),
       });
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: String(error) });
     } finally {
@@ -955,7 +1021,7 @@
       const request = new Request(input, init);
       const path = pathOf(request.url);
       if (path === "/webchat/api/v1.2/messages" && request.method === "POST") {
-        void captureSendTemplate(request);
+        void observeAsync("send_template_capture", () => captureSendTemplate(request));
       }
       const response = await originalFetch(input, init);
       if (path === "/webchat/api/v1.2/messages" && request.method === "POST") {
@@ -963,18 +1029,18 @@
       }
       if (request.method === "GET") captureActiveConversation(request);
       if (path.startsWith("/webchat/api/") && request.method === "GET" && !state.getTemplate) {
-        void templateFrom(request).then((template) => {
+        void observeAsync("history_template", () => templateFrom(request).then((template) => {
           state.getTemplate = template;
           postLog("info", "history_template_ready", "Shopee history request template captured.");
-        });
+        }));
       }
       if ([CONVERSATIONS_PATH, SUBACCOUNT_CONVERSATIONS_PATH].includes(path)) {
-        void templateFrom(request).then((template) => {
+        void observeAsync("conversation_template", () => templateFrom(request).then((template) => {
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
           startAutomaticAccountDiscovery();
-        });
+        }));
         captureAccounts(response);
       } else if (path === SHOP_LIST_PATH) {
         captureAccounts(response);
@@ -1025,29 +1091,33 @@
           ? JSON.parse(envelope.message_content)
           : envelope.message_content;
         post({ type: "realtime_event", body });
-      } catch { /* Ignore malformed provider events. */ }
+      } catch (error) {
+        logAsyncError("socket_message", error);
+      }
     });
   }
 
-  observeSocket();
-  setInterval(observeSocket, SOCKET_OBSERVER_INTERVAL_MS);
+  void observeAsync("socket_observer", observeSocket);
+  setInterval(() => {
+    void observeAsync("socket_observer", observeSocket);
+  }, SOCKET_OBSERVER_INTERVAL_MS);
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "sync") {
       const providerAccountId = value(event.data.provider_account_id);
-      void recover(event.data.request_id, {
+      void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
         ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
-      });
+      }));
     } else if (event.data.type === "cancel_sync") {
       if (state.recoveryRequestId === event.data.request_id) {
         state.recoveryAbortController?.abort();
       }
     } else if (event.data.type === "detect_account") {
-      void detectCurrentAccount(event.data.request_id);
+      void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api") {
-      void sendApi(event.data);
+      void observeAsync("send_api", () => sendApi(event.data));
     } else if (event.data.type === "recovery_ack") {
       const acknowledge = state.acknowledgements.get(event.data.request_id);
       if (acknowledge) {

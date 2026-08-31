@@ -5,7 +5,7 @@ import {
   findAccountConfig,
   validateConfigFile,
 } from "./lib/config.js";
-import { pruneLogs } from "./lib/logs.js";
+import { diagnosticErrorDetails, pruneLogs } from "./lib/logs.js";
 import {
   STORAGE,
   hasLocalConsent,
@@ -98,15 +98,41 @@ let viewingPrivacy = false;
 let isShopeeChatTab = false;
 
 function logPopup(level, event, message, details = {}) {
-  void chrome.runtime.sendMessage({
-    type: "record_log",
-    level,
-    area: "popup",
-    event,
-    message,
-    details,
-  }).catch(() => undefined);
+  try {
+    void chrome.runtime.sendMessage({
+      type: "record_log",
+      level,
+      area: "popup",
+      event,
+      message,
+      details,
+    }).catch(() => undefined);
+  } catch {
+    // Logging must not throw while handling another popup error.
+  }
 }
+
+function reportPopupError(scope, error) {
+  logPopup("error", "async_error", "Extension async operation failed.", {
+    scope,
+    ...diagnosticErrorDetails(error),
+  });
+}
+
+window.addEventListener("error", (event) => {
+  logPopup("error", "uncaught_error", "Unhandled popup error.", {
+    scope: "popup",
+    error_kind: "error_event",
+    ...diagnosticErrorDetails(event?.error ?? event?.message),
+  });
+});
+window.addEventListener("unhandledrejection", (event) => {
+  logPopup("error", "uncaught_error", "Unhandled popup error.", {
+    scope: "popup",
+    error_kind: "unhandled_rejection",
+    ...diagnosticErrorDetails(event?.reason),
+  });
+});
 
 function setHeaderActionsVisible(visible) {
   for (const button of [openLogsButton, settingsButton]) {
@@ -551,7 +577,8 @@ async function detectAccount() {
       renderDashboard();
       return true;
     }
-  } catch {
+  } catch (error) {
+    reportPopupError("detect_account", error);
     // The retry state below remains available.
   }
   setLeaderStatus("NEED CONFIG", "warning", "config");
@@ -673,7 +700,7 @@ async function load() {
   renderConsentScreen();
   renderDashboard();
   renderLogs();
-  if (consented) void detectAccount();
+  if (consented) void detectAccount().catch((error) => reportPopupError("detect_account", error));
 }
 
 consentInput.addEventListener("change", () => {
@@ -931,8 +958,8 @@ installationIdButton.addEventListener("click", async () => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
-    void refreshStoredState();
+    void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
   }
 });
 
-void load();
+void load().catch((error) => reportPopupError("load", error));

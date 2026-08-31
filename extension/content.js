@@ -40,6 +40,45 @@
     }).catch(() => undefined);
   };
 
+  function errorDetails(error) {
+    return {
+      error_type: typeof error?.name === "string" && error.name.trim() ? error.name : "Error",
+      error_message: typeof error?.message === "string" && error.message.trim()
+        ? error.message
+        : String(error ?? "Unknown error."),
+      ...(typeof error?.stack === "string" && error.stack.trim() ? { error_stack: error.stack } : {}),
+    };
+  }
+
+  function logAsyncError(scope, error, details = {}) {
+    log("error", "async_error", "Extension async operation failed.", {
+      scope,
+      ...errorDetails(error),
+      ...details,
+    });
+  }
+
+  function observeAsync(scope, task, details = {}) {
+    return Promise.resolve()
+      .then(task)
+      .catch((error) => logAsyncError(scope, error, details));
+  }
+
+  window.addEventListener("error", (event) => {
+    log("error", "uncaught_error", "Unhandled provider error.", {
+      scope: "content",
+      error_kind: "error_event",
+      ...errorDetails(event?.error ?? event?.message),
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    log("error", "uncaught_error", "Unhandled provider error.", {
+      scope: "content",
+      error_kind: "unhandled_rejection",
+      ...errorDetails(event?.reason),
+    });
+  });
+
   const outboundKey = (conversationId, text) => `${conversationId}\u0000${text}`;
   const recoveryIdFrom = (requestId) => String(requestId ?? "").split(":")[0];
 
@@ -322,6 +361,7 @@
     } catch (error) {
       log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error), {
         provider_account_id: message.provider_account_id,
+        ...errorDetails(error),
       });
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
@@ -344,6 +384,10 @@
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save sync cursor." }),
       });
     } catch (error) {
+      logAsyncError("recovery_cursor", error, {
+        provider_account_id: message.provider_account_id,
+        conversation_id: message.conversation_id,
+      });
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -363,6 +407,9 @@
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save bootstrap state." }),
       });
     } catch (error) {
+      logAsyncError("recovery_bootstrap", error, {
+        provider_account_id: message.provider_account_id,
+      });
       post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -375,7 +422,9 @@
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
       total_conversations: message.total_conversations
-    });
+    }, (error) => logAsyncError("sync_progress", error, {
+      provider_account_id: message.provider_account_id,
+    }));
   }
 
   function requestResumeSync() {
@@ -579,9 +628,9 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
-      void handleRealtimeEvent(event.data.body);
+      void observeAsync("realtime_event", () => handleRealtimeEvent(event.data.body));
     } else if (event.data.type === "accounts_detected" || event.data.type === "account_detected") {
-      void handleAccountsDetected(event.data);
+      void observeAsync("accounts_detected", () => handleAccountsDetected(event.data));
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
     } else if (event.data.type === "profiles_detected") {
@@ -608,11 +657,11 @@
     } else if (event.data.type === "recovery_activity") {
       touchRecovery(event.data.request_id);
     } else if (event.data.type === "recovery_batch") {
-      void handleRecoveryBatch(event.data);
+      void observeAsync("recovery_batch", () => handleRecoveryBatch(event.data));
     } else if (event.data.type === "recovery_cursor") {
-      void handleRecoveryCursor(event.data);
+      void observeAsync("recovery_cursor", () => handleRecoveryCursor(event.data));
     } else if (event.data.type === "recovery_bootstrap") {
-      void handleBootstrapSelection(event.data);
+      void observeAsync("recovery_bootstrap", () => handleBootstrapSelection(event.data));
     } else if (event.data.type === "recovery_progress") {
       handleRecoveryProgress(event.data);
     } else if (event.data.type === "sync_plan") {
@@ -623,9 +672,11 @@
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
         conversations: event.data.conversations,
-      });
+      }, (error) => logAsyncError("sync_plan", error, {
+        provider_account_id: event.data.provider_account_id,
+      }));
     } else if (event.data.type === "recovery_complete") {
-      void handleRecoveryComplete(event.data);
+      void observeAsync("recovery_complete", () => handleRecoveryComplete(event.data));
     } else if (event.data.type === "api_send_result") {
       handleApiSendResult(event.data);
     }
