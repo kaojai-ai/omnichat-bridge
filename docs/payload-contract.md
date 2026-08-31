@@ -89,8 +89,25 @@ and message participants match that account.
 }
 ```
 
+For a Shopee message where neither side, or both sides, identify the
+authenticated Shop, the server logs the malformed message at error level,
+skips that message, and continues the rest of the batch. When this happens,
+the acknowledgement adds the skipped message references:
+
+```json
+{
+  "skipped_messages": [
+    {
+      "conversation_id": "conversation-1",
+      "message_id": "message-2",
+      "reason": "provider_account_not_participant"
+    }
+  ]
+}
+```
+
 The extension removes messages from its local queue only when the batch ID
-matches and accepted plus duplicate messages equals the number sent.
+matches and accepted, duplicate, and skipped messages cover the number sent.
 
 ## Connection status
 

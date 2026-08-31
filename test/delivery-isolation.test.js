@@ -28,6 +28,20 @@ test("isolates one message-scoped delivery failure", async () => {
   assert.ok(calls.length > 1);
 });
 
+test("keeps server-skipped messages out of delivered messages", async () => {
+  const messages = [message("skipped"), message("accepted")];
+  const result = await deliverWithIsolation(
+    messages,
+    async () => ({ skipped: [messages[0]] }),
+    isScopedFailure,
+  );
+
+  assert.deepEqual(result.delivered.map((item) => item.id), ["accepted"]);
+  assert.deepEqual(result.skipped.map((item) => item.id), ["skipped"]);
+  assert.deepEqual(result.failed, []);
+  assert.equal(result.blocked, null);
+});
+
 test("does not split a non-message-scoped failure", async () => {
   const messages = [message("one"), message("two")];
   const calls = [];
