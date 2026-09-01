@@ -5,9 +5,10 @@ The bridge has two independent flows:
 1. **Send observed messages to the target server.**
 2. **Send a live reply from the target server back to the messaging provider.**
 
-The current implementation supports Shopee first. Provider-specific capture
-must stay behind an adapter; delivery and security contracts should remain
-provider-neutral where practical.
+The current implementation ships Shopee first. Provider-specific capture,
+page matching, account normalization, and configuration validation stay behind
+an adapter; delivery and security contracts remain provider-neutral where
+practical.
 
 ## Flow 1: Send messages to the target server
 
@@ -42,6 +43,8 @@ inbound destination, and outbound destination. See the
 - `commands_url` is the HTTPS command-channel endpoint.
 - `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
+- The provider adapter owns any provider-specific configuration validation and
+  server-origin resolution.
 - Import replaces the saved account list. Export includes HMAC secrets.
 - Pending messages, cursors, status, and resume timing are partitioned by the
   same account identity.
@@ -81,8 +84,9 @@ acknowledgement covers every message sent.
 
 ### Technical debt
 
-- **Provider behavior is brittle.** Shopee page, socket, or response changes can
-  break capture and recovery without notice.
+- **Provider behavior is brittle.** The adapter boundary isolates provider
+  changes, but Shopee page, socket, or response changes can still break
+  capture and recovery without notice.
 - **Local state has one device boundary.** Clearing extension storage loses the
   pending queue and acknowledged cursor. Multiple installations do not
   coordinate their cursors.
@@ -94,12 +98,13 @@ acknowledgement covers every message sent.
 - **Contract checks are split across repositories.** A shared conformance suite
   should verify signing, limits, acknowledgement, deduplication, and schema
   compatibility against every target implementation.
-- **Shop configuration still requires operator setup.** A version 2
-  configuration can contain multiple shops, and the extension can discover and
-  display all shops Shopee exposes in that Chrome profile. Every detected shop
-  with a matching configuration is synced and connected independently; local
-  delivery, scan, and live state remain partitioned per shop. Detected shops
-  without a matching configuration remain visible as `NEED CONFIG`.
+- **Provider configuration still requires operator setup.** A version 2
+  configuration can contain multiple provider accounts. The extension can
+  discover and display accounts exposed by the installed adapters. Every
+  detected account with a matching configuration is synced and connected
+  independently; local delivery, scan, and live state remain partitioned by
+  provider account. Accounts without a matching configuration remain visible
+  as `NEED CONFIG`.
 
 ## Flow 2: Reply back to the messaging provider
 

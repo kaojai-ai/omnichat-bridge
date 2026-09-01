@@ -29,11 +29,28 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
   const adapter = registry.forUrl("https://seller.shopee.co.th/webchat/conversations?conversation_id=1");
 
   assert.equal(adapter.id, "shopee");
+  assert.equal(registry.forPage("https://seller.shopee.co.th/settings").id, "shopee");
   assert.equal(adapter.supports("account_detection"), true);
   assert.equal(adapter.supports("message_recovery"), true);
   assert.equal(adapter.supportsSend("send_text"), true);
   assert.equal(adapter.supportsSend("send_sticker"), false);
   assert.equal(registry.forUrl("https://manager.line.biz/"), null);
+});
+
+test("allows a future provider to own config validation and page matching", () => {
+  const registry = createRegistry();
+  const adapter = registry.register({
+    id: "line_oa",
+    matchesUrl: (url) => String(url).startsWith("https://chat.line.biz/"),
+    matchesPage: (url) => String(url).startsWith("https://chat.line.biz/"),
+    validateConfig: () => ({ provider: "line_oa" }),
+    configOrigins: () => ["https://sync.example.com/events"],
+  });
+
+  assert.equal(registry.get(" line_oa "), adapter);
+  assert.deepEqual(plain(registry.list().map((item) => item.id)), ["shopee", "line_oa"]);
+  assert.equal(registry.forUrl("https://chat.line.biz/bot-1"), adapter);
+  assert.equal(registry.forPage("https://chat.line.biz/bot-1"), adapter);
 });
 
 test("extracts and merges Shopee accounts without treating user IDs as shop IDs", () => {

@@ -73,6 +73,13 @@ When Chrome is closed, the bridge is closed too. No tiny robot keeps working ove
 | Shopee Seller Chat | Supported | [Setup and behavior](docs/providers/shopee.md) |
 | LINE Official Account | Under development | - |
 
+The version 2 configuration envelope is shared across provider integrations.
+Unknown top-level and account fields are ignored, and accounts for providers
+without a registered Bridge adapter are skipped. Malformed account records and
+malformed accounts for a registered provider remain errors. This release ships
+the Shopee adapter; a new provider still needs its own adapter, page runtime,
+and manifest content-script entry.
+
 ## Contributing
 
 Issues and pull requests are welcome. Before changing delivery or reply

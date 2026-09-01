@@ -2,8 +2,21 @@
 
 Provider adapters send `omnichat.message_batch` version 1 to:
 
-The envelope is provider-shaped, but the current extension and receiver support
-`shopee` only.
+The envelope is provider-shaped and the delivery contract is provider-neutral.
+The current package ships the `shopee` adapter; other providers can use the
+same envelope after their adapter and receiver support are published.
+
+## Configuration envelope
+
+The Bridge accepts configuration version 2 as a shared provider envelope. It
+ignores unknown top-level and account fields, and skips accounts whose provider
+does not have a registered adapter. It still rejects malformed records and
+malformed accounts for a registered provider. Registered adapters own their
+provider-specific validation and requested server origins.
+
+For Shopee, `provider`, `provider_account_id`, `events_url`, `commands_url`,
+and `hmac_secret` remain required. `image_server_url` and `logs_url` are
+optional HTTPS endpoints.
 
 ```http
 POST /omnichat/events

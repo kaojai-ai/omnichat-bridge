@@ -4,6 +4,15 @@ const SHOPEE_CHAT_PATHS = [
   "/webchat/conversations",
 ];
 
+function isShopeePageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === SHOPEE_SELLER_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
 function normalizedPath(pathname) {
   return pathname.replace(/\/+$/, "") || "/";
 }
@@ -24,4 +33,8 @@ function isShopeeChatUrl(value) {
   }
 }
 
-globalThis.OmnichatShopeeUrl = { isShopeeChatPath, isShopeeChatUrl };
+globalThis.OmnichatShopeeUrl = {
+  isShopeePageUrl,
+  isShopeeChatPath,
+  isShopeeChatUrl,
+};

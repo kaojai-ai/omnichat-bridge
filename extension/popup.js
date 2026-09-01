@@ -19,13 +19,13 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 
+const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
-const isShopeeChatUrl = shopeeAdapter.matchesUrl;
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const SYNC_PHASE_LABELS = {
   preparing: "Preparing sync…",
   sending_pending: "Sending previously queued messages…",
-  loading_conversations: "Loading Shopee conversations…",
+  loading_conversations: "Loading provider conversations…",
   checking_conversations: "Checking conversations for missed messages…",
   sending_recovered: "Sending recovered messages to your server…",
 };
@@ -98,7 +98,16 @@ let popupTabId = null;
 let storedConsent = null;
 let storedDeviceName = "";
 let viewingPrivacy = false;
-let isShopeeChatTab = false;
+let activeProviderAdapter = null;
+let isProviderChatTab = false;
+
+function adapterForAccount(account) {
+  return providerAdapters.get(account?.provider);
+}
+
+function accountLabel(adapter) {
+  return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
+}
 
 function logPopup(level, event, message, details = {}) {
   try {
@@ -271,18 +280,18 @@ function accountRowStatus(account) {
   return { label: "READY", state: "ready" };
 }
 
-async function copyShopId(providerAccountId, button, valueElement) {
+async function copyProviderAccountId(providerAccountId, label, button, valueElement) {
   try {
     await navigator.clipboard.writeText(providerAccountId);
     valueElement.textContent = "Copied";
     button.title = "Copied";
   } catch {
     valueElement.textContent = "Could not copy";
-    button.title = "Could not copy Shop ID";
+    button.title = `Could not copy ${label} ID`;
   }
   setTimeout(() => {
     valueElement.textContent = providerAccountId;
-    button.title = "Copy Shop ID";
+    button.title = `Copy ${label} ID`;
   }, 900);
 }
 
@@ -303,15 +312,20 @@ function createCopyIcon() {
 }
 
 function renderDetectedAccounts() {
-  const accounts = detectedAccounts;
+  const accounts = detectedAccounts.filter((account) => (
+    adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
+  ));
   accountList.replaceChildren();
   accountListEmpty.hidden = accounts.length !== 0;
   for (const account of accounts) {
-    const id = account.provider === shopeeAdapter.id ? String(account.provider_account_id ?? "").trim() : "";
+    const adapter = adapterForAccount(account);
+    const id = adapter ? String(account.provider_account_id ?? "").trim() : "";
     if (!id) continue;
+    const label = accountLabel(adapter);
     const cardState = accountRowStatus(account);
     const card = document.createElement("div");
     card.className = "account-row";
+    card.dataset.provider = account.provider;
     card.dataset.accountId = id;
     card.dataset.state = cardState.state;
     const select = document.createElement("div");
@@ -319,7 +333,7 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const name = document.createElement("strong");
-    name.textContent = account.display_name || shopeeAdapter.accountName;
+    name.textContent = account.display_name || label;
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -331,8 +345,8 @@ function renderDetectedAccounts() {
       statusLabel.setAttribute(
         "aria-label",
         cardState.action === "config"
-          ? `Open settings to configure ${account.display_name || shopeeAdapter.accountName}`
-          : `Open error logs for ${account.display_name || shopeeAdapter.accountName}`,
+          ? `Open settings to configure ${account.display_name || label}`
+          : `Open error logs for ${account.display_name || label}`,
       );
       statusLabel.addEventListener("click", (event) => {
         event.preventDefault();
@@ -346,12 +360,12 @@ function renderDetectedAccounts() {
     const shopId = document.createElement("button");
     shopId.type = "button";
     shopId.className = "account-row-id";
-    shopId.title = "Copy Shop ID";
-    shopId.setAttribute("aria-label", `Copy Shop ID ${id}`);
+    shopId.title = `Copy ${label} ID`;
+    shopId.setAttribute("aria-label", `Copy ${label} ID ${id}`);
     const shopIdValue = document.createElement("span");
     shopIdValue.textContent = id;
     shopId.append(shopIdValue, createCopyIcon());
-    shopId.addEventListener("click", () => void copyShopId(id, shopId, shopIdValue));
+    shopId.addEventListener("click", () => void copyProviderAccountId(id, label, shopId, shopIdValue));
     card.append(select, shopId);
     accountList.append(card);
   }
@@ -394,9 +408,9 @@ function renderDashboard(message = "", isError = false) {
     .at(-1);
 
   if (!detectedAccounts.length) {
-    const openSellerChat = !isShopeeChatTab;
+    const openProviderChat = !isProviderChatTab;
     setLeaderStatus("NEED CONFIG", "warning", "config");
-    status.textContent = message || (openSellerChat ? "Open Shopee Seller Chat to detect your Shop IDs." : "");
+    status.textContent = message || (openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
     syncButton.disabled = true;
     syncButton.dataset.action = "";
     syncButton.textContent = "Sync messages";
@@ -509,7 +523,7 @@ function safeFilenamePart(value, fallback) {
 }
 
 function logsFilename() {
-  const provider = shopeeAdapter.id;
+  const provider = activeProviderAdapter?.id || "providers";
   const accountId = "all-shops";
   const version = safeFilenamePart(chrome.runtime.getManifest().version, "unknown");
   const timestamp = new Date().toISOString().replaceAll(":", "-");
@@ -574,7 +588,10 @@ async function refreshStoredState() {
 
 async function detectAccount() {
   try {
-    const result = await chrome.runtime.sendMessage({ type: "detect_account" });
+    const result = await chrome.runtime.sendMessage({
+      type: "detect_account",
+      ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
+    });
     if (result?.ok) {
       detectedAccounts = Array.isArray(result.accounts) ? result.accounts : [];
       renderDashboard();
@@ -616,8 +633,8 @@ function closeConfig() {
   configScreen.hidden = true;
   logsScreen.hidden = true;
   const consented = hasLocalConsent(storedConsent);
-  const showHintScreen = consented && !isShopeeChatTab;
-  const showDashboard = consented && isShopeeChatTab;
+  const showHintScreen = consented && !isProviderChatTab;
+  const showDashboard = consented && isProviderChatTab;
   hintScreen.hidden = !showHintScreen;
   dashboardScreen.hidden = !showDashboard;
   setHeaderActionsVisible(showDashboard);
@@ -639,13 +656,13 @@ function reportConfigurationStatus(message, isError = false) {
 }
 
 async function autoStartSync(config) {
-  if (!isShopeeChatTab) return false;
-  if (!(await detectAccount())) throw new Error("Could not detect Shopee Shop IDs. Try again from Shopee Seller Chat.");
+  if (!isProviderChatTab) return false;
+  if (!(await detectAccount())) throw new Error("Could not detect provider accounts. Try again from the provider chat.");
   const configuredAccount = detectedAccounts.some((account) => config.accounts.some((configured) => (
     configured.provider === account.provider
       && configured.provider_account_id === account.provider_account_id
   )));
-  if (!configuredAccount) throw new Error("Saved configuration does not include any detected Shop ID.");
+  if (!configuredAccount) throw new Error("Saved configuration does not include any detected provider account.");
 
   void chrome.runtime.sendMessage({ type: "sync_now" }).then((result) => {
     if (!result?.ok) reportConfigurationStatus(`Configuration saved. ${result?.error ?? "Sync failed."}`, true);
@@ -687,17 +704,18 @@ async function load() {
     : "";
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
-  isShopeeChatTab = isShopeeChatUrl(activeTab?.url);
+  activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
+  isProviderChatTab = Boolean(activeProviderAdapter?.matchesUrl(activeTab?.url));
   const showConsentScreen = !consented;
-  const showHintScreen = consented && !isShopeeChatTab;
-  const showDashboard = consented && isShopeeChatTab;
+  const showHintScreen = consented && !isProviderChatTab;
+  const showDashboard = consented && isProviderChatTab;
   consentScreen.hidden = !showConsentScreen;
   hintScreen.hidden = !showHintScreen;
   brandHeader.hidden = false;
   dashboardScreen.hidden = !showDashboard;
   configScreen.hidden = true;
   logsScreen.hidden = true;
-  setHeaderActionsVisible(consented && isShopeeChatTab);
+  setHeaderActionsVisible(consented && isProviderChatTab);
   setSettingsButtonVisible(consented);
   viewingPrivacy = false;
   renderConsentScreen();
@@ -741,13 +759,13 @@ openPrivacyButton.addEventListener("click", () => {
 closePrivacyButton.addEventListener("click", () => {
   const consented = hasLocalConsent(storedConsent);
   const showConsentScreen = !consented;
-  const showHintScreen = consented && !isShopeeChatTab;
+  const showHintScreen = consented && !isProviderChatTab;
   brandHeader.hidden = false;
   viewingPrivacy = false;
   consentScreen.hidden = !showConsentScreen;
   hintScreen.hidden = !showHintScreen;
-  dashboardScreen.hidden = !isShopeeChatTab || showConsentScreen;
-  setHeaderActionsVisible(consented && isShopeeChatTab);
+  dashboardScreen.hidden = !isProviderChatTab || showConsentScreen;
+  setHeaderActionsVisible(consented && isProviderChatTab);
   setSettingsButtonVisible(consented);
 });
 
@@ -871,7 +889,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
         syncStarted
           ? "Configuration saved. Sync started."
           : configurationChanged
-            ? "Configuration saved. Open Shopee Seller Chat to start sync."
+            ? "Configuration saved. Open a supported provider chat to start sync."
             : "Configuration saved.",
       );
     } catch (error) {
@@ -906,7 +924,7 @@ configFile.addEventListener("change", async () => {
       await requestTargetPermission(accountOrigins(config));
       message += " Server access approved.";
       if (await autoStartSync(config)) message += " Sync started.";
-      else message += " Open Shopee Seller Chat to start sync.";
+      else message += " Open a supported provider chat to start sync.";
     } catch (error) {
       message += ` ${error.message}`;
       permissionError = true;

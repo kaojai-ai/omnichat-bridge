@@ -32,6 +32,7 @@ function contentBridge(pathname = "/new-webchat/conversations") {
       hidden: false,
       addEventListener() {},
     },
+    URL,
     chrome: {
       runtime: {
         onMessage: {

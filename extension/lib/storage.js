@@ -25,13 +25,23 @@ export const LEGACY_STORAGE = {
 export const readStorage = (keys) => chrome.storage.local.get(keys);
 export const writeStorage = (values) => chrome.storage.local.set(values);
 
+function supportsAccountDetection(provider) {
+  const adapter = globalThis.OmnichatProviderAdapters?.get(provider);
+  return adapter ? adapter.supports("account_detection") : provider === "shopee";
+}
+
 export async function resetDetectedAccountsFromConfig() {
   const stored = await readStorage([STORAGE.config]);
   const accounts = Array.isArray(stored[STORAGE.config]?.accounts)
     ? stored[STORAGE.config].accounts
-      .filter((account) => account?.provider === "shopee" && String(account.provider_account_id ?? "").trim())
+      .filter((account) => {
+        const provider = typeof account?.provider === "string" ? account.provider.trim() : "";
+        return provider
+          && supportsAccountDetection(provider)
+          && String(account.provider_account_id ?? "").trim();
+      })
       .map((account) => ({
-        provider: "shopee",
+        provider: account.provider.trim(),
         provider_account_id: String(account.provider_account_id).trim(),
       }))
     : [];

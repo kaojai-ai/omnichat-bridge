@@ -56,6 +56,46 @@ test("resets detected accounts from saved config without copying secrets", async
   });
 });
 
+test("resets detected accounts for registered providers without copying secrets", async () => {
+  const previousAdapters = globalThis.OmnichatProviderAdapters;
+  let written = null;
+  globalThis.OmnichatProviderAdapters = {
+    get(provider) {
+      return provider === "line_oa" ? { supports: () => true } : null;
+    },
+  };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        get: async () => ({
+          [STORAGE.config]: {
+            version: 2,
+            accounts: [{
+              provider: "line_oa",
+              provider_account_id: "channel-1",
+              hmac_secret: "must-not-be-copied",
+            }],
+          },
+        }),
+        set: async (value) => { written = value; },
+      },
+    },
+  };
+
+  try {
+    assert.equal(await resetDetectedAccountsFromConfig(), true);
+    assert.deepEqual(written, {
+      [STORAGE.detectedAccounts]: [{
+        provider: "line_oa",
+        provider_account_id: "channel-1",
+      }],
+    });
+  } finally {
+    if (previousAdapters === undefined) delete globalThis.OmnichatProviderAdapters;
+    else globalThis.OmnichatProviderAdapters = previousAdapters;
+  }
+});
+
 test("does not reset detected accounts when saved config is empty", async () => {
   let writes = 0;
   globalThis.chrome = {

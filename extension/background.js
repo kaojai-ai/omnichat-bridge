@@ -1,5 +1,5 @@
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
-import { accountConfigKey, findAccountConfig } from "./lib/config.js";
+import { accountConfigKey, accountKey, findAccountConfig } from "./lib/config.js";
 import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   advanceConversationCursors,
@@ -36,9 +36,6 @@ import "./lib/shopee-adapter.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
-const isShopeeChatUrl = shopeeAdapter.matchesUrl;
-const SHOPEE_URL_PATTERN = shopeeAdapter.tabQueryPattern;
-const SHOPEE_CHAT_URL = shopeeAdapter.chatUrl;
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
@@ -57,30 +54,30 @@ const INBOUND_LOG_MESSAGES = {
   "popup.configuration_exported": "Configuration exported.",
   "popup.async_error": "Extension async operation failed.",
   "popup.uncaught_error": "Unhandled popup error.",
-  "provider.content_loaded": "Shopee content bridge loaded.",
+  "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
   "provider.uncaught_error": "Unhandled provider error.",
   "provider.recovery_not_configured": "Provider recovery could not start because setup is incomplete.",
   "provider.checkpoint_failed": "Could not load the sync checkpoint.",
   "provider.recovery_requested": "Provider recovery request sent.",
-  "provider.account_detection_timeout": "Shopee account detection timed out.",
-  "provider.account_detected": "Shopee account detected on provider page.",
-  "provider.account_detection_failed": "Shopee account detection failed.",
+  "provider.account_detection_timeout": "Provider account detection timed out.",
+  "provider.account_detected": "Provider account detected on provider page.",
+  "provider.account_detection_failed": "Provider account detection failed.",
   "provider.recovery_batch_processed": "Recovered message page processed.",
   "provider.recovery_batch_failed": "Recovered message page failed.",
   "provider.resume_failed": "Automatic sync resume failed.",
   "provider.realtime_processed": "Realtime provider event processed.",
-  "provider.recovery_failed": "Shopee recovery failed.",
-  "provider.recovery_timeout": "Shopee recovery stopped responding.",
-  "provider.recovery_completed": "Shopee recovery completed.",
-  "provider.socket_observed": "Shopee realtime socket detected.",
-  "provider.recovery_started": "Shopee recovery started.",
-  "provider.recovery_plan": "Shopee recovery plan prepared.",
+  "provider.recovery_failed": "Provider recovery failed.",
+  "provider.recovery_timeout": "Provider recovery stopped responding.",
+  "provider.recovery_completed": "Provider recovery completed.",
+  "provider.socket_observed": "Provider realtime socket detected.",
+  "provider.recovery_started": "Provider recovery started.",
+  "provider.recovery_plan": "Provider recovery plan prepared.",
   "provider.conversation_started": "Checking one conversation for missed messages.",
   "provider.conversation_completed": "Conversation recovery check completed.",
-  "provider.history_template_ready": "Shopee history request template captured.",
-  "provider.list_template_ready": "Shopee conversation-list request template captured.",
-  "provider.socket_connected": "Shopee realtime socket connected.",
+  "provider.history_template_ready": "Provider history request template captured.",
+  "provider.list_template_ready": "Provider conversation-list request template captured.",
+  "provider.socket_connected": "Provider realtime socket connected.",
 };
 let mutationQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
@@ -126,7 +123,7 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         STORAGE.config,
         STORAGE.detectedAccounts,
       ]);
-      const context = accountContextFor(stored, details?.provider_account_id);
+      const context = accountContextFor(stored, details?.provider_account_id, details?.provider);
       const entry = createLogEntry({
         level,
         area,
@@ -180,28 +177,58 @@ registerGlobalErrorHandlers();
 
 function detectedAccounts(stored) {
   return Array.isArray(stored[STORAGE.detectedAccounts])
-    ? stored[STORAGE.detectedAccounts].filter((account) => account?.provider === "shopee")
+    ? stored[STORAGE.detectedAccounts]
+      .filter((account) => providerAdapterForAccount(account) && messageProviderAccountId(account))
+      .map((account) => ({
+        ...account,
+        provider: normalizedProviderId(account.provider),
+        provider_account_id: messageProviderAccountId(account),
+      }))
     : [];
 }
 
-function accountContextFor(stored, providerAccountId) {
+function normalizedProviderId(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function providerAdapterForId(value) {
+  const provider = normalizedProviderId(value);
+  return provider ? providerAdapters.get(provider) : null;
+}
+
+function providerAdapterForAccount(account) {
+  return providerAdapterForId(account?.provider);
+}
+
+function providerLabel(adapter) {
+  return adapter?.displayName || adapter?.id || "Provider";
+}
+
+function messageProvider(message) {
+  if (Object.hasOwn(message ?? {}, "provider")) return normalizedProviderId(message.provider);
+  return shopeeAdapter.id;
+}
+
+function accountContextFor(stored, providerAccountId, provider = "") {
   const id = typeof providerAccountId === "string" || typeof providerAccountId === "number"
     ? String(providerAccountId).trim()
     : "";
+  const providerId = normalizedProviderId(provider);
   if (!id) return null;
-  const account = detectedAccounts(stored).find((item) => item.provider_account_id === id);
-  const config = findAccountConfig(stored[STORAGE.config], {
-    provider: "shopee",
-    provider_account_id: id,
-  });
+  const matches = detectedAccounts(stored).filter((item) => item.provider_account_id === id
+    && (!providerId || item.provider === providerId));
+  if (matches.length !== 1) return null;
+  const account = matches[0];
+  const config = findAccountConfig(stored[STORAGE.config], account);
   if (!account) return null;
   const key = accountConfigKey(account);
-  return key && config ? { key, config, account } : null;
+  const adapter = providerAdapterForAccount(account);
+  return key && config && adapter ? { key, config, account, adapter } : null;
 }
 
 function configuredAccountContexts(stored) {
   return detectedAccounts(stored)
-    .map((account) => accountContextFor(stored, account.provider_account_id))
+    .map((account) => accountContextFor(stored, account.provider_account_id, account.provider))
     .filter(Boolean);
 }
 
@@ -237,7 +264,7 @@ async function updateLiveState(context, patch) {
   });
 }
 
-async function getAccountScanState(providerAccountId) {
+async function getAccountScanState(providerAccountId, provider = "") {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -247,9 +274,9 @@ async function getAccountScanState(providerAccountId) {
     STORAGE.targetCursor,
     STORAGE.lastResumeSyncAt,
   ]);
-  const context = accountContextFor(stored, providerAccountId);
+  const context = accountContextFor(stored, providerAccountId, provider);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
-    throw new Error("Shopee browser bridge is not configured.");
+    throw new Error("Provider browser bridge is not configured.");
   }
   const existing = readAccountState(stored[STORAGE.scanState], context.key, null);
   if (existing?.version === 1) return { context, state: existing, stored };
@@ -298,8 +325,8 @@ function bootstrapConversation(value) {
   };
 }
 
-async function saveBootstrapSelection(providerAccountId, conversations) {
-  const { context, state, stored } = await getAccountScanState(providerAccountId);
+async function saveBootstrapSelection(providerAccountId, conversations, provider = "") {
+  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
   if (state.watermark || state.bootstrap?.conversations?.length) return;
   const selected = (Array.isArray(conversations) ? conversations : [])
     .map(bootstrapConversation)
@@ -313,10 +340,10 @@ async function saveBootstrapSelection(providerAccountId, conversations) {
   }, stored[STORAGE.scanState]);
 }
 
-async function advanceScanCursor(providerAccountId, conversationId, cursor, summaryToken) {
+async function advanceScanCursor(providerAccountId, conversationId, cursor, summaryToken, provider = "") {
   const id = String(conversationId ?? "").trim();
   if (!id) return;
-  const { context, state, stored } = await getAccountScanState(providerAccountId);
+  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
   const previous = state.conversations?.[id];
   const next = cursor && compareMessageCursor(cursor, previous) > 0
     ? {
@@ -374,7 +401,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "get_sync_state") {
-    void exclusive(() => getAccountScanState(message.provider_account_id)).then(
+    void exclusive(() => getAccountScanState(message.provider_account_id, message.provider)).then(
       ({ state }) => respond({ ok: true, checkpoint: state }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -428,9 +455,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "sync_progress") {
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      const context = accountContextFor(stored, message.provider_account_id);
+      const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
-      if (!key) throw new Error("Shopee account is not detected.");
+      if (!key) throw new Error("Provider account is not detected.");
       const current = readAccountState(stored[STORAGE.status], key, {});
       if (!["discovering", "syncing"].includes(current.state)) return;
       return updateScopedState(STORAGE.status, key, {
@@ -441,6 +468,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       });
     })).then(
       () => recordLog("info", "sync", "progress", "Sync progress updated.", {
+        provider: message.provider,
         provider_account_id: message.provider_account_id,
         completed: Number(message.completed_conversations) || 0,
         total: Number(message.total_conversations) || 0,
@@ -460,6 +488,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       probes: conversations.filter((item) => item?.decision === "probe").length,
       skipped: conversations.filter((item) => item?.decision === "skip").length,
       checkpoint_present: Boolean(message.checkpoint),
+      provider: message.provider,
       provider_account_id: message.provider_account_id,
     };
     void recordLog("info", "sync", "plan_created", "Sync plan created.", details).then(
@@ -474,6 +503,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       message.conversation_id,
       message.cursor,
       message.summary_token,
+      message.provider,
     )).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
@@ -481,14 +511,18 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "save_bootstrap") {
-    void exclusive(() => saveBootstrapSelection(message.provider_account_id, message.conversations)).then(
+    void exclusive(() => saveBootstrapSelection(
+      message.provider_account_id,
+      message.conversations,
+      message.provider,
+    )).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "detect_account") {
-    void detectOpenShopeeAccount().then(
+    void detectOpenProviderAccount(message?.provider || shopeeAdapter.id).then(
       (result) => respond(result),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -538,60 +572,47 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 });
 
 async function commandTab(context) {
+  const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
   if (Number.isInteger(tabId)) {
     try {
       const tab = await chrome.tabs.get(tabId);
-      if (tab.url?.startsWith("https://seller.shopee.co.th/")) return tab;
+      if (adapter.matchesUrl(tab.url)) return tab;
     } catch {
-      // The tab was closed; select another seller tab below.
+      // The tab was closed; select another provider tab below.
     }
   }
-  let tab = await findShopeeChatTab();
-  if (!tab) tab = await chrome.tabs.create({ url: SHOPEE_CHAT_URL, active: false });
-  if (!tab.id) throw new Error("Shopee Seller Chat tab is unavailable.");
+  let tab = await findProviderChatTab(adapter);
+  if (!tab && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
+    tab = await chrome.tabs.create({ url: adapter.chatUrl, active: false });
+  }
+  if (!tab?.id) throw new Error(`${label} chat tab is unavailable.`);
   await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
   return tab;
 }
 
 function providerAdapterForCommand(message) {
-  const provider = typeof message?.provider === "string" && message.provider.trim()
-    ? message.provider.trim()
-    : "shopee";
-  return providerAdapters.get(provider);
+  return providerAdapterForId(messageProvider(message));
 }
 
 async function sendViaProvider(message) {
   const adapter = providerAdapterForCommand(message);
   if (!adapter?.supportsSend(message?.type)) return { ok: false, error: "Unsupported provider reply command." };
-  if (adapter.id === shopeeAdapter.id) return sendViaShopeeApi(message);
-  return { ok: false, error: `${adapter.displayName} replies are not implemented.` };
-}
-
-async function selectCommandTab(context, tabId) {
-  if (!Number.isInteger(tabId)) return;
-  const tab = await chrome.tabs.get(tabId);
-  if (!Number.isInteger(tab.id) || !isShopeeChatUrl(tab.url)) {
-    throw new Error("Open Shopee Seller Chat in this tab first.");
-  }
-  const stored = await readStorage([STORAGE.commandTab]);
-  await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
-}
-
-async function sendViaShopeeApi(message) {
   const requestId = typeof message?.request_id === "string" ? message.request_id : "";
   const conversationId = typeof message?.conversation_id === "string" ? message.conversation_id : "";
   const clientMessageId = typeof message?.client_message_id === "string" ? message.client_message_id : "";
   const commandType = typeof message?.type === "string" ? message.type : "";
-  if (!requestId || !conversationId || !shopeeAdapter.supportsSend(commandType)) {
+  if (!requestId || !conversationId || !adapter.supportsSend(commandType)) {
     return { ok: false, error: "Reply command is invalid." };
   }
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const context = accountContextFor(stored, messageProviderAccountId(message));
-  if (!context) return { ok: false, error: "Shopee browser bridge is not configured." };
+  const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
+  if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context);
-  await ensureShopeeBridge(tab.id);
+  await ensureProviderBridge(tab.id, adapter);
   let imagePayload = {};
   if (commandType === "send_image") {
     const imageUrl = typeof message.image_url === "string" ? message.image_url : "";
@@ -624,6 +645,7 @@ async function sendViaShopeeApi(message) {
   return chrome.tabs.sendMessage(tab.id, {
     ...message,
     ...imagePayload,
+    provider: adapter.id,
     type: "send_api",
     command_type: commandType,
     request_id: requestId,
@@ -632,14 +654,26 @@ async function sendViaShopeeApi(message) {
   });
 }
 
+async function selectCommandTab(context, tabId) {
+  if (!Number.isInteger(tabId)) return;
+  const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
+  const tab = await chrome.tabs.get(tabId);
+  if (!Number.isInteger(tab.id) || !adapter?.matchesUrl(tab.url)) {
+    throw new Error(`Open ${providerLabel(adapter)} chat in this tab first.`);
+  }
+  const stored = await readStorage([STORAGE.commandTab]);
+  await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
+}
+
 // WIP alternative only. Do not call this from the command path: it needs the target
-// conversation open and competes with the user's Shopee UI.
+// conversation open and competes with the user's provider UI.
 async function sendTextByUiClick_WIP(message) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const context = accountContextFor(stored, messageProviderAccountId(message));
-  if (!context) return { ok: false, error: "Shopee browser bridge is not configured." };
+  const adapter = providerAdapterForCommand(message);
+  const context = accountContextFor(stored, messageProviderAccountId(message), adapter?.id);
+  if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context);
-  await ensureShopeeBridge(tab.id);
+  await ensureProviderBridge(tab.id, context.adapter);
   return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip" });
 }
 
@@ -657,13 +691,13 @@ function leaderEndpoint(config) {
 }
 
 async function signedLeaderRequest(context, action) {
-  if (!context) throw new Error("Shopee browser bridge is not configured.");
+  if (!context) throw new Error("Provider browser bridge is not configured.");
   const initialized = await readStorage([STORAGE.serverInitialized]);
   if (!hasServerInitialized(initialized)) throw new Error("Sync messages before using live replies.");
   const url = leaderEndpoint(context.config);
   if (!context || !url) throw new Error("Leader endpoint is not configured.");
   const body = JSON.stringify({
-    provider: "shopee",
+    provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     installation_id: await installationId(),
     action,
@@ -693,12 +727,12 @@ async function signedLeaderRequest(context, action) {
   return { ok: true, ...result };
 }
 
-async function getLiveState(providerAccountId) {
+async function getLiveState(providerAccountId, provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.serverInitialized]);
   const contexts = providerAccountId
-    ? [accountContextFor(stored, providerAccountId)].filter(Boolean)
+    ? [accountContextFor(stored, providerAccountId, provider)].filter(Boolean)
     : configuredAccountContexts(stored);
-  if (!contexts.length) return { ok: false, error: "No configured Shopee shops are detected." };
+  if (!contexts.length) return { ok: false, error: "No configured provider accounts are detected." };
   const results = [];
   for (const context of contexts) {
     try {
@@ -710,7 +744,12 @@ async function getLiveState(providerAccountId) {
         leader: false,
       });
       if (providerAccountId) throw error;
-      results.push({ ok: false, provider_account_id: context.account.provider_account_id, error: String(error) });
+      results.push({
+        ok: false,
+        provider: context.account.provider,
+        provider_account_id: context.account.provider_account_id,
+        error: String(error),
+      });
     }
   }
   if (providerAccountId) return results[0];
@@ -724,7 +763,7 @@ async function getLiveState(providerAccountId) {
 async function claimLeader(tabId) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("Shopee browser bridge is not configured.");
+  if (!contexts.length) throw new Error("Provider browser bridge is not configured.");
   const results = [];
   for (const context of contexts) {
     await selectCommandTab(context, tabId);
@@ -736,7 +775,7 @@ async function claimLeader(tabId) {
 async function releaseLeader() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("Shopee browser bridge is not configured.");
+  if (!contexts.length) throw new Error("Provider browser bridge is not configured.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
   return results.at(-1) ?? { ok: true };
@@ -745,9 +784,9 @@ async function releaseLeader() {
 async function openCommandTab() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = configuredAccountContexts(stored)[0];
-  if (!context) throw new Error("Shopee browser bridge is not configured.");
+  if (!context) throw new Error("Provider browser bridge is not configured.");
   const tab = await commandTab(context);
-  if (!tab.id) throw new Error("Shopee Seller Chat tab is unavailable.");
+  if (!tab.id) throw new Error(`${providerLabel(context.adapter)} chat tab is unavailable.`);
   await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
   return { ok: true };
@@ -771,10 +810,15 @@ function scheduleLiveReconnect(context) {
   connection.reconnectTimer = setTimeout(() => { void ensureAccountLiveConnection(context); }, delay);
 }
 
-async function signedLiveTicket(config, providerAccountId) {
+async function signedLiveTicket(context) {
+  const { config, account } = context;
   const url = liveEndpoint(config);
   if (!url) throw new Error("Live reply endpoint is not configured.");
-  const body = JSON.stringify({ provider: "shopee", provider_account_id: providerAccountId, installation_id: await installationId() });
+  const body = JSON.stringify({
+    provider: account.provider,
+    provider_account_id: account.provider_account_id,
+    installation_id: await installationId(),
+  });
   const timestamp = new Date().toISOString();
   const nonce = crypto.randomUUID();
   const bodyHash = await sha256Hex(body);
@@ -783,7 +827,7 @@ async function signedLiveTicket(config, providerAccountId) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-omnichat-provider-account-id": providerAccountId,
+      "x-omnichat-provider-account-id": account.provider_account_id,
       "x-omnichat-timestamp": timestamp,
       "x-omnichat-nonce": nonce,
       "x-omnichat-signature": signature,
@@ -810,8 +854,11 @@ async function connectionStatusSnapshot(context) {
     STORAGE.pending,
     STORAGE.status,
   ]);
-  const tabs = (await chrome.tabs.query({ url: SHOPEE_URL_PATTERN }))
-    .filter((tab) => isShopeeChatUrl(tab.url));
+  const adapter = context.adapter ?? providerAdapterForAccount(context.account);
+  const tabs = adapter
+    ? (await chrome.tabs.query({ url: adapter.tabQueryPattern }))
+      .filter((tab) => adapter.matchesUrl(tab.url))
+    : [];
   let providerStatus = null;
   for (const tab of tabs) {
     if (!tab.id) continue;
@@ -822,18 +869,20 @@ async function connectionStatusSnapshot(context) {
         break;
       }
     } catch {
-      // A Shopee tab can exist while its content bridge is still loading.
+      // A provider tab can exist while its content bridge is still loading.
     }
   }
 
   const accountDetected = detectedAccounts(stored).some(
-    (account) => account.provider_account_id === context.account.provider_account_id,
+    (account) => account.provider === context.account.provider
+      && account.provider_account_id === context.account.provider_account_id,
   );
   const accountMatches = accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
   const health = buildConnectionHealth({
+    provider: context.account.provider,
     tabCount: tabs.length,
     contentReady: Boolean(providerStatus),
     accountDetected,
@@ -914,10 +963,7 @@ async function ensureAccountLiveConnection(context) {
     provider_account_id: context.account.provider_account_id,
   });
   try {
-    const { ticket, socketUrl } = await signedLiveTicket(
-      context.config,
-      context.account.provider_account_id,
-    );
+    const { ticket, socketUrl } = await signedLiveTicket(context);
     socketUrl.searchParams.set("ticket", ticket);
     const socket = new WebSocket(socketUrl);
     existing.socket = socket;
@@ -940,7 +986,8 @@ async function ensureAccountLiveConnection(context) {
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
         }));
-      void getLiveState(context.account.provider_account_id).catch((error) => recordUnexpected("leader_status", error, {
+      void getLiveState(context.account.provider_account_id, context.account.provider).catch((error) => recordUnexpected("leader_status", error, {
+        provider: context.account.provider,
         provider_account_id: context.account.provider_account_id,
       }));
     });
@@ -1040,65 +1087,96 @@ function isVersionBefore(value, target) {
 
 async function reinitializeAfterUpgrade() {
   if (!await resetDetectedAccountsFromConfig()) return;
-  const tabs = await chrome.tabs.query({ url: SHOPEE_URL_PATTERN });
-  const chatTabs = tabs.filter((tab) => tab.id && isShopeeChatUrl(tab.url));
   let bridgesReady = true;
-  for (const tab of chatTabs) {
-    try {
-      await ensureShopeeBridge(tab.id);
-      const result = await chrome.tabs.sendMessage(tab.id, { type: "detect_account" });
-      if (!result?.ok) {
-        await recordLog("warn", "account", "detection_failed", "Shopee account was not detected after extension upgrade.");
+  for (const adapter of providerAdapters.list()) {
+    if (!adapter.supports("account_detection")) continue;
+    const tabs = await chrome.tabs.query(
+      adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
+    );
+    const chatTabs = tabs.filter((tab) => tab.id && adapter.matchesUrl(tab.url));
+    for (const tab of chatTabs) {
+      try {
+        await ensureProviderBridge(tab.id, adapter);
+        const result = await chrome.tabs.sendMessage(tab.id, {
+          type: "detect_account",
+          provider: adapter.id,
+        });
+        if (!result?.ok) {
+          await recordLog("warn", "account", "detection_failed", `${providerLabel(adapter)} account was not detected after extension upgrade.`, {
+            provider: adapter.id,
+          });
+        }
+      } catch (error) {
+        bridgesReady = false;
+        await recordUnexpected("storage_upgrade", error, { provider: adapter.id });
       }
-    } catch (error) {
-      bridgesReady = false;
-      await recordUnexpected("storage_upgrade", error);
     }
   }
   if (bridgesReady) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
 }
 
-async function detectOpenShopeeAccount() {
-  let tab = await findShopeeChatTab();
-  if (!tab) {
-    await recordLog("warn", "account", "tab_missing", "Shopee Seller Chat tab was not found.");
-    return { ok: false, error: "Open Shopee Seller Chat to detect the Shop ID." };
+async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
+  const adapter = providerAdapterForId(provider);
+  if (!adapter) return { ok: false, error: `Unsupported provider: ${provider}.` };
+  if (!adapter.supports("account_detection")) {
+    return { ok: false, error: `${providerLabel(adapter)} does not support account detection.` };
   }
-  await recordLog("info", "account", "detection_started", "Detecting Shopee account.");
-  await ensureShopeeBridge(tab.id);
-  const result = await chrome.tabs.sendMessage(tab.id, { type: "detect_account" });
+  const label = providerLabel(adapter);
+  const tab = await findProviderChatTab(adapter);
+  if (!tab) {
+    await recordLog("warn", "account", "tab_missing", `${label} tab was not found.`, { provider: adapter.id });
+    return { ok: false, error: `Open ${label} to detect the account ID.` };
+  }
+  await recordLog("info", "account", "detection_started", `Detecting ${label} account.`, { provider: adapter.id });
+  await ensureProviderBridge(tab.id, adapter);
+  const result = await chrome.tabs.sendMessage(tab.id, {
+    type: "detect_account",
+    provider: adapter.id,
+  });
   await recordLog(
     result?.ok ? "info" : "warn",
     "account",
     result?.ok ? "detected" : "detection_failed",
-    result?.ok ? "Shopee account detected." : "Shopee account was not detected.",
-    result?.ok ? {} : diagnosticErrorDetails(result?.error),
+    result?.ok ? `${label} account detected.` : `${label} account was not detected.`,
+    { provider: adapter.id, ...(result?.ok ? {} : diagnosticErrorDetails(result?.error)) },
   );
   return result;
 }
 
-async function findShopeeChatTab() {
-  const tabs = await chrome.tabs.query({ url: SHOPEE_URL_PATTERN });
-  return tabs.find((item) => item.id && isShopeeChatUrl(item.url));
+async function findProviderChatTab(adapter) {
+  if (!adapter) return null;
+  const tabs = await chrome.tabs.query(
+    adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
+  );
+  return tabs.find((item) => item.id && adapter.matchesUrl(item.url));
 }
 
-async function ensureShopeeBridge(tabId) {
+async function ensureProviderBridge(tabId, adapter) {
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const label = providerLabel(adapter);
   try {
     const result = await chrome.tabs.sendMessage(tabId, { type: "ping" });
     if (result?.ok && result.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
-      await recordLog("debug", "provider", "content_ready", "Shopee content bridge is ready.");
+      await recordLog("debug", "provider", "content_ready", `${label} content bridge is ready.`, {
+        provider: adapter.id,
+      });
       return;
     }
   } catch {
     // Reload below when an installed/reloaded extension is not attached to the existing page.
   }
-  await recordLog("warn", "provider", "content_reload", "Reloading Shopee Seller Chat to attach the bridge.");
+  await recordLog("warn", "provider", "content_reload", `Reloading ${label} to attach the bridge.`, {
+    provider: adapter.id,
+  });
   await chrome.tabs.reload(tabId);
-  await waitForShopeeBridge(tabId);
-  await recordLog("info", "provider", "content_attached", "Shopee content bridge attached after reload.");
+  await waitForProviderBridge(tabId, adapter);
+  await recordLog("info", "provider", "content_attached", `${label} content bridge attached after reload.`, {
+    provider: adapter.id,
+  });
 }
 
-async function waitForShopeeBridge(tabId) {
+async function waitForProviderBridge(tabId, adapter) {
+  const label = providerLabel(adapter);
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     try {
@@ -1109,7 +1187,7 @@ async function waitForShopeeBridge(tabId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("Shopee Seller Chat did not finish loading.");
+  throw new Error(`${label} did not finish loading.`);
 }
 
 function syncCancelledError() {
@@ -1122,23 +1200,27 @@ function throwIfSyncCancelled(signal) {
   if (signal?.aborted) throw syncCancelledError();
 }
 
-async function syncOpenShopee(control, providerAccountId) {
-  if (!shopeeAdapter.supports("message_recovery")) {
-    throw new Error(`${shopeeAdapter.displayName} does not support message recovery.`);
+async function syncOpenProvider(control, context) {
+  const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
+  const label = providerLabel(adapter);
+  if (!adapter?.supports("message_recovery")) {
+    throw new Error(`${label} does not support message recovery.`);
   }
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
-  const tab = await findShopeeChatTab();
-  if (!tab) throw new Error("Open Shopee Seller Chat to sync messages.");
+  const tab = await findProviderChatTab(adapter);
+  if (!tab) throw new Error(`Open ${label} to sync messages.`);
   control.tabId = tab.id;
-  await ensureShopeeBridge(tab.id);
+  control.adapter = adapter;
+  await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
   const result = await chrome.tabs.sendMessage(tab.id, {
     type: "sync_now",
-    provider_account_id: providerAccountId,
+    provider: context.account.provider,
+    provider_account_id: context.account.provider_account_id,
   });
   throwIfSyncCancelled(signal);
-  if (!result?.ok) throw new Error(result?.error ?? "Shopee recovery failed.");
+  if (!result?.ok) throw new Error(result?.error ?? `${label} recovery failed.`);
   return result;
 }
 
@@ -1161,10 +1243,13 @@ async function cancelActiveSync() {
   const control = activeSyncControl;
   const running = activeSync;
   control?.controller.abort();
-  const tabId = control?.tabId ?? (await findShopeeChatTab())?.id;
+  const tabId = control?.tabId ?? (await findProviderChatTab(control?.adapter ?? shopeeAdapter))?.id;
   let providerCancelled = false;
   if (tabId) {
-    const result = await chrome.tabs.sendMessage(tabId, { type: "cancel_sync" }).catch(() => null);
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: "cancel_sync",
+      ...(control?.adapter ? { provider: control.adapter.id } : {}),
+    }).catch(() => null);
     providerCancelled = result?.cancelled === true;
   }
   if (!control || !running) {
@@ -1232,11 +1317,12 @@ async function clearPersistedSync() {
 
 async function runAccountSync(trigger, control, context) {
   const { signal } = control.controller;
+  control.adapter = context.adapter;
   const automatic = trigger === "automatic";
   const providerAccountId = context.account.provider_account_id;
   const prepared = await exclusive(async () => {
     throwIfSyncCancelled(signal);
-    const { state, stored } = await getAccountScanState(providerAccountId);
+    const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
     if (automatic
       && !state.in_progress
@@ -1267,7 +1353,7 @@ async function runAccountSync(trigger, control, context) {
       provider_account_id: providerAccountId,
       reason: prepared.skipped,
     });
-    return { provider_account_id: providerAccountId, ...prepared };
+    return { provider: context.account.provider, provider_account_id: providerAccountId, ...prepared };
   }
   await recordLog("info", "sync", "started", "Sync started.", {
     provider_account_id: providerAccountId,
@@ -1287,13 +1373,14 @@ async function runAccountSync(trigger, control, context) {
     await updateScopedState(STORAGE.status, context.key, {
       phase: "loading_conversations",
     });
-    await recordLog("info", "sync", "provider_recovery", "Requesting missed messages from Shopee.", {
+    await recordLog("info", "sync", "provider_recovery", `Requesting missed messages from ${providerLabel(context.adapter)}.`, {
+      provider: context.account.provider,
       provider_account_id: providerAccountId,
     });
-    const recovered = await syncOpenShopee(control, providerAccountId);
+    const recovered = await syncOpenProvider(control, context);
     throwIfSyncCancelled(signal);
     await exclusive(async () => {
-      const { state, stored } = await getAccountScanState(providerAccountId);
+      const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
       await writeAccountScanState(context, {
         ...state,
         watermark: recovered.watermark ?? state.watermark,
@@ -1311,6 +1398,7 @@ async function runAccountSync(trigger, control, context) {
     const delivered = await attemptDelivery(context, { resetBackoff: true, signal });
     throwIfSyncCancelled(signal);
     const result = {
+      provider: context.account.provider,
       provider_account_id: providerAccountId,
       recovered: recovered.recovered ?? 0,
       queued: recovered.queued ?? 0,
@@ -1367,6 +1455,7 @@ async function runAccountSync(trigger, control, context) {
       provider_account_id: providerAccountId,
     });
     return {
+      provider: context.account.provider,
       provider_account_id: providerAccountId,
       recovered: 0,
       queued: 0,
@@ -1380,10 +1469,10 @@ async function runAccountSync(trigger, control, context) {
 async function runUnifiedSync(trigger, control) {
   const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
   if (!hasLocalConsent(stored[STORAGE.consent])) {
-    throw new Error("Shopee browser bridge is not configured.");
+    throw new Error("Provider browser bridge is not configured.");
   }
   const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("No configured Shopee shops are detected.");
+  if (!contexts.length) throw new Error("No configured provider accounts are detected.");
   const accounts = [];
   for (const context of contexts) {
     throwIfSyncCancelled(control.controller.signal);
@@ -1398,7 +1487,7 @@ async function runUnifiedSync(trigger, control) {
     accounts,
     ...(errors.length ? { errors } : {}),
   };
-  await recordLog("info", "sync", "all_completed", "All configured Shopee shop syncs completed.", {
+  await recordLog("info", "sync", "all_completed", "All configured provider account syncs completed.", {
     accounts: accounts.length,
     errors: errors.length,
     recovered: result.recovered,
@@ -1422,7 +1511,7 @@ async function resumeSync() {
 }
 
 function messageKey(message) {
-  return `${message.provider}:${message.conversation_id}:${message.id}`;
+  return `${messageProvider(message)}:${message.conversation_id}:${message.id}`;
 }
 
 async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
@@ -1459,7 +1548,7 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
   const added = [];
   for (const message of scopedMessages) {
     const cursor = scanState.conversations?.[message?.conversation_id];
-    if (message?.provider !== "shopee"
+    if (messageProvider(message) !== context.account.provider
       || !isAfterMessageCursor(message, cursor)) continue;
     eligible.push(message);
     if (known.has(messageKey(message))) continue;
@@ -1552,40 +1641,45 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
     return { queued: 0, sent: 0, pending: 0 };
   }
   const contexts = new Map(
-    configuredAccountContexts(stored).map((context) => [context.account.provider_account_id, context]),
+    configuredAccountContexts(stored).map((context) => [
+      accountKey(context.account.provider, context.account.provider_account_id),
+      context,
+    ]),
   );
   const groups = new Map();
   let missingAccountMessages = 0;
   let unconfiguredAccountMessages = 0;
   for (const message of Array.isArray(messages) ? messages : []) {
+    const provider = messageProvider(message);
     const providerAccountId = messageProviderAccountId(message);
-    if (!providerAccountId) {
+    if (!provider || !providerAccountId) {
       missingAccountMessages += 1;
       continue;
     }
-    if (!contexts.has(providerAccountId)) {
+    const contextKey = accountKey(provider, providerAccountId);
+    if (!contexts.has(contextKey)) {
       unconfiguredAccountMessages += 1;
       continue;
     }
-    const group = groups.get(providerAccountId) ?? [];
+    const group = groups.get(contextKey) ?? [];
     group.push(message);
-    groups.set(providerAccountId, group);
+    groups.set(contextKey, group);
   }
   if (missingAccountMessages) {
-    await recordLog("warn", "queue", "account_missing", "Captured messages were ignored because Shopee did not identify their Shop ID.", {
+    await recordLog("warn", "queue", "account_missing", "Captured messages were ignored because no provider account ID was identified.", {
       received: missingAccountMessages,
     });
   }
   if (unconfiguredAccountMessages) {
-    await recordLog("warn", "queue", "account_not_configured", "Captured messages were ignored because their Shop ID is not configured.", {
+    await recordLog("warn", "queue", "account_not_configured", "Captured messages were ignored because their provider account is not configured.", {
       received: unconfiguredAccountMessages,
     });
   }
   const results = [];
-  for (const [providerAccountId, group] of groups) {
+  for (const [contextKey, group] of groups) {
     results.push(await queueMessagesForContext(
       group,
-      contexts.get(providerAccountId),
+      contexts.get(contextKey),
       shouldFlush,
       advanceCursor,
     ));
@@ -1600,6 +1694,12 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
 }
 
 function batchFor(messages, installId) {
+  const provider = messageProvider(messages[0]);
+  const adapter = providerAdapterForId(provider);
+  if (!adapter) throw new Error(`Unsupported provider: ${provider || "<unknown>"}.`);
+  if (messages.some((message) => messageProvider(message) !== provider)) {
+    throw new Error("A message batch cannot contain multiple providers.");
+  }
   const conversations = new Map();
   for (const message of messages) {
     const participant = participantForBatch(message.participant);
@@ -1633,9 +1733,9 @@ function batchFor(messages, installId) {
     version: 1,
     batch_id: crypto.randomUUID(),
     installation_id: installId,
-    provider: "shopee",
+    provider: adapter.id,
     extension_version: chrome.runtime.getManifest().version,
-    adapter_version: "shopee-realtime-2",
+    adapter_version: adapter.adapterVersion ?? `${adapter.id}-1`,
     conversations: [...conversations.values()]
   };
 }

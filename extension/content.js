@@ -1,8 +1,10 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
   const BRIDGE_PROTOCOL_VERSION = 2;
-  const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
-  if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
+  const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
+  const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
+  if (!providerAdapter) return;
+  const providerLabel = providerAdapter.displayName || providerAdapter.id;
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
@@ -38,7 +40,7 @@
       area: "provider",
       event,
       message,
-      details,
+      details: { ...details, provider: providerAdapter.id },
     }).catch(() => undefined);
   };
 
@@ -93,10 +95,10 @@
       if (recoveries.get(id) !== pending) return;
       recoveries.delete(id);
       post({ type: "cancel_sync", request_id: id });
-      log("error", "recovery_timeout", "Shopee recovery stopped responding.");
+      log("error", "recovery_timeout", `${providerLabel} recovery stopped responding.`);
       pending.resolve({
         ok: false,
-        error: "Shopee recovery stopped responding for 60 seconds. Retry.",
+        error: `${providerLabel} recovery stopped responding for 60 seconds. Retry.`,
       });
     }, RECOVERY_INACTIVITY_TIMEOUT_MS);
   }
@@ -150,7 +152,7 @@
         if (pendingApiSends.get(requestId) !== pending) return;
         pendingApiSends.delete(requestId);
         clearTimeout(pending.timeout);
-        pending.resolve({ ok: false, error: "Shopee did not return a provider message ID." });
+        pending.resolve({ ok: false, error: `${providerLabel} did not return a provider message ID.` });
       }, 2_000);
       return;
     }
@@ -160,8 +162,8 @@
     pending.resolve({
       ok: false,
       error: pending.result.error
-        ? `Shopee API error: ${pending.result.error}`
-        : "Shopee API reply failed."
+        ? `${providerLabel} API error: ${pending.result.error}`
+        : `${providerLabel} API reply failed.`
     });
   }
 
@@ -199,6 +201,7 @@
     }
     const syncState = await chrome.runtime.sendMessage({
       type: "get_sync_state",
+      provider: providerAdapter.id,
       provider_account_id: accountId,
     });
     if (!syncState?.ok) {
@@ -214,6 +217,7 @@
       type: "sync",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
+      provider: providerAdapter.id,
       provider_account_id: accountId,
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
@@ -243,8 +247,8 @@
     const result = new Promise((resolve) => {
       const timeout = setTimeout(() => {
         accountDetections.delete(requestId);
-        log("warn", "account_detection_timeout", "Shopee account detection timed out.");
-        resolve({ ok: false, error: "Refresh Shopee Seller Chat to detect the Shop ID." });
+        log("warn", "account_detection_timeout", `${providerLabel} account detection timed out.`);
+        resolve({ ok: false, error: `Refresh ${providerLabel} to detect the account ID.` });
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
@@ -256,6 +260,15 @@
     return providerAdapter.normalizeAccount(message);
   }
 
+  function normalizedMessages(payload, captureMethod) {
+    return providerAdapter.normalizeMessages(payload, captureMethod).map((message) => ({
+      ...message,
+      provider: typeof message?.provider === "string" && message.provider.trim()
+        ? message.provider.trim()
+        : providerAdapter.id,
+    }));
+  }
+
   async function handleAccountsDetected(message) {
     const accounts = (Array.isArray(message?.accounts) ? message.accounts : [message])
       .map(normalizedAccount)
@@ -264,7 +277,7 @@
     const stored = await chrome.storage.local.get(["local_consent"]);
     if (!stored.local_consent?.accepted_at) return;
     await chrome.storage.local.set({ detected_accounts: accounts });
-    log("info", "account_detected", "Shopee shops detected on provider page.", {
+    log("info", "account_detected", `${providerLabel} accounts detected on the provider page.`, {
       accounts: accounts.length,
     });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
@@ -279,8 +292,8 @@
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
-    log("warn", "account_detection_failed", message.error ?? "Shopee account was not found.");
-    pending.resolve({ ok: false, error: message.error ?? "Shopee Shop ID was not found." });
+    log("warn", "account_detection_failed", message.error ?? `${providerLabel} account was not found.`);
+    pending.resolve({ ok: false, error: message.error ?? `${providerLabel} account ID was not found.` });
   }
 
   function handleProfilesDetected(message) {
@@ -320,7 +333,7 @@
     touchRecovery(message.request_id);
     try {
       const messages = addConversationProfile(
-        providerAdapter.normalizeMessages(message.body, "history_recovery")
+        normalizedMessages(message.body, "history_recovery")
       ).map((item) => ({
         ...item,
         ...(item.provider_account_id || !message.provider_account_id
@@ -363,6 +376,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "advance_scan_cursor",
+        provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
         cursor: message.cursor,
@@ -388,6 +402,7 @@
     try {
       const result = await chrome.runtime.sendMessage({
         type: "save_bootstrap",
+        provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversations: message.conversations,
       });
@@ -409,6 +424,7 @@
     touchRecovery(message.request_id);
     void sendRuntimeMessage({
       type: "sync_progress",
+      provider: providerAdapter.id,
       provider_account_id: message.provider_account_id,
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
@@ -431,7 +447,7 @@
 
   async function handleRealtimeEvent(body) {
     const messages = [];
-    for (const message of addConversationProfile(providerAdapter.normalizeMessages(body, "realtime_socket"))) {
+    for (const message of addConversationProfile(normalizedMessages(body, "realtime_socket"))) {
       const apiSend = findPendingApiSend(message);
       if (apiSend) {
         apiSend.pending.echo = message;
@@ -508,7 +524,7 @@
 
   function setComposerText(composer, text) {
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (!setter) throw new Error("Shopee message composer is unavailable.");
+    if (!setter) throw new Error(`${providerLabel} message composer is unavailable.`);
     setter.call(composer, text);
     composer.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
   }
@@ -522,13 +538,13 @@
       return { ok: false, error: "Reply text is invalid." };
     }
     if (activeConversationId !== conversationId) {
-      return { ok: false, error: "Open the matching Shopee conversation before replying." };
+      return { ok: false, error: `Open the matching ${providerLabel} conversation before replying.` };
     }
 
     const composer = document.querySelector("textarea[placeholder]");
     const sendControl = composer?.parentElement?.querySelector("i");
     if (!(composer instanceof HTMLTextAreaElement) || !(sendControl instanceof HTMLElement)) {
-      return { ok: false, error: "Open the Shopee conversation before replying." };
+      return { ok: false, error: `Open the ${providerLabel} conversation before replying.` };
     }
 
     if (typeof message.client_message_id === "string" && message.client_message_id) {
@@ -558,7 +574,7 @@
       const providerProductId = String(message?.provider_product_id ?? "").trim();
       const productName = String(message?.product_name ?? "").trim();
       if (!/^\d+$/.test(providerProductId) || !productName) {
-        return { ok: false, error: "Shopee product is invalid." };
+        return { ok: false, error: `${providerLabel} product is invalid.` };
       }
     }
     let imagePayload = {};
@@ -575,7 +591,7 @@
       imagePayload = { image_bytes: imageBytes, image_type: imageType };
     }
     if (!providerAdapter.supportsSend(commandType)) {
-      return { ok: false, error: "Unsupported Shopee reply command." };
+      return { ok: false, error: `Unsupported ${providerLabel} reply command.` };
     }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -586,7 +602,7 @@
           resolve({ ok: true, provider_message_id: pending.echo.id });
           return;
         }
-        resolve({ ok: false, error: "Shopee API reply timed out." });
+        resolve({ ok: false, error: `${providerLabel} API reply timed out.` });
       }, 30_000);
       pendingApiSends.set(requestId, {
         resolve,
@@ -601,6 +617,7 @@
         type: "send_api",
         ...message,
         ...imagePayload,
+        provider: providerAdapter.id,
         request_id: requestId,
         conversation_id: conversationId,
         command_type: commandType,
@@ -631,7 +648,7 @@
     } else if (event.data.type === "socket_connected") {
       realtimeConnected = true;
       lastRealtimeConnectedAt = new Date().toISOString();
-      log("info", "socket_observed", "Shopee realtime socket detected.");
+      log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
       realtimeConnected = event.data.realtime_connected === true;
@@ -659,6 +676,7 @@
       touchRecovery(event.data.request_id);
       void sendRuntimeMessage({
         type: "record_sync_plan",
+        provider: providerAdapter.id,
         provider_account_id: event.data.provider_account_id,
         mode: event.data.mode,
         checkpoint: event.data.checkpoint,
@@ -674,6 +692,10 @@
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.provider && message.provider !== providerAdapter.id) {
+      respond({ ok: false, error: "Provider message does not match this page." });
+      return false;
+    }
     if (message?.type === "ping") {
       respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION });
       return false;
@@ -716,8 +738,8 @@
     if (!document.hidden) requestResumeSync();
   });
 
-  log("info", "content_loaded", "Shopee content bridge loaded.");
-  if (globalThis.OmnichatShopeeUrl.isShopeeChatPath(window.location.pathname)) {
+  log("info", "content_loaded", `${providerLabel} content bridge loaded.`);
+  if (providerAdapter.matchesUrl(currentUrl)) {
     requestResumeSync();
   }
 })();
