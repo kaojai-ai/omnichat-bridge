@@ -61,8 +61,11 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
 
 The signature covers the method, request path, timestamp, nonce, and SHA-256
 hash of the exact body. The server acknowledges the matching `batch_id` and
-reports accepted plus duplicate message counts. The extension removes those
-messages from its local queue only when the counts cover every message sent.
+reports accepted plus duplicate message counts. A Shopee message with invalid
+participant routing is logged and returned as a skipped message reference
+while the rest of the batch continues. The extension removes accepted,
+duplicate, and skipped messages from its local queue only when the
+acknowledgement covers every message sent.
 
 ### Current delivery limits
 

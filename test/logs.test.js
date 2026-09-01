@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   LOG_RETENTION_MS,
   createLogEntry,
+  diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
 } from "../extension/lib/logs.js";
@@ -46,4 +47,30 @@ test("remote log payload omits internal account routing", () => {
     account_key: "shopee:123",
   }, Date.parse("2026-07-26T00:00:00.000Z"), "log-1");
   assert.equal(logEntryForUpload(entry).account_key, undefined);
+});
+
+test("keeps useful raw exception details and message fingerprints", () => {
+  const error = new Error("Target server returned 403: provider_account_not_participant");
+  error.http_status = 403;
+  error.server_error_code = "provider_account_not_participant";
+  error.stack = "Error: Target server returned 403: provider_account_not_participant";
+  const entry = createLogEntry({
+    level: "error",
+    area: "delivery",
+    event: "failed",
+    details: {
+      ...diagnosticErrorDetails(error),
+      provider_account_id: "1549058683",
+      message_id: "message-1",
+      conversation_id: "conversation-1",
+      message_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    },
+  }, Date.parse("2026-07-26T00:00:00.000Z"), "log-diagnostic");
+
+  assert.equal(entry.details.http_status, 403);
+  assert.equal(entry.details.server_error_code, "provider_account_not_participant");
+  assert.equal(entry.details.error_type, "Error");
+  assert.match(entry.details.error_message, /Target server returned 403/);
+  assert.match(entry.details.error_stack, /Target server returned 403/);
+  assert.equal(entry.details.message_fingerprint, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 });
