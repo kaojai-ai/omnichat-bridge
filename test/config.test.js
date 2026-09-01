@@ -54,3 +54,90 @@ test("logs URL must use HTTPS", () => {
     }],
   }), /Logs URL must use HTTPS/);
 });
+
+test("imports shared configurations without rejecting unsupported provider entries", () => {
+  const config = validateConfigFile({
+    version: 2,
+    generated_by: "admin",
+    accounts: [
+      {
+        provider: "line_oa",
+        provider_account_id: "channel-1",
+        tenant_id: "tenant-1",
+        bot_id: "bot-1",
+        sync_key_url: "https://sync.example.com/v3",
+        hmac_secret: "line-secret",
+      },
+      {
+        provider: "shopee",
+        provider_account_id: "shop-1",
+        events_url: "https://collector.example.com/events",
+        commands_url: "https://admin.example.com/tickets",
+        hmac_secret: "shopee-secret",
+        provider_specific_extra: "ignored",
+      },
+      {
+        provider: "future_provider",
+        provider_account_id: "future-1",
+        arbitrary: "ignored",
+      },
+    ],
+  });
+
+  assert.deepEqual(config, {
+    version: 2,
+    accounts: [{
+      provider: "shopee",
+      provider_account_id: "shop-1",
+      events_url: "https://collector.example.com/events",
+      commands_url: "https://admin.example.com/tickets",
+      hmac_secret: "shopee-secret",
+    }],
+  });
+});
+
+test("delegates validation and origins to a registered provider adapter", () => {
+  const previous = globalThis.OmnichatProviderAdapters;
+  globalThis.OmnichatProviderAdapters = {
+    get(provider) {
+      return provider === "line_oa"
+        ? {
+          validateConfig(value) {
+            return {
+              provider: "line_oa",
+              provider_account_id: String(value.provider_account_id).trim(),
+              endpoint_url: String(value.endpoint_url).trim(),
+              hmac_secret: String(value.hmac_secret).trim(),
+            };
+          },
+          configOrigins(account) {
+            return [account.endpoint_url];
+          },
+        }
+        : null;
+    },
+  };
+
+  try {
+    const config = validateConfigFile({
+      version: 2,
+      accounts: [{
+        provider: "line_oa",
+        provider_account_id: "channel-1",
+        endpoint_url: "https://line.example.com/events",
+        hmac_secret: "line-secret",
+        unused_field: "ignored",
+      }],
+    });
+    assert.deepEqual(accountOrigins(config), ["https://line.example.com/events"]);
+    assert.deepEqual(config.accounts[0], {
+      provider: "line_oa",
+      provider_account_id: "channel-1",
+      endpoint_url: "https://line.example.com/events",
+      hmac_secret: "line-secret",
+    });
+  } finally {
+    if (previous === undefined) delete globalThis.OmnichatProviderAdapters;
+    else globalThis.OmnichatProviderAdapters = previous;
+  }
+});

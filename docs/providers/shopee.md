@@ -17,6 +17,11 @@ Shopee Seller Chat is the first supported provider.
 
 See the shared [`omnichat.message_batch` v1 contract](../payload-contract.md).
 
+The Bridge uses the shared version 2 configuration envelope. A configuration
+file may contain entries for other providers; this Shopee adapter ignores
+those entries and ignores fields it does not use. Shopee entries are still
+validated strictly for the required fields shown below.
+
 ```mermaid
 flowchart LR
     A["Shopee Seller Chat"] --> B["Realtime socket or history recovery"]

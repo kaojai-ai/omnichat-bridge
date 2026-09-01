@@ -7,7 +7,7 @@ const source = await readFile(new URL("../extension/lib/shopee-url.js", import.m
 const context = vm.createContext({ URL });
 vm.runInContext(source, context);
 
-const { isShopeeChatPath, isShopeeChatUrl } = context.OmnichatShopeeUrl;
+const { isShopeePageUrl, isShopeeChatPath, isShopeeChatUrl } = context.OmnichatShopeeUrl;
 
 test("accepts both Shopee Seller Chat URLs", () => {
   for (const path of ["/new-webchat/conversations", "/webchat/conversations"]) {
@@ -17,6 +17,8 @@ test("accepts both Shopee Seller Chat URLs", () => {
 });
 
 test("keeps Shopee Seller Chat matching origin-locked", () => {
+  assert.equal(isShopeePageUrl("https://seller.shopee.co.th/settings"), true);
+  assert.equal(isShopeePageUrl("https://seller.shopee.co.th.evil.example/settings"), false);
   assert.equal(isShopeeChatUrl("https://seller.shopee.co.th/shop/123"), false);
   assert.equal(isShopeeChatUrl("https://seller.shopee.co.th.evil.example/webchat/conversations"), false);
   assert.equal(isShopeeChatUrl("https://example.com/webchat/conversations"), false);

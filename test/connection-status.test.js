@@ -56,3 +56,13 @@ test("reports a mismatched Shopee account without provider-specific server logic
   const result = buildConnectionHealth({ ...healthy, accountMatches: false });
   assert.equal(result.reason_code, "seller_account_mismatch");
 });
+
+test("names realtime failures after the active provider", () => {
+  const result = buildConnectionHealth({
+    ...healthy,
+    provider: "line_oa",
+    realtimeConnected: false,
+  });
+  assert.equal(result.reason_code, "line_oa_realtime_disconnected");
+  assert.equal(result.checks[3].reason_code, "line_oa_realtime_disconnected");
+});

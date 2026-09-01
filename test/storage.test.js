@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   STORAGE,
+  mergeDetectedAccounts,
   normalizeDeviceName,
   resetDetectedAccountsFromConfig,
   writeStorage,
@@ -23,6 +24,41 @@ test("device name is optional, trimmed, bounded, and persisted locally", async (
   await writeStorage({ [STORAGE.deviceName]: name });
   assert.equal(name.length, 80);
   assert.deepEqual(written, { [STORAGE.deviceName]: name });
+});
+
+test("merges detected accounts by provider and account ID", () => {
+  assert.deepEqual(
+    mergeDetectedAccounts(
+      [
+        {
+          provider: "shopee",
+          provider_account_id: "shop-1",
+          display_name: "Shopee shop",
+          detected_at: "2026-08-30T00:00:00.000Z",
+        },
+        { provider: "future_provider", provider_account_id: "shared-1" },
+      ],
+      [
+        {
+          provider: "shopee",
+          provider_account_id: "shop-1",
+          display_name: "Updated Shopee shop",
+          detected_at: "2026-09-01T00:00:00.000Z",
+        },
+        { provider: "shopee", provider_account_id: "shared-1" },
+      ],
+    ),
+    [
+      {
+        provider: "shopee",
+        provider_account_id: "shop-1",
+        display_name: "Updated Shopee shop",
+        detected_at: "2026-09-01T00:00:00.000Z",
+      },
+      { provider: "future_provider", provider_account_id: "shared-1" },
+      { provider: "shopee", provider_account_id: "shared-1" },
+    ],
+  );
 });
 
 test("resets detected accounts from saved config without copying secrets", async () => {
@@ -54,6 +90,46 @@ test("resets detected accounts from saved config without copying secrets", async
       provider_account_id: "1549058683",
     }],
   });
+});
+
+test("resets detected accounts for registered providers without copying secrets", async () => {
+  const previousAdapters = globalThis.OmnichatProviderAdapters;
+  let written = null;
+  globalThis.OmnichatProviderAdapters = {
+    get(provider) {
+      return provider === "line_oa" ? { supports: () => true } : null;
+    },
+  };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        get: async () => ({
+          [STORAGE.config]: {
+            version: 2,
+            accounts: [{
+              provider: "line_oa",
+              provider_account_id: "channel-1",
+              hmac_secret: "must-not-be-copied",
+            }],
+          },
+        }),
+        set: async (value) => { written = value; },
+      },
+    },
+  };
+
+  try {
+    assert.equal(await resetDetectedAccountsFromConfig(), true);
+    assert.deepEqual(written, {
+      [STORAGE.detectedAccounts]: [{
+        provider: "line_oa",
+        provider_account_id: "channel-1",
+      }],
+    });
+  } finally {
+    if (previousAdapters === undefined) delete globalThis.OmnichatProviderAdapters;
+    else globalThis.OmnichatProviderAdapters = previousAdapters;
+  }
 });
 
 test("does not reset detected accounts when saved config is empty", async () => {
