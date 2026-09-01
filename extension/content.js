@@ -276,7 +276,14 @@
     if (!accounts.length) return;
     const stored = await chrome.storage.local.get(["local_consent"]);
     if (!stored.local_consent?.accepted_at) return;
-    await chrome.storage.local.set({ detected_accounts: accounts });
+    const persisted = await sendRuntimeMessage({
+      type: "accounts_detected",
+      provider: providerAdapter.id,
+      accounts,
+    });
+    if (!persisted?.ok) {
+      throw new Error(persisted?.error ?? "Could not save detected provider accounts.");
+    }
     log("info", "account_detected", `${providerLabel} accounts detected on the provider page.`, {
       accounts: accounts.length,
     });

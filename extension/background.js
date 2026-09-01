@@ -23,6 +23,7 @@ import {
   STORAGE,
   hasLocalConsent,
   installationId,
+  mergeDetectedAccounts,
   normalizeDeviceName,
   readAccountState,
   readStorage,
@@ -371,6 +372,30 @@ function exclusive(task) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "accounts_detected") {
+    void exclusive(async () => {
+      const provider = normalizedProviderId(message.provider);
+      const adapter = providerAdapterForId(provider);
+      if (!adapter?.supports("account_detection")) {
+        throw new Error(`Unsupported provider account detection: ${provider || "<unknown>"}.`);
+      }
+      const accounts = Array.isArray(message.accounts) ? message.accounts : [];
+      if (!accounts.length || accounts.some((account) => account?.provider !== provider)) {
+        throw new Error("Detected provider accounts are invalid.");
+      }
+      const stored = await readStorage([STORAGE.consent, STORAGE.detectedAccounts]);
+      if (!hasLocalConsent(stored[STORAGE.consent])) {
+        throw new Error("Provider browser bridge is not configured.");
+      }
+      const detectedAccounts = mergeDetectedAccounts(stored[STORAGE.detectedAccounts], accounts);
+      await writeStorage({ [STORAGE.detectedAccounts]: detectedAccounts });
+      return { accounts: detectedAccounts };
+    }).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) }),
+    );
+    return true;
+  }
   if (message?.type === "record_log") {
     const area = message.area === "popup" ? "popup" : "provider";
     const safeMessage = INBOUND_LOG_MESSAGES[`${area}.${message.event}`];

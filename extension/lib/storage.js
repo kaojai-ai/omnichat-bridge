@@ -25,6 +25,42 @@ export const LEGACY_STORAGE = {
 export const readStorage = (keys) => chrome.storage.local.get(keys);
 export const writeStorage = (values) => chrome.storage.local.set(values);
 
+function normalizeDetectedAccount(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const provider = typeof value.provider === "string" ? value.provider.trim() : "";
+  const providerAccountId = typeof value.provider_account_id === "string"
+    || typeof value.provider_account_id === "number"
+    ? String(value.provider_account_id).trim()
+    : "";
+  if (!provider || !providerAccountId) return null;
+  return {
+    ...value,
+    provider,
+    provider_account_id: providerAccountId,
+  };
+}
+
+export function mergeDetectedAccounts(existing, incoming) {
+  const merged = [];
+  const indexes = new Map();
+  for (const value of [
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ]) {
+    const account = normalizeDetectedAccount(value);
+    if (!account) continue;
+    const key = `${account.provider}:${account.provider_account_id}`;
+    const index = indexes.get(key);
+    if (index === undefined) {
+      indexes.set(key, merged.length);
+      merged.push(account);
+    } else {
+      merged[index] = { ...merged[index], ...account };
+    }
+  }
+  return merged;
+}
+
 function supportsAccountDetection(provider) {
   const adapter = globalThis.OmnichatProviderAdapters?.get(provider);
   return adapter ? adapter.supports("account_detection") : provider === "shopee";

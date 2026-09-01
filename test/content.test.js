@@ -9,10 +9,11 @@ const adaptersSource = await readFile(new URL("../extension/lib/provider-adapter
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations") {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
+  const storageWrites = [];
   let context;
   const window = {
     location: {
@@ -45,7 +46,16 @@ function contentBridge(pathname = "/new-webchat/conversations") {
           return { ok: true };
         },
       },
-      storage: { local: { async get() { return {}; } } },
+      storage: {
+        local: {
+          async get() {
+            return localConsent ? { local_consent: { accepted_at: "2026-09-01T00:00:00.000Z" } } : {};
+          },
+          async set(value) {
+            storageWrites.push(value);
+          },
+        },
+      },
     },
     OmnichatShopee: {
       parseShopeeMessages(body) {
@@ -88,6 +98,7 @@ function contentBridge(pathname = "/new-webchat/conversations") {
     },
     providerEvent,
     runtimeMessages,
+    storageWrites,
     sendCommand,
     triggerWindowEvent,
   };
@@ -101,6 +112,23 @@ const command = {
   command_type: "send_text",
   text: "Hello",
 };
+
+test("routes detected accounts through the background merger", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { localConsent: true });
+
+  await bridge.providerEvent({
+    type: "accounts_detected",
+    accounts: [{ provider: "shopee", provider_account_id: "shop-1" }],
+  });
+
+  const detection = bridge.runtimeMessages.find((message) => message.type === "accounts_detected");
+  assert.equal(detection?.provider, "shopee");
+  assert.deepEqual(
+    plain(detection?.accounts.map(({ detected_at: _detectedAt, ...account }) => account)),
+    [{ provider: "shopee", provider_account_id: "shop-1" }],
+  );
+  assert.deepEqual(bridge.storageWrites, []);
+});
 
 const echo = {
   provider: "shopee",
