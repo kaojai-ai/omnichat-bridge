@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
@@ -22,6 +23,20 @@ test("reattaches an invalidated content bridge without refreshing the provider p
   assert.match(source, /existing\.socket\?\.readyState === WebSocket\.OPEN/);
   assert.match(source, /sendConnectionStatus\(existing\.socket, context\)/);
   assert.ok(manifest.permissions.includes("scripting"));
+});
+
+test("keeps connection status compatible with the server's strict version 1 envelope", () => {
+  const statusStart = source.indexOf("async function connectionStatusSnapshot(");
+  const statusEnd = source.indexOf("\n}\n\nasync function sendConnectionStatus", statusStart);
+  assert.ok(statusStart >= 0);
+  assert.ok(statusEnd > statusStart);
+  const statusSource = source.slice(statusStart, statusEnd);
+  assert.match(statusSource, /schema: "omnichat\.connection_status"/);
+  assert.match(statusSource, /version: 1/);
+  assert.match(statusSource, /health,/);
+  assert.doesNotMatch(statusSource, /provider_surface:/);
+  assert.doesNotMatch(statusSource, /provider_capabilities:/);
+  assert.doesNotMatch(statusSource, /provider_realtime_transport:/);
 });
 
 test("does not redeclare page bridge dependencies during reattachment", () => {
@@ -73,9 +88,57 @@ test("requires an already-open Shopee tab for outbound replies", () => {
   assert.ok(sendStart >= 0);
   assert.ok(sendEnd > sendStart);
   const sendSource = source.slice(sendStart, sendEnd);
-  assert.match(sendSource, /commandTab\(context, \{ createIfMissing: false \}\)/);
+  assert.match(sendSource, /commandTab\(context, \{ createIfMissing: false, prepareForSend: true \}\)/);
   assert.doesNotMatch(sendSource, /chrome\.tabs\.create\s*\(/);
   assert.match(source, /Open \$\{label\} in Chrome before sending a reply\./);
+});
+
+test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {
+  const commandStart = source.indexOf("async function commandTab(");
+  const commandEnd = source.indexOf("\n}\n\nfunction providerAdapterForCommand", commandStart);
+  assert.ok(commandStart >= 0);
+  assert.ok(commandEnd > commandStart);
+  const commandSource = source.slice(commandStart, commandEnd);
+  assert.match(commandSource, /prepareForSend = false/);
+  assert.match(commandSource, /prepareProviderTab\(candidate, adapter\)/);
+  assert.match(commandSource, /for \(const candidate of orderedTabs\)/);
+  assert.match(commandSource, /isReadyProviderTab\(candidate, adapter\)/);
+  assert.match(commandSource, /orderedTabs\[0\] \?\? selectedTab/);
+  assert.match(source, /function orderProviderTabs\(adapter, tabs, preferredTabId = null\)/);
+  assert.match(source, /leftRank !== rightRank/);
+  assert.match(source, /leftActive = left\.active === true/);
+  assert.match(source, /type: "prepare_provider_v2"/);
+  assert.match(source, /operation: "surface preparation"/);
+});
+
+test("orders a ready Seller Centre candidate ahead of a preferred legacy tab", () => {
+  const start = source.indexOf("function orderProviderTabs(");
+  const end = source.indexOf("\n}\n\nasync function providerTabStatus", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const orderProviderTabs = vm.runInNewContext(`(${source.slice(start, end + 2)})`);
+  const adapter = {
+    surfacePriority: ["seller-centre", "legacy"],
+    surfaceForUrl(url) {
+      return url.includes("/portal/") ? "seller-centre" : "legacy";
+    },
+  };
+  const ordered = orderProviderTabs(adapter, [
+    { id: 7, url: "https://seller.shopee.co.th/new-webchat/conversations", active: true },
+    { id: 3, url: "https://seller.shopee.co.th/portal/chat-management", active: false },
+  ], 7);
+  assert.deepEqual(Array.from(ordered, (tab) => tab.id), [3, 7]);
+});
+
+test("does not cross-send a Seller Centre command through the legacy endpoint", () => {
+  const sendStart = source.indexOf("async function sendViaProvider(");
+  const sendEnd = source.indexOf("\n}\n\nasync function selectCommandTab", sendStart);
+  assert.ok(sendStart >= 0);
+  assert.ok(sendEnd > sendStart);
+  const sendSource = source.slice(sendStart, sendEnd);
+  assert.match(sendSource, /prepareForSend: true/);
+  assert.doesNotMatch(sendSource, /sendPath|webchat\/api\/v1\.2\/messages/);
+  assert.match(source, /surfaceForUrl\?\.\(tab\.url\) === "seller-centre"/);
 });
 
 test("keeps tab creation limited to an explicit open-tab action", () => {

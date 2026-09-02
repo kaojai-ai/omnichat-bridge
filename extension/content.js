@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v2";
-  const BRIDGE_PROTOCOL_VERSION = 3;
+  const BRIDGE_PROTOCOL_VERSION = 4;
   const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
   if (!providerAdapter) return;
@@ -10,6 +10,7 @@
   const profilesByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
+  const pendingProviderPreparations = new Map();
   const realtimeMessageKeys = new Set();
   let activeConversationId = null;
   let realtimeConnected = false;
@@ -173,6 +174,24 @@
       error: pending.result.error
         ? `${providerLabel} API error: ${pending.result.error}`
         : `${providerLabel} API reply failed.`
+    });
+  }
+
+  function prepareProviderSurface(message) {
+    const requestId = typeof message?.request_id === "string" ? message.request_id : "";
+    if (!requestId) return Promise.resolve({ ok: false, error: "Provider preparation request is invalid." });
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        if (!pendingProviderPreparations.has(requestId)) return;
+        pendingProviderPreparations.delete(requestId);
+        resolve({ ok: false, error: `${providerLabel} surface preparation timed out.` });
+      }, 30_000);
+      pendingProviderPreparations.set(requestId, { resolve, timeout });
+      post({
+        type: "prepare_provider_v2",
+        provider: providerAdapter.id,
+        request_id: requestId,
+      });
     });
   }
 
@@ -683,6 +702,8 @@
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
+    } else if (event.data.type === "seller_centre_chat_opened") {
+      requestResumeSync();
     } else if (event.data.type === "diagnostic_log") {
       log(
         event.data.level,
@@ -716,6 +737,12 @@
       void observeAsync("recovery_complete", () => handleRecoveryComplete(event.data));
     } else if (event.data.type === "api_send_result") {
       handleApiSendResult(event.data);
+    } else if (event.data.type === "prepare_provider_result") {
+      const pending = pendingProviderPreparations.get(event.data.request_id);
+      if (!pending) return;
+      pendingProviderPreparations.delete(event.data.request_id);
+      clearTimeout(pending.timeout);
+      pending.resolve(event.data);
     }
   });
 
@@ -755,6 +782,10 @@
     }
     if (message?.type === "send_api_v2") {
       void sendViaApi(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
+      return true;
+    }
+    if (message?.type === "prepare_provider_v2") {
+      void prepareProviderSurface(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "send_text_ui_click_wip_v2") {

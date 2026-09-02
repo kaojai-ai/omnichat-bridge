@@ -58,9 +58,10 @@ headers, tokens, or message bodies.
 Your server can send one text, image, or product reply to a configured seller
 browser Shop ID on either supported surface. Text and image replies may quote
 an existing provider message. The extension uses the authenticated request
-profile of the selected surface; it never silently sends a Seller Centre
-command through legacy endpoints and never transfers Shopee cookies,
-passwords, or login tokens.
+profile of the selected surface: Seller Centre sends through its page-native
+mini-chat request, while legacy Webchat uses its secure sender. It never
+silently sends a Seller Centre command through legacy endpoints and never
+transfers Shopee cookies, passwords, or login tokens.
 
 - The target conversation must already be available in the selected Shopee chat
   surface.
@@ -91,6 +92,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
   covered by conversation cursors.
 - Load, reconnect, and visible focus can resume sync at most once every five
   minutes. **Sync messages** and **Retry now** bypass that window.
+- Opening the Seller Centre mini-chat manually starts the same debounced
+  automatic sync path, so the chat does not need to be opened before syncing.
 - Failed collector delivery retries after approximately 1, 2, 5, 15, and 30
   minutes, capped at 30 minutes. Retry never calls Shopee.
 - Shopee recovery requests are spaced by at least one second.

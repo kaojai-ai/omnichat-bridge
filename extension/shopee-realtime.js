@@ -135,15 +135,21 @@
     details,
   });
 
+  const surfaceSendReady = () => {
+    if (!state.listTemplate || !state.getTemplate) return false;
+    if (isSellerCentreSurface()) return typeof state.nativeFetch === "function";
+    return typeof window.__chat_anti_fraud__?.poster === "function";
+  };
+
   const surfaceCapabilities = () => ({
     account_detection: Boolean(state.listTemplate),
     message_observation: isSellerCentreSurface()
       ? Boolean(state.listTemplate && state.getTemplate)
       : Boolean(state.socket),
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
-    send_text: Boolean(state.listTemplate && state.getTemplate),
-    send_image: Boolean(state.listTemplate && state.getTemplate),
-    send_product: Boolean(state.listTemplate && state.getTemplate),
+    send_text: surfaceSendReady(),
+    send_image: surfaceSendReady(),
+    send_product: surfaceSendReady(),
   });
 
   const publishSurfaceStatus = () => {
@@ -224,6 +230,7 @@
     if (panelItem?.classList?.contains?.("active")) return true;
     return launcher.getAttribute?.("aria-expanded") === "true";
   };
+  let openingSellerCentreChatInternally = false;
   const ensureSellerCentreChatOpen = async () => {
     if (!isSellerCentreSurface()) return;
     if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
@@ -242,11 +249,14 @@
       }
       if (sellerCentreChatIsOpen(launcher)) return;
       postLog("info", "seller_centre_chat_open_started", "Opening the Seller Centre mini-chat before sync.");
+      openingSellerCentreChatInternally = true;
       try {
         launcher.click();
       } catch (error) {
         postLog("error", "seller_centre_chat_open_failed", "Seller Centre mini-chat could not be opened.", errorDetails(error));
         throw error;
+      } finally {
+        openingSellerCentreChatInternally = false;
       }
       while (!sellerCentreChatIsOpen(launcher) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, SELLER_CENTRE_CHAT_OPEN_POLL_MS));
@@ -262,6 +272,19 @@
     });
     return state.sellerCentreChatOpenPromise;
   };
+  if (isSellerCentreSurface() && typeof document?.addEventListener === "function") {
+    document.addEventListener("click", (event) => {
+      if (openingSellerCentreChatInternally) return;
+      const target = event?.target;
+      const launcher = target?.id === "SidebarEntry"
+        ? target
+        : target?.closest?.("#SidebarEntry");
+      if (!launcher || sellerCentreChatIsOpen(launcher)) return;
+      setTimeout(() => {
+        post({ type: "seller_centre_chat_opened" });
+      }, 0);
+    }, true);
+  }
   const value = (input) => {
     if (typeof input !== "string" && typeof input !== "number") return null;
     const normalized = String(input).trim();
@@ -342,6 +365,26 @@
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!state.listTemplate || !state.getTemplate) throw new Error("Refresh Shopee Seller Chat once to initialize realtime sync.");
+  };
+
+  const waitForSellerCentreTemplates = async () => {
+    if (state.listTemplate && state.getTemplate) return;
+    if (typeof document?.getElementById !== "function") {
+      throw new Error("Seller Centre chat is still initializing. Open the Chat panel and wait for its conversation list.");
+    }
+    await waitForTemplate();
+  };
+
+  const prepareSellerCentre = async () => {
+    if (!isSellerCentreSurface()) throw new Error("Shopee Seller Centre is not open in this tab.");
+    await ensureSellerCentreChatOpen();
+    await waitForSellerCentreTemplates();
+    publishSurfaceStatus();
+    return {
+      surface: state.surface,
+      surface_ready: true,
+      capabilities: surfaceCapabilities(),
+    };
   };
 
   async function fetchShopList() {
@@ -459,6 +502,7 @@
     source: SOURCE,
     resetRecovery,
     openSellerCentreChat: ensureSellerCentreChatOpen,
+    prepareSellerCentre,
   };
 
   const captureProfiles = (conversations) => {
@@ -682,7 +726,9 @@
   };
 
   const senderTemplate = (routing, requestId, clientMessageId) => {
-    if (state.sendTemplate) return state.sendTemplate;
+    if (state.sendTemplate && pathOf(state.sendTemplate.url) === surfaceProfile().sendPath) {
+      return state.sendTemplate;
+    }
     if (!state.getTemplate) return null;
 
     const sourceUrl = new URL(state.getTemplate.url);
@@ -721,6 +767,31 @@
         ...(profile.sendSource ? { source: profile.sendSource } : {}),
       },
     };
+  };
+
+  const sendThroughSurface = async (template, url, payload) => {
+    if (isSellerCentreSurface()) {
+      if (typeof state.nativeFetch !== "function") {
+        throw new Error("Shopee Seller Centre native sender is unavailable. Refresh Seller Chat.");
+      }
+      const sourceInit = state.getTemplate?.init ?? {};
+      const init = {
+        method: "POST",
+        headers: new Headers(template.headers ?? sourceInit.headers ?? {}),
+        body: JSON.stringify(payload),
+        credentials: sourceInit.credentials ?? "include",
+        mode: sourceInit.mode ?? "cors",
+      };
+      for (const key of ["cache", "redirect", "referrerPolicy", "integrity", "keepalive"]) {
+        if (sourceInit[key] !== undefined) init[key] = sourceInit[key];
+      }
+      return state.nativeFetch(new Request(url, init));
+    }
+    const poster = window.__chat_anti_fraud__?.poster;
+    if (typeof poster !== "function") {
+      throw new Error("Shopee secure sender is unavailable. Refresh Seller Chat.");
+    }
+    return poster(url, payload, { headers: template.headers });
   };
 
   const numericId = (value) => {
@@ -843,6 +914,7 @@
     }
     try {
       await ensureSellerCentreChatOpen();
+      if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
     } catch (error) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
       return;
@@ -869,11 +941,6 @@
     }
     if (!routing?.shop_id || !routing.to_id) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Refresh Shopee Seller Chat." });
-      return;
-    }
-    const poster = window.__chat_anti_fraud__?.poster;
-    if (typeof poster !== "function") {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Shopee secure sender is unavailable. Refresh Seller Chat." });
       return;
     }
     try {
@@ -913,7 +980,10 @@
       const url = new URL(template.url);
       if (isSellerCentreSurface()) url.searchParams.delete("uuid");
       else url.searchParams.set("uuid", clientMessageId);
-      const response = await poster(url.toString(), payload, { headers: template.headers });
+      if (url.pathname !== surfaceProfile().sendPath) {
+        throw new Error("Shopee Seller Chat send profile does not match the active surface.");
+      }
+      const response = await sendThroughSurface(template, url.toString(), payload);
       let body = response;
       if (typeof response?.clone === "function") {
         try {
@@ -1487,6 +1557,18 @@
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api_v2") {
       void observeAsync("send_api", () => sendApi(event.data));
+    } else if (event.data.type === "prepare_provider_v2") {
+      void observeAsync("prepare_provider", async () => {
+        const requestId = String(event.data.request_id ?? "").trim();
+        try {
+          const result = isSellerCentreSurface()
+            ? await prepareSellerCentre()
+            : { surface: state.surface, surface_ready: true, capabilities: surfaceCapabilities() };
+          post({ type: "prepare_provider_result", request_id: requestId, ok: true, ...result });
+        } catch (error) {
+          post({ type: "prepare_provider_result", request_id: requestId, ok: false, error: String(error) });
+        }
+      });
     } else if (event.data.type === "recovery_ack_v2") {
       const acknowledge = state.acknowledgements.get(event.data.request_id);
       if (acknowledge) {

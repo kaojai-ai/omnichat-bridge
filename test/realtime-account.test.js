@@ -25,6 +25,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
 
 function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null } = {}) {
   const listeners = [];
+  const documentListeners = new Map();
   const posts = [];
   const responses = new Map();
   const requests = [];
@@ -38,7 +39,10 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   };
   const miniChatLauncher = {
     getBoundingClientRect: () => ({ width: 48, height: 48 }),
-    closest: (selector) => selector === ".panel-item" ? miniChatPanel : null,
+    id: "SidebarEntry",
+    closest: (selector) => selector === ".panel-item"
+      ? miniChatPanel
+      : selector === "#SidebarEntry" ? miniChatLauncher : null,
     getAttribute: () => null,
     click: () => {
       miniChatClicks += 1;
@@ -47,6 +51,9 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   };
   const document = {
     documentElement: { dataset: {} },
+    addEventListener(type, listener) {
+      documentListeners.set(type, [...(documentListeners.get(type) ?? []), listener]);
+    },
     ...(miniChatOpen === null ? {} : {
       getElementById: (id) => id === "SidebarEntry" ? miniChatLauncher : null,
     }),
@@ -148,6 +155,14 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     await new Promise((resolve) => setImmediate(resolve));
   }
 
+  async function clickMiniChat() {
+    for (const listener of documentListeners.get("click") ?? []) {
+      listener({ target: miniChatLauncher });
+    }
+    miniChatLauncher.click();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
   async function detect(requestId = "detect-1") {
     for (const listener of listeners) {
       listener({
@@ -231,6 +246,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     requests,
     intervals,
     runIntervals,
+    clickMiniChat,
     get miniChatClicks() { return miniChatClicks; },
     get miniChatIsOpen() { return miniChatIsOpen; },
   };
@@ -248,6 +264,17 @@ test("resets stale page-side recovery state before a retry", async () => {
     acknowledgementCount: 0,
     recoveryEpoch: 1,
   });
+});
+
+test("signals automatic sync when Seller Centre mini-chat is opened manually", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", miniChatOpen: false });
+
+  await bridge.clickMiniChat();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(bridge.miniChatClicks, 1);
+  assert.equal(bridge.miniChatIsOpen, true);
+  assert.equal(bridge.posts.filter((post) => post.type === "seller_centre_chat_opened").length, 1);
 });
 
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {

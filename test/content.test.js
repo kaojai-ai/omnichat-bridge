@@ -171,6 +171,42 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("prepares Seller Centre before an outbound command is selected", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+  const result = bridge.sendCommand({
+    type: "prepare_provider_v2",
+    provider: "shopee",
+    request_id: "prepare-1",
+  });
+
+  assert.deepEqual(
+    plain(bridge.runtimeMessages.find((message) => message.type === "prepare_provider_v2")),
+    { source: "omnichat-realtime-bridge-v2", type: "prepare_provider_v2", provider: "shopee", request_id: "prepare-1" },
+  );
+  await bridge.providerEvent({
+    type: "prepare_provider_result",
+    request_id: "prepare-1",
+    ok: true,
+    surface: "seller-centre",
+    surface_ready: true,
+  });
+
+  assert.equal((await result).surface, "seller-centre");
+  assert.equal((await result).surface_ready, true);
+});
+
+test("starts the existing automatic sync path after a manual Seller Centre chat open", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+
+  await bridge.providerEvent({ type: "seller_centre_chat_opened" });
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
+    1,
+  );
+});
+
 test("does not deliver the same provider message twice across realtime surfaces", async () => {
   const bridge = contentBridge("/portal/chat-management");
   await bridge.providerEvent({ type: "realtime_event", capture_method: "realtime_socket", body: { messages: [echo] } });
