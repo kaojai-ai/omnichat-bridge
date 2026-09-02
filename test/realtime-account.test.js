@@ -9,6 +9,20 @@ const adaptersSource = await readFile(new URL("../extension/lib/provider-adapter
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const origin = "https://seller.shopee.co.th";
 
+test("keeps the recovery account identity available to reconnect cleanup", () => {
+  const recoverStart = source.indexOf("async function recover(");
+  const recoveryTry = source.indexOf("    try {", recoverStart);
+  const accountDeclaration = source.indexOf("const accountId = value(checkpoint?.provider_account_id);", recoverStart);
+
+  assert.ok(recoverStart >= 0);
+  assert.ok(accountDeclaration > recoverStart);
+  assert.ok(accountDeclaration < recoveryTry);
+  assert.equal(
+    source.indexOf("const accountId = value(checkpoint?.provider_account_id);", accountDeclaration + 1),
+    -1,
+  );
+});
+
 function createBridge({ pathname = "/webchat/conversations" } = {}) {
   const listeners = [];
   const posts = [];

@@ -1034,6 +1034,7 @@
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: "Recovery is already running." });
       return;
     }
+    const accountId = value(checkpoint?.provider_account_id);
     const recoveryEpoch = state.recoveryEpoch;
     state.recoveryInFlight = true;
     state.recoveryRequestId = requestId;
@@ -1052,7 +1053,6 @@
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
-      const accountId = value(checkpoint?.provider_account_id);
       const requiredIds = bootstrap && frozenBootstrap.length
         ? frozenBootstrap.map((conversation) => String(conversation.id))
         : null;
