@@ -52,6 +52,47 @@ test("prioritizes delivery failure and keeps its timestamp", () => {
   assert.equal(result.metrics.pending_messages, 3);
 });
 
+test("keeps a recovered sync failure as history without marking the bridge inactive", () => {
+  const result = buildConnectionHealth({
+    ...healthy,
+    lastRealtimeConnectedAt: "2026-07-31T00:00:06.000Z",
+    status: {
+      ...healthy.status,
+      last_capture_at: "2026-07-31T00:00:05.000Z",
+      sync_error: "Seller Centre recovery failed",
+      sync_error_at: "2026-07-31T00:00:04.000Z",
+    },
+  });
+
+  assert.equal(result.reason_code, "healthy");
+  assert.deepEqual(result.checks.map((check) => check.status), ["pass", "pass", "pass", "pass"]);
+  assert.deepEqual(result.last_error, {
+    code: "message_sync_failed",
+    occurred_at: "2026-07-31T00:00:04.000Z",
+  });
+});
+
+test("keeps an unrecovered sync failure inactive", () => {
+  const result = buildConnectionHealth({
+    ...healthy,
+    lastRealtimeConnectedAt: "2026-07-31T00:00:02.000Z",
+    status: {
+      ...healthy.status,
+      last_capture_at: "2026-07-31T00:00:02.000Z",
+      last_delivery_at: "2026-07-31T00:00:02.000Z",
+      last_sync_at: "2026-07-31T00:00:02.000Z",
+      sync_error: "Seller Centre recovery failed",
+      sync_error_at: "2026-07-31T00:00:04.000Z",
+    },
+  });
+
+  assert.equal(result.reason_code, "message_sync_failed");
+  assert.deepEqual(result.last_error, {
+    code: "message_sync_failed",
+    occurred_at: "2026-07-31T00:00:04.000Z",
+  });
+});
+
 test("reports a mismatched Shopee account without provider-specific server logic", () => {
   const result = buildConnectionHealth({ ...healthy, accountMatches: false });
   assert.equal(result.reason_code, "seller_account_mismatch");
