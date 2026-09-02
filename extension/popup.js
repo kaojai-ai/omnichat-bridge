@@ -68,6 +68,7 @@ const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
 const configInput = document.querySelector("#config");
 const deviceNameInput = document.querySelector("#device-name");
+const deviceNameBadge = document.querySelector("#device-name-badge");
 const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
 const leaderStatus = document.querySelector("#leader-status");
@@ -213,6 +214,14 @@ function setLeaderStatus(label, state, action, isLeader = false) {
     : isLeader
       ? "Unset this installation as leader"
       : "Set this tab as leader";
+}
+
+function renderDeviceNameBadge() {
+  const deviceName = normalizeDeviceName(storedDeviceName);
+  deviceNameBadge.textContent = deviceName;
+  deviceNameBadge.hidden = !deviceName;
+  deviceNameBadge.title = deviceName ? `Node name: ${deviceName}` : "";
+  deviceNameBadge.setAttribute("aria-label", deviceName ? `Node name ${deviceName}` : "Node name");
 }
 
 function setConfigStatus(message, isError = false) {
@@ -373,6 +382,7 @@ function renderDetectedAccounts() {
 }
 
 function renderDashboard(message = "", isError = false) {
+  renderDeviceNameBadge();
   showAccounts(detectedAccounts);
   renderDetectedAccounts();
   status.replaceChildren();
@@ -878,6 +888,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     });
     storedConfig = config;
     storedDeviceName = deviceName;
+    renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
       accounts: config.accounts.length,
       logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
