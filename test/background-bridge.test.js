@@ -66,3 +66,22 @@ test("resumes an interrupted sync after the service worker restarts", () => {
   assert.match(source, /\["discovering", "syncing"\]\.includes\(status\?\.state\)/);
   assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
 });
+
+test("requires an already-open Shopee tab for outbound replies", () => {
+  const sendStart = source.indexOf("async function sendViaProvider(");
+  const sendEnd = source.indexOf("\n}\n\nasync function selectCommandTab", sendStart);
+  assert.ok(sendStart >= 0);
+  assert.ok(sendEnd > sendStart);
+  const sendSource = source.slice(sendStart, sendEnd);
+  assert.match(sendSource, /commandTab\(context, \{ createIfMissing: false \}\)/);
+  assert.doesNotMatch(sendSource, /chrome\.tabs\.create\s*\(/);
+  assert.match(source, /Open \$\{label\} in Chrome before sending a reply\./);
+});
+
+test("keeps tab creation limited to an explicit open-tab action", () => {
+  const openStart = source.indexOf("async function openCommandTab(");
+  const openEnd = source.indexOf("\n}\n", openStart);
+  assert.ok(openStart >= 0);
+  assert.ok(openEnd > openStart);
+  assert.match(source.slice(openStart, openEnd), /commandTab\(context, \{ createIfMissing: true \}\)/);
+});

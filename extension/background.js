@@ -610,7 +610,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   return undefined;
 });
 
-async function commandTab(context) {
+async function commandTab(context, { createIfMissing = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
@@ -628,10 +628,16 @@ async function commandTab(context) {
   if (selectedTab && await isReadyProviderTab(selectedTab, adapter)) return selectedTab;
   let tab = await findReadyProviderChatTab(adapter);
   if (!tab) tab = selectedTab ?? await findProviderChatTab(adapter);
-  if (!tab && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
+  if (!tab && createIfMissing && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
     tab = await chrome.tabs.create({ url: adapter.chatUrl, active: false });
   }
-  if (!tab?.id) throw new Error(`${label} chat tab is unavailable.`);
+  if (!tab?.id) {
+    await recordLog("warn", "provider", "tab_missing", `${label} chat tab is unavailable for an outbound reply.`, {
+      provider: adapter.id,
+      provider_account_id: context.account.provider_account_id,
+    });
+    throw new Error(`Open ${label} in Chrome before sending a reply.`);
+  }
   if (!(await isReadyProviderTab(tab, adapter))) {
     await recordLog("warn", "provider", "surface_unready", `${label} chat surface is not ready for commands.`, {
       provider: adapter.id,
@@ -659,7 +665,7 @@ async function sendViaProvider(message) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: false });
   await ensureProviderBridge(tab.id, adapter);
   let imagePayload = {};
   if (commandType === "send_image") {
@@ -720,7 +726,7 @@ async function sendTextByUiClick_WIP(message) {
   const adapter = providerAdapterForCommand(message);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter?.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: false });
   await ensureProviderBridge(tab.id, context.adapter);
   return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v2" });
 }
@@ -833,7 +839,7 @@ async function openCommandTab() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = configuredAccountContexts(stored)[0];
   if (!context) throw new Error("Provider browser bridge is not configured.");
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: true });
   if (!tab.id) throw new Error(`${providerLabel(context.adapter)} chat tab is unavailable.`);
   await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });

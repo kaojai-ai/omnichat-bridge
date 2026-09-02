@@ -64,6 +64,9 @@ passwords, or login tokens.
 
 - The target conversation must already be available in the selected Shopee chat
   surface.
+- Outbound replies never create or navigate to a Shopee tab. An Admin reply is
+  sent only when an already-open Seller Centre or legacy Shopee chat tab is
+  available; otherwise it fails with an actionable error.
 - If the browser is offline or another conversation is open, the server returns
   an error. There is no remote command queue or retry.
 - The live service keeps only a short-lived connection ticket and browser
