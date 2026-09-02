@@ -38,8 +38,8 @@ import "./lib/shopee-adapter.js";
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 4;
-const BRIDGE_SOURCE = "omnichat-realtime-bridge-v2";
+const BRIDGE_PROTOCOL_VERSION = 5;
+const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -715,7 +715,7 @@ async function sendViaProvider(message) {
     ...message,
     ...imagePayload,
     provider: adapter.id,
-    type: "send_api_v2",
+    type: "send_api_v3",
     command_type: commandType,
     request_id: requestId,
     conversation_id: conversationId,
@@ -743,7 +743,7 @@ async function sendTextByUiClick_WIP(message) {
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
   await ensureProviderBridge(tab.id, context.adapter);
-  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v2" });
+  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v3" });
 }
 
 function liveEndpoint(config) {
@@ -1174,7 +1174,7 @@ async function reinitializeAfterUpgrade() {
       try {
         await ensureProviderBridge(tab.id, adapter);
         const result = await chrome.tabs.sendMessage(tab.id, {
-          type: "detect_account_v2",
+          type: "detect_account_v3",
           provider: adapter.id,
         });
         if (!result?.ok) {
@@ -1206,7 +1206,7 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
   await recordLog("info", "account", "detection_started", `Detecting ${label} account.`, { provider: adapter.id });
   await ensureProviderBridge(tab.id, adapter);
   const result = await chrome.tabs.sendMessage(tab.id, {
-    type: "detect_account_v2",
+    type: "detect_account_v3",
     provider: adapter.id,
   });
   await recordLog(
@@ -1250,7 +1250,7 @@ function orderProviderTabs(adapter, tabs, preferredTabId = null) {
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
   try {
-    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v2" }, {
+    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
       label: "Provider",
       operation: "status request",
       timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
@@ -1294,7 +1294,7 @@ async function ensureProviderBridge(tabId, adapter) {
   let pingFailed = false;
   let bridgeReady = false;
   try {
-    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
+    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
     bridgeReady = Boolean(
       response?.ok
       && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
@@ -1312,7 +1312,7 @@ async function ensureProviderBridge(tabId, adapter) {
 
   if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
-      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
+      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
       bridgeReady = Boolean(
         response?.ok
         && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
@@ -1354,7 +1354,7 @@ async function prepareProviderTab(tab, adapter) {
   await ensureProviderBridge(tab.id, adapter);
   const requestId = `prepare:${Date.now()}:${tab.id}`;
   const result = await sendProviderMessage(tab.id, {
-    type: "prepare_provider_v2",
+    type: "prepare_provider_v3",
     provider: adapter.id,
     request_id: requestId,
   }, {
@@ -1412,32 +1412,113 @@ async function resetProviderRecovery(tabId) {
   return hadRecovery;
 }
 
+async function providerMainBridgeStatus(tabId) {
+  const mainBridge = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [BRIDGE_SOURCE],
+    func: (bridgeSource) => ({
+      ready: Boolean(
+        globalThis.OmnichatShopeeUrl
+        && globalThis.OmnichatProviderAdapters?.get?.("shopee")
+        && window.__omnichatRealtimeState
+        && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
+        && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
+        && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
+        && typeof window.__omnichatRealtimeBridgeControl?.prepareSellerCentre === "function",
+      ),
+      hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
+      hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
+      hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
+    }),
+  });
+  return mainBridge?.[0]?.result ?? {};
+}
+
+async function retireProviderMainBridge(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const reason = "Provider bridge reattached.";
+      const state = window.__omnichatRealtimeState;
+      const hadRecovery = Boolean(
+        state?.recoveryInFlight
+        || state?.recoveryRequestId
+        || state?.acknowledgements?.size,
+      );
+      const control = window.__omnichatRealtimeBridgeControl;
+      if (typeof control?.dispose === "function") {
+        return {
+          hadRecovery,
+          disposed: Boolean(control.dispose(reason)),
+          source: typeof control.source === "string" ? control.source : null,
+        };
+      }
+      if (!state) return { hadRecovery, disposed: false, source: null };
+      state.recoveryAbortController?.abort();
+      for (const [acknowledgementId, acknowledge] of state.acknowledgements ?? []) {
+        state.acknowledgements.delete(acknowledgementId);
+        try {
+          acknowledge({ ok: false, error: reason });
+        } catch {
+          // A stale acknowledgement must not prevent bridge reattachment.
+        }
+      }
+      state.recoveryRequestId = null;
+      state.recoveryInFlight = false;
+      state.recoveryAbortController = null;
+      const currentEpoch = Number(state.recoveryEpoch);
+      state.recoveryEpoch = (Number.isFinite(currentEpoch) ? currentEpoch : 0) + 1;
+      if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
+      state.sellerCentrePollingTimer = null;
+      state.sellerCentrePollingStarted = false;
+      state.pollingRefreshInFlight = false;
+      state.pollingConnected = false;
+      state.pollingConnectedAt = null;
+      state.sellerCentreChatOpenPromise = null;
+      state.socket = null;
+      return {
+        hadRecovery,
+        disposed: false,
+        source: typeof control?.source === "string" ? control.source : null,
+      };
+    },
+  });
+  const retired = result?.[0]?.result ?? {};
+  if (retired.hadRecovery === true) {
+    // Let an interrupted page-side recovery observe the cancellation before
+    // a newly attached content bridge begins another recovery.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return retired;
+}
+
+async function retireProviderContentBridge(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: () => {
+      const control = globalThis.__omnichatContentBridgeControl;
+      if (typeof control?.dispose !== "function") return { disposed: false, source: null };
+      return {
+        disposed: Boolean(control.dispose("Content bridge reattached.")),
+        source: typeof control.source === "string" ? control.source : null,
+      };
+    },
+  });
+  return result?.[0]?.result ?? {};
+}
+
 async function reinjectProviderBridge(tabId, adapter) {
   if (!chrome.scripting?.executeScript || !adapter) return false;
   const inFlight = providerBridgeReinjections.get(tabId);
   if (inFlight) return inFlight;
   const reinjection = (async () => {
     try {
-      await resetProviderRecovery(tabId);
-      const mainBridge = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: () => ({
-          ready: Boolean(
-            globalThis.OmnichatShopeeUrl
-            && globalThis.OmnichatProviderAdapters?.get?.("shopee")
-            && window.__omnichatRealtimeState
-            && window.__omnichatRealtimeBridgeControl?.source === "omnichat-realtime-bridge-v2"
-            && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
-            && typeof window.__omnichatRealtimeBridgeControl?.prepareSellerCentre === "function",
-          ),
-          hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
-          hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
-          hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
-        }),
-      });
-      const mainStatus = mainBridge?.[0]?.result ?? {};
+      const mainStatus = await providerMainBridgeStatus(tabId);
       if (mainStatus.ready !== true) {
+        await retireProviderMainBridge(tabId);
         const mainFiles = [
           ...(mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
           ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
@@ -1449,7 +1530,10 @@ async function reinjectProviderBridge(tabId, adapter) {
           world: "MAIN",
           files: mainFiles,
         });
+      } else {
+        await resetProviderRecovery(tabId);
       }
+      await retireProviderContentBridge(tabId);
       const isolatedBridge = await chrome.scripting.executeScript({
         target: { tabId },
         world: "ISOLATED",
@@ -1564,7 +1648,7 @@ async function syncOpenProvider(control, context) {
   await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
   const syncMessage = {
-    type: "sync_now_v2",
+    type: "sync_now_v3",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
   };
@@ -1611,7 +1695,7 @@ async function cancelActiveSync() {
   let providerCancelled = false;
   if (tabId) {
     const result = await chrome.tabs.sendMessage(tabId, {
-      type: "cancel_sync_v2",
+      type: "cancel_sync_v3",
       ...(control?.adapter ? { provider: control.adapter.id } : {}),
     }).catch(() => null);
     providerCancelled = result?.cancelled === true;

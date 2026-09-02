@@ -53,8 +53,8 @@ test("bounds the provider sync handoff when a page reload interrupts its respons
   assert.match(source, /PROVIDER_STATUS_RESPONSE_TIMEOUT_MS = 5_000/);
   assert.match(source, /function sendProviderMessage\(/);
   assert.match(source, /providerMessageTimeout\(label, operation\)/);
-  assert.match(source, /sendProviderMessage\(tab\.id, \{[\s\S]*type: "sync_now_v2"/);
-  assert.match(source, /type: "get_provider_status_v2"[\s\S]*timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS/);
+  assert.match(source, /sendProviderMessage\(tab\.id, \{[\s\S]*type: "sync_now_v3"/);
+  assert.match(source, /type: "get_provider_status_v3"[\s\S]*timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS/);
   assert.match(source, /const providerBridgeReinjections = new Map\(\)/);
   assert.match(source, /providerBridgeReinjections\.get\(tabId\)/);
 });
@@ -67,12 +67,15 @@ test("resets a stale page-side recovery before reinjection and retries an overla
   assert.match(source, /state\.recoveryAbortController\?\.abort\(\)/);
 });
 
-test("reattaches older content and page bridges without a provider reload", () => {
-  assert.match(source, /const BRIDGE_SOURCE = "omnichat-realtime-bridge-v2"/);
+test("retires old bridge listeners before reattaching without a provider reload", () => {
+  assert.match(source, /const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3"/);
   assert.match(source, /response\.bridge_source === BRIDGE_SOURCE/);
   assert.match(source, /!bridgeReady && await reinjectProviderBridge\(tabId, adapter\)/);
-  assert.match(source, /window\.__omnichatRealtimeBridgeControl\?\.source === "omnichat-realtime-bridge-v2"/);
-  assert.match(source, /type: "sync_now_v2"/);
+  assert.match(source, /async function retireProviderMainBridge\(/);
+  assert.match(source, /async function retireProviderContentBridge\(/);
+  assert.match(source, /typeof control\?\.dispose === "function"/);
+  assert.match(source, /await retireProviderContentBridge\(tabId\)/);
+  assert.match(source, /type: "sync_now_v3"/);
 });
 
 test("resumes an interrupted sync after the service worker restarts", () => {
@@ -107,7 +110,7 @@ test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {
   assert.match(source, /function orderProviderTabs\(adapter, tabs, preferredTabId = null\)/);
   assert.match(source, /leftRank !== rightRank/);
   assert.match(source, /leftActive = left\.active === true/);
-  assert.match(source, /type: "prepare_provider_v2"/);
+  assert.match(source, /type: "prepare_provider_v3"/);
   assert.match(source, /operation: "surface preparation"/);
 });
 

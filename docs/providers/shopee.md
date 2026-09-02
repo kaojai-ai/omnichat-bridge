@@ -3,10 +3,10 @@
 Shopee Seller Chat is the first supported provider. The bridge supports both
 Shopee surfaces while Shopee retires the legacy page:
 
-- Seller Centre: `https://seller.shopee.co.th/portal/chat-management` or the
-  Seller Centre home page `/` with its Chat panel (the preferred surface)
-- Legacy: `/new-webchat/conversations` and `/webchat/conversations` (temporary
-  compatibility)
+- Seller Centre: every non-Webchat page at `https://seller.shopee.co.th/`,
+  including `/`, `/portal`, and `/portal/*` (such as
+  `/portal/chat-management`), with its Chat panel (the preferred surface)
+- Legacy: `/new-webchat/*` and `/webchat/*` (temporary compatibility)
 
 ## How it works
 

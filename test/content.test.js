@@ -23,6 +23,9 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     addEventListener(type, listener) {
       windowListeners.set(type, [...(windowListeners.get(type) ?? []), listener]);
     },
+    removeEventListener(type, listener) {
+      windowListeners.set(type, (windowListeners.get(type) ?? []).filter((item) => item !== listener));
+    },
     postMessage(message) {
       runtimeMessages.push(message);
     },
@@ -32,6 +35,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     document: {
       hidden: false,
       addEventListener() {},
+      removeEventListener() {},
     },
     URL,
     chrome: {
@@ -39,6 +43,10 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
         onMessage: {
           addListener(listener) {
             runtimeListeners.push(listener);
+          },
+          removeListener(listener) {
+            const index = runtimeListeners.indexOf(listener);
+            if (index >= 0) runtimeListeners.splice(index, 1);
           },
         },
         async sendMessage(message) {
@@ -81,7 +89,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
       listener({
         source: window,
         origin: window.location.origin,
-        data: { source: "omnichat-realtime-bridge-v2", ...data },
+        data: { source: "omnichat-realtime-bridge-v3", ...data },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -101,11 +109,16 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     storageWrites,
     sendCommand,
     triggerWindowEvent,
+    reattach() {
+      vm.runInContext(source, context);
+    },
+    get runtimeListenerCount() { return runtimeListeners.length; },
+    get pageMessageListenerCount() { return (windowListeners.get("message") ?? []).length; },
   };
 }
 
 const command = {
-  type: "send_api_v2",
+  type: "send_api_v3",
   request_id: "request-1",
   conversation_id: "conversation-1",
   client_message_id: "client-1",
@@ -174,14 +187,14 @@ test("queues an API echo after the provider result completes the send", async ()
 test("prepares Seller Centre before an outbound command is selected", async () => {
   const bridge = contentBridge("/portal/chat-management");
   const result = bridge.sendCommand({
-    type: "prepare_provider_v2",
+    type: "prepare_provider_v3",
     provider: "shopee",
     request_id: "prepare-1",
   });
 
   assert.deepEqual(
-    plain(bridge.runtimeMessages.find((message) => message.type === "prepare_provider_v2")),
-    { source: "omnichat-realtime-bridge-v2", type: "prepare_provider_v2", provider: "shopee", request_id: "prepare-1" },
+    plain(bridge.runtimeMessages.find((message) => message.type === "prepare_provider_v3")),
+    { source: "omnichat-realtime-bridge-v3", type: "prepare_provider_v3", provider: "shopee", request_id: "prepare-1" },
   );
   await bridge.providerEvent({
     type: "prepare_provider_result",
@@ -193,6 +206,17 @@ test("prepares Seller Centre before an outbound command is selected", async () =
 
   assert.equal((await result).surface, "seller-centre");
   assert.equal((await result).surface_ready, true);
+});
+
+test("replaces the prior content bridge listener on reattachment", () => {
+  const bridge = contentBridge();
+
+  assert.equal(bridge.runtimeListenerCount, 1);
+  assert.equal(bridge.pageMessageListenerCount, 1);
+  bridge.reattach();
+
+  assert.equal(bridge.runtimeListenerCount, 1);
+  assert.equal(bridge.pageMessageListenerCount, 1);
 });
 
 test("starts the existing automatic sync path after a manual Seller Centre chat open", async () => {
@@ -231,7 +255,16 @@ test("ignores best-effort messages after the extension context is invalidated", 
   );
 });
 
-for (const pathname of ["/new-webchat/conversations", "/webchat/conversations", "/portal/chat-management", "/"]) {
+for (const pathname of [
+  "/new-webchat/conversations",
+  "/webchat/conversations",
+  "/",
+  "/404",
+  "/portal",
+  "/portal/",
+  "/portal/chat-management",
+  "/portal/sale/order",
+]) {
   test(`requests automatic sync when ${pathname} loads`, async () => {
     const bridge = contentBridge(pathname);
 

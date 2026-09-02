@@ -31,6 +31,11 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     addEventListener(type, listener) {
       if (type === "message") listeners.push(listener);
     },
+    removeEventListener(type, listener) {
+      if (type !== "message") return;
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
+    },
     postMessage(message) {
       posts.push(message);
     },
@@ -99,6 +104,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     Uint8Array,
     structuredClone,
     setInterval: () => 0,
+    clearInterval,
     setTimeout,
     clearTimeout,
   });
@@ -113,7 +119,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v2", type: "send_api_v2", ...message },
+        data: { source: "omnichat-realtime-bridge-v3", type: "send_api_v3", ...message },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -123,7 +129,17 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     };
   }
 
-  return { send, sentUrls, nativeRequests, nativeRequestHeaders, nativePayloads };
+  return {
+    send,
+    sentUrls,
+    nativeRequests,
+    nativeRequestHeaders,
+    nativePayloads,
+    reattach() {
+      vm.runInContext(source, context);
+    },
+    get messageListenerCount() { return listeners.length; },
+  };
 }
 
 const baseCommand = {
@@ -181,6 +197,23 @@ test("omits quote metadata for an ordinary text command", async () => {
   assert.deepEqual(plain(payload.content), { text: "Hello", uid: "client-plain-1" });
 });
 
+test("sends once after the page bridge is reattached", async () => {
+  const bridge = createBridge();
+
+  bridge.reattach();
+  assert.equal(bridge.messageListenerCount, 1);
+  const { result } = await bridge.send({
+    ...baseCommand,
+    request_id: "request-reattached-1",
+    client_message_id: "client-reattached-1",
+    command_type: "send_text",
+    text: "Only once",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.sentUrls.length, 1);
+});
+
 test("rejects an invalid quote target instead of sending unquoted", async () => {
   const bridge = createBridge();
   const { payload, result } = await bridge.send({
@@ -193,7 +226,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
 
   assert.equal(payload, undefined);
   assert.deepEqual(plain(result), {
-    source: "omnichat-realtime-bridge-v2",
+    source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "request-invalid-1",
     ok: false,
