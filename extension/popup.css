@@ -357,8 +357,8 @@ input[type="checkbox"] {
 .account-identifiers {
   align-items: center;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
+  flex-wrap: nowrap;
+  gap: 6px 8px;
 }
 
 .account-identifier {
