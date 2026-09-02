@@ -48,6 +48,8 @@
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
+  const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
+  const SELLER_CENTRE_CHAT_OPEN_POLL_MS = 250;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -82,6 +84,7 @@
     pollingConnected: false,
     pollingConnectedAt: null,
     pollingRefreshInFlight: false,
+    sellerCentreChatOpenPromise: null,
   };
   state.surface ??= currentSurface;
   if (state.surface !== currentSurface) {
@@ -99,6 +102,7 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.pollingRefreshInFlight = false;
+    state.sellerCentreChatOpenPromise = null;
   }
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
@@ -118,6 +122,7 @@
   state.pollingConnected ??= false;
   state.pollingConnectedAt ??= null;
   state.pollingRefreshInFlight ??= false;
+  state.sellerCentreChatOpenPromise ??= null;
 
   const { accountsFromPayload, conversationItems } = providerAdapter;
 
@@ -203,6 +208,60 @@
   const isListPath = (path) => surfaceProfile().listPaths.includes(path);
   const isHistoryPath = (path) => surfaceProfile().historyPathPattern.test(path);
   const isSendPath = (path) => path === surfaceProfile().sendPath;
+  const visibleElement = (element) => {
+    if (!element || typeof element.getBoundingClientRect !== "function") return false;
+    const rect = element.getBoundingClientRect();
+    return Number(rect?.width) > 0 && Number(rect?.height) > 0;
+  };
+  const sellerCentreChatLauncher = () => {
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return null;
+    const launcher = document.getElementById("SidebarEntry");
+    return visibleElement(launcher) ? launcher : null;
+  };
+  const sellerCentreChatIsOpen = (launcher = sellerCentreChatLauncher()) => {
+    if (!launcher) return false;
+    const panelItem = typeof launcher.closest === "function" ? launcher.closest(".panel-item") : null;
+    if (panelItem?.classList?.contains?.("active")) return true;
+    return launcher.getAttribute?.("aria-expanded") === "true";
+  };
+  const ensureSellerCentreChatOpen = async () => {
+    if (!isSellerCentreSurface()) return;
+    if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
+    if (state.sellerCentreChatOpenPromise) return state.sellerCentreChatOpenPromise;
+    state.sellerCentreChatOpenPromise = (async () => {
+      const deadline = Date.now() + SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS;
+      let launcher = sellerCentreChatLauncher();
+      while (!launcher && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, SELLER_CENTRE_CHAT_OPEN_POLL_MS));
+        launcher = sellerCentreChatLauncher();
+      }
+      if (!launcher) {
+        const error = new Error("Shopee Seller Centre Chat launcher is unavailable. Open Seller Centre and retry Sync.");
+        postLog("error", "seller_centre_chat_open_failed", "Seller Centre mini-chat could not be opened.", errorDetails(error));
+        throw error;
+      }
+      if (sellerCentreChatIsOpen(launcher)) return;
+      postLog("info", "seller_centre_chat_open_started", "Opening the Seller Centre mini-chat before sync.");
+      try {
+        launcher.click();
+      } catch (error) {
+        postLog("error", "seller_centre_chat_open_failed", "Seller Centre mini-chat could not be opened.", errorDetails(error));
+        throw error;
+      }
+      while (!sellerCentreChatIsOpen(launcher) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, SELLER_CENTRE_CHAT_OPEN_POLL_MS));
+      }
+      if (!sellerCentreChatIsOpen(launcher)) {
+        const error = new Error("Shopee Seller Centre Chat panel did not open. Open the Chat panel and retry Sync.");
+        postLog("error", "seller_centre_chat_open_failed", "Seller Centre mini-chat did not open after the launcher was clicked.", errorDetails(error));
+        throw error;
+      }
+      postLog("info", "seller_centre_chat_opened", "Seller Centre mini-chat opened before sync.");
+    })().finally(() => {
+      state.sellerCentreChatOpenPromise = null;
+    });
+    return state.sellerCentreChatOpenPromise;
+  };
   const value = (input) => {
     if (typeof input !== "string" && typeof input !== "number") return null;
     const normalized = String(input).trim();
@@ -399,6 +458,7 @@
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
     resetRecovery,
+    openSellerCentreChat: ensureSellerCentreChatOpen,
   };
 
   const captureProfiles = (conversations) => {
@@ -781,6 +841,12 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
     }
+    try {
+      await ensureSellerCentreChatOpen();
+    } catch (error) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
+      return;
+    }
     if (isSellerCentreSurface() && (!state.listTemplate || !state.getTemplate)) {
       post({
         type: "api_send_result",
@@ -1080,6 +1146,7 @@
       postLog("info", "recovery_started", "Shopee recovery started.", {
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
+      await ensureSellerCentreChatOpen();
       await waitForTemplate();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;

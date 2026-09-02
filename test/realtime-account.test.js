@@ -23,12 +23,34 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null } = {}) {
   const listeners = [];
   const posts = [];
   const responses = new Map();
   const requests = [];
   const intervals = [];
+  let miniChatClicks = 0;
+  let miniChatIsOpen = miniChatOpen === true;
+  const miniChatPanel = {
+    classList: {
+      contains: (name) => name === "active" && miniChatIsOpen,
+    },
+  };
+  const miniChatLauncher = {
+    getBoundingClientRect: () => ({ width: 48, height: 48 }),
+    closest: (selector) => selector === ".panel-item" ? miniChatPanel : null,
+    getAttribute: () => null,
+    click: () => {
+      miniChatClicks += 1;
+      miniChatIsOpen = true;
+    },
+  };
+  const document = {
+    documentElement: { dataset: {} },
+    ...(miniChatOpen === null ? {} : {
+      getElementById: (id) => id === "SidebarEntry" ? miniChatLauncher : null,
+    }),
+  };
   const window = {
     location: { origin, href: `${origin}${pathname}` },
     fetch: async (input) => {
@@ -50,7 +72,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   };
   const context = vm.createContext({
     window,
-    document: { documentElement: { dataset: {} } },
+    document,
     URL,
     Headers,
     Request,
@@ -209,6 +231,8 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     requests,
     intervals,
     runIntervals,
+    get miniChatClicks() { return miniChatClicks; },
+    get miniChatIsOpen() { return miniChatIsOpen; },
   };
 }
 
@@ -419,7 +443,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
 });
 
 test("recovers Seller Centre history through the mini conversation route", async () => {
-  const bridge = createBridge({ pathname: "/portal/chat-management" });
+  const bridge = createBridge({ pathname: "/portal/chat-management", miniChatOpen: false });
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
     id: "seller-centre-recovery",
@@ -433,6 +457,8 @@ test("recovers Seller Centre history through the mini conversation route", async
 
   const complete = await bridge.sync("1549058683");
   assert.equal(complete.ok, true);
+  assert.equal(bridge.miniChatClicks, 1);
+  assert.equal(bridge.miniChatIsOpen, true);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages"), true);
   assert.equal(bridge.requests.some((path) => path.includes("/webchat/api/v1.2/conversations/")), false);
 });
