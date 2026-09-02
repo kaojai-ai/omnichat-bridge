@@ -94,6 +94,7 @@ let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
 const liveConnections = new Map();
+const providerBridgeReinjections = new Map();
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -1350,47 +1351,59 @@ async function resetProviderRecovery(tabId) {
 
 async function reinjectProviderBridge(tabId, adapter) {
   if (!chrome.scripting?.executeScript || !adapter) return false;
-  try {
-    await resetProviderRecovery(tabId);
-    const mainBridge = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: () => Boolean(
-        globalThis.OmnichatProviderAdapters
-        && window.__omnichatRealtimeState
-        && window.fetch?.__omnichatRealtimeBridge,
-      ),
-    });
-    if (mainBridge?.[0]?.result !== true) {
-      await chrome.scripting.executeScript({
+  const inFlight = providerBridgeReinjections.get(tabId);
+  if (inFlight) return inFlight;
+  const reinjection = (async () => {
+    try {
+      await resetProviderRecovery(tabId);
+      const mainBridge = await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
+        func: () => Boolean(
+          globalThis.OmnichatProviderAdapters
+          && window.__omnichatRealtimeState
+          && window.fetch?.__omnichatRealtimeBridge,
+        ),
+      });
+      if (mainBridge?.[0]?.result !== true) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          files: [
+            "lib/shopee-url.js",
+            "lib/provider-adapters.js",
+            "lib/shopee-adapter.js",
+            "shopee-realtime.js",
+          ],
+        });
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "ISOLATED",
         files: [
           "lib/shopee-url.js",
+          "lib/shopee.js",
           "lib/provider-adapters.js",
           "lib/shopee-adapter.js",
-          "shopee-realtime.js",
+          "content.js",
         ],
       });
+      return true;
+    } catch (error) {
+      await recordUnexpected("provider_bridge_reinject", error, {
+        provider: adapter.id,
+        tab_id: tabId,
+      });
+      return false;
     }
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "ISOLATED",
-      files: [
-        "lib/shopee-url.js",
-        "lib/shopee.js",
-        "lib/provider-adapters.js",
-        "lib/shopee-adapter.js",
-        "content.js",
-      ],
-    });
-    return true;
-  } catch (error) {
-    await recordUnexpected("provider_bridge_reinject", error, {
-      provider: adapter.id,
-      tab_id: tabId,
-    });
-    return false;
+  })();
+  providerBridgeReinjections.set(tabId, reinjection);
+  try {
+    return await reinjection;
+  } finally {
+    if (providerBridgeReinjections.get(tabId) === reinjection) {
+      providerBridgeReinjections.delete(tabId);
+    }
   }
 }
 

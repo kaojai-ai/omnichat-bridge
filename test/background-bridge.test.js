@@ -31,6 +31,8 @@ test("bounds the provider sync handoff when a page reload interrupts its respons
   assert.match(source, /providerMessageTimeout\(label, operation\)/);
   assert.match(source, /sendProviderMessage\(tab\.id, \{[\s\S]*type: "sync_now"/);
   assert.match(source, /type: "get_provider_status"[\s\S]*timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS/);
+  assert.match(source, /const providerBridgeReinjections = new Map\(\)/);
+  assert.match(source, /providerBridgeReinjections\.get\(tabId\)/);
 });
 
 test("resets a stale page-side recovery before reinjection and retries an overlapping sync", () => {
