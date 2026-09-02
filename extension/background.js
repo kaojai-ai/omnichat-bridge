@@ -78,6 +78,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.conversation_completed": "Conversation recovery check completed.",
   "provider.history_template_ready": "Provider history request template captured.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
+  "provider.content_unready": "Provider content bridge is not ready. Refresh the provider tab manually before retrying.",
   "provider.seller_centre_messages_observed": "Seller Centre realtime messages observed.",
   "provider.seller_centre_conversation_parse": "Seller Centre conversation response could not be parsed.",
   "provider.seller_centre_message_poll": "Seller Centre message polling failed.",
@@ -1242,40 +1243,34 @@ async function findReadyProviderChatTab(adapter) {
 async function ensureProviderBridge(tabId, adapter) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
+  let response = null;
+  let pingFailed = false;
   try {
-    const result = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-    if (result?.ok && result.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
+    response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
+    if (response?.ok && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
       await recordLog("debug", "provider", "content_ready", `${label} content bridge is ready.`, {
         provider: adapter.id,
       });
       return;
     }
   } catch {
-    // Reload below when an installed/reloaded extension is not attached to the existing page.
+    pingFailed = true;
   }
-  await recordLog("warn", "provider", "content_reload", `Reloading ${label} to attach the bridge.`, {
-    provider: adapter.id,
-  });
-  await chrome.tabs.reload(tabId);
-  await waitForProviderBridge(tabId, adapter);
-  await recordLog("info", "provider", "content_attached", `${label} content bridge attached after reload.`, {
-    provider: adapter.id,
-  });
-}
 
-async function waitForProviderBridge(tabId, adapter) {
-  const label = providerLabel(adapter);
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    try {
-      const result = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-      if (result?.ok) return;
-    } catch {
-      // The page or content script is still loading.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`${label} did not finish loading.`);
+  const observedProtocol = Number.isInteger(response?.bridge_protocol_version)
+    ? response.bridge_protocol_version
+    : null;
+  await recordLog("warn", "provider", "content_unready", `${label} content bridge is not ready. Refresh the tab manually before retrying.`, {
+    provider: adapter.id,
+    reason: pingFailed
+      ? "no_response"
+      : observedProtocol === null
+        ? "invalid_response"
+        : "protocol_mismatch",
+    expected_bridge_protocol: BRIDGE_PROTOCOL_VERSION,
+    ...(observedProtocol === null ? {} : { observed_bridge_protocol: observedProtocol }),
+  });
+  throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
 }
 
 function syncCancelledError() {
