@@ -81,7 +81,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
       listener({
         source: window,
         origin: window.location.origin,
-        data: { source: "omnichat-realtime-bridge", ...data },
+        data: { source: "omnichat-realtime-bridge-v2", ...data },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -105,7 +105,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
 }
 
 const command = {
-  type: "send_api",
+  type: "send_api_v2",
   request_id: "request-1",
   conversation_id: "conversation-1",
   client_message_id: "client-1",

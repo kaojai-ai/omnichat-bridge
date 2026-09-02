@@ -106,7 +106,7 @@ function createBridge({ sellerCentre = false, ready = true } = {}) {
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge", type: "send_api", ...message },
+        data: { source: "omnichat-realtime-bridge-v2", type: "send_api_v2", ...message },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -186,7 +186,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
 
   assert.equal(payload, undefined);
   assert.deepEqual(plain(result), {
-    source: "omnichat-realtime-bridge",
+    source: "omnichat-realtime-bridge-v2",
     type: "api_send_result",
     request_id: "request-invalid-1",
     ok: false,

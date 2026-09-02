@@ -1,5 +1,5 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge";
+  const SOURCE = "omnichat-realtime-bridge-v2";
   const LEGACY_CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
   const LEGACY_SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
   const LEGACY_SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
@@ -389,6 +389,7 @@
   };
 
   window.__omnichatRealtimeBridgeControl = {
+    source: SOURCE,
     resetRecovery,
   };
 
@@ -1252,7 +1253,7 @@
     }
   }
 
-  if (!window.fetch.__omnichatRealtimeBridge) {
+  if (window.fetch.__omnichatRealtimeBridgeSource !== SOURCE) {
     const originalFetch = state.nativeFetch;
     const observedFetch = async (input, init) => {
       const request = new Request(input, init);
@@ -1313,6 +1314,7 @@
       return response;
     };
     Object.defineProperty(observedFetch, "__omnichatRealtimeBridge", { value: true });
+    Object.defineProperty(observedFetch, "__omnichatRealtimeBridgeSource", { value: SOURCE });
     window.fetch = observedFetch;
   }
 
@@ -1369,23 +1371,23 @@
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "sync") {
+    if (event.data.type === "sync_v2") {
       const providerAccountId = value(event.data.provider_account_id);
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
         ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
       }));
-    } else if (event.data.type === "cancel_sync") {
+    } else if (event.data.type === "cancel_sync_v2") {
       if (state.recoveryRequestId === event.data.request_id) {
         state.recoveryAbortController?.abort();
       }
     } else if (event.data.type === "reset_recovery") {
       resetRecovery();
-    } else if (event.data.type === "detect_account") {
+    } else if (event.data.type === "detect_account_v2") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
-    } else if (event.data.type === "send_api") {
+    } else if (event.data.type === "send_api_v2") {
       void observeAsync("send_api", () => sendApi(event.data));
-    } else if (event.data.type === "recovery_ack") {
+    } else if (event.data.type === "recovery_ack_v2") {
       const acknowledge = state.acknowledgements.get(event.data.request_id);
       if (acknowledge) {
         state.acknowledgements.delete(event.data.request_id);

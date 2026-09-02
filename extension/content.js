@@ -1,5 +1,5 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge";
+  const SOURCE = "omnichat-realtime-bridge-v2";
   const BRIDGE_PROTOCOL_VERSION = 3;
   const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
@@ -103,7 +103,7 @@
     pending.timeout = setTimeout(() => {
       if (recoveries.get(id) !== pending) return;
       recoveries.delete(id);
-      post({ type: "cancel_sync", request_id: id });
+      post({ type: "cancel_sync_v2", request_id: id });
       log("error", "recovery_timeout", `${providerLabel} recovery stopped responding.`);
       pending.resolve({
         ok: false,
@@ -223,7 +223,7 @@
       touchRecovery(requestId);
     });
     post({
-      type: "sync",
+      type: "sync_v2",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
       provider: providerAdapter.id,
@@ -241,7 +241,7 @@
     for (const [requestId, pending] of recoveries) {
       clearTimeout(pending.timeout);
       recoveries.delete(requestId);
-      post({ type: "cancel_sync", request_id: requestId });
+      post({ type: "cancel_sync_v2", request_id: requestId });
       pending.resolve({ ok: false, error: "Sync cancelled." });
       cancelled += 1;
     }
@@ -261,7 +261,7 @@
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
-    post({ type: "detect_account", request_id: requestId });
+    post({ type: "detect_account_v2", request_id: requestId });
     return result;
   }
 
@@ -363,7 +363,7 @@
         advance_cursor: false,
       });
       post({
-        type: "recovery_ack",
+        type: "recovery_ack_v2",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         parsed: messages.length,
@@ -383,7 +383,7 @@
         provider_account_id: message.provider_account_id,
         ...errorDetails(error),
       });
-      post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -399,7 +399,7 @@
         summary_token: message.summary_token,
       });
       post({
-        type: "recovery_ack",
+        type: "recovery_ack_v2",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save sync cursor." }),
@@ -409,7 +409,7 @@
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
       });
-      post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -423,7 +423,7 @@
         conversations: message.conversations,
       });
       post({
-        type: "recovery_ack",
+        type: "recovery_ack_v2",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save bootstrap state." }),
@@ -432,7 +432,7 @@
       logAsyncError("recovery_bootstrap", error, {
         provider_account_id: message.provider_account_id,
       });
-      post({ type: "recovery_ack", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -634,7 +634,7 @@
         providerIdTimeout: null,
       });
       post({
-        type: "send_api",
+        type: "send_api_v2",
         ...message,
         ...imagePayload,
         provider: providerAdapter.id,
@@ -725,7 +725,7 @@
       return false;
     }
     if (message?.type === "ping") {
-      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION });
+      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION, bridge_source: SOURCE });
       return false;
     }
     if (message?.type === "get_provider_status") {
@@ -741,23 +741,23 @@
       });
       return false;
     }
-    if (message?.type === "sync_now") {
+    if (message?.type === "sync_now_v2") {
       void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "cancel_sync") {
+    if (message?.type === "cancel_sync_v2") {
       respond(cancelRecovery());
       return false;
     }
-    if (message?.type === "detect_account") {
+    if (message?.type === "detect_account_v2") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "send_api") {
+    if (message?.type === "send_api_v2") {
       void sendViaApi(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "send_text_ui_click_wip") {
+    if (message?.type === "send_text_ui_click_wip_v2") {
       void sendTextByUiClick_WIP(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }

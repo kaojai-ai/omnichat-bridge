@@ -39,6 +39,7 @@ const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 3;
+const BRIDGE_SOURCE = "omnichat-realtime-bridge-v2";
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -690,7 +691,7 @@ async function sendViaProvider(message) {
     ...message,
     ...imagePayload,
     provider: adapter.id,
-    type: "send_api",
+    type: "send_api_v2",
     command_type: commandType,
     request_id: requestId,
     conversation_id: conversationId,
@@ -718,7 +719,7 @@ async function sendTextByUiClick_WIP(message) {
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context);
   await ensureProviderBridge(tab.id, context.adapter);
-  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip" });
+  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v2" });
 }
 
 function liveEndpoint(config) {
@@ -1152,7 +1153,7 @@ async function reinitializeAfterUpgrade() {
       try {
         await ensureProviderBridge(tab.id, adapter);
         const result = await chrome.tabs.sendMessage(tab.id, {
-          type: "detect_account",
+          type: "detect_account_v2",
           provider: adapter.id,
         });
         if (!result?.ok) {
@@ -1184,7 +1185,7 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
   await recordLog("info", "account", "detection_started", `Detecting ${label} account.`, { provider: adapter.id });
   await ensureProviderBridge(tab.id, adapter);
   const result = await chrome.tabs.sendMessage(tab.id, {
-    type: "detect_account",
+    type: "detect_account_v2",
     provider: adapter.id,
   });
   await recordLog(
@@ -1262,9 +1263,15 @@ async function ensureProviderBridge(tabId, adapter) {
   const label = providerLabel(adapter);
   let response = null;
   let pingFailed = false;
+  let bridgeReady = false;
   try {
     response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-    if (response?.ok && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
+    bridgeReady = Boolean(
+      response?.ok
+      && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
+      && response.bridge_source === BRIDGE_SOURCE,
+    );
+    if (bridgeReady) {
       await recordLog("debug", "provider", "content_ready", `${label} content bridge is ready.`, {
         provider: adapter.id,
       });
@@ -1274,10 +1281,15 @@ async function ensureProviderBridge(tabId, adapter) {
     pingFailed = true;
   }
 
-  if (pingFailed && await reinjectProviderBridge(tabId, adapter)) {
+  if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
       response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
-      if (response?.ok && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
+      bridgeReady = Boolean(
+        response?.ok
+        && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
+        && response.bridge_source === BRIDGE_SOURCE,
+      );
+      if (bridgeReady) {
         await recordLog("info", "provider", "bridge_reinjected", `${label} content bridge was reattached without refreshing the page.`, {
           provider: adapter.id,
           surface: adapter.surfaceForUrl?.((await chrome.tabs.get(tabId)).url) ?? null,
@@ -1300,7 +1312,9 @@ async function ensureProviderBridge(tabId, adapter) {
         ? "invalid_response"
         : "protocol_mismatch",
     expected_bridge_protocol: BRIDGE_PROTOCOL_VERSION,
+    expected_bridge_source: BRIDGE_SOURCE,
     ...(observedProtocol === null ? {} : { observed_bridge_protocol: observedProtocol }),
+    ...(typeof response?.bridge_source === "string" ? { observed_bridge_source: response.bridge_source } : {}),
   });
   throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
 }
@@ -1364,6 +1378,7 @@ async function reinjectProviderBridge(tabId, adapter) {
             globalThis.OmnichatShopeeUrl
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
+            && window.__omnichatRealtimeBridgeControl?.source === "omnichat-realtime-bridge-v2"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function",
           ),
           hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
@@ -1499,7 +1514,7 @@ async function syncOpenProvider(control, context) {
   await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
   const syncMessage = {
-    type: "sync_now",
+    type: "sync_now_v2",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
   };
@@ -1546,7 +1561,7 @@ async function cancelActiveSync() {
   let providerCancelled = false;
   if (tabId) {
     const result = await chrome.tabs.sendMessage(tabId, {
-      type: "cancel_sync",
+      type: "cancel_sync_v2",
       ...(control?.adapter ? { provider: control.adapter.id } : {}),
     }).catch(() => null);
     providerCancelled = result?.cancelled === true;

@@ -102,7 +102,7 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge", type: "reset_recovery" },
+        data: { source: "omnichat-realtime-bridge-v2", type: "reset_recovery" },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -119,7 +119,7 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge", type: "detect_account", request_id: requestId },
+        data: { source: "omnichat-realtime-bridge-v2", type: "detect_account_v2", request_id: requestId },
       });
     }
     for (let attempt = 0; attempt < 400; attempt += 1) {
@@ -147,8 +147,8 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
         source: window,
         origin,
         data: {
-          source: "omnichat-realtime-bridge",
-          type: "sync",
+          source: "omnichat-realtime-bridge-v2",
+          type: "sync_v2",
           request_id: requestId,
           checkpoint: { watermark: "2026-08-01T00:00:00.000Z" },
           provider_account_id: providerAccountId,
@@ -169,8 +169,8 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
             source: window,
             origin,
             data: {
-              source: "omnichat-realtime-bridge",
-              type: "recovery_ack",
+              source: "omnichat-realtime-bridge-v2",
+              type: "recovery_ack_v2",
               request_id: post.request_id,
               ok: true,
               latest_cursor: null,
