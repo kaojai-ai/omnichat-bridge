@@ -47,6 +47,7 @@ const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
 const PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000;
+const PROVIDER_STATUS_RESPONSE_TIMEOUT_MS = 5_000;
 const DELIVERY_RETRY_ALARM = "omnichat-delivery-retry";
 const LOG_UPLOAD_ALARM = "omnichat-log-upload";
 const MAX_LOG_UPLOAD_BATCH = 100;
@@ -86,6 +87,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.seller_centre_sync_response": "Seller Centre realtime polling status updated.",
   "provider.surface_unready": "Provider chat surface is not ready for commands.",
   "provider.socket_connected": "Provider realtime socket connected.",
+  "provider.bridge_reinjected": "Provider content bridge was reattached without refreshing the page.",
 };
 let mutationQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
@@ -997,7 +999,13 @@ async function ensureAccountLiveConnection(context) {
     reconnectAttempt: 0,
   };
   liveConnections.set(context.key, existing);
-  if (existing.socket?.readyState === WebSocket.OPEN || existing.socket?.readyState === WebSocket.CONNECTING) return;
+  if (existing.socket?.readyState === WebSocket.OPEN) {
+    void sendConnectionStatus(existing.socket, context).catch((error) => recordUnexpected("connection_status", error, {
+      provider_account_id: context.account.provider_account_id,
+    }));
+    return;
+  }
+  if (existing.socket?.readyState === WebSocket.CONNECTING) return;
   clearTimeout(existing.reconnectTimer);
   existing.reconnectTimer = null;
   await updateLiveState(context, { socket: "connecting" });
@@ -1103,6 +1111,7 @@ chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
   void resumeLogUpload();
   void ensureLiveConnection();
+  void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
   void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
 });
 
@@ -1116,6 +1125,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
 void resumeLogUpload();
 void ensureLiveConnection();
+void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
 void resumeInterruptedSync().catch((error) => recordUnexpected("sync_resume", error));
 
 function isVersionBefore(value, target) {
@@ -1206,7 +1216,11 @@ function orderProviderTabs(adapter, tabs) {
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
   try {
-    const result = await chrome.tabs.sendMessage(tab.id, { type: "get_provider_status" });
+    const result = await sendProviderMessage(tab.id, { type: "get_provider_status" }, {
+      label: "Provider",
+      operation: "status request",
+      timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+    });
     return result?.ok ? result : null;
   } catch {
     return null;
@@ -1259,6 +1273,21 @@ async function ensureProviderBridge(tabId, adapter) {
     pingFailed = true;
   }
 
+  if (pingFailed && await reinjectProviderBridge(tabId, adapter)) {
+    try {
+      response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
+      if (response?.ok && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION) {
+        await recordLog("info", "provider", "bridge_reinjected", `${label} content bridge was reattached without refreshing the page.`, {
+          provider: adapter.id,
+          surface: adapter.surfaceForUrl?.((await chrome.tabs.get(tabId)).url) ?? null,
+        });
+        return;
+      }
+    } catch {
+      // The injected bridge did not attach; report the actionable failure below.
+    }
+  }
+
   const observedProtocol = Number.isInteger(response?.bridge_protocol_version)
     ? response.bridge_protocol_version
     : null;
@@ -1273,6 +1302,67 @@ async function ensureProviderBridge(tabId, adapter) {
     ...(observedProtocol === null ? {} : { observed_bridge_protocol: observedProtocol }),
   });
   throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
+}
+
+async function reinjectProviderBridge(tabId, adapter) {
+  if (!chrome.scripting?.executeScript || !adapter) return false;
+  try {
+    const mainBridge = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => Boolean(
+        globalThis.OmnichatProviderAdapters
+        && window.__omnichatRealtimeState
+        && window.fetch?.__omnichatRealtimeBridge,
+      ),
+    });
+    if (mainBridge?.[0]?.result !== true) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        files: [
+          "lib/shopee-url.js",
+          "lib/provider-adapters.js",
+          "lib/shopee-adapter.js",
+          "shopee-realtime.js",
+        ],
+      });
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      files: [
+        "lib/shopee-url.js",
+        "lib/shopee.js",
+        "lib/provider-adapters.js",
+        "lib/shopee-adapter.js",
+        "content.js",
+      ],
+    });
+    return true;
+  } catch (error) {
+    await recordUnexpected("provider_bridge_reinject", error, {
+      provider: adapter.id,
+      tab_id: tabId,
+    });
+    return false;
+  }
+}
+
+async function reattachOpenProviderBridges() {
+  for (const adapter of providerAdapters.list()) {
+    const tabs = await chrome.tabs.query(
+      adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
+    );
+    for (const tab of tabs.filter((item) => item.id && adapter.matchesUrl(item.url))) {
+      try {
+        await ensureProviderBridge(tab.id, adapter);
+      } catch (error) {
+        await recordUnexpected("provider_bridge_startup", error, { provider: adapter.id });
+      }
+    }
+  }
+  await ensureLiveConnection();
 }
 
 function providerMessageTimeout(label, operation) {

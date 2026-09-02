@@ -96,6 +96,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
   the popup in an indefinite loading state.
 - If Chrome restarts the extension service worker during recovery, a persisted
   in-progress scan is resumed automatically when the worker starts again.
+- If reloading the extension invalidates a content bridge in an already-open
+  Seller Centre tab, the worker reattaches it without refreshing that page.
 
 ## Data sent
 
@@ -107,8 +109,9 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Select **Load unpacked** and choose the `extension/` folder.
-3. If a Shopee tab was already open, refresh that tab once so Chrome attaches
-   the updated content bridge. The extension will not reload it automatically.
+3. If a Shopee tab was already open, the extension reattaches its content bridge
+   after an extension reload without refreshing the page. A closed tab still
+   needs to be opened again.
 4. Accept the disclosure and let the extension detect the available Shop IDs.
 5. Open **Configure** and add or import the detected Shop IDs you want to sync.
 6. Select **Sync messages**. Every detected Shop ID with a matching
