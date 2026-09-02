@@ -1304,9 +1304,54 @@ async function ensureProviderBridge(tabId, adapter) {
   throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
 }
 
+async function resetProviderRecovery(tabId) {
+  if (!chrome.scripting?.executeScript) return false;
+  const resetResult = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const reason = "Provider bridge reconnected; retrying recovery.";
+      const control = window.__omnichatRealtimeBridgeControl;
+      if (typeof control?.resetRecovery === "function") {
+        return { ok: true, hadRecovery: Boolean(control.resetRecovery(reason)) };
+      }
+      const state = window.__omnichatRealtimeState;
+      if (!state) return { ok: false, hadRecovery: false };
+      const hadRecovery = Boolean(
+        state.recoveryInFlight
+        || state.recoveryRequestId
+        || state.acknowledgements?.size,
+      );
+      state.recoveryAbortController?.abort();
+      for (const [acknowledgementId, acknowledge] of state.acknowledgements ?? []) {
+        state.acknowledgements.delete(acknowledgementId);
+        try {
+          acknowledge({ ok: false, error: reason });
+        } catch {
+          // A stale acknowledgement must not prevent bridge reattachment.
+        }
+      }
+      state.recoveryRequestId = null;
+      state.recoveryInFlight = false;
+      state.recoveryAbortController = null;
+      const currentEpoch = Number(state.recoveryEpoch);
+      state.recoveryEpoch = (Number.isFinite(currentEpoch) ? currentEpoch : 0) + 1;
+      return { ok: true, hadRecovery };
+    },
+  });
+  const hadRecovery = resetResult?.[0]?.result?.hadRecovery === true;
+  if (hadRecovery) {
+    // Let an interrupted page-side recovery observe the cancellation before
+    // a newly requested recovery starts.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return hadRecovery;
+}
+
 async function reinjectProviderBridge(tabId, adapter) {
   if (!chrome.scripting?.executeScript || !adapter) return false;
   try {
+    await resetProviderRecovery(tabId);
     const mainBridge = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
@@ -1420,16 +1465,27 @@ async function syncOpenProvider(control, context) {
   control.adapter = adapter;
   await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
-  const result = await sendProviderMessage(tab.id, {
+  const syncMessage = {
     type: "sync_now",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
-  }, {
+  };
+  let result = await sendProviderMessage(tab.id, syncMessage, {
     label,
     operation: "sync request",
     signal,
   });
   throwIfSyncCancelled(signal);
+  if (!result?.ok && result?.error === "Recovery is already running.") {
+    await resetProviderRecovery(tab.id);
+    throwIfSyncCancelled(signal);
+    result = await sendProviderMessage(tab.id, syncMessage, {
+      label,
+      operation: "retry sync request",
+      signal,
+    });
+    throwIfSyncCancelled(signal);
+  }
   if (!result?.ok) throw new Error(result?.error ?? `${label} recovery failed.`);
   return result;
 }

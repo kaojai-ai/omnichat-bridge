@@ -27,14 +27,18 @@
   function sendRuntimeMessage(message, onError) {
     try {
       const runtime = globalThis.chrome?.runtime;
-      if (typeof runtime?.sendMessage !== "function") return Promise.resolve(undefined);
+      if (typeof runtime?.sendMessage !== "function") {
+        const error = new Error("Extension context invalidated.");
+        onError?.(error);
+        return Promise.resolve({ ok: false, error: error.message });
+      }
       return Promise.resolve(runtime.sendMessage(message)).catch((error) => {
         onError?.(error);
-        return undefined;
+        return { ok: false, error: String(error) };
       });
     } catch (error) {
       onError?.(error);
-      return Promise.resolve(undefined);
+      return Promise.resolve({ ok: false, error: String(error) });
     }
   }
 
@@ -204,7 +208,7 @@
       });
       return { ok: false, error: "Extension setup is required." };
     }
-    const syncState = await chrome.runtime.sendMessage({
+    const syncState = await sendRuntimeMessage({
       type: "get_sync_state",
       provider: providerAdapter.id,
       provider_account_id: accountId,
@@ -352,7 +356,7 @@
           ? {}
           : { provider_account_id: message.provider_account_id }),
       }));
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendRuntimeMessage({
         type: "queue_messages",
         messages,
         flush: false,
@@ -386,7 +390,7 @@
   async function handleRecoveryCursor(message) {
     touchRecovery(message.request_id);
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendRuntimeMessage({
         type: "advance_scan_cursor",
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
@@ -412,7 +416,7 @@
   async function handleBootstrapSelection(message) {
     touchRecovery(message.request_id);
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendRuntimeMessage({
         type: "save_bootstrap",
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
@@ -485,7 +489,7 @@
       });
     }
     if (!messages.length) return;
-    const result = await chrome.runtime.sendMessage({ type: "queue_messages", messages, flush: true });
+    const result = await sendRuntimeMessage({ type: "queue_messages", messages, flush: true });
     log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
       ? "Realtime provider event processed."
       : result?.error ?? "Realtime provider event failed.", {

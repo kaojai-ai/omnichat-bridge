@@ -98,6 +98,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
   in-progress scan is resumed automatically when the worker starts again.
 - If reloading the extension invalidates a content bridge in an already-open
   Seller Centre tab, the worker reattaches it without refreshing that page.
+- An interrupted page-side recovery is cancelled before that reattached bridge
+  retries, so a stale `Recovery is already running` state cannot block sync.
 
 ## Data sent
 

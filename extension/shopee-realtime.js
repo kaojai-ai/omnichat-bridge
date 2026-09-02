@@ -70,6 +70,7 @@
     nextRecoveryRequestAt: 0,
     recoveryRequestId: null,
     recoveryAbortController: null,
+    recoveryEpoch: 0,
     accountDiscoveryPromise: null,
     automaticAccountDiscoveryStarted: false,
     latestMessageIdsByConversation: new Map(),
@@ -100,6 +101,7 @@
   state.nextRecoveryRequestAt ??= 0;
   state.recoveryRequestId ??= null;
   state.recoveryAbortController ??= null;
+  state.recoveryEpoch ??= 0;
   state.accountDiscoveryPromise ??= null;
   state.automaticAccountDiscoveryStarted ??= false;
   state.latestMessageIdsByConversation ??= new Map();
@@ -363,6 +365,32 @@
       resolve(message);
     });
   });
+
+  const resetRecovery = (reason = "Provider bridge reconnected; retrying recovery.") => {
+    const hadRecovery = Boolean(
+      state.recoveryInFlight
+      || state.recoveryRequestId
+      || state.acknowledgements.size,
+    );
+    state.recoveryEpoch += 1;
+    state.recoveryAbortController?.abort();
+    state.recoveryAbortController = null;
+    for (const [acknowledgementId, acknowledge] of state.acknowledgements) {
+      state.acknowledgements.delete(acknowledgementId);
+      try {
+        acknowledge({ ok: false, error: reason });
+      } catch {
+        // A stale page acknowledgement must not prevent the bridge reset.
+      }
+    }
+    state.recoveryRequestId = null;
+    state.recoveryInFlight = false;
+    return hadRecovery;
+  };
+
+  window.__omnichatRealtimeBridgeControl = {
+    resetRecovery,
+  };
 
   const captureProfiles = (conversations) => {
     const profiles = [];
@@ -1006,6 +1034,7 @@
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: "Recovery is already running." });
       return;
     }
+    const recoveryEpoch = state.recoveryEpoch;
     state.recoveryInFlight = true;
     state.recoveryRequestId = requestId;
     state.recoveryAbortController = new AbortController();
@@ -1198,6 +1227,16 @@
         duration_ms: Date.now() - startedAt,
       });
     } catch (error) {
+      if (state.recoveryEpoch !== recoveryEpoch) {
+        post({
+          type: "recovery_complete",
+          request_id: requestId,
+          provider_account_id: accountId,
+          ok: false,
+          error: "Recovery was superseded by a bridge reconnect.",
+        });
+        return;
+      }
       postLog("error", "recovery_failed", error instanceof Error ? error.message : String(error), {
         conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
@@ -1205,8 +1244,8 @@
       });
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: String(error) });
     } finally {
-      state.recoveryInFlight = false;
-      if (state.recoveryRequestId === requestId) {
+      if (state.recoveryEpoch === recoveryEpoch && state.recoveryRequestId === requestId) {
+        state.recoveryInFlight = false;
         state.recoveryRequestId = null;
         state.recoveryAbortController = null;
       }
@@ -1340,6 +1379,8 @@
       if (state.recoveryRequestId === event.data.request_id) {
         state.recoveryAbortController?.abort();
       }
+    } else if (event.data.type === "reset_recovery") {
+      resetRecovery();
     } else if (event.data.type === "detect_account") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api") {

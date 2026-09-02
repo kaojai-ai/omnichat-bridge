@@ -75,6 +75,31 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
     responses.set(path, body);
   }
 
+  function seedRecoveryState() {
+    const state = window.__omnichatRealtimeState;
+    state.recoveryInFlight = true;
+    state.recoveryRequestId = "stale-recovery";
+    state.recoveryAbortController = new AbortController();
+    state.acknowledgements.set("stale-ack", () => {});
+  }
+
+  async function resetRecovery() {
+    for (const listener of listeners) {
+      listener({
+        source: window,
+        origin,
+        data: { source: "omnichat-realtime-bridge", type: "reset_recovery" },
+      });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    return {
+      recoveryInFlight: window.__omnichatRealtimeState.recoveryInFlight,
+      recoveryRequestId: window.__omnichatRealtimeState.recoveryRequestId,
+      acknowledgementCount: window.__omnichatRealtimeState.acknowledgements.size,
+      recoveryEpoch: window.__omnichatRealtimeState.recoveryEpoch,
+    };
+  }
+
   async function detect(requestId = "detect-1") {
     for (const listener of listeners) {
       listener({
@@ -146,8 +171,32 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
     throw new Error("Recovery did not complete in the test harness.");
   }
 
-  return { fetch, setResponse, detect, waitForAutomaticDetection, sync, posts, requests };
+  return {
+    fetch,
+    setResponse,
+    seedRecoveryState,
+    resetRecovery,
+    detect,
+    waitForAutomaticDetection,
+    sync,
+    posts,
+    requests,
+  };
 }
+
+test("resets stale page-side recovery state before a retry", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management" });
+  bridge.seedRecoveryState();
+
+  const state = await bridge.resetRecovery();
+
+  assert.deepEqual(state, {
+    recoveryInFlight: false,
+    recoveryRequestId: null,
+    acknowledgementCount: 0,
+    recoveryEpoch: 1,
+  });
+});
 
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {
   const bridge = createBridge();

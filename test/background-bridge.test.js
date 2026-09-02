@@ -33,6 +33,14 @@ test("bounds the provider sync handoff when a page reload interrupts its respons
   assert.match(source, /type: "get_provider_status"[\s\S]*timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS/);
 });
 
+test("resets a stale page-side recovery before reinjection and retries an overlapping sync", () => {
+  assert.match(source, /async function resetProviderRecovery\(/);
+  assert.match(source, /window\.__omnichatRealtimeBridgeControl/);
+  assert.match(source, /Recovery is already running\./);
+  assert.match(source, /operation: "retry sync request"/);
+  assert.match(source, /state\.recoveryAbortController\?\.abort\(\)/);
+});
+
 test("resumes an interrupted sync after the service worker restarts", () => {
   assert.match(source, /async function resumeInterruptedSync\(/);
   assert.match(source, /scanState\?\.in_progress === true/);
