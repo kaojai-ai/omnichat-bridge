@@ -117,3 +117,11 @@ export async function installationId() {
 export function normalizeDeviceName(value) {
   return typeof value === "string" ? value.trim().slice(0, 80) : "";
 }
+
+const DEVICE_NAME_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+export function generateDeviceName() {
+  const random = new Uint8Array(6);
+  crypto.getRandomValues(random);
+  return `NODE_${Array.from(random, (value) => DEVICE_NAME_ALPHABET[value % DEVICE_NAME_ALPHABET.length]).join("")}`;
+}

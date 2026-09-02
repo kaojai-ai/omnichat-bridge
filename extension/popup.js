@@ -10,6 +10,7 @@ import {
   STORAGE,
   hasLocalConsent,
   installationId,
+  generateDeviceName,
   normalizeDeviceName,
   readAccountState,
   readStorage,
@@ -864,7 +865,7 @@ clearLogsButton.addEventListener("click", async () => {
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
     const config = validateConfigFile(JSON.parse(configInput.value));
-    const deviceName = normalizeDeviceName(deviceNameInput.value);
+    const deviceName = normalizeDeviceName(deviceNameInput.value) || generateDeviceName();
     const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
     await writeStorage({
       [STORAGE.config]: config,
