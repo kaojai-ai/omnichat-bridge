@@ -85,6 +85,23 @@ test("resumes an interrupted sync after the service worker restarts", () => {
   assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
 });
 
+test("requires the local Seller Centre preference before an automatic landing sync", () => {
+  assert.match(source, /message\?\.type === "auto_sync_now"/);
+  assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);
+  assert.match(source, /stored\[STORAGE\.autoOpenSellerCentreChat\] !== true/);
+  assert.match(source, /initializeAndStartSync\("automatic"\)/);
+});
+
+test("starts opted-in Seller Centre sync after the tab finishes loading", () => {
+  assert.match(source, /chrome\.tabs\.onUpdated\.addListener/);
+  assert.match(source, /changeInfo\.status !== "complete"/);
+  assert.match(source, /async function autoStartSellerCentreTab\(/);
+  assert.match(source, /type: "auto_open_chat_and_sync_v3"/);
+  assert.match(source, /const sellerCentreLandingStarts = new Map\(\)/);
+  assert.match(source, /sellerCentreLandingStarts\.get\(tabId\)/);
+  assert.match(source, /await ensureProviderBridge\(tabId, shopeeAdapter\)/);
+});
+
 test("requires an already-open Shopee tab for outbound replies", () => {
   const sendStart = source.indexOf("async function sendViaProvider(");
   const sendEnd = source.indexOf("\n}\n\nasync function selectCommandTab", sendStart);

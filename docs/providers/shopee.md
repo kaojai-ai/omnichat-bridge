@@ -54,6 +54,12 @@ means the mini-chat is closed, **CONNECTED · INITIALIZING** means it is open
 but still capturing its request templates, and **CONNECTED · CHAT READY** means
 the surface can sync. The first manual sync can open the mini-chat automatically.
 
+**Open chat and sync automatically** is an optional, device-local preference
+shown above the Sync button on Seller Centre. It is off by default. When enabled,
+each new Seller Centre page load opens the mini-chat once, detects the current
+shop, and starts the normal automatic sync. Turning it off does not close an
+already-open chat or cancel a sync that is already running.
+
 Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.
 Recovery may fetch missed messages after the seller returns. The bridge keeps

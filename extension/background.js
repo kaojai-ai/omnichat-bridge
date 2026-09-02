@@ -99,6 +99,7 @@ let activeSync = null;
 let activeSyncControl = null;
 const liveConnections = new Map();
 const providerBridgeReinjections = new Map();
+const sellerCentreLandingStarts = new Map();
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -489,17 +490,17 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_now") {
-    void writeStorage({
-      [STORAGE.serverInitialized]: true,
-      [STORAGE.logUploadEnabled]: true,
-    })
-      .then(() => recordLog("info", "sync", "requested", "Manual sync requested."))
-      .then(() => ensureLiveConnection())
-      .then(() => startSync("manual"))
-      .then(
-        (result) => respond({ ok: true, ...result }),
-        (error) => respond({ ok: false, error: String(error) })
-      );
+    void initializeAndStartSync("manual").then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "auto_sync_now") {
+    void startAutomaticSellerCentreSync(message.provider).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
     return true;
   }
   if (message?.type === "resume_sync") {
@@ -626,6 +627,38 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   return undefined;
 });
+
+async function initializeAndStartSync(trigger) {
+  await writeStorage({
+    [STORAGE.serverInitialized]: true,
+    [STORAGE.logUploadEnabled]: true,
+  });
+  await recordLog(
+    "info",
+    "sync",
+    trigger === "automatic" ? "automatic_requested" : "requested",
+    trigger === "automatic"
+      ? "Automatic sync requested by the Seller Centre preference."
+      : "Manual sync requested.",
+  );
+  await ensureLiveConnection();
+  return startSync(trigger);
+}
+
+async function startAutomaticSellerCentreSync(provider) {
+  const stored = await readStorage([
+    STORAGE.autoOpenSellerCentreChat,
+    STORAGE.consent,
+  ]);
+  if (
+    provider !== shopeeAdapter.id
+    || stored[STORAGE.autoOpenSellerCentreChat] !== true
+    || !hasLocalConsent(stored[STORAGE.consent])
+  ) {
+    return { skipped: "automatic_sync_disabled" };
+  }
+  return initializeAndStartSync("automatic");
+}
 
 async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
@@ -1153,6 +1186,17 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  void autoStartSellerCentreTab({ ...tab, id: tabId }).catch((error) => {
+    void recordUnexpected("seller_centre_landing_start", error, { provider: shopeeAdapter.id });
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  sellerCentreLandingStarts.delete(tabId);
+});
+
 chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
   void resumeLogUpload();
@@ -1607,12 +1651,65 @@ async function reattachOpenProviderBridges() {
     for (const tab of tabs.filter((item) => item.id && adapter.matchesUrl(item.url))) {
       try {
         await ensureProviderBridge(tab.id, adapter);
+        await autoStartSellerCentreTab(tab);
       } catch (error) {
         await recordUnexpected("provider_bridge_startup", error, { provider: adapter.id });
       }
     }
   }
   await ensureLiveConnection();
+}
+
+async function autoStartSellerCentreTab(tab) {
+  const tabId = tab?.id;
+  if (!Number.isInteger(tabId)) return { skipped: "tab_missing" };
+  const existing = sellerCentreLandingStarts.get(tabId);
+  if (existing) return existing;
+
+  const start = (async () => {
+    const currentTab = typeof tab?.url === "string" ? tab : await chrome.tabs.get(tabId);
+    if (shopeeAdapter.surfaceForUrl?.(currentTab?.url) !== "seller-centre") {
+      return { skipped: "not_seller_centre" };
+    }
+    const stored = await readStorage([
+      STORAGE.autoOpenSellerCentreChat,
+      STORAGE.consent,
+      STORAGE.config,
+    ]);
+    const configured = stored[STORAGE.config]?.accounts?.some(
+      (account) => account?.provider === shopeeAdapter.id,
+    );
+    if (
+      stored[STORAGE.autoOpenSellerCentreChat] !== true
+      || !hasLocalConsent(stored[STORAGE.consent])
+      || !configured
+    ) {
+      return { skipped: "automatic_sync_disabled" };
+    }
+
+    await ensureProviderBridge(tabId, shopeeAdapter);
+    const result = await sendProviderMessage(tabId, {
+      type: "auto_open_chat_and_sync_v3",
+      provider: shopeeAdapter.id,
+    }, {
+      label: providerLabel(shopeeAdapter),
+      operation: "automatic Seller Centre startup",
+      timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error || "Shopee Seller Centre automatic startup failed.");
+    }
+    return result;
+  })();
+
+  sellerCentreLandingStarts.set(tabId, start);
+  try {
+    return await start;
+  } finally {
+    if (sellerCentreLandingStarts.get(tabId) === start) {
+      sellerCentreLandingStarts.delete(tabId);
+    }
+  }
 }
 
 function providerMessageTimeout(label, operation) {

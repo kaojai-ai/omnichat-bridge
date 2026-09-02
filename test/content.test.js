@@ -9,7 +9,7 @@ const adaptersSource = await readFile(new URL("../extension/lib/provider-adapter
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {} } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
@@ -57,7 +57,10 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
       storage: {
         local: {
           async get() {
-            return localConsent ? { local_consent: { accepted_at: "2026-09-01T00:00:00.000Z" } } : {};
+            return {
+              ...(localConsent ? { local_consent: { accepted_at: "2026-09-01T00:00:00.000Z" } } : {}),
+              ...storage,
+            };
           },
           async set(value) {
             storageWrites.push(value);
@@ -72,6 +75,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     },
     setTimeout,
     clearTimeout,
+    crypto,
     Uint8Array,
     atob,
   });
@@ -246,6 +250,100 @@ test("starts the existing automatic sync path after a manual Seller Centre chat 
   );
 });
 
+test("resumes sync when Seller Centre is already open and becomes ready", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: true,
+    chat_open: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
+    1,
+  );
+});
+
+test("does not reopen Seller Centre from lifecycle events after Chat is closed", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: true,
+    chat_open: false,
+  });
+  await bridge.triggerWindowEvent("focus");
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
+    0,
+  );
+});
+
+test("waits for the Seller Centre page bridge before starting saved landing sync", async () => {
+  const bridge = contentBridge("/portal/sale/order", {
+    localConsent: true,
+    storage: {
+      auto_open_seller_centre_chat: true,
+      config: {
+        version: 2,
+        accounts: [{ provider: "shopee", provider_account_id: "shop-1" }],
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "prepare_provider_v3").length,
+    0,
+  );
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: false,
+    chat_open: false,
+  });
+
+  const preparation = bridge.runtimeMessages.find((message) => message.type === "prepare_provider_v3");
+  assert.match(preparation?.request_id, /^auto-open:/);
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: true,
+    chat_open: true,
+  });
+  await bridge.providerEvent({
+    type: "prepare_provider_result",
+    request_id: preparation.request_id,
+    ok: true,
+    surface: "seller-centre",
+    surface_ready: true,
+  });
+
+  const detection = bridge.runtimeMessages.find((message) => message.type === "detect_account_v3");
+  assert.ok(detection?.request_id);
+  await bridge.providerEvent({
+    type: "accounts_detected",
+    request_id: detection.request_id,
+    accounts: [{ provider: "shopee", provider_account_id: "shop-1" }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 550));
+
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "auto_sync_now").length,
+    1,
+  );
+  assert.equal(
+    bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
+    0,
+  );
+});
+
 test("does not deliver the same provider message twice across realtime surfaces", async () => {
   const bridge = contentBridge("/portal/chat-management");
   await bridge.providerEvent({ type: "realtime_event", capture_method: "realtime_socket", body: { messages: [echo] } });
@@ -273,12 +371,6 @@ test("ignores best-effort messages after the extension context is invalidated", 
 for (const pathname of [
   "/new-webchat/conversations",
   "/webchat/conversations",
-  "/",
-  "/404",
-  "/portal",
-  "/portal/",
-  "/portal/chat-management",
-  "/portal/sale/order",
 ]) {
   test(`requests automatic sync when ${pathname} loads`, async () => {
     const bridge = contentBridge(pathname);
@@ -288,6 +380,26 @@ for (const pathname of [
     assert.equal(
       bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
       1,
+    );
+  });
+}
+
+for (const pathname of [
+  "/",
+  "/404",
+  "/portal",
+  "/portal/",
+  "/portal/chat-management",
+  "/portal/sale/order",
+]) {
+  test(`does not open Seller Centre automatically when the option is disabled on ${pathname}`, async () => {
+    const bridge = contentBridge(pathname);
+
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    assert.equal(
+      bridge.runtimeMessages.filter((message) => ["resume_sync", "prepare_provider_v3"].includes(message.type)).length,
+      0,
     );
   });
 }

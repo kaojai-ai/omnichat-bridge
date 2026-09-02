@@ -12,6 +12,7 @@ export const STORAGE = {
   deliveryRetry: "delivery_retry_state",
   live: "live_status",
   commandTab: "command_tab",
+  autoOpenSellerCentreChat: "auto_open_seller_centre_chat",
   serverInitialized: "server_initialized",
   logs: "operational_logs",
   logOutbox: "operational_log_outbox",

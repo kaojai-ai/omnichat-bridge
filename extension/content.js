@@ -1,6 +1,7 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_PROTOCOL_VERSION = 5;
+  const AUTO_OPEN_SELLER_CENTRE_CHAT = "auto_open_seller_centre_chat";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
     previousBridge.dispose("Content bridge reattached.");
@@ -29,6 +30,10 @@
   let providerCapabilities = {};
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
+  let automaticSellerCentreLandingStarted = false;
+  let automaticSellerCentreLandingStartupChecked = false;
+  let automaticSellerCentreLandingPromise = null;
+  let automaticSellerCentreLandingRerun = false;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -216,6 +221,71 @@
         request_id: requestId,
       });
     });
+  }
+
+  const isSellerCentrePage = () => providerAdapter.id === "shopee"
+    && providerAdapter.surfaceForUrl?.(currentUrl) === "seller-centre";
+
+  async function automaticSellerCentreLandingSync() {
+    if (!isBridgeActive() || !isSellerCentrePage() || automaticSellerCentreLandingStarted) {
+      return { skipped: "not_eligible" };
+    }
+    const stored = await chrome.storage.local.get([
+      AUTO_OPEN_SELLER_CENTRE_CHAT,
+      "local_consent",
+      "config",
+    ]);
+    const configured = stored.config?.accounts?.some(
+      (account) => account?.provider === providerAdapter.id,
+    );
+    if (
+      stored[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true
+      || !stored.local_consent?.accepted_at
+      || !configured
+    ) {
+      return { skipped: "not_enabled" };
+    }
+
+    automaticSellerCentreLandingStarted = true;
+    const prepared = await prepareProviderSurface({
+      request_id: `auto-open:${crypto.randomUUID()}`,
+    });
+    if (!prepared?.ok) {
+      throw new Error(prepared?.error ?? "Seller Centre Chat could not be opened automatically.");
+    }
+    const detection = await requestAccountDetection();
+    if (!detection?.ok) {
+      throw new Error(detection?.error ?? "Shopee account detection failed after opening Chat.");
+    }
+    const latest = await chrome.storage.local.get([AUTO_OPEN_SELLER_CENTRE_CHAT]);
+    if (latest[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true) {
+      return { skipped: "disabled_during_startup" };
+    }
+    const result = await sendRuntimeMessage({
+      type: "auto_sync_now",
+      provider: providerAdapter.id,
+    });
+    if (!result?.ok) throw new Error(result?.error ?? "Automatic sync could not start.");
+    return result;
+  }
+
+  function startAutomaticSellerCentreLandingSync() {
+    if (automaticSellerCentreLandingPromise) {
+      automaticSellerCentreLandingRerun = true;
+      return;
+    }
+    automaticSellerCentreLandingPromise = automaticSellerCentreLandingSync()
+      .catch((error) => {
+        automaticSellerCentreLandingStarted = false;
+        logAsyncError("automatic_seller_centre_sync", error);
+      })
+      .finally(() => {
+        automaticSellerCentreLandingPromise = null;
+        if (automaticSellerCentreLandingRerun) {
+          automaticSellerCentreLandingRerun = false;
+          startAutomaticSellerCentreLandingSync();
+        }
+      });
   }
 
   async function isConfigured(providerAccountId) {
@@ -716,6 +786,7 @@
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
+      const wasSurfaceReady = providerSurfaceReady;
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
@@ -730,6 +801,19 @@
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
+      }
+      if (providerSurface === "seller-centre" && !automaticSellerCentreLandingStartupChecked) {
+        automaticSellerCentreLandingStartupChecked = true;
+        startAutomaticSellerCentreLandingSync();
+      }
+      if (
+        providerSurface === "seller-centre"
+        && providerSurfaceReady
+        && providerChatOpen === true
+        && !wasSurfaceReady
+        && !automaticSellerCentreLandingStarted
+      ) {
+        requestResumeSync();
       }
     } else if (event.data.type === "seller_centre_chat_opened") {
       requestResumeSync();
@@ -799,6 +883,12 @@
       });
       return false;
     }
+    if (message?.type === "auto_open_chat_and_sync_v3") {
+      automaticSellerCentreLandingStartupChecked = true;
+      startAutomaticSellerCentreLandingSync();
+      respond({ ok: true, scheduled: true });
+      return false;
+    }
     if (message?.type === "sync_now_v3") {
       void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
@@ -826,14 +916,19 @@
     return undefined;
   };
 
+  const requestLifecycleResumeSync = () => {
+    if (!isSellerCentrePage() || providerChatOpen === true) {
+      requestResumeSync();
+    }
+  };
   const onPageShow = () => {
-    if (isBridgeActive()) requestResumeSync();
+    if (isBridgeActive()) requestLifecycleResumeSync();
   };
   const onWindowFocus = () => {
-    if (isBridgeActive()) requestResumeSync();
+    if (isBridgeActive()) requestLifecycleResumeSync();
   };
   const onVisibilityChange = () => {
-    if (isBridgeActive() && !document.hidden) requestResumeSync();
+    if (isBridgeActive() && !document.hidden) requestLifecycleResumeSync();
   };
   window.addEventListener("message", onPageMessage);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
@@ -890,6 +985,6 @@
 
   log("info", "content_loaded", `${providerLabel} content bridge loaded.`);
   if (providerAdapter.matchesUrl(currentUrl)) {
-    requestResumeSync();
+    requestLifecycleResumeSync();
   }
 })();

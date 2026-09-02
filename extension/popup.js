@@ -62,6 +62,8 @@ const accountList = document.querySelector("#account-list");
 const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
+const autoSyncOption = document.querySelector("#auto-sync-option");
+const autoOpenChatInput = document.querySelector("#auto-open-chat");
 const cancelSyncButton = document.querySelector("#cancel-sync");
 const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
@@ -100,8 +102,10 @@ let logs = [];
 let popupTabId = null;
 let storedConsent = null;
 let storedDeviceName = "";
+let autoOpenSellerCentreChat = false;
 let viewingPrivacy = false;
 let activeProviderAdapter = null;
+let activeProviderSurface = null;
 let isProviderChatTab = false;
 
 function adapterForAccount(account) {
@@ -387,6 +391,8 @@ function renderDetectedAccounts() {
 
 function renderDashboard(message = "", isError = false) {
   renderDeviceNameBadge();
+  autoSyncOption.hidden = activeProviderSurface !== "seller-centre";
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   showAccounts(detectedAccounts);
   renderDetectedAccounts();
   status.replaceChildren();
@@ -588,6 +594,7 @@ async function refreshStoredState() {
     STORAGE.live,
     STORAGE.logs,
     STORAGE.deviceName,
+    STORAGE.autoOpenSellerCentreChat,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
@@ -601,6 +608,8 @@ async function refreshStoredState() {
   storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
     ? stored[STORAGE.deviceName]
     : "";
+  autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   renderDashboard();
   renderLogs();
 }
@@ -706,6 +715,7 @@ async function load() {
     STORAGE.live,
     STORAGE.logs,
     STORAGE.deviceName,
+    STORAGE.autoOpenSellerCentreChat,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
@@ -721,9 +731,12 @@ async function load() {
   storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
     ? stored[STORAGE.deviceName]
     : "";
+  autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
+  activeProviderSurface = activeProviderAdapter?.surfaceForUrl?.(activeTab?.url) ?? null;
   isProviderChatTab = Boolean(activeProviderAdapter?.matchesUrl(activeTab?.url));
   const showConsentScreen = !consented;
   const showHintScreen = consented && !isProviderChatTab;
@@ -803,6 +816,43 @@ syncButton.addEventListener("click", async () => {
     await showSyncResult(await chrome.runtime.sendMessage({ type: "sync_now" }));
   } catch (error) {
     renderDashboard(error.message, true);
+  }
+});
+
+autoOpenChatInput.addEventListener("change", async () => {
+  const enabled = autoOpenChatInput.checked;
+  autoOpenChatInput.disabled = true;
+  try {
+    await writeStorage({ [STORAGE.autoOpenSellerCentreChat]: enabled });
+    autoOpenSellerCentreChat = enabled;
+    let message = enabled
+      ? "Automatic chat opening enabled."
+      : "Automatic chat opening disabled.";
+    const hasShopeeConfig = storedConfig.accounts.some(
+      (account) => account.provider === activeProviderAdapter?.id,
+    );
+    if (enabled && !hasShopeeConfig) {
+      message = "Automatic sync enabled. Configure a Shopee account to apply it.";
+    } else if (enabled && popupTabId && activeProviderSurface === "seller-centre") {
+      try {
+        const result = await chrome.tabs.sendMessage(popupTabId, {
+          type: "auto_open_chat_and_sync_v3",
+          provider: activeProviderAdapter?.id,
+        });
+        message = result?.ok
+          ? "Opening Chat and starting sync…"
+          : "Automatic sync enabled. Reload Seller Centre to apply it.";
+      } catch {
+        message = "Automatic sync enabled. Reload Seller Centre to apply it.";
+      }
+    }
+    renderDashboard(message);
+  } catch (error) {
+    autoOpenSellerCentreChat = !enabled;
+    autoOpenChatInput.checked = autoOpenSellerCentreChat;
+    renderDashboard(error.message, true);
+  } finally {
+    autoOpenChatInput.disabled = false;
   }
 });
 
@@ -998,7 +1048,7 @@ installationIdButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
+  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat]) {
     void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
   }
 });

@@ -139,6 +139,18 @@ button:disabled {
   gap: 3px;
 }
 
+.auto-sync-option {
+  align-items: center;
+  color: #344054;
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  font-weight: 550;
+  gap: 8px;
+}
+
+.auto-sync-option input { flex: 0 0 auto; margin: 0; }
+
 .cancel-sync-link {
   background: transparent;
   border: 0;
