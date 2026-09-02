@@ -46,6 +46,7 @@ const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
+const PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000;
 const DELIVERY_RETRY_ALARM = "omnichat-delivery-retry";
 const LOG_UPLOAD_ALARM = "omnichat-log-upload";
 const MAX_LOG_UPLOAD_BATCH = 100;
@@ -1273,6 +1274,37 @@ async function ensureProviderBridge(tabId, adapter) {
   throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
 }
 
+function providerMessageTimeout(label, operation) {
+  const error = new Error(`${label} ${operation} timed out. Refresh the provider tab and try again.`);
+  error.name = "TimeoutError";
+  return error;
+}
+
+function sendProviderMessage(tabId, message, {
+  label,
+  operation,
+  signal,
+  timeoutMs = PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
+} = {}) {
+  let timeout;
+  let onAbort;
+  const response = Promise.resolve()
+    .then(() => chrome.tabs.sendMessage(tabId, message));
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(providerMessageTimeout(label ?? "Provider", operation ?? "request")), timeoutMs);
+  });
+  const cancellation = new Promise((_, reject) => {
+    if (!signal) return;
+    onAbort = () => reject(syncCancelledError());
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([response, deadline, cancellation]).finally(() => {
+    clearTimeout(timeout);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  });
+}
+
 function syncCancelledError() {
   const error = new Error("Sync cancelled.");
   error.name = "AbortError";
@@ -1297,10 +1329,14 @@ async function syncOpenProvider(control, context) {
   control.adapter = adapter;
   await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
-  const result = await chrome.tabs.sendMessage(tab.id, {
+  const result = await sendProviderMessage(tab.id, {
     type: "sync_now",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
+  }, {
+    label,
+    operation: "sync request",
+    signal,
   });
   throwIfSyncCancelled(signal);
   if (!result?.ok) throw new Error(result?.error ?? `${label} recovery failed.`);

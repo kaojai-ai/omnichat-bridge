@@ -91,6 +91,9 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 - Failed collector delivery retries after approximately 1, 2, 5, 15, and 30
   minutes, capped at 30 minutes. Retry never calls Shopee.
 - Shopee recovery requests are spaced by at least one second.
+- If a page reload interrupts a recovery response, the extension marks the sync
+  failed after 90 seconds and shows a manual-refresh action instead of leaving
+  the popup in an indefinite loading state.
 
 ## Data sent
 
