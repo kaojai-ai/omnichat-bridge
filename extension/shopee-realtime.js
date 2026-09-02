@@ -47,6 +47,7 @@
   const ACCOUNT_DISCOVERY_MAX_ATTEMPTS = 2;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
+  const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -76,12 +77,15 @@
     latestMessageIdsByConversation: new Map(),
     observedMessageKeys: new Set(),
     sellerCentreListInitialized: false,
+    sellerCentrePollingStarted: false,
+    sellerCentrePollingTimer: null,
     pollingConnected: false,
     pollingConnectedAt: null,
     pollingRefreshInFlight: false,
   };
   state.surface ??= currentSurface;
   if (state.surface !== currentSurface) {
+    if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
     state.surface = currentSurface;
     state.getTemplate = null;
     state.listTemplate = null;
@@ -90,6 +94,8 @@
     state.latestMessageIdsByConversation = new Map();
     state.observedMessageKeys = new Set();
     state.sellerCentreListInitialized = false;
+    state.sellerCentrePollingStarted = false;
+    state.sellerCentrePollingTimer = null;
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.pollingRefreshInFlight = false;
@@ -107,6 +113,8 @@
   state.latestMessageIdsByConversation ??= new Map();
   state.observedMessageKeys ??= new Set();
   state.sellerCentreListInitialized ??= false;
+  state.sellerCentrePollingStarted ??= false;
+  state.sellerCentrePollingTimer ??= null;
   state.pollingConnected ??= false;
   state.pollingConnectedAt ??= null;
   state.pollingRefreshInFlight ??= false;
@@ -572,6 +580,30 @@
     } finally {
       state.pollingRefreshInFlight = false;
     }
+  }
+
+  function startSellerCentrePolling() {
+    if (!isSellerCentreSurface() || !state.listTemplate || state.sellerCentrePollingStarted) return;
+    state.sellerCentrePollingStarted = true;
+    const poll = () => {
+      if (!state.listTemplate || state.pollingRefreshInFlight) return;
+      void (async () => {
+        try {
+          await refreshSellerCentreConversations();
+          state.pollingConnected = true;
+          state.pollingConnectedAt ??= new Date().toISOString();
+        } catch (error) {
+          state.pollingConnected = false;
+          postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
+        } finally {
+          publishSurfaceStatus();
+        }
+      })();
+    };
+    state.sellerCentrePollingTimer = setInterval(poll, SELLER_CENTRE_POLL_INTERVAL_MS);
+    postLog("info", "seller_centre_polling_started", "Seller Centre conversation polling started.", {
+      interval_ms: SELLER_CENTRE_POLL_INTERVAL_MS,
+    });
   }
 
   const captureSendTemplate = async (request) => {
@@ -1287,6 +1319,7 @@
         void observeAsync("conversation_template", () => templateFrom(request).then((template) => {
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
+          startSellerCentrePolling();
           publishSurfaceStatus();
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
           startAutomaticAccountDiscovery();

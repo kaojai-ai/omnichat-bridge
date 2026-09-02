@@ -23,11 +23,12 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations" } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false } = {}) {
   const listeners = [];
   const posts = [];
   const responses = new Map();
   const requests = [];
+  const intervals = [];
   const window = {
     location: { origin, href: `${origin}${pathname}` },
     fetch: async (input) => {
@@ -60,8 +61,13 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
     Uint8Array,
     structuredClone,
     AbortController,
-    setInterval: () => 0,
+    setInterval: (callback, delay) => {
+      if (!captureIntervals) return 0;
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
     setTimeout,
+    clearInterval,
     clearTimeout,
   });
   vm.runInContext(urlSource, context);
@@ -112,6 +118,12 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
       acknowledgementCount: window.__omnichatRealtimeState.acknowledgements.size,
       recoveryEpoch: window.__omnichatRealtimeState.recoveryEpoch,
     };
+  }
+
+  async function runIntervals() {
+    for (const { callback } of intervals) callback();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
   }
 
   async function detect(requestId = "detect-1") {
@@ -195,6 +207,8 @@ function createBridge({ pathname = "/webchat/conversations" } = {}) {
     sync,
     posts,
     requests,
+    intervals,
+    runIntervals,
   };
 }
 
@@ -345,7 +359,7 @@ test("limits recovery to the requested Shop ID", async () => {
 });
 
 test("discovers a Seller Centre shop and polls its mini history without legacy endpoints", async () => {
-  const bridge = createBridge({ pathname: "/portal/chat-management" });
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   const conversation = {
     id: "seller-centre-conversation",
     shop_id: 1549058683,
@@ -392,11 +406,8 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     content: { text: "Second" },
     created_timestamp: 1_724_141_060,
   }]);
-  await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
-    ...conversation,
-    latest_message_id: "seller-message-2",
-    last_message_time: "2026-08-20T10:01:00.000Z",
-  }]);
+  await bridge.runIntervals();
+  assert.equal(bridge.intervals.filter(({ delay }) => delay === 3_000).length, 1);
   const realtime = bridge.posts.findLast((post) => post.type === "realtime_event");
   assert.equal(realtime.capture_method, "poll");
   assert.deepEqual(
