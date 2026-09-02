@@ -10,8 +10,9 @@ Shopee surfaces while Shopee retires the legacy page:
 
 ## How it works
 
-1. The seller signs in and opens the Seller Centre Chat panel (or a legacy
-   Seller Chat page during the compatibility period).
+1. The seller signs in and opens the Seller Centre page (the first manual sync
+   can open its Chat panel) or a legacy Seller Chat page during the
+   compatibility period.
 2. On Seller Centre, the extension observes Shopee's authenticated conversation
    list and realtime sync polling. On legacy pages it reads the existing chat
    socket.
@@ -46,6 +47,12 @@ The extension status records the active surface (`seller-centre` or `legacy`),
 its named capabilities, and the realtime transport (`polling` or `socket`). A
 command is rejected with an explicit initialization error when the selected
 surface has not exposed the required request profile.
+
+The popup separates the Seller Centre connection states so a live KaoJai
+connection is not confused with a ready Shopee chat: **CONNECTED · OPEN CHAT**
+means the mini-chat is closed, **CONNECTED · INITIALIZING** means it is open
+but still capturing its request templates, and **CONNECTED · CHAT READY** means
+the surface can sync. The first manual sync can open the mini-chat automatically.
 
 Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.

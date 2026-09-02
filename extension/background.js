@@ -279,6 +279,23 @@ async function updateLiveState(context, patch) {
   });
 }
 
+async function persistProviderSurfaceState(context, adapter, providerStatus, tab) {
+  const surface = typeof providerStatus?.surface === "string" && providerStatus.surface.trim()
+    ? providerStatus.surface.trim()
+    : adapter?.surfaceForUrl?.(tab?.url) ?? null;
+  if (!surface) return;
+  await updateLiveState(context, {
+    provider_surface: surface,
+    provider_surface_ready: providerStatus?.surface_ready === true,
+    provider_chat_open: typeof providerStatus?.chat_open === "boolean" ? providerStatus.chat_open : null,
+    provider_realtime_connected: providerStatus?.realtime_connected === true,
+    provider_realtime_transport: typeof providerStatus?.realtime_transport === "string"
+      ? providerStatus.realtime_transport
+      : null,
+    provider_status_at: new Date().toISOString(),
+  });
+}
+
 async function getAccountScanState(providerAccountId, provider = "") {
   const stored = await readStorage([
     STORAGE.config,
@@ -929,16 +946,22 @@ async function connectionStatusSnapshot(context) {
       .filter((tab) => adapter.matchesUrl(tab.url))
     : [];
   let providerStatus = null;
+  let providerStatusTab = null;
   for (const tab of orderProviderTabs(adapter, tabs)) {
     if (!tab.id) continue;
     const result = await providerTabStatus(tab);
     if (!result) continue;
-    providerStatus ??= result;
+    if (!providerStatus) {
+      providerStatus = result;
+      providerStatusTab = tab;
+    }
     if (providerTabIsReady(result, adapter)) {
       providerStatus = result;
+      providerStatusTab = tab;
       break;
     }
   }
+  await persistProviderSurfaceState(context, adapter, providerStatus, providerStatusTab);
 
   const accountDetected = detectedAccounts(stored).some(
     (account) => account.provider === context.account.provider

@@ -19,6 +19,7 @@ import {
 import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
+import { sellerCentreConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -285,6 +286,8 @@ function accountRowStatus(account) {
   const currentError = syncState?.delivery_error || syncState?.sync_error;
   if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
+  const sellerCentreStatus = sellerCentreConnectionStatus(live);
+  if (sellerCentreStatus) return sellerCentreStatus;
   if (live?.socket === "connected") return { label: "CONNECTED", state: "ready" };
   if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: "OFFLINE", state: "warning" };
   return { label: "READY", state: "ready" };
@@ -348,6 +351,7 @@ function renderDetectedAccounts() {
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
     statusLabel.textContent = cardState.label;
+    if (cardState.hint) statusLabel.title = cardState.hint;
     if (cardState.action) {
       statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
       statusLabel.classList.add("account-row-status-link");
@@ -412,6 +416,9 @@ function renderDashboard(message = "", isError = false) {
     .filter(Boolean)
     .at(-1);
   const anyLeader = configuredStates.some((item) => item.live?.leader);
+  const surfaceHint = configuredStates
+    .map((item) => sellerCentreConnectionStatus(item.live))
+    .find((item) => item?.state === "warning" && item?.hint);
   const latestSync = configuredStates
     .map((item) => item.syncState?.last_sync_at)
     .filter(Boolean)
@@ -480,6 +487,7 @@ function renderDashboard(message = "", isError = false) {
       || (anyError
         ? `${pendingTotal ? `${pendingTotal} pending. ` : ""}Open Logs for details.`
         : "")
+      || surfaceHint?.hint
       || formatSyncResult(latestResult);
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage;

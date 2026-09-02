@@ -28,6 +28,7 @@
   let providerSurfaceReady = false;
   let providerCapabilities = {};
   let providerRealtimeTransport = null;
+  let providerChatOpen = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -723,6 +724,9 @@
       providerRealtimeTransport = typeof event.data.realtime_transport === "string"
         ? event.data.realtime_transport
         : providerRealtimeTransport;
+      providerChatOpen = typeof event.data.chat_open === "boolean"
+        ? event.data.chat_open
+        : providerChatOpen;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
@@ -788,6 +792,7 @@
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
         realtime_transport: providerRealtimeTransport,
+        chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,
         last_realtime_connected_at: lastRealtimeConnectedAt,
         page_visible: document.visibilityState === "visible",

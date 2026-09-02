@@ -222,12 +222,19 @@
   const publishSurfaceStatus = () => {
     const capabilities = surfaceCapabilities();
     const ready = Boolean(state.listTemplate && state.getTemplate);
+    const chatOpen = isSellerCentreSurface()
+      ? (() => {
+        const launcher = sellerCentreChatLauncher();
+        return launcher ? sellerCentreChatIsOpen(launcher) : null;
+      })()
+      : null;
     post({
       type: "provider_status",
       surface: state.surface,
       surface_ready: ready,
       capabilities,
       realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
+      ...(isSellerCentreSurface() ? { chat_open: chatOpen } : {}),
       realtime_connected: isSellerCentreSurface() ? state.pollingConnected : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
     });
@@ -357,7 +364,9 @@
         : target?.closest?.("#SidebarEntry");
       if (!launcher || sellerCentreChatIsOpen(launcher)) return;
       setTimeout(() => {
-        if (isBridgeActive()) post({ type: "seller_centre_chat_opened" });
+        if (!isBridgeActive()) return;
+        publishSurfaceStatus();
+        post({ type: "seller_centre_chat_opened" });
       }, 0);
     };
     document.addEventListener("click", sellerCentreClickListener, true);

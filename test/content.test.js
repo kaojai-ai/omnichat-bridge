@@ -208,6 +208,21 @@ test("prepares Seller Centre before an outbound command is selected", async () =
   assert.equal((await result).surface_ready, true);
 });
 
+test("keeps Seller Centre chat-open state available to the popup status", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: false,
+    chat_open: false,
+  });
+
+  const result = await bridge.sendCommand({ type: "get_provider_status_v3" });
+  assert.equal(result.chat_open, false);
+  assert.equal(result.surface_ready, false);
+});
+
 test("replaces the prior content bridge listener on reattachment", () => {
   const bridge = contentBridge();
 

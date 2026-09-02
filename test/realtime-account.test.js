@@ -311,6 +311,21 @@ test("signals automatic sync when Seller Centre mini-chat is opened manually", a
   assert.equal(bridge.posts.filter((post) => post.type === "seller_centre_chat_opened").length, 1);
 });
 
+test("reports Seller Centre chat-open state separately from surface readiness", async () => {
+  const bridge = createBridge({ pathname: "/portal/sale/order", miniChatOpen: false });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const closed = bridge.posts.findLast((post) => post.type === "provider_status");
+  assert.equal(closed?.surface, "seller-centre");
+  assert.equal(closed?.surface_ready, false);
+  assert.equal(closed?.chat_open, false);
+
+  await bridge.clickMiniChat();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const opened = bridge.posts.findLast((post) => post.type === "provider_status");
+  assert.equal(opened?.chat_open, true);
+});
+
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {
   const bridge = createBridge();
   await bridge.fetch("/webchat/api/coreapi/v1.2/login", {
