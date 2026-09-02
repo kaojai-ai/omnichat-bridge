@@ -1116,6 +1116,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
 void resumeLogUpload();
 void ensureLiveConnection();
+void resumeInterruptedSync().catch((error) => recordUnexpected("sync_resume", error));
 
 function isVersionBefore(value, target) {
   const current = String(value ?? "").split(".").map(Number);
@@ -1627,6 +1628,29 @@ async function resumeSync() {
     if (String(error).includes("not configured")) return { skipped: "not_configured" };
     throw error;
   }
+}
+
+async function resumeInterruptedSync() {
+  if (activeSync) return activeSync;
+  const stored = await readStorage([
+    STORAGE.serverInitialized,
+    STORAGE.consent,
+    STORAGE.config,
+    STORAGE.detectedAccounts,
+    STORAGE.status,
+    STORAGE.scanState,
+  ]);
+  if (!hasServerInitialized(stored) || !hasLocalConsent(stored[STORAGE.consent])) {
+    return { skipped: "not_initialized" };
+  }
+  const interrupted = configuredAccountContexts(stored).some((context) => {
+    const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+    const status = readAccountState(stored[STORAGE.status], context.key, null);
+    return scanState?.in_progress === true
+      || ["discovering", "syncing"].includes(status?.state);
+  });
+  if (!interrupted) return { skipped: "no_interrupted_sync" };
+  return resumeSync();
 }
 
 function messageKey(message) {

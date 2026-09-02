@@ -16,3 +16,10 @@ test("bounds the provider sync handoff when a page reload interrupts its respons
   assert.match(source, /providerMessageTimeout\(label, operation\)/);
   assert.match(source, /sendProviderMessage\(tab\.id, \{[\s\S]*type: "sync_now"/);
 });
+
+test("resumes an interrupted sync after the service worker restarts", () => {
+  assert.match(source, /async function resumeInterruptedSync\(/);
+  assert.match(source, /scanState\?\.in_progress === true/);
+  assert.match(source, /\["discovering", "syncing"\]\.includes\(status\?\.state\)/);
+  assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
+});

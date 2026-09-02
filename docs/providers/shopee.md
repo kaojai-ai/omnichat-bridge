@@ -94,6 +94,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 - If a page reload interrupts a recovery response, the extension marks the sync
   failed after 90 seconds and shows a manual-refresh action instead of leaving
   the popup in an indefinite loading state.
+- If Chrome restarts the extension service worker during recovery, a persisted
+  in-progress scan is resumed automatically when the worker starts again.
 
 ## Data sent
 
