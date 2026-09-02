@@ -1359,34 +1359,54 @@ async function reinjectProviderBridge(tabId, adapter) {
       const mainBridge = await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
-        func: () => Boolean(
-          globalThis.OmnichatProviderAdapters
-          && window.__omnichatRealtimeState
-          && window.fetch?.__omnichatRealtimeBridge,
-        ),
+        func: () => ({
+          ready: Boolean(
+            globalThis.OmnichatShopeeUrl
+            && globalThis.OmnichatProviderAdapters?.get?.("shopee")
+            && window.__omnichatRealtimeState
+            && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function",
+          ),
+          hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
+          hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
+          hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
+        }),
       });
-      if (mainBridge?.[0]?.result !== true) {
+      const mainStatus = mainBridge?.[0]?.result ?? {};
+      if (mainStatus.ready !== true) {
+        const mainFiles = [
+          ...(mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
+          ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+          ...(mainStatus.hasShopeeAdapter ? [] : ["lib/shopee-adapter.js"]),
+          "shopee-realtime.js",
+        ];
         await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
-          files: [
-            "lib/shopee-url.js",
-            "lib/provider-adapters.js",
-            "lib/shopee-adapter.js",
-            "shopee-realtime.js",
-          ],
+          files: mainFiles,
         });
       }
+      const isolatedBridge = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "ISOLATED",
+        func: () => ({
+          hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
+          hasShopee: typeof globalThis.OmnichatShopee?.parseShopeeMessages === "function",
+          hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
+          hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
+        }),
+      });
+      const isolatedStatus = isolatedBridge?.[0]?.result ?? {};
+      const isolatedFiles = [
+        ...(isolatedStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
+        ...(isolatedStatus.hasShopee ? [] : ["lib/shopee.js"]),
+        ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+        ...(isolatedStatus.hasShopeeAdapter ? [] : ["lib/shopee-adapter.js"]),
+        "content.js",
+      ];
       await chrome.scripting.executeScript({
         target: { tabId },
         world: "ISOLATED",
-        files: [
-          "lib/shopee-url.js",
-          "lib/shopee.js",
-          "lib/provider-adapters.js",
-          "lib/shopee-adapter.js",
-          "content.js",
-        ],
+        files: isolatedFiles,
       });
       return true;
     } catch (error) {

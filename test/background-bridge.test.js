@@ -24,6 +24,15 @@ test("reattaches an invalidated content bridge without refreshing the provider p
   assert.ok(manifest.permissions.includes("scripting"));
 });
 
+test("does not redeclare page bridge dependencies during reattachment", () => {
+  assert.match(source, /hasUrl: Boolean\(globalThis\.OmnichatShopeeUrl\)/);
+  assert.match(source, /hasShopeeAdapter: Boolean\(globalThis\.OmnichatProviderAdapters\?\.get\?\.\("shopee"\)\)/);
+  assert.match(source, /const mainFiles = \[/);
+  assert.match(source, /const isolatedFiles = \[/);
+  assert.match(source, /\.\.\.\(mainStatus\.hasUrl \? \[\] : \["lib\/shopee-url\.js"\]\)/);
+  assert.match(source, /\.\.\.\(isolatedStatus\.hasShopee \? \[\] : \["lib\/shopee\.js"\]\)/);
+});
+
 test("bounds the provider sync handoff when a page reload interrupts its response", () => {
   assert.match(source, /PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000/);
   assert.match(source, /PROVIDER_STATUS_RESPONSE_TIMEOUT_MS = 5_000/);
