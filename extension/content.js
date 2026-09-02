@@ -724,11 +724,11 @@
       respond({ ok: false, error: "Provider message does not match this page." });
       return false;
     }
-    if (message?.type === "ping") {
+    if (message?.type === "ping_v2") {
       respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION, bridge_source: SOURCE });
       return false;
     }
-    if (message?.type === "get_provider_status") {
+    if (message?.type === "get_provider_status_v2") {
       respond({
         ok: true,
         surface: providerSurface,

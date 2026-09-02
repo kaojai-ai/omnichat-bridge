@@ -1218,7 +1218,7 @@ function orderProviderTabs(adapter, tabs) {
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
   try {
-    const result = await sendProviderMessage(tab.id, { type: "get_provider_status" }, {
+    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v2" }, {
       label: "Provider",
       operation: "status request",
       timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
@@ -1265,7 +1265,7 @@ async function ensureProviderBridge(tabId, adapter) {
   let pingFailed = false;
   let bridgeReady = false;
   try {
-    response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
+    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
     bridgeReady = Boolean(
       response?.ok
       && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
@@ -1283,7 +1283,7 @@ async function ensureProviderBridge(tabId, adapter) {
 
   if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
-      response = await chrome.tabs.sendMessage(tabId, { type: "ping" });
+      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
       bridgeReady = Boolean(
         response?.ok
         && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
