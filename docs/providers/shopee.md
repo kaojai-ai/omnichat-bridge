@@ -3,15 +3,16 @@
 Shopee Seller Chat is the first supported provider. The bridge supports both
 Shopee surfaces while Shopee retires the legacy page:
 
-- Seller Centre: `https://seller.shopee.co.th/portal/chat-management` or the
-  Seller Centre home page `/` with its Chat panel (the preferred surface)
-- Legacy: `/new-webchat/conversations` and `/webchat/conversations` (temporary
-  compatibility)
+- Seller Centre: every non-Webchat page at `https://seller.shopee.co.th/`,
+  including `/`, `/portal`, and `/portal/*` (such as
+  `/portal/chat-management`), with its Chat panel (the preferred surface)
+- Legacy: `/new-webchat/*` and `/webchat/*` (temporary compatibility)
 
 ## How it works
 
-1. The seller signs in and opens the Seller Centre Chat panel (or a legacy
-   Seller Chat page during the compatibility period).
+1. The seller signs in and opens the Seller Centre page (the first manual sync
+   can open its Chat panel) or a legacy Seller Chat page during the
+   compatibility period.
 2. On Seller Centre, the extension observes Shopee's authenticated conversation
    list and realtime sync polling. On legacy pages it reads the existing chat
    socket.
@@ -47,6 +48,18 @@ its named capabilities, and the realtime transport (`polling` or `socket`). A
 command is rejected with an explicit initialization error when the selected
 surface has not exposed the required request profile.
 
+The popup separates the Seller Centre connection states so a live KaoJai
+connection is not confused with a ready Shopee chat: **CONNECTED · OPEN CHAT**
+means the mini-chat is closed, **CONNECTED · INITIALIZING** means it is open
+but still capturing its request templates, and **CONNECTED · CHAT READY** means
+the surface can sync. The first manual sync can open the mini-chat automatically.
+
+**Open chat and sync automatically** is an optional, device-local preference
+shown above the Sync button on Seller Centre. It is off by default. When enabled,
+each new Seller Centre page load opens the mini-chat once, detects the current
+shop, and starts the normal automatic sync. Turning it off does not close an
+already-open chat or cancel a sync that is already running.
+
 Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.
 Recovery may fetch missed messages after the seller returns. The bridge keeps
@@ -58,12 +71,16 @@ headers, tokens, or message bodies.
 Your server can send one text, image, or product reply to a configured seller
 browser Shop ID on either supported surface. Text and image replies may quote
 an existing provider message. The extension uses the authenticated request
-profile of the selected surface; it never silently sends a Seller Centre
-command through legacy endpoints and never transfers Shopee cookies,
-passwords, or login tokens.
+profile of the selected surface: Seller Centre sends through its page-native
+mini-chat request, while legacy Webchat uses its secure sender. It never
+silently sends a Seller Centre command through legacy endpoints and never
+transfers Shopee cookies, passwords, or login tokens.
 
 - The target conversation must already be available in the selected Shopee chat
   surface.
+- Outbound replies never create or navigate to a Shopee tab. An Admin reply is
+  sent only when an already-open Seller Centre or legacy Shopee chat tab is
+  available; otherwise it fails with an actionable error.
 - If the browser is offline or another conversation is open, the server returns
   an error. There is no remote command queue or retry.
 - The live service keeps only a short-lived connection ticket and browser
@@ -88,6 +105,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
   covered by conversation cursors.
 - Load, reconnect, and visible focus can resume sync at most once every five
   minutes. **Sync messages** and **Retry now** bypass that window.
+- Opening the Seller Centre mini-chat manually starts the same debounced
+  automatic sync path, so the chat does not need to be opened before syncing.
 - Failed collector delivery retries after approximately 1, 2, 5, 15, and 30
   minutes, capped at 30 minutes. Retry never calls Shopee.
 - Shopee recovery requests are spaced by at least one second.

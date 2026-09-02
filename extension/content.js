@@ -1,6 +1,16 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge-v2";
-  const BRIDGE_PROTOCOL_VERSION = 3;
+  const SOURCE = "omnichat-realtime-bridge-v3";
+  const BRIDGE_PROTOCOL_VERSION = 5;
+  const AUTO_OPEN_SELLER_CENTRE_CHAT = "auto_open_seller_centre_chat";
+  const previousBridge = globalThis.__omnichatContentBridgeControl;
+  if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
+    previousBridge.dispose("Content bridge reattached.");
+  }
+  const bridgeGeneration = (Number(globalThis.__omnichatContentBridgeGeneration) || 0) + 1;
+  globalThis.__omnichatContentBridgeGeneration = bridgeGeneration;
+  let disposed = false;
+  const isBridgeActive = () => !disposed
+    && globalThis.__omnichatContentBridgeGeneration === bridgeGeneration;
   const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
   if (!providerAdapter) return;
@@ -10,6 +20,7 @@
   const profilesByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
+  const pendingProviderPreparations = new Map();
   const realtimeMessageKeys = new Set();
   let activeConversationId = null;
   let realtimeConnected = false;
@@ -18,13 +29,24 @@
   let providerSurfaceReady = false;
   let providerCapabilities = {};
   let providerRealtimeTransport = null;
+  let providerChatOpen = null;
+  let automaticSellerCentreLandingStarted = false;
+  let automaticSellerCentreLandingStartupChecked = false;
+  let automaticSellerCentreLandingPromise = null;
+  let automaticSellerCentreLandingRerun = false;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
   const RECOVERY_INACTIVITY_TIMEOUT_MS = 60_000;
 
-  const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  const post = (message) => {
+    if (!isBridgeActive()) return;
+    window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  };
   function sendRuntimeMessage(message, onError) {
+    if (!isBridgeActive()) {
+      return Promise.resolve({ ok: false, error: "Provider bridge was replaced." });
+    }
     try {
       const runtime = globalThis.chrome?.runtime;
       if (typeof runtime?.sendMessage !== "function") {
@@ -72,25 +94,32 @@
   }
 
   function observeAsync(scope, task, details = {}) {
+    if (!isBridgeActive()) return Promise.resolve();
     return Promise.resolve()
-      .then(task)
-      .catch((error) => logAsyncError(scope, error, details));
+      .then(() => (isBridgeActive() ? task() : undefined))
+      .catch((error) => {
+        if (isBridgeActive()) logAsyncError(scope, error, details);
+      });
   }
 
-  window.addEventListener("error", (event) => {
+  const onWindowError = (event) => {
+    if (!isBridgeActive()) return;
     log("error", "uncaught_error", "Unhandled provider error.", {
       scope: "content",
       error_kind: "error_event",
       ...errorDetails(event?.error ?? event?.message),
     });
-  });
-  window.addEventListener("unhandledrejection", (event) => {
+  };
+  const onUnhandledRejection = (event) => {
+    if (!isBridgeActive()) return;
     log("error", "uncaught_error", "Unhandled provider error.", {
       scope: "content",
       error_kind: "unhandled_rejection",
       ...errorDetails(event?.reason),
     });
-  });
+  };
+  window.addEventListener("error", onWindowError);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
 
   const outboundKey = (conversationId, text) => `${conversationId}\u0000${text}`;
   const recoveryIdFrom = (requestId) => String(requestId ?? "").split(":")[0];
@@ -103,7 +132,7 @@
     pending.timeout = setTimeout(() => {
       if (recoveries.get(id) !== pending) return;
       recoveries.delete(id);
-      post({ type: "cancel_sync_v2", request_id: id });
+      post({ type: "cancel_sync_v3", request_id: id });
       log("error", "recovery_timeout", `${providerLabel} recovery stopped responding.`);
       pending.resolve({
         ok: false,
@@ -176,6 +205,89 @@
     });
   }
 
+  function prepareProviderSurface(message) {
+    const requestId = typeof message?.request_id === "string" ? message.request_id : "";
+    if (!requestId) return Promise.resolve({ ok: false, error: "Provider preparation request is invalid." });
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        if (!pendingProviderPreparations.has(requestId)) return;
+        pendingProviderPreparations.delete(requestId);
+        resolve({ ok: false, error: `${providerLabel} surface preparation timed out.` });
+      }, 30_000);
+      pendingProviderPreparations.set(requestId, { resolve, timeout });
+      post({
+        type: "prepare_provider_v3",
+        provider: providerAdapter.id,
+        request_id: requestId,
+      });
+    });
+  }
+
+  const isSellerCentrePage = () => providerAdapter.id === "shopee"
+    && providerAdapter.surfaceForUrl?.(currentUrl) === "seller-centre";
+
+  async function automaticSellerCentreLandingSync() {
+    if (!isBridgeActive() || !isSellerCentrePage() || automaticSellerCentreLandingStarted) {
+      return { skipped: "not_eligible" };
+    }
+    const stored = await chrome.storage.local.get([
+      AUTO_OPEN_SELLER_CENTRE_CHAT,
+      "local_consent",
+      "config",
+    ]);
+    const configured = stored.config?.accounts?.some(
+      (account) => account?.provider === providerAdapter.id,
+    );
+    if (
+      stored[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true
+      || !stored.local_consent?.accepted_at
+      || !configured
+    ) {
+      return { skipped: "not_enabled" };
+    }
+
+    automaticSellerCentreLandingStarted = true;
+    const prepared = await prepareProviderSurface({
+      request_id: `auto-open:${crypto.randomUUID()}`,
+    });
+    if (!prepared?.ok) {
+      throw new Error(prepared?.error ?? "Seller Centre Chat could not be opened automatically.");
+    }
+    const detection = await requestAccountDetection();
+    if (!detection?.ok) {
+      throw new Error(detection?.error ?? "Shopee account detection failed after opening Chat.");
+    }
+    const latest = await chrome.storage.local.get([AUTO_OPEN_SELLER_CENTRE_CHAT]);
+    if (latest[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true) {
+      return { skipped: "disabled_during_startup" };
+    }
+    const result = await sendRuntimeMessage({
+      type: "auto_sync_now",
+      provider: providerAdapter.id,
+    });
+    if (!result?.ok) throw new Error(result?.error ?? "Automatic sync could not start.");
+    return result;
+  }
+
+  function startAutomaticSellerCentreLandingSync() {
+    if (automaticSellerCentreLandingPromise) {
+      automaticSellerCentreLandingRerun = true;
+      return;
+    }
+    automaticSellerCentreLandingPromise = automaticSellerCentreLandingSync()
+      .catch((error) => {
+        automaticSellerCentreLandingStarted = false;
+        logAsyncError("automatic_seller_centre_sync", error);
+      })
+      .finally(() => {
+        automaticSellerCentreLandingPromise = null;
+        if (automaticSellerCentreLandingRerun) {
+          automaticSellerCentreLandingRerun = false;
+          startAutomaticSellerCentreLandingSync();
+        }
+      });
+  }
+
   async function isConfigured(providerAccountId) {
     const stored = await chrome.storage.local.get([
       "config",
@@ -223,7 +335,7 @@
       touchRecovery(requestId);
     });
     post({
-      type: "sync_v2",
+      type: "sync_v3",
       request_id: requestId,
       checkpoint: syncState.checkpoint,
       provider: providerAdapter.id,
@@ -241,7 +353,7 @@
     for (const [requestId, pending] of recoveries) {
       clearTimeout(pending.timeout);
       recoveries.delete(requestId);
-      post({ type: "cancel_sync_v2", request_id: requestId });
+      post({ type: "cancel_sync_v3", request_id: requestId });
       pending.resolve({ ok: false, error: "Sync cancelled." });
       cancelled += 1;
     }
@@ -261,7 +373,7 @@
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
-    post({ type: "detect_account_v2", request_id: requestId });
+    post({ type: "detect_account_v3", request_id: requestId });
     return result;
   }
 
@@ -363,7 +475,7 @@
         advance_cursor: false,
       });
       post({
-        type: "recovery_ack_v2",
+        type: "recovery_ack_v3",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         parsed: messages.length,
@@ -383,7 +495,7 @@
         provider_account_id: message.provider_account_id,
         ...errorDetails(error),
       });
-      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -399,7 +511,7 @@
         summary_token: message.summary_token,
       });
       post({
-        type: "recovery_ack_v2",
+        type: "recovery_ack_v3",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save sync cursor." }),
@@ -409,7 +521,7 @@
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
       });
-      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -423,7 +535,7 @@
         conversations: message.conversations,
       });
       post({
-        type: "recovery_ack_v2",
+        type: "recovery_ack_v3",
         request_id: message.request_id,
         ok: Boolean(result?.ok),
         ...(result?.ok ? {} : { error: result?.error ?? "Could not save bootstrap state." }),
@@ -432,7 +544,7 @@
       logAsyncError("recovery_bootstrap", error, {
         provider_account_id: message.provider_account_id,
       });
-      post({ type: "recovery_ack_v2", request_id: message.request_id, ok: false, error: String(error) });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
 
@@ -451,8 +563,10 @@
   }
 
   function requestResumeSync() {
+    if (!isBridgeActive()) return;
     clearTimeout(resumeSyncTimer);
     resumeSyncTimer = setTimeout(() => {
+      if (!isBridgeActive()) return;
       void sendRuntimeMessage({ type: "resume_sync" }, (error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
@@ -634,7 +748,7 @@
         providerIdTimeout: null,
       });
       post({
-        type: "send_api_v2",
+        type: "send_api_v3",
         ...message,
         ...imagePayload,
         provider: providerAdapter.id,
@@ -653,7 +767,8 @@
     finishPendingApiSend(message.request_id, pending);
   }
 
-  window.addEventListener("message", (event) => {
+  const onPageMessage = (event) => {
+    if (!isBridgeActive()) return;
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
       void observeAsync("realtime_event", () => handleRealtimeEvent(event.data.body, event.data.capture_method));
@@ -671,6 +786,7 @@
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
+      const wasSurfaceReady = providerSurfaceReady;
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
@@ -679,10 +795,28 @@
       providerRealtimeTransport = typeof event.data.realtime_transport === "string"
         ? event.data.realtime_transport
         : providerRealtimeTransport;
+      providerChatOpen = typeof event.data.chat_open === "boolean"
+        ? event.data.chat_open
+        : providerChatOpen;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
+      if (providerSurface === "seller-centre" && !automaticSellerCentreLandingStartupChecked) {
+        automaticSellerCentreLandingStartupChecked = true;
+        startAutomaticSellerCentreLandingSync();
+      }
+      if (
+        providerSurface === "seller-centre"
+        && providerSurfaceReady
+        && providerChatOpen === true
+        && !wasSurfaceReady
+        && !automaticSellerCentreLandingStarted
+      ) {
+        requestResumeSync();
+      }
+    } else if (event.data.type === "seller_centre_chat_opened") {
+      requestResumeSync();
     } else if (event.data.type === "diagnostic_log") {
       log(
         event.data.level,
@@ -716,62 +850,141 @@
       void observeAsync("recovery_complete", () => handleRecoveryComplete(event.data));
     } else if (event.data.type === "api_send_result") {
       handleApiSendResult(event.data);
+    } else if (event.data.type === "prepare_provider_result") {
+      const pending = pendingProviderPreparations.get(event.data.request_id);
+      if (!pending) return;
+      pendingProviderPreparations.delete(event.data.request_id);
+      clearTimeout(pending.timeout);
+      pending.resolve(event.data);
     }
-  });
+  };
 
-  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  const onRuntimeMessage = (message, _sender, respond) => {
+    if (!isBridgeActive()) return undefined;
     if (message?.provider && message.provider !== providerAdapter.id) {
       respond({ ok: false, error: "Provider message does not match this page." });
       return false;
     }
-    if (message?.type === "ping_v2") {
+    if (message?.type === "ping_v3") {
       respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION, bridge_source: SOURCE });
       return false;
     }
-    if (message?.type === "get_provider_status_v2") {
+    if (message?.type === "get_provider_status_v3") {
       respond({
         ok: true,
         surface: providerSurface,
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
         realtime_transport: providerRealtimeTransport,
+        chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,
         last_realtime_connected_at: lastRealtimeConnectedAt,
         page_visible: document.visibilityState === "visible",
       });
       return false;
     }
-    if (message?.type === "sync_now_v2") {
+    if (message?.type === "auto_open_chat_and_sync_v3") {
+      automaticSellerCentreLandingStartupChecked = true;
+      startAutomaticSellerCentreLandingSync();
+      respond({ ok: true, scheduled: true });
+      return false;
+    }
+    if (message?.type === "sync_now_v3") {
       void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "cancel_sync_v2") {
+    if (message?.type === "cancel_sync_v3") {
       respond(cancelRecovery());
       return false;
     }
-    if (message?.type === "detect_account_v2") {
+    if (message?.type === "detect_account_v3") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "send_api_v2") {
+    if (message?.type === "send_api_v3") {
       void sendViaApi(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (message?.type === "send_text_ui_click_wip_v2") {
+    if (message?.type === "prepare_provider_v3") {
+      void prepareProviderSurface(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
+      return true;
+    }
+    if (message?.type === "send_text_ui_click_wip_v3") {
       void sendTextByUiClick_WIP(message).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     return undefined;
-  });
+  };
 
-  window.addEventListener("pageshow", requestResumeSync);
-  window.addEventListener("focus", requestResumeSync);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) requestResumeSync();
-  });
+  const requestLifecycleResumeSync = () => {
+    if (!isSellerCentrePage() || providerChatOpen === true) {
+      requestResumeSync();
+    }
+  };
+  const onPageShow = () => {
+    if (isBridgeActive()) requestLifecycleResumeSync();
+  };
+  const onWindowFocus = () => {
+    if (isBridgeActive()) requestLifecycleResumeSync();
+  };
+  const onVisibilityChange = () => {
+    if (isBridgeActive() && !document.hidden) requestLifecycleResumeSync();
+  };
+  window.addEventListener("message", onPageMessage);
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  window.addEventListener("pageshow", onPageShow);
+  window.addEventListener("focus", onWindowFocus);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
+  const dispose = (reason = "Content bridge was replaced.") => {
+    if (disposed) return false;
+    disposed = true;
+    clearTimeout(resumeSyncTimer);
+    for (const pending of recoveries.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    recoveries.clear();
+    for (const pending of accountDetections.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    accountDetections.clear();
+    for (const pending of pendingApiSends.values()) {
+      clearTimeout(pending.timeout);
+      if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    pendingApiSends.clear();
+    for (const pending of pendingProviderPreparations.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    pendingProviderPreparations.clear();
+    for (const pending of pendingOutbound.values()) clearTimeout(pending.timeout);
+    pendingOutbound.clear();
+    window.removeEventListener?.("error", onWindowError);
+    window.removeEventListener?.("unhandledrejection", onUnhandledRejection);
+    window.removeEventListener?.("message", onPageMessage);
+    window.removeEventListener?.("pageshow", onPageShow);
+    window.removeEventListener?.("focus", onWindowFocus);
+    document.removeEventListener?.("visibilitychange", onVisibilityChange);
+    try {
+      globalThis.chrome?.runtime?.onMessage?.removeListener?.(onRuntimeMessage);
+    } catch {
+      // Chrome invalidates this API during an extension reload; the new listener uses a new channel generation.
+    }
+    return true;
+  };
+  globalThis.__omnichatContentBridgeControl = {
+    source: SOURCE,
+    bridge_protocol_version: BRIDGE_PROTOCOL_VERSION,
+    generation: bridgeGeneration,
+    dispose,
+  };
 
   log("info", "content_loaded", `${providerLabel} content bridge loaded.`);
   if (providerAdapter.matchesUrl(currentUrl)) {
-    requestResumeSync();
+    requestLifecycleResumeSync();
   }
 })();

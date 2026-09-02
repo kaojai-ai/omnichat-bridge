@@ -2,6 +2,13 @@ export function isoOrNull(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
+function latestTimestamp(...values) {
+  return values
+    .map(isoOrNull)
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+}
+
 export function buildConnectionHealth({
   provider = "shopee",
   tabCount,
@@ -28,6 +35,17 @@ export function buildConnectionHealth({
   const realtimeDisconnectedReason = `${providerId}_realtime_disconnected`;
   const deliveryErrorAt = status?.delivery_error ? isoOrNull(status.delivery_error_at) : null;
   const syncErrorAt = status?.sync_error ? isoOrNull(status.sync_error_at) : null;
+  const latestSuccessfulActivityAt = latestTimestamp(
+    lastRealtimeConnectedAt,
+    status?.last_capture_at,
+    status?.last_delivery_at,
+    status?.last_sync_at,
+  );
+  const hasRecoveredFromSyncError = Boolean(
+    syncErrorAt
+    && latestSuccessfulActivityAt
+    && Date.parse(latestSuccessfulActivityAt) > Date.parse(syncErrorAt),
+  );
   const checks = [
     {
       key: "provider_tab",
@@ -60,14 +78,16 @@ export function buildConnectionHealth({
     },
   ];
 
+  const lastError = deliveryErrorAt
+    ? { code: "message_delivery_failed", occurred_at: deliveryErrorAt }
+    : syncErrorAt
+      ? { code: "message_sync_failed", occurred_at: syncErrorAt }
+      : null;
   let reasonCode = "healthy";
-  let lastError = null;
   if (deliveryErrorAt) {
     reasonCode = "message_delivery_failed";
-    lastError = { code: reasonCode, occurred_at: deliveryErrorAt };
-  } else if (syncErrorAt) {
+  } else if (syncErrorAt && !hasRecoveredFromSyncError) {
     reasonCode = "message_sync_failed";
-    lastError = { code: reasonCode, occurred_at: syncErrorAt };
   } else if (!tabCount) {
     reasonCode = tabClosedReason;
   } else if (!contentReady) {

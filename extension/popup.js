@@ -10,6 +10,7 @@ import {
   STORAGE,
   hasLocalConsent,
   installationId,
+  generateDeviceName,
   normalizeDeviceName,
   readAccountState,
   readStorage,
@@ -18,6 +19,7 @@ import {
 import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
+import { sellerCentreConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -60,6 +62,8 @@ const accountList = document.querySelector("#account-list");
 const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
+const autoSyncOption = document.querySelector("#auto-sync-option");
+const autoOpenChatInput = document.querySelector("#auto-open-chat");
 const cancelSyncButton = document.querySelector("#cancel-sync");
 const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
@@ -67,6 +71,7 @@ const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
 const configInput = document.querySelector("#config");
 const deviceNameInput = document.querySelector("#device-name");
+const deviceNameBadge = document.querySelector("#device-name-badge");
 const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
 const leaderStatus = document.querySelector("#leader-status");
@@ -97,8 +102,10 @@ let logs = [];
 let popupTabId = null;
 let storedConsent = null;
 let storedDeviceName = "";
+let autoOpenSellerCentreChat = false;
 let viewingPrivacy = false;
 let activeProviderAdapter = null;
+let activeProviderSurface = null;
 let isProviderChatTab = false;
 
 function adapterForAccount(account) {
@@ -214,6 +221,14 @@ function setLeaderStatus(label, state, action, isLeader = false) {
       : "Set this tab as leader";
 }
 
+function renderDeviceNameBadge() {
+  const deviceName = normalizeDeviceName(storedDeviceName);
+  deviceNameBadge.textContent = deviceName;
+  deviceNameBadge.hidden = !deviceName;
+  deviceNameBadge.title = deviceName ? `Node name: ${deviceName}` : "";
+  deviceNameBadge.setAttribute("aria-label", deviceName ? `Node name ${deviceName}` : "Node name");
+}
+
 function setConfigStatus(message, isError = false) {
   configStatus.textContent = message;
   configStatus.classList.toggle("error", isError);
@@ -275,6 +290,8 @@ function accountRowStatus(account) {
   const currentError = syncState?.delivery_error || syncState?.sync_error;
   if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
+  const sellerCentreStatus = sellerCentreConnectionStatus(live);
+  if (sellerCentreStatus) return sellerCentreStatus;
   if (live?.socket === "connected") return { label: "CONNECTED", state: "ready" };
   if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: "OFFLINE", state: "warning" };
   return { label: "READY", state: "ready" };
@@ -338,6 +355,7 @@ function renderDetectedAccounts() {
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
     statusLabel.textContent = cardState.label;
+    if (cardState.hint) statusLabel.title = cardState.hint;
     if (cardState.action) {
       statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
       statusLabel.classList.add("account-row-status-link");
@@ -372,6 +390,9 @@ function renderDetectedAccounts() {
 }
 
 function renderDashboard(message = "", isError = false) {
+  renderDeviceNameBadge();
+  autoSyncOption.hidden = activeProviderSurface !== "seller-centre";
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   showAccounts(detectedAccounts);
   renderDetectedAccounts();
   status.replaceChildren();
@@ -401,6 +422,9 @@ function renderDashboard(message = "", isError = false) {
     .filter(Boolean)
     .at(-1);
   const anyLeader = configuredStates.some((item) => item.live?.leader);
+  const surfaceHint = configuredStates
+    .map((item) => sellerCentreConnectionStatus(item.live))
+    .find((item) => item?.state === "warning" && item?.hint);
   const latestSync = configuredStates
     .map((item) => item.syncState?.last_sync_at)
     .filter(Boolean)
@@ -469,6 +493,7 @@ function renderDashboard(message = "", isError = false) {
       || (anyError
         ? `${pendingTotal ? `${pendingTotal} pending. ` : ""}Open Logs for details.`
         : "")
+      || surfaceHint?.hint
       || formatSyncResult(latestResult);
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage;
@@ -569,6 +594,7 @@ async function refreshStoredState() {
     STORAGE.live,
     STORAGE.logs,
     STORAGE.deviceName,
+    STORAGE.autoOpenSellerCentreChat,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
@@ -582,6 +608,8 @@ async function refreshStoredState() {
   storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
     ? stored[STORAGE.deviceName]
     : "";
+  autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   renderDashboard();
   renderLogs();
 }
@@ -687,6 +715,7 @@ async function load() {
     STORAGE.live,
     STORAGE.logs,
     STORAGE.deviceName,
+    STORAGE.autoOpenSellerCentreChat,
   ]);
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
@@ -702,9 +731,12 @@ async function load() {
   storedDeviceName = typeof stored[STORAGE.deviceName] === "string"
     ? stored[STORAGE.deviceName]
     : "";
+  autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  autoOpenChatInput.checked = autoOpenSellerCentreChat;
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
+  activeProviderSurface = activeProviderAdapter?.surfaceForUrl?.(activeTab?.url) ?? null;
   isProviderChatTab = Boolean(activeProviderAdapter?.matchesUrl(activeTab?.url));
   const showConsentScreen = !consented;
   const showHintScreen = consented && !isProviderChatTab;
@@ -787,6 +819,43 @@ syncButton.addEventListener("click", async () => {
   }
 });
 
+autoOpenChatInput.addEventListener("change", async () => {
+  const enabled = autoOpenChatInput.checked;
+  autoOpenChatInput.disabled = true;
+  try {
+    await writeStorage({ [STORAGE.autoOpenSellerCentreChat]: enabled });
+    autoOpenSellerCentreChat = enabled;
+    let message = enabled
+      ? "Automatic chat opening enabled."
+      : "Automatic chat opening disabled.";
+    const hasShopeeConfig = storedConfig.accounts.some(
+      (account) => account.provider === activeProviderAdapter?.id,
+    );
+    if (enabled && !hasShopeeConfig) {
+      message = "Automatic sync enabled. Configure a Shopee account to apply it.";
+    } else if (enabled && popupTabId && activeProviderSurface === "seller-centre") {
+      try {
+        const result = await chrome.tabs.sendMessage(popupTabId, {
+          type: "auto_open_chat_and_sync_v3",
+          provider: activeProviderAdapter?.id,
+        });
+        message = result?.ok
+          ? "Opening Chat and starting sync…"
+          : "Automatic sync enabled. Reload Seller Centre to apply it.";
+      } catch {
+        message = "Automatic sync enabled. Reload Seller Centre to apply it.";
+      }
+    }
+    renderDashboard(message);
+  } catch (error) {
+    autoOpenSellerCentreChat = !enabled;
+    autoOpenChatInput.checked = autoOpenSellerCentreChat;
+    renderDashboard(error.message, true);
+  } finally {
+    autoOpenChatInput.disabled = false;
+  }
+});
+
 cancelSyncButton.addEventListener("click", async () => {
   cancelSyncButton.disabled = true;
   cancelSyncButton.textContent = "Cancelling…";
@@ -864,7 +933,7 @@ clearLogsButton.addEventListener("click", async () => {
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
     const config = validateConfigFile(JSON.parse(configInput.value));
-    const deviceName = normalizeDeviceName(deviceNameInput.value);
+    const deviceName = normalizeDeviceName(deviceNameInput.value) || generateDeviceName();
     const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
     await writeStorage({
       [STORAGE.config]: config,
@@ -877,6 +946,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     });
     storedConfig = config;
     storedDeviceName = deviceName;
+    renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
       accounts: config.accounts.length,
       logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
@@ -978,7 +1048,7 @@ installationIdButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab]) {
+  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat]) {
     void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
   }
 });

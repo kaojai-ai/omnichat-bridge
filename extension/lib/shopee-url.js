@@ -1,12 +1,12 @@
 const SHOPEE_SELLER_ORIGIN = "https://seller.shopee.co.th";
 const SHOPEE_CHAT_SURFACES = Object.freeze({
   legacy: Object.freeze([
-    "/new-webchat/conversations",
-    "/webchat/conversations",
+    "/new-webchat",
+    "/webchat",
   ]),
   "seller-centre": Object.freeze([
-    "/portal/chat-management",
     "/",
+    "/portal",
   ]),
 });
 
@@ -23,15 +23,17 @@ function normalizedPath(pathname) {
   return pathname.replace(/\/+$/, "") || "/";
 }
 
+function pathMatches(path, prefix) {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
 function surfaceForPath(pathname) {
   if (typeof pathname !== "string") return null;
   const path = normalizedPath(pathname);
-  for (const [surface, paths] of Object.entries(SHOPEE_CHAT_SURFACES)) {
-    if (paths.some((chatPath) => path === chatPath || path.startsWith(`${chatPath}/`))) {
-      return surface;
-    }
+  if (SHOPEE_CHAT_SURFACES.legacy.some((legacyPath) => pathMatches(path, legacyPath))) {
+    return "legacy";
   }
-  return null;
+  return "seller-centre";
 }
 
 function isShopeeChatPath(pathname) {

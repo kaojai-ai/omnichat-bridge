@@ -25,6 +25,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
 
 function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null } = {}) {
   const listeners = [];
+  const documentListeners = new Map();
   const posts = [];
   const responses = new Map();
   const requests = [];
@@ -38,7 +39,10 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   };
   const miniChatLauncher = {
     getBoundingClientRect: () => ({ width: 48, height: 48 }),
-    closest: (selector) => selector === ".panel-item" ? miniChatPanel : null,
+    id: "SidebarEntry",
+    closest: (selector) => selector === ".panel-item"
+      ? miniChatPanel
+      : selector === "#SidebarEntry" ? miniChatLauncher : null,
     getAttribute: () => null,
     click: () => {
       miniChatClicks += 1;
@@ -47,6 +51,9 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   };
   const document = {
     documentElement: { dataset: {} },
+    addEventListener(type, listener) {
+      documentListeners.set(type, [...(documentListeners.get(type) ?? []), listener]);
+    },
     ...(miniChatOpen === null ? {} : {
       getElementById: (id) => id === "SidebarEntry" ? miniChatLauncher : null,
     }),
@@ -64,6 +71,11 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     },
     addEventListener(type, listener) {
       if (type === "message") listeners.push(listener);
+    },
+    removeEventListener(type, listener) {
+      if (type !== "message") return;
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
     },
     postMessage(message) {
       posts.push(message);
@@ -130,7 +142,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v2", type: "reset_recovery" },
+        data: { source: "omnichat-realtime-bridge-v3", type: "reset_recovery_v3" },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -148,12 +160,20 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     await new Promise((resolve) => setImmediate(resolve));
   }
 
+  async function clickMiniChat() {
+    for (const listener of documentListeners.get("click") ?? []) {
+      listener({ target: miniChatLauncher });
+    }
+    miniChatLauncher.click();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
   async function detect(requestId = "detect-1") {
     for (const listener of listeners) {
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v2", type: "detect_account_v2", request_id: requestId },
+        data: { source: "omnichat-realtime-bridge-v3", type: "detect_account_v3", request_id: requestId },
       });
     }
     for (let attempt = 0; attempt < 400; attempt += 1) {
@@ -181,8 +201,8 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
         source: window,
         origin,
         data: {
-          source: "omnichat-realtime-bridge-v2",
-          type: "sync_v2",
+          source: "omnichat-realtime-bridge-v3",
+          type: "sync_v3",
           request_id: requestId,
           checkpoint: { watermark: "2026-08-01T00:00:00.000Z" },
           provider_account_id: providerAccountId,
@@ -203,8 +223,8 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
             source: window,
             origin,
             data: {
-              source: "omnichat-realtime-bridge-v2",
-              type: "recovery_ack_v2",
+              source: "omnichat-realtime-bridge-v3",
+              type: "recovery_ack_v3",
               request_id: post.request_id,
               ok: true,
               latest_cursor: null,
@@ -231,6 +251,18 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     requests,
     intervals,
     runIntervals,
+    clickMiniChat,
+    reattach() {
+      vm.runInContext(source, context);
+    },
+    postLegacyBridgeMessage() {
+      window.postMessage({
+        source: "omnichat-realtime-bridge-v2",
+        type: "send_api_v2",
+        request_id: "legacy-send",
+      }, origin);
+    },
+    get messageListenerCount() { return listeners.length; },
     get miniChatClicks() { return miniChatClicks; },
     get miniChatIsOpen() { return miniChatIsOpen; },
   };
@@ -248,6 +280,50 @@ test("resets stale page-side recovery state before a retry", async () => {
     acknowledgementCount: 0,
     recoveryEpoch: 1,
   });
+});
+
+test("replaces the prior page bridge listener on reattachment", () => {
+  const bridge = createBridge();
+
+  assert.equal(bridge.messageListenerCount, 1);
+  bridge.reattach();
+
+  assert.equal(bridge.messageListenerCount, 1);
+});
+
+test("fences messages emitted by a pre-v3 page bridge", () => {
+  const bridge = createBridge();
+  const before = bridge.posts.length;
+
+  bridge.postLegacyBridgeMessage();
+
+  assert.equal(bridge.posts.length, before);
+});
+
+test("signals automatic sync when Seller Centre mini-chat is opened manually", async () => {
+  const bridge = createBridge({ pathname: "/portal/sale/order", miniChatOpen: false });
+
+  await bridge.clickMiniChat();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(bridge.miniChatClicks, 1);
+  assert.equal(bridge.miniChatIsOpen, true);
+  assert.equal(bridge.posts.filter((post) => post.type === "seller_centre_chat_opened").length, 1);
+});
+
+test("reports Seller Centre chat-open state separately from surface readiness", async () => {
+  const bridge = createBridge({ pathname: "/portal/sale/order", miniChatOpen: false });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const closed = bridge.posts.findLast((post) => post.type === "provider_status");
+  assert.equal(closed?.surface, "seller-centre");
+  assert.equal(closed?.surface_ready, false);
+  assert.equal(closed?.chat_open, false);
+
+  await bridge.clickMiniChat();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const opened = bridge.posts.findLast((post) => post.type === "provider_status");
+  assert.equal(opened?.chat_open, true);
 });
 
 test("uses shop.id as the provider account and keeps user IDs as metadata", async () => {

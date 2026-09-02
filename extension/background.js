@@ -38,8 +38,8 @@ import "./lib/shopee-adapter.js";
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 3;
-const BRIDGE_SOURCE = "omnichat-realtime-bridge-v2";
+const BRIDGE_PROTOCOL_VERSION = 5;
+const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -99,6 +99,7 @@ let activeSync = null;
 let activeSyncControl = null;
 const liveConnections = new Map();
 const providerBridgeReinjections = new Map();
+const sellerCentreLandingStarts = new Map();
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -276,6 +277,23 @@ async function updateLiveState(context, patch) {
       ...patch,
       updated_at: new Date().toISOString(),
     }),
+  });
+}
+
+async function persistProviderSurfaceState(context, adapter, providerStatus, tab) {
+  const surface = typeof providerStatus?.surface === "string" && providerStatus.surface.trim()
+    ? providerStatus.surface.trim()
+    : adapter?.surfaceForUrl?.(tab?.url) ?? null;
+  if (!surface) return;
+  await updateLiveState(context, {
+    provider_surface: surface,
+    provider_surface_ready: providerStatus?.surface_ready === true,
+    provider_chat_open: typeof providerStatus?.chat_open === "boolean" ? providerStatus.chat_open : null,
+    provider_realtime_connected: providerStatus?.realtime_connected === true,
+    provider_realtime_transport: typeof providerStatus?.realtime_transport === "string"
+      ? providerStatus.realtime_transport
+      : null,
+    provider_status_at: new Date().toISOString(),
   });
 }
 
@@ -472,17 +490,17 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_now") {
-    void writeStorage({
-      [STORAGE.serverInitialized]: true,
-      [STORAGE.logUploadEnabled]: true,
-    })
-      .then(() => recordLog("info", "sync", "requested", "Manual sync requested."))
-      .then(() => ensureLiveConnection())
-      .then(() => startSync("manual"))
-      .then(
-        (result) => respond({ ok: true, ...result }),
-        (error) => respond({ ok: false, error: String(error) })
-      );
+    void initializeAndStartSync("manual").then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "auto_sync_now") {
+    void startAutomaticSellerCentreSync(message.provider).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
     return true;
   }
   if (message?.type === "resume_sync") {
@@ -610,28 +628,81 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   return undefined;
 });
 
-async function commandTab(context) {
+async function initializeAndStartSync(trigger) {
+  await writeStorage({
+    [STORAGE.serverInitialized]: true,
+    [STORAGE.logUploadEnabled]: true,
+  });
+  await recordLog(
+    "info",
+    "sync",
+    trigger === "automatic" ? "automatic_requested" : "requested",
+    trigger === "automatic"
+      ? "Automatic sync requested by the Seller Centre preference."
+      : "Manual sync requested.",
+  );
+  await ensureLiveConnection();
+  return startSync(trigger);
+}
+
+async function startAutomaticSellerCentreSync(provider) {
+  const stored = await readStorage([
+    STORAGE.autoOpenSellerCentreChat,
+    STORAGE.consent,
+  ]);
+  if (
+    provider !== shopeeAdapter.id
+    || stored[STORAGE.autoOpenSellerCentreChat] !== true
+    || !hasLocalConsent(stored[STORAGE.consent])
+  ) {
+    return { skipped: "automatic_sync_disabled" };
+  }
+  return initializeAndStartSync("automatic");
+}
+
+async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
-  let selectedTab = null;
-  if (Number.isInteger(tabId)) {
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      if (adapter.matchesUrl(tab.url)) selectedTab = tab;
-    } catch {
-      // The tab was closed; select another provider tab below.
+  const tabs = await providerChatTabs(adapter);
+  const selectedTab = Number.isInteger(tabId)
+    ? tabs.find((tab) => tab.id === tabId) ?? null
+    : null;
+  const orderedTabs = orderProviderTabs(adapter, tabs, tabId);
+  if (prepareForSend && adapter.id === "shopee") {
+    for (const candidate of orderedTabs.filter((tab) => adapter.surfaceForUrl?.(tab.url) === "seller-centre")) {
+      if (await isReadyProviderTab(candidate, adapter)) continue;
+      try {
+        await prepareProviderTab(candidate, adapter);
+      } catch (error) {
+        await recordLog("warn", "provider", "surface_unready", `${label} Seller Centre could not be prepared for an outbound reply.`, {
+          provider: adapter.id,
+          surface: "seller-centre",
+          ...diagnosticErrorDetails(error),
+        });
+      }
     }
   }
-  if (selectedTab && await isReadyProviderTab(selectedTab, adapter)) return selectedTab;
-  let tab = await findReadyProviderChatTab(adapter);
-  if (!tab) tab = selectedTab ?? await findProviderChatTab(adapter);
-  if (!tab && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
+  let tab = null;
+  for (const candidate of orderedTabs) {
+    if (await isReadyProviderTab(candidate, adapter)) {
+      tab = candidate;
+      break;
+    }
+  }
+  if (!tab) tab = orderedTabs[0] ?? selectedTab ?? null;
+  if (!tab && createIfMissing && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
     tab = await chrome.tabs.create({ url: adapter.chatUrl, active: false });
   }
-  if (!tab?.id) throw new Error(`${label} chat tab is unavailable.`);
+  if (!tab?.id) {
+    await recordLog("warn", "provider", "tab_missing", `${label} chat tab is unavailable for an outbound reply.`, {
+      provider: adapter.id,
+      provider_account_id: context.account.provider_account_id,
+    });
+    throw new Error(`Open ${label} in Chrome before sending a reply.`);
+  }
   if (!(await isReadyProviderTab(tab, adapter))) {
     await recordLog("warn", "provider", "surface_unready", `${label} chat surface is not ready for commands.`, {
       provider: adapter.id,
@@ -659,7 +730,7 @@ async function sendViaProvider(message) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
   await ensureProviderBridge(tab.id, adapter);
   let imagePayload = {};
   if (commandType === "send_image") {
@@ -694,7 +765,7 @@ async function sendViaProvider(message) {
     ...message,
     ...imagePayload,
     provider: adapter.id,
-    type: "send_api_v2",
+    type: "send_api_v3",
     command_type: commandType,
     request_id: requestId,
     conversation_id: conversationId,
@@ -720,9 +791,9 @@ async function sendTextByUiClick_WIP(message) {
   const adapter = providerAdapterForCommand(message);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter?.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
   await ensureProviderBridge(tab.id, context.adapter);
-  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v2" });
+  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v3" });
 }
 
 function liveEndpoint(config) {
@@ -833,7 +904,7 @@ async function openCommandTab() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = configuredAccountContexts(stored)[0];
   if (!context) throw new Error("Provider browser bridge is not configured.");
-  const tab = await commandTab(context);
+  const tab = await commandTab(context, { createIfMissing: true });
   if (!tab.id) throw new Error(`${providerLabel(context.adapter)} chat tab is unavailable.`);
   await chrome.tabs.update(tab.id, { active: true });
   await chrome.windows.update(tab.windowId, { focused: true });
@@ -908,16 +979,22 @@ async function connectionStatusSnapshot(context) {
       .filter((tab) => adapter.matchesUrl(tab.url))
     : [];
   let providerStatus = null;
+  let providerStatusTab = null;
   for (const tab of orderProviderTabs(adapter, tabs)) {
     if (!tab.id) continue;
     const result = await providerTabStatus(tab);
     if (!result) continue;
-    providerStatus ??= result;
+    if (!providerStatus) {
+      providerStatus = result;
+      providerStatusTab = tab;
+    }
     if (providerTabIsReady(result, adapter)) {
       providerStatus = result;
+      providerStatusTab = tab;
       break;
     }
   }
+  await persistProviderSurfaceState(context, adapter, providerStatus, providerStatusTab);
 
   const accountDetected = detectedAccounts(stored).some(
     (account) => account.provider === context.account.provider
@@ -949,9 +1026,6 @@ async function connectionStatusSnapshot(context) {
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
-    provider_surface: providerStatus?.surface ?? null,
-    provider_capabilities: providerStatus?.capabilities ?? {},
-    provider_realtime_transport: providerStatus?.realtime_transport ?? null,
     client: {
       platform: String(navigator.platform ?? "").slice(0, 120),
       language: String(navigator.language ?? "").slice(0, 32),
@@ -1112,6 +1186,17 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  void autoStartSellerCentreTab({ ...tab, id: tabId }).catch((error) => {
+    void recordUnexpected("seller_centre_landing_start", error, { provider: shopeeAdapter.id });
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  sellerCentreLandingStarts.delete(tabId);
+});
+
 chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
   void resumeLogUpload();
@@ -1156,7 +1241,7 @@ async function reinitializeAfterUpgrade() {
       try {
         await ensureProviderBridge(tab.id, adapter);
         const result = await chrome.tabs.sendMessage(tab.id, {
-          type: "detect_account_v2",
+          type: "detect_account_v3",
           provider: adapter.id,
         });
         if (!result?.ok) {
@@ -1188,7 +1273,7 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
   await recordLog("info", "account", "detection_started", `Detecting ${label} account.`, { provider: adapter.id });
   await ensureProviderBridge(tab.id, adapter);
   const result = await chrome.tabs.sendMessage(tab.id, {
-    type: "detect_account_v2",
+    type: "detect_account_v3",
     provider: adapter.id,
   });
   await recordLog(
@@ -1202,26 +1287,37 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
 }
 
 async function findProviderChatTab(adapter) {
-  if (!adapter) return null;
+  const tabs = await providerChatTabs(adapter);
+  return orderProviderTabs(adapter, tabs)[0] ?? null;
+}
+
+async function providerChatTabs(adapter) {
+  if (!adapter) return [];
   const tabs = await chrome.tabs.query(
     adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
   );
-  return orderProviderTabs(adapter, tabs).find((item) => item.id && adapter.matchesUrl(item.url)) ?? null;
+  return tabs.filter((tab) => tab.id && adapter.matchesUrl(tab.url));
 }
 
-function orderProviderTabs(adapter, tabs) {
+function orderProviderTabs(adapter, tabs, preferredTabId = null) {
   const priority = new Map((adapter?.surfacePriority ?? []).map((surface, index) => [surface, index]));
   return [...tabs].sort((left, right) => {
     const leftRank = priority.get(adapter?.surfaceForUrl?.(left.url)) ?? Number.MAX_SAFE_INTEGER;
     const rightRank = priority.get(adapter?.surfaceForUrl?.(right.url)) ?? Number.MAX_SAFE_INTEGER;
-    return leftRank - rightRank || Number(left.id ?? 0) - Number(right.id ?? 0);
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    const leftActive = left.active === true ? 1 : 0;
+    const rightActive = right.active === true ? 1 : 0;
+    if (leftActive !== rightActive) return rightActive - leftActive;
+    const leftPreferred = left.id === preferredTabId ? 1 : 0;
+    const rightPreferred = right.id === preferredTabId ? 1 : 0;
+    return rightPreferred - leftPreferred || Number(left.id ?? 0) - Number(right.id ?? 0);
   });
 }
 
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
   try {
-    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v2" }, {
+    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
       label: "Provider",
       operation: "status request",
       timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
@@ -1251,11 +1347,8 @@ async function isReadyProviderTab(tab, adapter) {
 }
 
 async function findReadyProviderChatTab(adapter) {
-  if (!adapter) return null;
-  const tabs = await chrome.tabs.query(
-    adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
-  );
-  for (const tab of orderProviderTabs(adapter, tabs).filter((item) => item.id && adapter.matchesUrl(item.url))) {
+  const tabs = await providerChatTabs(adapter);
+  for (const tab of orderProviderTabs(adapter, tabs)) {
     if (await isReadyProviderTab(tab, adapter)) return tab;
   }
   return null;
@@ -1268,7 +1361,7 @@ async function ensureProviderBridge(tabId, adapter) {
   let pingFailed = false;
   let bridgeReady = false;
   try {
-    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
+    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
     bridgeReady = Boolean(
       response?.ok
       && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
@@ -1286,7 +1379,7 @@ async function ensureProviderBridge(tabId, adapter) {
 
   if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
-      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v2" });
+      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
       bridgeReady = Boolean(
         response?.ok
         && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
@@ -1320,6 +1413,26 @@ async function ensureProviderBridge(tabId, adapter) {
     ...(typeof response?.bridge_source === "string" ? { observed_bridge_source: response.bridge_source } : {}),
   });
   throw new Error(`${label} content bridge is not ready. Refresh the tab manually and try again.`);
+}
+
+async function prepareProviderTab(tab, adapter) {
+  if (!tab?.id || adapter?.id !== "shopee") return { ok: true };
+  if (adapter.surfaceForUrl?.(tab.url) !== "seller-centre") return { ok: true };
+  await ensureProviderBridge(tab.id, adapter);
+  const requestId = `prepare:${Date.now()}:${tab.id}`;
+  const result = await sendProviderMessage(tab.id, {
+    type: "prepare_provider_v3",
+    provider: adapter.id,
+    request_id: requestId,
+  }, {
+    label: providerLabel(adapter),
+    operation: "surface preparation",
+    timeoutMs: PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
+  });
+  if (!result?.ok) {
+    throw new Error(result?.error || "Shopee Seller Centre could not be prepared for an outbound reply.");
+  }
+  return result;
 }
 
 async function resetProviderRecovery(tabId) {
@@ -1366,31 +1479,113 @@ async function resetProviderRecovery(tabId) {
   return hadRecovery;
 }
 
+async function providerMainBridgeStatus(tabId) {
+  const mainBridge = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [BRIDGE_SOURCE],
+    func: (bridgeSource) => ({
+      ready: Boolean(
+        globalThis.OmnichatShopeeUrl
+        && globalThis.OmnichatProviderAdapters?.get?.("shopee")
+        && window.__omnichatRealtimeState
+        && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
+        && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
+        && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
+        && typeof window.__omnichatRealtimeBridgeControl?.prepareSellerCentre === "function",
+      ),
+      hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
+      hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
+      hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
+    }),
+  });
+  return mainBridge?.[0]?.result ?? {};
+}
+
+async function retireProviderMainBridge(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const reason = "Provider bridge reattached.";
+      const state = window.__omnichatRealtimeState;
+      const hadRecovery = Boolean(
+        state?.recoveryInFlight
+        || state?.recoveryRequestId
+        || state?.acknowledgements?.size,
+      );
+      const control = window.__omnichatRealtimeBridgeControl;
+      if (typeof control?.dispose === "function") {
+        return {
+          hadRecovery,
+          disposed: Boolean(control.dispose(reason)),
+          source: typeof control.source === "string" ? control.source : null,
+        };
+      }
+      if (!state) return { hadRecovery, disposed: false, source: null };
+      state.recoveryAbortController?.abort();
+      for (const [acknowledgementId, acknowledge] of state.acknowledgements ?? []) {
+        state.acknowledgements.delete(acknowledgementId);
+        try {
+          acknowledge({ ok: false, error: reason });
+        } catch {
+          // A stale acknowledgement must not prevent bridge reattachment.
+        }
+      }
+      state.recoveryRequestId = null;
+      state.recoveryInFlight = false;
+      state.recoveryAbortController = null;
+      const currentEpoch = Number(state.recoveryEpoch);
+      state.recoveryEpoch = (Number.isFinite(currentEpoch) ? currentEpoch : 0) + 1;
+      if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
+      state.sellerCentrePollingTimer = null;
+      state.sellerCentrePollingStarted = false;
+      state.pollingRefreshInFlight = false;
+      state.pollingConnected = false;
+      state.pollingConnectedAt = null;
+      state.sellerCentreChatOpenPromise = null;
+      state.socket = null;
+      return {
+        hadRecovery,
+        disposed: false,
+        source: typeof control?.source === "string" ? control.source : null,
+      };
+    },
+  });
+  const retired = result?.[0]?.result ?? {};
+  if (retired.hadRecovery === true) {
+    // Let an interrupted page-side recovery observe the cancellation before
+    // a newly attached content bridge begins another recovery.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return retired;
+}
+
+async function retireProviderContentBridge(tabId) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: () => {
+      const control = globalThis.__omnichatContentBridgeControl;
+      if (typeof control?.dispose !== "function") return { disposed: false, source: null };
+      return {
+        disposed: Boolean(control.dispose("Content bridge reattached.")),
+        source: typeof control.source === "string" ? control.source : null,
+      };
+    },
+  });
+  return result?.[0]?.result ?? {};
+}
+
 async function reinjectProviderBridge(tabId, adapter) {
   if (!chrome.scripting?.executeScript || !adapter) return false;
   const inFlight = providerBridgeReinjections.get(tabId);
   if (inFlight) return inFlight;
   const reinjection = (async () => {
     try {
-      await resetProviderRecovery(tabId);
-      const mainBridge = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: () => ({
-          ready: Boolean(
-            globalThis.OmnichatShopeeUrl
-            && globalThis.OmnichatProviderAdapters?.get?.("shopee")
-            && window.__omnichatRealtimeState
-            && window.__omnichatRealtimeBridgeControl?.source === "omnichat-realtime-bridge-v2"
-            && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function",
-          ),
-          hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
-          hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
-          hasShopeeAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.("shopee")),
-        }),
-      });
-      const mainStatus = mainBridge?.[0]?.result ?? {};
+      const mainStatus = await providerMainBridgeStatus(tabId);
       if (mainStatus.ready !== true) {
+        await retireProviderMainBridge(tabId);
         const mainFiles = [
           ...(mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
           ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
@@ -1402,7 +1597,10 @@ async function reinjectProviderBridge(tabId, adapter) {
           world: "MAIN",
           files: mainFiles,
         });
+      } else {
+        await resetProviderRecovery(tabId);
       }
+      await retireProviderContentBridge(tabId);
       const isolatedBridge = await chrome.scripting.executeScript({
         target: { tabId },
         world: "ISOLATED",
@@ -1453,12 +1651,65 @@ async function reattachOpenProviderBridges() {
     for (const tab of tabs.filter((item) => item.id && adapter.matchesUrl(item.url))) {
       try {
         await ensureProviderBridge(tab.id, adapter);
+        await autoStartSellerCentreTab(tab);
       } catch (error) {
         await recordUnexpected("provider_bridge_startup", error, { provider: adapter.id });
       }
     }
   }
   await ensureLiveConnection();
+}
+
+async function autoStartSellerCentreTab(tab) {
+  const tabId = tab?.id;
+  if (!Number.isInteger(tabId)) return { skipped: "tab_missing" };
+  const existing = sellerCentreLandingStarts.get(tabId);
+  if (existing) return existing;
+
+  const start = (async () => {
+    const currentTab = typeof tab?.url === "string" ? tab : await chrome.tabs.get(tabId);
+    if (shopeeAdapter.surfaceForUrl?.(currentTab?.url) !== "seller-centre") {
+      return { skipped: "not_seller_centre" };
+    }
+    const stored = await readStorage([
+      STORAGE.autoOpenSellerCentreChat,
+      STORAGE.consent,
+      STORAGE.config,
+    ]);
+    const configured = stored[STORAGE.config]?.accounts?.some(
+      (account) => account?.provider === shopeeAdapter.id,
+    );
+    if (
+      stored[STORAGE.autoOpenSellerCentreChat] !== true
+      || !hasLocalConsent(stored[STORAGE.consent])
+      || !configured
+    ) {
+      return { skipped: "automatic_sync_disabled" };
+    }
+
+    await ensureProviderBridge(tabId, shopeeAdapter);
+    const result = await sendProviderMessage(tabId, {
+      type: "auto_open_chat_and_sync_v3",
+      provider: shopeeAdapter.id,
+    }, {
+      label: providerLabel(shopeeAdapter),
+      operation: "automatic Seller Centre startup",
+      timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error || "Shopee Seller Centre automatic startup failed.");
+    }
+    return result;
+  })();
+
+  sellerCentreLandingStarts.set(tabId, start);
+  try {
+    return await start;
+  } finally {
+    if (sellerCentreLandingStarts.get(tabId) === start) {
+      sellerCentreLandingStarts.delete(tabId);
+    }
+  }
 }
 
 function providerMessageTimeout(label, operation) {
@@ -1517,7 +1768,7 @@ async function syncOpenProvider(control, context) {
   await ensureProviderBridge(tab.id, adapter);
   throwIfSyncCancelled(signal);
   const syncMessage = {
-    type: "sync_now_v2",
+    type: "sync_now_v3",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
   };
@@ -1564,7 +1815,7 @@ async function cancelActiveSync() {
   let providerCancelled = false;
   if (tabId) {
     const result = await chrome.tabs.sendMessage(tabId, {
-      type: "cancel_sync_v2",
+      type: "cancel_sync_v3",
       ...(control?.adapter ? { provider: control.adapter.id } : {}),
     }).catch(() => null);
     providerCancelled = result?.cancelled === true;

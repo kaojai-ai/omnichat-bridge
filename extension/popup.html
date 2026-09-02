@@ -75,6 +75,7 @@
               </div>
             </div>
             <div class="account-column node-status-column">
+              <span id="device-name-badge" class="device-name-badge" aria-label="Node name" hidden></span>
               <button id="leader-status" class="leader-status" type="button" aria-live="polite">
                 <i></i><span class="leader-current">NEED CONFIG</span>
               </button>
@@ -87,6 +88,11 @@
           <div id="account-list" class="account-list" aria-live="polite"></div>
           <p id="account-list-empty" class="account-list-empty" hidden>No provider accounts detected yet.</p>
         </section>
+
+        <label id="auto-sync-option" class="auto-sync-option" hidden>
+          <input id="auto-open-chat" type="checkbox">
+          <span>Open chat and sync automatically</span>
+        </label>
 
         <div class="sync-actions">
           <button id="sync" type="button" disabled>Sync messages</button>
@@ -179,7 +185,7 @@
           <span id="version"></span>
         </div>
         <div class="footer-copyright">
-          <span>© 2026 OK Production Co., Ltd., 🇹🇭💚 </span><a class="brand-link" href="https://kaojai.ai" target="_blank" rel="noreferrer">KaoJai.ai</a>
+          <span>© 2026 OK Production Co., Ltd., 💚 </span><a class="brand-link" href="https://kaojai.ai" target="_blank" rel="noreferrer">KaoJai.ai</a>
         </div>
       </footer>
     </main>

@@ -10,43 +10,59 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
   const sentUrls = [];
   const nativeRequests = [];
+  const nativeRequestHeaders = [];
+  const nativePayloads = [];
   const sendPath = sellerCentre ? "/webchat/api/v1.2/mini/messages" : "/webchat/api/v1.2/messages";
+  const jsonResponse = (body) => ({
+    ok: true,
+    status: 200,
+    clone: () => ({ json: async () => body }),
+    json: async () => body,
+  });
   const window = {
     location: { origin, href: `${origin}${sellerCentre ? "/portal/chat-management" : "/new-webchat/conversations"}` },
     fetch: async () => ({ ok: true }),
     addEventListener(type, listener) {
       if (type === "message") listeners.push(listener);
     },
+    removeEventListener(type, listener) {
+      if (type !== "message") return;
+      const index = listeners.indexOf(listener);
+      if (index >= 0) listeners.splice(index, 1);
+    },
     postMessage(message) {
       posts.push(message);
     },
     __CHAT_GLOBAL__: {},
-    __chat_anti_fraud__: {
-      poster: async (url, payload) => {
-        sentUrls.push(url);
-        sent.push(payload);
-        return {
-          ok: true,
-          clone: () => ({ json: async () => ({ id: "provider-message-1" }) }),
-        };
+    ...((!sellerCentre && secureSender) ? {
+      __chat_anti_fraud__: {
+        poster: async (url, payload) => {
+          sentUrls.push(url);
+          sent.push(payload);
+          return jsonResponse({ id: "provider-message-1" });
+        },
       },
-    },
+    } : {}),
     __omnichatRealtimeState: {
       nativeFetch: async (input) => {
-        nativeRequests.push(new URL(input.url ?? input, origin).pathname);
-        return {
-          ok: true,
-          json: async () => ({
-            url: "https://cdn.example.com/reply.jpg",
-            thumbnail: "https://cdn.example.com/reply-thumb.jpg",
-          }),
-        };
+        const request = input instanceof Request ? input : new Request(input, {});
+        const path = new URL(request.url, origin).pathname;
+        nativeRequests.push(path);
+        nativeRequestHeaders.push(Object.fromEntries(request.headers.entries()));
+        if (path === "/webchat/api/v1.2/mini/messages") {
+          nativePayloads.push(await request.clone().json());
+          return jsonResponse({ id: "provider-native-message-1" });
+        }
+        return jsonResponse({
+          url: "https://cdn.example.com/reply.jpg",
+          thumbnail: "https://cdn.example.com/reply-thumb.jpg",
+        });
       },
       surface: sellerCentre ? "seller-centre" : "legacy",
       listTemplate: sellerCentre && ready ? {
@@ -56,30 +72,26 @@ function createBridge({ sellerCentre = false, ready = true } = {}) {
       } : null,
       getTemplate: sellerCentre && ready ? {
         url: `${origin}/webchat/api/v1.2/mini/user/setting?csrf_token=test`,
-        init: { method: "GET", headers: {} },
+        init: {
+          method: "GET",
+          headers: { authorization: "Bearer seller-test", "x-shop-region": "TH" },
+          credentials: "include",
+          mode: "cors",
+        },
         body: null,
       } : null,
       conversationsById: new Map([
         ["conversation-1", { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0" }],
       ]),
-      sendTemplate: {
+      sendTemplate: sellerCentre ? null : {
         url: `${origin}${sendPath}?csrf_token=test`,
         headers: { "content-type": "application/json" },
-        payload: sellerCentre ? {
-          request_id: "template-request",
-          type: "text",
-          conversation_id: "conversation-1",
-          shop_id: 1,
-          to_id: 2,
-          biz_id: 0,
-          content: { uid: "template" },
-          choice_info: { real_shop_id: 1 },
-          source: "minichat",
-        } : { content: { uid: "template" } },
+        payload: { content: { uid: "template" } },
       },
       sendErrorsByClientMessageId: new Map(),
     },
   };
+  if (!nativeSender) window.__omnichatRealtimeState.nativeFetch = null;
   const context = vm.createContext({
     window,
     document: { documentElement: { dataset: {} } },
@@ -92,6 +104,7 @@ function createBridge({ sellerCentre = false, ready = true } = {}) {
     Uint8Array,
     structuredClone,
     setInterval: () => 0,
+    clearInterval,
     setTimeout,
     clearTimeout,
   });
@@ -106,7 +119,7 @@ function createBridge({ sellerCentre = false, ready = true } = {}) {
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v2", type: "send_api_v2", ...message },
+        data: { source: "omnichat-realtime-bridge-v3", type: "send_api_v3", ...message },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -116,7 +129,17 @@ function createBridge({ sellerCentre = false, ready = true } = {}) {
     };
   }
 
-  return { send, sentUrls, nativeRequests };
+  return {
+    send,
+    sentUrls,
+    nativeRequests,
+    nativeRequestHeaders,
+    nativePayloads,
+    reattach() {
+      vm.runInContext(source, context);
+    },
+    get messageListenerCount() { return listeners.length; },
+  };
 }
 
 const baseCommand = {
@@ -174,6 +197,23 @@ test("omits quote metadata for an ordinary text command", async () => {
   assert.deepEqual(plain(payload.content), { text: "Hello", uid: "client-plain-1" });
 });
 
+test("sends once after the page bridge is reattached", async () => {
+  const bridge = createBridge();
+
+  bridge.reattach();
+  assert.equal(bridge.messageListenerCount, 1);
+  const { result } = await bridge.send({
+    ...baseCommand,
+    request_id: "request-reattached-1",
+    client_message_id: "client-reattached-1",
+    command_type: "send_text",
+    text: "Only once",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.sentUrls.length, 1);
+});
+
 test("rejects an invalid quote target instead of sending unquoted", async () => {
   const bridge = createBridge();
   const { payload, result } = await bridge.send({
@@ -186,7 +226,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
 
   assert.equal(payload, undefined);
   assert.deepEqual(plain(result), {
-    source: "omnichat-realtime-bridge-v2",
+    source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "request-invalid-1",
     ok: false,
@@ -196,7 +236,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
 
 test("sends Seller Centre text through the mini endpoint", async () => {
   const bridge = createBridge({ sellerCentre: true });
-  const { payload, result } = await bridge.send({
+  const { result } = await bridge.send({
     ...baseCommand,
     request_id: "seller-text-1",
     client_message_id: "seller-client-1",
@@ -205,10 +245,16 @@ test("sends Seller Centre text through the mini endpoint", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(new URL(bridge.sentUrls[0]).pathname, "/webchat/api/v1.2/mini/messages");
-  assert.equal(payload.source, "minichat");
-  assert.equal(payload.choice_info.real_shop_id, 1);
-  assert.equal(payload.content.text, "Seller Centre hello");
+  assert.deepEqual(bridge.sentUrls, []);
+  assert.equal(bridge.nativeRequests.at(-1), "/webchat/api/v1.2/mini/messages");
+  assert.equal(bridge.nativeRequestHeaders.at(-1).authorization, "Bearer seller-test");
+  assert.equal(bridge.nativeRequestHeaders.at(-1)["x-shop-region"], "TH");
+  assert.equal(bridge.nativePayloads.at(-1).conversation_id, "conversation-1");
+  assert.equal(bridge.nativePayloads.at(-1).source, "minichat");
+  assert.equal(bridge.nativePayloads.at(-1).choice_info.real_shop_id, "shop-1");
+  assert.equal(bridge.nativePayloads.at(-1).content.text, "Seller Centre hello");
+  assert.equal(result.provider_message_id, "provider-native-message-1");
+  assert.equal(bridge.nativeRequests.includes("/webchat/api/v1.2/messages"), false);
 });
 
 test("keeps Seller Centre image and product replies on the new request profile", async () => {
@@ -223,8 +269,9 @@ test("keeps Seller Centre image and product replies on the new request profile",
   });
   assert.equal(image.result.ok, true);
   assert.equal(imageBridge.nativeRequests.includes("/webchat/api/coreapi/v1.2/images"), true);
-  assert.equal(new URL(imageBridge.sentUrls[0]).pathname, "/webchat/api/v1.2/mini/messages");
-  assert.equal(image.payload.type, "image");
+  assert.equal(imageBridge.nativeRequests.includes("/webchat/api/v1.2/mini/messages"), true);
+  assert.equal(imageBridge.nativePayloads.at(-1).type, "image");
+  assert.equal(image.result.provider_message_id, "provider-native-message-1");
 
   const productBridge = createBridge({ sellerCentre: true });
   const product = await productBridge.send({
@@ -236,9 +283,54 @@ test("keeps Seller Centre image and product replies on the new request profile",
     product_name: "Test product",
   });
   assert.equal(product.result.ok, true);
-  assert.equal(new URL(productBridge.sentUrls[0]).pathname, "/webchat/api/v1.2/mini/messages");
-  assert.equal(product.payload.type, "product");
-  assert.equal(product.payload.content.product_id, 12345);
+  assert.equal(productBridge.nativeRequests.at(-1), "/webchat/api/v1.2/mini/messages");
+  assert.equal(productBridge.nativePayloads.at(-1).type, "product");
+  assert.equal(productBridge.nativePayloads.at(-1).content.product_id, 12345);
+});
+
+test("sends a quoted Seller Centre text without the legacy secure poster", async () => {
+  const bridge = createBridge({ sellerCentre: true });
+  const result = await bridge.send({
+    ...baseCommand,
+    request_id: "seller-quoted-1",
+    client_message_id: "seller-quoted-client-1",
+    command_type: "send_text",
+    text: "Quoted Seller Centre hello",
+    reply_to_provider_message_id: "provider-message-quoted",
+  });
+
+  assert.equal(result.result.ok, true);
+  assert.equal(bridge.sentUrls.length, 0);
+  assert.equal(bridge.nativePayloads.at(-1).content.quoted_msg_id, "provider-message-quoted");
+});
+
+test("keeps the legacy secure-sender failure scoped to the legacy surface", async () => {
+  const bridge = createBridge({ secureSender: false });
+  const { payload, result } = await bridge.send({
+    ...baseCommand,
+    request_id: "legacy-unavailable-1",
+    command_type: "send_text",
+    text: "Should not send",
+  });
+
+  assert.equal(payload, undefined);
+  assert.match(result.error, /secure sender is unavailable/);
+  assert.equal(bridge.nativeRequests.includes("/webchat/api/v1.2/messages"), false);
+});
+
+test("reports a Seller Centre native-sender failure without falling back", async () => {
+  const bridge = createBridge({ sellerCentre: true, nativeSender: false });
+  const { payload, result } = await bridge.send({
+    ...baseCommand,
+    request_id: "seller-native-unavailable-1",
+    command_type: "send_text",
+    text: "Should not send",
+  });
+
+  assert.equal(payload, undefined);
+  assert.match(result.error, /Seller Centre native sender is unavailable/);
+  assert.deepEqual(bridge.sentUrls, []);
+  assert.deepEqual(bridge.nativeRequests, []);
 });
 
 test("fails explicitly when Seller Centre capabilities are not initialized", async () => {

@@ -1,5 +1,46 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge-v2";
+  const SOURCE = "omnichat-realtime-bridge-v3";
+  const LEGACY_BRIDGE_SOURCE = "omnichat-realtime-bridge-v2";
+  const previousBridge = window.__omnichatRealtimeBridgeControl;
+  if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
+    previousBridge.dispose("Page bridge reattached.");
+  }
+  const bridgeGeneration = (Number(window.__omnichatRealtimeBridgeGeneration) || 0) + 1;
+  window.__omnichatRealtimeBridgeGeneration = bridgeGeneration;
+  let disposed = false;
+  const isBridgeActive = () => !disposed
+    && window.__omnichatRealtimeBridgeGeneration === bridgeGeneration;
+
+  const installLegacyMessageFence = () => {
+    const existing = window.__omnichatRealtimeBridgeMessageFence;
+    if (
+      existing?.version === 1
+      && typeof existing.originalPostMessage === "function"
+      && typeof existing.blockedSources?.add === "function"
+    ) {
+      existing.blockedSources.add(LEGACY_BRIDGE_SOURCE);
+      return;
+    }
+    const originalPostMessage = window.postMessage;
+    if (typeof originalPostMessage !== "function") return;
+    const blockedSources = new Set([LEGACY_BRIDGE_SOURCE]);
+    const filteredPostMessage = function omnichatBridgePostMessage(...args) {
+      const message = args[0];
+      if (message && typeof message === "object" && blockedSources.has(message.source)) return undefined;
+      return originalPostMessage.apply(window, args);
+    };
+    try {
+      window.postMessage = filteredPostMessage;
+      window.__omnichatRealtimeBridgeMessageFence = {
+        version: 1,
+        originalPostMessage,
+        blockedSources,
+      };
+    } catch {
+      // Versioned bridge commands still isolate the previous page bridge if the page blocks this fence.
+    }
+  };
+  installLegacyMessageFence();
   const LEGACY_CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
   const LEGACY_SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
   const LEGACY_SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
@@ -50,6 +91,13 @@
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
   const SELLER_CENTRE_CHAT_OPEN_POLL_MS = 250;
+  let sellerCentreClickListener = null;
+  let socketObserverTimer = null;
+  let pageMessageListener = null;
+  let observedFetch = null;
+  let fetchBeforeBridge = null;
+  let observedSocket = null;
+  let socketListeners = null;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -108,6 +156,10 @@
   state.conversationsById ??= new Map();
   state.accountsById ??= new Map();
   state.sendErrorsByClientMessageId ??= new Map();
+  if (!Object.hasOwn(state, "nativeFetch")) state.nativeFetch = window.fetch.bind(window);
+  state.recoveryInFlight ??= false;
+  state.socket ??= null;
+  state.acknowledgements ??= new Map();
   state.nextRecoveryRequestAt ??= 0;
   state.recoveryRequestId ??= null;
   state.recoveryAbortController ??= null;
@@ -123,10 +175,25 @@
   state.pollingConnectedAt ??= null;
   state.pollingRefreshInFlight ??= false;
   state.sellerCentreChatOpenPromise ??= null;
+  if ([SOURCE, LEGACY_BRIDGE_SOURCE].includes(previousBridge?.source)) {
+    if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
+    state.sellerCentrePollingTimer = null;
+    state.sellerCentrePollingStarted = false;
+    state.pollingConnected = false;
+    state.pollingConnectedAt = null;
+    state.pollingRefreshInFlight = false;
+    state.sellerCentreChatOpenPromise = null;
+    state.socket = null;
+    state.accountDiscoveryPromise = null;
+    state.automaticAccountDiscoveryStarted = false;
+  }
 
   const { accountsFromPayload, conversationItems } = providerAdapter;
 
-  const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  const post = (message) => {
+    if (!isBridgeActive()) return;
+    window.postMessage({ source: SOURCE, ...message }, window.location.origin);
+  };
   const postLog = (level, event, message, details = {}) => post({
     type: "diagnostic_log",
     level,
@@ -135,26 +202,39 @@
     details,
   });
 
+  const surfaceSendReady = () => {
+    if (!state.listTemplate || !state.getTemplate) return false;
+    if (isSellerCentreSurface()) return typeof state.nativeFetch === "function";
+    return typeof window.__chat_anti_fraud__?.poster === "function";
+  };
+
   const surfaceCapabilities = () => ({
     account_detection: Boolean(state.listTemplate),
     message_observation: isSellerCentreSurface()
       ? Boolean(state.listTemplate && state.getTemplate)
       : Boolean(state.socket),
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
-    send_text: Boolean(state.listTemplate && state.getTemplate),
-    send_image: Boolean(state.listTemplate && state.getTemplate),
-    send_product: Boolean(state.listTemplate && state.getTemplate),
+    send_text: surfaceSendReady(),
+    send_image: surfaceSendReady(),
+    send_product: surfaceSendReady(),
   });
 
   const publishSurfaceStatus = () => {
     const capabilities = surfaceCapabilities();
     const ready = Boolean(state.listTemplate && state.getTemplate);
+    const chatOpen = isSellerCentreSurface()
+      ? (() => {
+        const launcher = sellerCentreChatLauncher();
+        return launcher ? sellerCentreChatIsOpen(launcher) : null;
+      })()
+      : null;
     post({
       type: "provider_status",
       surface: state.surface,
       surface_ready: ready,
       capabilities,
       realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
+      ...(isSellerCentreSurface() ? { chat_open: chatOpen } : {}),
       realtime_connected: isSellerCentreSurface() ? state.pollingConnected : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
     });
@@ -179,25 +259,32 @@
   }
 
   function observeAsync(scope, task, details = {}) {
+    if (!isBridgeActive()) return Promise.resolve();
     return Promise.resolve()
-      .then(task)
-      .catch((error) => logAsyncError(scope, error, details));
+      .then(() => (isBridgeActive() ? task() : undefined))
+      .catch((error) => {
+        if (isBridgeActive()) logAsyncError(scope, error, details);
+      });
   }
 
-  window.addEventListener("error", (event) => {
+  const onWindowError = (event) => {
+    if (!isBridgeActive()) return;
     postLog("error", "uncaught_error", "Unhandled provider error.", {
       scope: "provider",
       error_kind: "error_event",
       ...errorDetails(event?.error ?? event?.message),
     });
-  });
-  window.addEventListener("unhandledrejection", (event) => {
+  };
+  const onUnhandledRejection = (event) => {
+    if (!isBridgeActive()) return;
     postLog("error", "uncaught_error", "Unhandled provider error.", {
       scope: "provider",
       error_kind: "unhandled_rejection",
       ...errorDetails(event?.reason),
     });
-  });
+  };
+  window.addEventListener("error", onWindowError);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
 
   const pathOf = (url) => {
     try { return new URL(url, window.location.href).pathname; }
@@ -224,7 +311,9 @@
     if (panelItem?.classList?.contains?.("active")) return true;
     return launcher.getAttribute?.("aria-expanded") === "true";
   };
+  let openingSellerCentreChatInternally = false;
   const ensureSellerCentreChatOpen = async () => {
+    if (!isBridgeActive()) throw new Error("Shopee page bridge was replaced.");
     if (!isSellerCentreSurface()) return;
     if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
     if (state.sellerCentreChatOpenPromise) return state.sellerCentreChatOpenPromise;
@@ -242,11 +331,14 @@
       }
       if (sellerCentreChatIsOpen(launcher)) return;
       postLog("info", "seller_centre_chat_open_started", "Opening the Seller Centre mini-chat before sync.");
+      openingSellerCentreChatInternally = true;
       try {
         launcher.click();
       } catch (error) {
         postLog("error", "seller_centre_chat_open_failed", "Seller Centre mini-chat could not be opened.", errorDetails(error));
         throw error;
+      } finally {
+        openingSellerCentreChatInternally = false;
       }
       while (!sellerCentreChatIsOpen(launcher) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, SELLER_CENTRE_CHAT_OPEN_POLL_MS));
@@ -262,6 +354,23 @@
     });
     return state.sellerCentreChatOpenPromise;
   };
+  if (isSellerCentreSurface() && typeof document?.addEventListener === "function") {
+    sellerCentreClickListener = (event) => {
+      if (!isBridgeActive()) return;
+      if (openingSellerCentreChatInternally) return;
+      const target = event?.target;
+      const launcher = target?.id === "SidebarEntry"
+        ? target
+        : target?.closest?.("#SidebarEntry");
+      if (!launcher || sellerCentreChatIsOpen(launcher)) return;
+      setTimeout(() => {
+        if (!isBridgeActive()) return;
+        publishSurfaceStatus();
+        post({ type: "seller_centre_chat_opened" });
+      }, 0);
+    };
+    document.addEventListener("click", sellerCentreClickListener, true);
+  }
   const value = (input) => {
     if (typeof input !== "string" && typeof input !== "number") return null;
     const normalized = String(input).trim();
@@ -342,6 +451,27 @@
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!state.listTemplate || !state.getTemplate) throw new Error("Refresh Shopee Seller Chat once to initialize realtime sync.");
+  };
+
+  const waitForSellerCentreTemplates = async () => {
+    if (state.listTemplate && state.getTemplate) return;
+    if (typeof document?.getElementById !== "function") {
+      throw new Error("Seller Centre chat is still initializing. Open the Chat panel and wait for its conversation list.");
+    }
+    await waitForTemplate();
+  };
+
+  const prepareSellerCentre = async () => {
+    if (!isBridgeActive()) throw new Error("Shopee page bridge was replaced.");
+    if (!isSellerCentreSurface()) throw new Error("Shopee Seller Centre is not open in this tab.");
+    await ensureSellerCentreChatOpen();
+    await waitForSellerCentreTemplates();
+    publishSurfaceStatus();
+    return {
+      surface: state.surface,
+      surface_ready: true,
+      capabilities: surfaceCapabilities(),
+    };
   };
 
   async function fetchShopList() {
@@ -453,12 +583,6 @@
     state.recoveryRequestId = null;
     state.recoveryInFlight = false;
     return hadRecovery;
-  };
-
-  window.__omnichatRealtimeBridgeControl = {
-    source: SOURCE,
-    resetRecovery,
-    openSellerCentreChat: ensureSellerCentreChatOpen,
   };
 
   const captureProfiles = (conversations) => {
@@ -628,7 +752,7 @@
   }
 
   async function refreshSellerCentreConversations() {
-    if (!isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
+    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
     state.pollingRefreshInFlight = true;
     try {
       const response = await state.nativeFetch(new Request(state.listTemplate.url, {
@@ -643,10 +767,10 @@
   }
 
   function startSellerCentrePolling() {
-    if (!isSellerCentreSurface() || !state.listTemplate || state.sellerCentrePollingStarted) return;
+    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.sellerCentrePollingStarted) return;
     state.sellerCentrePollingStarted = true;
     const poll = () => {
-      if (!state.listTemplate || state.pollingRefreshInFlight) return;
+      if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight) return;
       void (async () => {
         try {
           await refreshSellerCentreConversations();
@@ -682,7 +806,9 @@
   };
 
   const senderTemplate = (routing, requestId, clientMessageId) => {
-    if (state.sendTemplate) return state.sendTemplate;
+    if (state.sendTemplate && pathOf(state.sendTemplate.url) === surfaceProfile().sendPath) {
+      return state.sendTemplate;
+    }
     if (!state.getTemplate) return null;
 
     const sourceUrl = new URL(state.getTemplate.url);
@@ -721,6 +847,31 @@
         ...(profile.sendSource ? { source: profile.sendSource } : {}),
       },
     };
+  };
+
+  const sendThroughSurface = async (template, url, payload) => {
+    if (isSellerCentreSurface()) {
+      if (typeof state.nativeFetch !== "function") {
+        throw new Error("Shopee Seller Centre native sender is unavailable. Refresh Seller Chat.");
+      }
+      const sourceInit = state.getTemplate?.init ?? {};
+      const init = {
+        method: "POST",
+        headers: new Headers(template.headers ?? sourceInit.headers ?? {}),
+        body: JSON.stringify(payload),
+        credentials: sourceInit.credentials ?? "include",
+        mode: sourceInit.mode ?? "cors",
+      };
+      for (const key of ["cache", "redirect", "referrerPolicy", "integrity", "keepalive"]) {
+        if (sourceInit[key] !== undefined) init[key] = sourceInit[key];
+      }
+      return state.nativeFetch(new Request(url, init));
+    }
+    const poster = window.__chat_anti_fraud__?.poster;
+    if (typeof poster !== "function") {
+      throw new Error("Shopee secure sender is unavailable. Refresh Seller Chat.");
+    }
+    return poster(url, payload, { headers: template.headers });
   };
 
   const numericId = (value) => {
@@ -832,6 +983,7 @@
   };
 
   const sendApi = async (message) => {
+    if (!isBridgeActive()) return;
     const requestId = String(message?.request_id ?? "").trim();
     const conversationId = String(message?.conversation_id ?? "").trim();
     const commandType = String(message?.command_type ?? "").trim();
@@ -843,6 +995,7 @@
     }
     try {
       await ensureSellerCentreChatOpen();
+      if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
     } catch (error) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
       return;
@@ -857,6 +1010,7 @@
       publishSurfaceStatus();
       return;
     }
+    if (!isBridgeActive()) return;
     if (!routing) {
       try {
         await waitForTemplate();
@@ -869,11 +1023,6 @@
     }
     if (!routing?.shop_id || !routing.to_id) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Refresh Shopee Seller Chat." });
-      return;
-    }
-    const poster = window.__chat_anti_fraud__?.poster;
-    if (typeof poster !== "function") {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Shopee secure sender is unavailable. Refresh Seller Chat." });
       return;
     }
     try {
@@ -913,7 +1062,11 @@
       const url = new URL(template.url);
       if (isSellerCentreSurface()) url.searchParams.delete("uuid");
       else url.searchParams.set("uuid", clientMessageId);
-      const response = await poster(url.toString(), payload, { headers: template.headers });
+      if (url.pathname !== surfaceProfile().sendPath) {
+        throw new Error("Shopee Seller Chat send profile does not match the active surface.");
+      }
+      if (!isBridgeActive()) return;
+      const response = await sendThroughSurface(template, url.toString(), payload);
       let body = response;
       if (typeof response?.clone === "function") {
         try {
@@ -1129,6 +1282,7 @@
   }
 
   async function recover(requestId, checkpoint = {}) {
+    if (!isBridgeActive()) return;
     if (state.recoveryInFlight) {
       post({ type: "recovery_complete", request_id: requestId, ok: false, error: "Recovery is already running." });
       return;
@@ -1352,9 +1506,11 @@
     }
   }
 
-  if (window.fetch.__omnichatRealtimeBridgeSource !== SOURCE) {
+  {
+    fetchBeforeBridge = window.fetch;
     const originalFetch = state.nativeFetch;
-    const observedFetch = async (input, init) => {
+    observedFetch = async (input, init) => {
+      if (!isBridgeActive()) return originalFetch(input, init);
       const request = new Request(input, init);
       const path = pathOf(request.url);
       if (isSendPath(path) && request.method === "POST") {
@@ -1418,7 +1574,24 @@
     window.fetch = observedFetch;
   }
 
+  const detachObservedSocket = () => {
+    if (!observedSocket || !socketListeners) return;
+    const removeListener = observedSocket.off ?? observedSocket.removeListener;
+    if (typeof removeListener === "function") {
+      for (const [event, listener] of Object.entries(socketListeners)) {
+        try {
+          removeListener.call(observedSocket, event, listener);
+        } catch {
+          // Socket cleanup is best effort; the generation guard keeps stale handlers inert.
+        }
+      }
+    }
+    observedSocket = null;
+    socketListeners = null;
+  };
+
   function observeSocket() {
+    if (!isBridgeActive()) return;
     if (isSellerCentreSurface()) {
       publishSurfaceStatus();
       return;
@@ -1430,8 +1603,10 @@
     }
     const connected = typeof socket.connected === "boolean" ? socket.connected : true;
     publishSurfaceStatus();
-    if (state.socket === socket) return;
+    if (state.socket === socket && observedSocket === socket) return;
+    detachObservedSocket();
     state.socket = socket;
+    observedSocket = socket;
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtime = connected ? "connected" : "disconnected";
     }
@@ -1439,16 +1614,19 @@
       post({ type: "socket_connected" });
       postLog("info", "socket_connected", "Shopee realtime socket connected.");
     }
-    socket.on("connect", () => {
+    const onConnect = () => {
+      if (!isBridgeActive()) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
       post({ type: "socket_connected" });
       publishSurfaceStatus();
-    });
-    socket.on("disconnect", () => {
+    };
+    const onDisconnect = () => {
+      if (!isBridgeActive()) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
       publishSurfaceStatus();
-    });
-    socket.on("message", (event) => {
+    };
+    const onMessage = (event) => {
+      if (!isBridgeActive()) return;
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
       try {
@@ -1461,38 +1639,88 @@
       } catch (error) {
         logAsyncError("socket_message", error);
       }
-    });
+    };
+    socketListeners = { connect: onConnect, disconnect: onDisconnect, message: onMessage };
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("message", onMessage);
   }
 
+  if (isSellerCentreSurface() && state.listTemplate) startSellerCentrePolling();
   void observeAsync("socket_observer", observeSocket);
-  setInterval(() => {
+  socketObserverTimer = setInterval(() => {
     void observeAsync("socket_observer", observeSocket);
   }, SOCKET_OBSERVER_INTERVAL_MS);
 
-  window.addEventListener("message", (event) => {
+  pageMessageListener = (event) => {
+    if (!isBridgeActive()) return;
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "sync_v2") {
+    if (event.data.type === "sync_v3") {
       const providerAccountId = value(event.data.provider_account_id);
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
         ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
       }));
-    } else if (event.data.type === "cancel_sync_v2") {
+    } else if (event.data.type === "cancel_sync_v3") {
       if (state.recoveryRequestId === event.data.request_id) {
         state.recoveryAbortController?.abort();
       }
-    } else if (event.data.type === "reset_recovery") {
+    } else if (event.data.type === "reset_recovery_v3") {
       resetRecovery();
-    } else if (event.data.type === "detect_account_v2") {
+    } else if (event.data.type === "detect_account_v3") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
-    } else if (event.data.type === "send_api_v2") {
+    } else if (event.data.type === "send_api_v3") {
       void observeAsync("send_api", () => sendApi(event.data));
-    } else if (event.data.type === "recovery_ack_v2") {
+    } else if (event.data.type === "prepare_provider_v3") {
+      void observeAsync("prepare_provider", async () => {
+        const requestId = String(event.data.request_id ?? "").trim();
+        try {
+          const result = isSellerCentreSurface()
+            ? await prepareSellerCentre()
+            : { surface: state.surface, surface_ready: true, capabilities: surfaceCapabilities() };
+          post({ type: "prepare_provider_result", request_id: requestId, ok: true, ...result });
+        } catch (error) {
+          post({ type: "prepare_provider_result", request_id: requestId, ok: false, error: String(error) });
+        }
+      });
+    } else if (event.data.type === "recovery_ack_v3") {
       const acknowledge = state.acknowledgements.get(event.data.request_id);
       if (acknowledge) {
         state.acknowledgements.delete(event.data.request_id);
         acknowledge(event.data);
       }
     }
-  });
+  };
+  window.addEventListener("message", pageMessageListener);
+
+  const dispose = (reason = "Page bridge was replaced.") => {
+    if (disposed) return false;
+    disposed = true;
+    resetRecovery(reason);
+    if (socketObserverTimer != null) clearInterval(socketObserverTimer);
+    socketObserverTimer = null;
+    if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
+    state.sellerCentrePollingTimer = null;
+    state.sellerCentrePollingStarted = false;
+    state.pollingRefreshInFlight = false;
+    state.pollingConnected = false;
+    state.pollingConnectedAt = null;
+    state.sellerCentreChatOpenPromise = null;
+    detachObservedSocket();
+    state.socket = null;
+    if (window.fetch === observedFetch && fetchBeforeBridge) window.fetch = fetchBeforeBridge;
+    window.removeEventListener?.("error", onWindowError);
+    window.removeEventListener?.("unhandledrejection", onUnhandledRejection);
+    if (pageMessageListener) window.removeEventListener?.("message", pageMessageListener);
+    if (sellerCentreClickListener) document.removeEventListener?.("click", sellerCentreClickListener, true);
+    return true;
+  };
+  window.__omnichatRealtimeBridgeControl = {
+    source: SOURCE,
+    generation: bridgeGeneration,
+    dispose,
+    resetRecovery,
+    openSellerCentreChat: ensureSellerCentreChatOpen,
+    prepareSellerCentre,
+  };
 })();

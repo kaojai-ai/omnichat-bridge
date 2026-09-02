@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   STORAGE,
+  generateDeviceName,
   mergeDetectedAccounts,
   normalizeDeviceName,
   resetDetectedAccountsFromConfig,
@@ -24,6 +25,10 @@ test("device name is optional, trimmed, bounded, and persisted locally", async (
   await writeStorage({ [STORAGE.deviceName]: name });
   assert.equal(name.length, 80);
   assert.deepEqual(written, { [STORAGE.deviceName]: name });
+});
+
+test("generates an uppercase six-character alphanumeric node name", () => {
+  assert.match(generateDeviceName(), /^NODE_[A-Z0-9]{6}$/);
 });
 
 test("merges detected accounts by provider and account ID", () => {

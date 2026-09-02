@@ -139,6 +139,18 @@ button:disabled {
   gap: 3px;
 }
 
+.auto-sync-option {
+  align-items: center;
+  color: #344054;
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  font-weight: 550;
+  gap: 8px;
+}
+
+.auto-sync-option input { flex: 0 0 auto; margin: 0; }
+
 .cancel-sync-link {
   background: transparent;
   border: 0;
@@ -339,7 +351,11 @@ input[type="checkbox"] {
 }
 
 .node-status-column {
-  justify-items: end;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 .account-section h2 {
@@ -353,8 +369,8 @@ input[type="checkbox"] {
 .account-identifiers {
   align-items: center;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
+  flex-wrap: nowrap;
+  gap: 6px 8px;
 }
 
 .account-identifier {
@@ -511,6 +527,23 @@ input[type="checkbox"] {
 .account-row-id:hover {
   background: #d8f7f2;
   border-color: #55d6c5;
+}
+
+.device-name-badge {
+  background: #f2f4f7;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  color: #475467;
+  display: inline-flex;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.2;
+  max-width: 150px;
+  overflow: hidden;
+  padding: 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .copy-icon {
