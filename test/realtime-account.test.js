@@ -9,13 +9,13 @@ const adaptersSource = await readFile(new URL("../extension/lib/provider-adapter
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const origin = "https://seller.shopee.co.th";
 
-function createBridge() {
+function createBridge({ pathname = "/webchat/conversations" } = {}) {
   const listeners = [];
   const posts = [];
   const responses = new Map();
   const requests = [];
   const window = {
-    location: { origin, href: `${origin}/webchat/conversations` },
+    location: { origin, href: `${origin}${pathname}` },
     fetch: async (input) => {
       const path = new URL(input.url ?? input, origin).pathname;
       requests.push(path);
@@ -60,11 +60,12 @@ function createBridge() {
     const isConversationList = [
       "/webchat/api/v1.2/conversations",
       "/webchat/api/v1.2/subaccount/serving_mode/conversations",
+      "/webchat/api/v1.2/mini/conversations",
     ].includes(path);
     await window.fetch(isConversationList
       ? new Request(`${origin}${path}`, { method: "POST", body: "{}" })
       : `${origin}${path}`);
-    if (isConversationList) {
+    if (isConversationList && path !== "/webchat/api/v1.2/mini/conversations") {
       await window.fetch(`${origin}/webchat/api/v1.2/conversation/serving_mode/attr`);
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -278,4 +279,86 @@ test("limits recovery to the requested Shop ID", async () => {
     JSON.parse(JSON.stringify(plan.conversations.map((conversation) => conversation.conversation_id))),
     ["conversation-th"],
   );
+});
+
+test("discovers a Seller Centre shop and polls its mini history without legacy endpoints", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management" });
+  const conversation = {
+    id: "seller-centre-conversation",
+    shop_id: 1549058683,
+    to_id: 987654321,
+    to_name: "Test buyer",
+    latest_message_id: "seller-message-1",
+    latest_message_type: "text",
+    latest_message_content: { text: "First" },
+    last_message_time: "2026-08-20T10:00:00.000Z",
+    biz_id: 0,
+  };
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations", [conversation]);
+  await bridge.fetch("/webchat/api/workbenchapi/v1.2/mini/shop/setting", { shop_id: 1549058683 });
+
+  const detection = await bridge.detect();
+  assert.ok(detection);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(detection.accounts.map((account) => account.provider_account_id))),
+    ["1549058683"],
+  );
+
+  bridge.setResponse("/webchat/api/v1.2/mini/conversations", [{
+    ...conversation,
+    latest_message_id: "seller-message-2",
+    last_message_time: "2026-08-20T10:01:00.000Z",
+  }]);
+  bridge.setResponse("/webchat/api/v1.2/mini/conversations/seller-centre-conversation/messages", [{
+    id: "seller-message-1",
+    conversation_id: "seller-centre-conversation",
+    from_id: 987654321,
+    to_id: 1549058683,
+    shop_id: 1549058683,
+    type: "text",
+    content: { text: "First" },
+    created_timestamp: 1_724_141_000,
+  }, {
+    id: "seller-message-2",
+    conversation_id: "seller-centre-conversation",
+    from_id: 987654321,
+    to_id: 1549058683,
+    shop_id: 1549058683,
+    type: "text",
+    content: { text: "Second" },
+    created_timestamp: 1_724_141_060,
+  }]);
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
+    ...conversation,
+    latest_message_id: "seller-message-2",
+    last_message_time: "2026-08-20T10:01:00.000Z",
+  }]);
+  const realtime = bridge.posts.findLast((post) => post.type === "realtime_event");
+  assert.equal(realtime.capture_method, "poll");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(realtime.body.messages.map((message) => message.id))),
+    ["seller-message-2"],
+  );
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations"), false);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/messages"), false);
+});
+
+test("recovers Seller Centre history through the mini conversation route", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management" });
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
+    id: "seller-centre-recovery",
+    shop_id: 1549058683,
+    to_id: 987654321,
+    last_message_time: "2026-08-20T10:00:00.000Z",
+    latest_message_id: "seller-recovery-message",
+    biz_id: 0,
+  }]);
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages", []);
+
+  const complete = await bridge.sync("1549058683");
+  assert.equal(complete.ok, true);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages"), true);
+  assert.equal(bridge.requests.some((path) => path.includes("/webchat/api/v1.2/conversations/")), false);
 });

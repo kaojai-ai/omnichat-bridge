@@ -80,6 +80,8 @@
       }
     };
     add(accountFromShop(body?.shop, body?.user));
+    const directShopId = firstValue(body, ["shop_id", "shopId"]);
+    if (directShopId) add({ provider: "shopee", provider_account_id: directShopId });
     for (const shop of shopListItems(body)) add(accountFromShop(shop, body?.user));
     for (const conversation of conversationItems(body)) add(accountFromConversation(conversation));
     const shopIds = Array.isArray(body?.ShopIds)
@@ -115,12 +117,14 @@
     displayName: "Shopee Seller Chat",
     accountName: "Shopee shop",
     adapterVersion: "shopee-realtime-2",
-    chatUrl: "https://seller.shopee.co.th/new-webchat/conversations",
+    chatUrl: "https://seller.shopee.co.th/portal/chat-management",
     tabQueryPattern: "https://seller.shopee.co.th/*",
+    surfacePriority: ["seller-centre", "legacy"],
     capabilities: ["account_detection", "message_observation", "message_recovery"],
     sendCommands: ["send_text", "send_image", "send_product"],
     matchesPage: (url) => globalThis.OmnichatShopeeUrl?.isShopeePageUrl(url) === true,
     matchesUrl: (url) => globalThis.OmnichatShopeeUrl?.isShopeeChatUrl(url) === true,
+    surfaceForUrl: (url) => globalThis.OmnichatShopeeUrl?.surfaceForUrl(url) ?? null,
     accountsFromPayload,
     conversationItems,
     normalizeAccount,

@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
-  const BRIDGE_PROTOCOL_VERSION = 2;
+  const BRIDGE_PROTOCOL_VERSION = 3;
   const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
   if (!providerAdapter) return;
@@ -10,9 +10,14 @@
   const profilesByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
+  const realtimeMessageKeys = new Set();
   let activeConversationId = null;
   let realtimeConnected = false;
   let lastRealtimeConnectedAt = null;
+  let providerSurface = null;
+  let providerSurfaceReady = false;
+  let providerCapabilities = {};
+  let providerRealtimeTransport = null;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -452,14 +457,18 @@
     }, 500);
   }
 
-  async function handleRealtimeEvent(body) {
+  async function handleRealtimeEvent(body, captureMethod = "realtime_socket") {
     const messages = [];
-    for (const message of addConversationProfile(normalizedMessages(body, "realtime_socket"))) {
+    for (const message of addConversationProfile(normalizedMessages(body, captureMethod))) {
       const apiSend = findPendingApiSend(message);
       if (apiSend) {
         apiSend.pending.echo = message;
         finishPendingApiSend(apiSend.requestId, apiSend.pending);
       }
+
+      const realtimeKey = `${message.conversation_id}:${message.id}`;
+      if (realtimeMessageKeys.has(realtimeKey)) continue;
+      realtimeMessageKeys.add(realtimeKey);
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
@@ -643,7 +652,7 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "realtime_event") {
-      void observeAsync("realtime_event", () => handleRealtimeEvent(event.data.body));
+      void observeAsync("realtime_event", () => handleRealtimeEvent(event.data.body, event.data.capture_method));
     } else if (event.data.type === "accounts_detected" || event.data.type === "account_detected") {
       void observeAsync("accounts_detected", () => handleAccountsDetected(event.data));
     } else if (event.data.type === "account_detection_failed") {
@@ -658,6 +667,14 @@
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
+      providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
+      providerSurfaceReady = event.data.surface_ready === true;
+      providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
+        ? { ...event.data.capabilities }
+        : providerCapabilities;
+      providerRealtimeTransport = typeof event.data.realtime_transport === "string"
+        ? event.data.realtime_transport
+        : providerRealtimeTransport;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
@@ -710,6 +727,10 @@
     if (message?.type === "get_provider_status") {
       respond({
         ok: true,
+        surface: providerSurface,
+        surface_ready: providerSurfaceReady,
+        capabilities: { ...providerCapabilities },
+        realtime_transport: providerRealtimeTransport,
         realtime_connected: realtimeConnected,
         last_realtime_connected_at: lastRealtimeConnectedAt,
         page_visible: document.visibilityState === "visible",

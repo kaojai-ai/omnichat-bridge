@@ -38,7 +38,7 @@ import "./lib/shopee-adapter.js";
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 2;
+const BRIDGE_PROTOCOL_VERSION = 3;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -78,6 +78,11 @@ const INBOUND_LOG_MESSAGES = {
   "provider.conversation_completed": "Conversation recovery check completed.",
   "provider.history_template_ready": "Provider history request template captured.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
+  "provider.seller_centre_messages_observed": "Seller Centre realtime messages observed.",
+  "provider.seller_centre_conversation_parse": "Seller Centre conversation response could not be parsed.",
+  "provider.seller_centre_message_poll": "Seller Centre message polling failed.",
+  "provider.seller_centre_sync_response": "Seller Centre realtime polling status updated.",
+  "provider.surface_unready": "Provider chat surface is not ready for commands.",
   "provider.socket_connected": "Provider realtime socket connected.",
 };
 let mutationQueue = Promise.resolve();
@@ -602,19 +607,28 @@ async function commandTab(context) {
   const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
+  let selectedTab = null;
   if (Number.isInteger(tabId)) {
     try {
       const tab = await chrome.tabs.get(tabId);
-      if (adapter.matchesUrl(tab.url)) return tab;
+      if (adapter.matchesUrl(tab.url)) selectedTab = tab;
     } catch {
       // The tab was closed; select another provider tab below.
     }
   }
-  let tab = await findProviderChatTab(adapter);
+  if (selectedTab && await isReadyProviderTab(selectedTab, adapter)) return selectedTab;
+  let tab = await findReadyProviderChatTab(adapter);
+  if (!tab) tab = selectedTab ?? await findProviderChatTab(adapter);
   if (!tab && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
     tab = await chrome.tabs.create({ url: adapter.chatUrl, active: false });
   }
   if (!tab?.id) throw new Error(`${label} chat tab is unavailable.`);
+  if (!(await isReadyProviderTab(tab, adapter))) {
+    await recordLog("warn", "provider", "surface_unready", `${label} chat surface is not ready for commands.`, {
+      provider: adapter.id,
+      surface: adapter.surfaceForUrl?.(tab.url) ?? null,
+    });
+  }
   await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
   return tab;
 }
@@ -885,16 +899,14 @@ async function connectionStatusSnapshot(context) {
       .filter((tab) => adapter.matchesUrl(tab.url))
     : [];
   let providerStatus = null;
-  for (const tab of tabs) {
+  for (const tab of orderProviderTabs(adapter, tabs)) {
     if (!tab.id) continue;
-    try {
-      const result = await chrome.tabs.sendMessage(tab.id, { type: "get_provider_status" });
-      if (result?.ok) {
-        providerStatus = result;
-        break;
-      }
-    } catch {
-      // A provider tab can exist while its content bridge is still loading.
+    const result = await providerTabStatus(tab);
+    if (!result) continue;
+    providerStatus ??= result;
+    if (providerTabIsReady(result, adapter)) {
+      providerStatus = result;
+      break;
     }
   }
 
@@ -928,6 +940,9 @@ async function connectionStatusSnapshot(context) {
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
+    provider_surface: providerStatus?.surface ?? null,
+    provider_capabilities: providerStatus?.capabilities ?? {},
+    provider_realtime_transport: providerStatus?.realtime_transport ?? null,
     client: {
       platform: String(navigator.platform ?? "").slice(0, 120),
       language: String(navigator.language ?? "").slice(0, 32),
@@ -1147,7 +1162,7 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
     return { ok: false, error: `${providerLabel(adapter)} does not support account detection.` };
   }
   const label = providerLabel(adapter);
-  const tab = await findProviderChatTab(adapter);
+  const tab = await findReadyProviderChatTab(adapter) ?? await findProviderChatTab(adapter);
   if (!tab) {
     await recordLog("warn", "account", "tab_missing", `${label} tab was not found.`, { provider: adapter.id });
     return { ok: false, error: `Open ${label} to detect the account ID.` };
@@ -1173,7 +1188,55 @@ async function findProviderChatTab(adapter) {
   const tabs = await chrome.tabs.query(
     adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
   );
-  return tabs.find((item) => item.id && adapter.matchesUrl(item.url));
+  return orderProviderTabs(adapter, tabs).find((item) => item.id && adapter.matchesUrl(item.url)) ?? null;
+}
+
+function orderProviderTabs(adapter, tabs) {
+  const priority = new Map((adapter?.surfacePriority ?? []).map((surface, index) => [surface, index]));
+  return [...tabs].sort((left, right) => {
+    const leftRank = priority.get(adapter?.surfaceForUrl?.(left.url)) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = priority.get(adapter?.surfaceForUrl?.(right.url)) ?? Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank || Number(left.id ?? 0) - Number(right.id ?? 0);
+  });
+}
+
+async function providerTabStatus(tab) {
+  if (!tab?.id) return null;
+  try {
+    const result = await chrome.tabs.sendMessage(tab.id, { type: "get_provider_status" });
+    return result?.ok ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function providerTabIsReady(status, adapter) {
+  if (adapter?.id !== "shopee") return Boolean(status?.ok);
+  return Boolean(
+    status?.surface_ready === true
+    && status?.capabilities?.account_detection === true
+    && status?.capabilities?.message_observation === true
+    && status?.capabilities?.message_recovery === true
+    && status?.capabilities?.send_text === true
+    && status?.capabilities?.send_image === true
+    && status?.capabilities?.send_product === true,
+  );
+}
+
+async function isReadyProviderTab(tab, adapter) {
+  if (!tab?.id || !adapter?.matchesUrl(tab.url)) return false;
+  return providerTabIsReady(await providerTabStatus(tab), adapter);
+}
+
+async function findReadyProviderChatTab(adapter) {
+  if (!adapter) return null;
+  const tabs = await chrome.tabs.query(
+    adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
+  );
+  for (const tab of orderProviderTabs(adapter, tabs).filter((item) => item.id && adapter.matchesUrl(item.url))) {
+    if (await isReadyProviderTab(tab, adapter)) return tab;
+  }
+  return null;
 }
 
 async function ensureProviderBridge(tabId, adapter) {
@@ -1233,7 +1296,7 @@ async function syncOpenProvider(control, context) {
   }
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
-  const tab = await findProviderChatTab(adapter);
+  const tab = await findReadyProviderChatTab(adapter) ?? await findProviderChatTab(adapter);
   if (!tab) throw new Error(`Open ${label} to sync messages.`);
   control.tabId = tab.id;
   control.adapter = adapter;

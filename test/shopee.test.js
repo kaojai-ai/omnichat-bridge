@@ -55,6 +55,26 @@ test("keeps the Shopee Shop ID on normalized messages", () => {
   assert.equal(messages[0].recipient_account_id, "1549058683");
 });
 
+test("normalizes a Seller Centre mini message into the canonical Shopee shape", () => {
+  const [message] = context.OmnichatShopee.parseShopeeMessages([{
+    id: "mini-message-1",
+    conversation_id: "mini-conversation-1",
+    from_id: 987654321,
+    to_id: 1549058683,
+    shop_id: 1549058683,
+    type: "text",
+    content: { text: "Hello from Seller Centre" },
+    created_timestamp: 1_724_141_000,
+  }], "poll");
+
+  assert.equal(message.provider, "shopee");
+  assert.equal(message.id, "mini-message-1");
+  assert.equal(message.conversation_id, "mini-conversation-1");
+  assert.equal(message.provider_account_id, "1549058683");
+  assert.equal(message.text, "Hello from Seller Centre");
+  assert.equal(message.capture_method, "poll");
+});
+
 test("uses the product Shop ID when message routing metadata is absent", () => {
   const messages = context.OmnichatShopee.parseShopeeMessages({
     id: "message-product-account",

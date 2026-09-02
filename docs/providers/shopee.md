@@ -1,11 +1,19 @@
 # Shopee provider
 
-Shopee Seller Chat is the first supported provider.
+Shopee Seller Chat is the first supported provider. The bridge supports both
+Shopee surfaces while Shopee retires the legacy page:
+
+- Seller Centre: `https://seller.shopee.co.th/portal/chat-management` or the
+  Seller Centre home page `/` with its Chat panel (the preferred surface)
+- Legacy: `/new-webchat/conversations` and `/webchat/conversations` (temporary
+  compatibility)
 
 ## How it works
 
-1. The seller signs in and opens Shopee Seller Chat.
-2. The extension reads realtime messages from the existing authenticated chat
+1. The seller signs in and opens the Seller Centre Chat panel (or a legacy
+   Seller Chat page during the compatibility period).
+2. On Seller Centre, the extension observes Shopee's authenticated conversation
+   list and realtime sync polling. On legacy pages it reads the existing chat
    socket.
 3. For missed messages, it requests recent conversation history using the open
    Seller Chat session.
@@ -24,7 +32,7 @@ validated strictly for the required fields shown below.
 
 ```mermaid
 flowchart LR
-    A["Shopee Seller Chat"] --> B["Realtime socket or history recovery"]
+    A["Shopee Seller Centre or legacy Seller Chat"] --> B["Realtime polling/socket or history recovery"]
     B --> C["Parse supported messages"]
     C --> D["Local pending queue"]
     D -->|"HTTPS + HMAC"| E["Configured server"]
@@ -34,19 +42,28 @@ flowchart LR
 The extension **does NOT save or send the seller's Shopee password, cookies, or
 login tokens**. Request headers remain in the Shopee page's memory.
 
-Chrome and the Seller Chat tab must remain open for realtime capture. When the
-laptop or Chrome is off, nothing is captured or sent. Recovery may fetch missed
-messages after the seller returns.
+The extension status records the active surface (`seller-centre` or `legacy`),
+its named capabilities, and the realtime transport (`polling` or `socket`). A
+command is rejected with an explicit initialization error when the selected
+surface has not exposed the required request profile.
+
+Chrome and the Seller Centre or legacy chat tab must remain open for realtime
+capture. When the laptop or Chrome is off, nothing is captured or sent.
+Recovery may fetch missed messages after the seller returns. The bridge keeps
+request templates only in page memory; it never persists Shopee cookies,
+headers, tokens, or message bodies.
 
 ## Optional live replies
 
 Your server can send one text, image, or product reply to a configured seller
-browser Shop ID. Text and image replies may quote an existing provider message. The
-extension fills and submits Shopee's visible composer; it does not call a
-Shopee private message API and never transfers Shopee cookies, passwords, or
-login tokens.
+browser Shop ID on either supported surface. Text and image replies may quote
+an existing provider message. The extension uses the authenticated request
+profile of the selected surface; it never silently sends a Seller Centre
+command through legacy endpoints and never transfers Shopee cookies,
+passwords, or login tokens.
 
-- The target conversation must already be open in Seller Chat.
+- The target conversation must already be available in the selected Shopee chat
+  surface.
 - If the browser is offline or another conversation is open, the server returns
   an error. There is no remote command queue or retry.
 - The live service keeps only a short-lived connection ticket and browser

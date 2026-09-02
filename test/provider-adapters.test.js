@@ -34,6 +34,9 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
   assert.equal(adapter.supports("message_recovery"), true);
   assert.equal(adapter.supportsSend("send_text"), true);
   assert.equal(adapter.supportsSend("send_sticker"), false);
+  assert.equal(registry.forUrl("https://seller.shopee.co.th/portal/chat-management").surfaceForUrl("https://seller.shopee.co.th/portal/chat-management"), "seller-centre");
+  assert.deepEqual(plain(adapter.surfacePriority), ["seller-centre", "legacy"]);
+  assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/portal/chat-management");
   assert.equal(registry.forUrl("https://manager.line.biz/"), null);
 });
 

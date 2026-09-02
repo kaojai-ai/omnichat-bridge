@@ -124,8 +124,9 @@ matches and accepted, duplicate, and skipped messages cover the number sent.
 
 ## Connection status
 
-While its authenticated WebSocket is open, the extension sends
-`omnichat.connection_status` every 20 seconds. The envelope is provider-neutral:
+While its authenticated realtime transport is active, the extension sends
+`omnichat.connection_status` every 20 seconds. Seller Centre uses authenticated
+polling; legacy Seller Chat uses its WebSocket. The envelope is provider-neutral:
 each provider adapter reports named checks and the common capture, delivery,
 sync, and queue timestamps. Shopee currently reports `provider_tab`,
 `content_bridge`, `provider_account`, and `provider_realtime`.
@@ -139,8 +140,18 @@ sync, and queue timestamps. Shopee currently reports `provider_tab`,
   "provider_account_id": "123456789",
   "installation_id": "22222222-2222-4222-8222-222222222222",
   "device_name": "Front desk MacBook",
-  "extension_version": "0.4.0",
+  "extension_version": "0.5.8",
   "reported_at": "2026-07-31T00:00:00.000Z",
+  "provider_surface": "seller-centre",
+  "provider_realtime_transport": "polling",
+  "provider_capabilities": {
+    "account_detection": true,
+    "message_observation": true,
+    "message_recovery": true,
+    "send_text": true,
+    "send_image": true,
+    "send_product": true
+  },
   "client": {
     "platform": "MacIntel",
     "language": "th"

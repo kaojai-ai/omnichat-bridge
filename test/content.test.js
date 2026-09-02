@@ -171,6 +171,16 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("does not deliver the same provider message twice across realtime surfaces", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+  await bridge.providerEvent({ type: "realtime_event", capture_method: "realtime_socket", body: { messages: [echo] } });
+  await bridge.providerEvent({ type: "realtime_event", capture_method: "realtime_polling", body: { messages: [echo] } });
+
+  const queued = bridge.runtimeMessages.filter((message) => message.type === "queue_messages");
+  assert.equal(queued.length, 1);
+  assert.deepEqual(plain(queued[0].messages), [echo]);
+});
+
 test("ignores best-effort messages after the extension context is invalidated", async () => {
   const bridge = contentBridge();
   bridge.invalidateRuntime();
@@ -185,7 +195,7 @@ test("ignores best-effort messages after the extension context is invalidated", 
   );
 });
 
-for (const pathname of ["/new-webchat/conversations", "/webchat/conversations"]) {
+for (const pathname of ["/new-webchat/conversations", "/webchat/conversations", "/portal/chat-management", "/"]) {
   test(`requests automatic sync when ${pathname} loads`, async () => {
     const bridge = contentBridge(pathname);
 

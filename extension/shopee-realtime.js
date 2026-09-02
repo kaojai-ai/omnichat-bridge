@@ -1,9 +1,45 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge";
-  const CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
-  const SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
-  const SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
-  const LOGIN_PATH = "/webchat/api/coreapi/v1.2/login";
+  const LEGACY_CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
+  const LEGACY_SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
+  const LEGACY_SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
+  const LEGACY_LOGIN_PATH = "/webchat/api/coreapi/v1.2/login";
+  const SELLER_CENTRE_CONVERSATIONS_PATH = "/webchat/api/v1.2/mini/conversations";
+  const SELLER_CENTRE_SYNC_PATH = "/webchat/api/v1.2/mini/user/sync";
+  const SELLER_CENTRE_MESSAGE_PREFIX = "/webchat/api/v1.2/mini/conversations/";
+  const SELLER_CENTRE_SEND_PATH = "/webchat/api/v1.2/mini/messages";
+  const LEGACY_SEND_PATH = "/webchat/api/v1.2/messages";
+  const LEGACY_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
+  const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
+  const SELLER_CENTRE_SURFACE = "seller-centre";
+  const LEGACY_SURFACE = "legacy";
+  const SURFACE_PROFILES = Object.freeze({
+    [LEGACY_SURFACE]: Object.freeze({
+      listPaths: Object.freeze([
+        LEGACY_CONVERSATIONS_PATH,
+        LEGACY_SUBACCOUNT_CONVERSATIONS_PATH,
+      ]),
+      shopListPath: LEGACY_SHOP_LIST_PATH,
+      loginPath: LEGACY_LOGIN_PATH,
+      sendPath: LEGACY_SEND_PATH,
+      imagePath: LEGACY_IMAGE_PATH,
+      historyPath: (conversationId) => `/webchat/api/v1.2/conversations/${encodeURIComponent(conversationId)}/messages`,
+      historyPathPattern: /^\/webchat\/api\/v1\.2\/conversations\/[^/]+\/messages$/,
+      syncPath: null,
+      sendSource: null,
+    }),
+    [SELLER_CENTRE_SURFACE]: Object.freeze({
+      listPaths: Object.freeze([SELLER_CENTRE_CONVERSATIONS_PATH]),
+      shopListPath: null,
+      loginPath: "/api/v2/login/",
+      sendPath: SELLER_CENTRE_SEND_PATH,
+      imagePath: SELLER_CENTRE_IMAGE_PATH,
+      historyPath: (conversationId) => `${SELLER_CENTRE_MESSAGE_PREFIX}${encodeURIComponent(conversationId)}/messages`,
+      historyPathPattern: /^\/webchat\/api\/v1\.2\/mini\/conversations\/[^/]+\/messages$/,
+      syncPath: SELLER_CENTRE_SYNC_PATH,
+      sendSource: "minichat",
+    }),
+  });
   const HISTORY_LIMIT = 100;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
@@ -11,9 +47,16 @@
   const ACCOUNT_DISCOVERY_MAX_ATTEMPTS = 2;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
+  const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
+  if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
+  const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
+    ?? globalThis.OmnichatShopeeUrl?.surfaceForUrl?.(window.location.href)
+    ?? LEGACY_SURFACE;
   const state = window.__omnichatRealtimeState ??= {
+    surface: null,
     getTemplate: null,
     listTemplate: null,
+    historyTemplate: null,
     nativeFetch: window.fetch.bind(window),
     recoveryInFlight: false,
     socket: null,
@@ -29,7 +72,27 @@
     recoveryAbortController: null,
     accountDiscoveryPromise: null,
     automaticAccountDiscoveryStarted: false,
+    latestMessageIdsByConversation: new Map(),
+    observedMessageKeys: new Set(),
+    sellerCentreListInitialized: false,
+    pollingConnected: false,
+    pollingConnectedAt: null,
+    pollingRefreshInFlight: false,
   };
+  state.surface ??= currentSurface;
+  if (state.surface !== currentSurface) {
+    state.surface = currentSurface;
+    state.getTemplate = null;
+    state.listTemplate = null;
+    state.historyTemplate = null;
+    state.sendTemplate = null;
+    state.latestMessageIdsByConversation = new Map();
+    state.observedMessageKeys = new Set();
+    state.sellerCentreListInitialized = false;
+    state.pollingConnected = false;
+    state.pollingConnectedAt = null;
+    state.pollingRefreshInFlight = false;
+  }
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
   state.accountsById ??= new Map();
@@ -39,9 +102,13 @@
   state.recoveryAbortController ??= null;
   state.accountDiscoveryPromise ??= null;
   state.automaticAccountDiscoveryStarted ??= false;
+  state.latestMessageIdsByConversation ??= new Map();
+  state.observedMessageKeys ??= new Set();
+  state.sellerCentreListInitialized ??= false;
+  state.pollingConnected ??= false;
+  state.pollingConnectedAt ??= null;
+  state.pollingRefreshInFlight ??= false;
 
-  const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
-  if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const { accountsFromPayload, conversationItems } = providerAdapter;
 
   const post = (message) => window.postMessage({ source: SOURCE, ...message }, window.location.origin);
@@ -52,6 +119,31 @@
     message,
     details,
   });
+
+  const surfaceCapabilities = () => ({
+    account_detection: Boolean(state.listTemplate),
+    message_observation: isSellerCentreSurface()
+      ? Boolean(state.listTemplate && state.getTemplate)
+      : Boolean(state.socket),
+    message_recovery: Boolean(state.listTemplate && state.getTemplate),
+    send_text: Boolean(state.listTemplate && state.getTemplate),
+    send_image: Boolean(state.listTemplate && state.getTemplate),
+    send_product: Boolean(state.listTemplate && state.getTemplate),
+  });
+
+  const publishSurfaceStatus = () => {
+    const capabilities = surfaceCapabilities();
+    const ready = Boolean(state.listTemplate && state.getTemplate);
+    post({
+      type: "provider_status",
+      surface: state.surface,
+      surface_ready: ready,
+      capabilities,
+      realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
+      realtime_connected: isSellerCentreSurface() ? state.pollingConnected : Boolean(state.socket?.connected ?? state.socket),
+      ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
+    });
+  };
 
   function errorDetails(error) {
     return {
@@ -96,6 +188,11 @@
     try { return new URL(url, window.location.href).pathname; }
     catch { return ""; }
   };
+  const surfaceProfile = () => SURFACE_PROFILES[state.surface] ?? SURFACE_PROFILES[LEGACY_SURFACE];
+  const isSellerCentreSurface = () => state.surface === SELLER_CENTRE_SURFACE;
+  const isListPath = (path) => surfaceProfile().listPaths.includes(path);
+  const isHistoryPath = (path) => surfaceProfile().historyPathPattern.test(path);
+  const isSendPath = (path) => path === surfaceProfile().sendPath;
   const value = (input) => {
     if (typeof input !== "string" && typeof input !== "number") return null;
     const normalized = String(input).trim();
@@ -179,10 +276,12 @@
   };
 
   async function fetchShopList() {
+    const shopListPath = surfaceProfile().shopListPath;
+    if (!shopListPath) return [];
     const template = state.listTemplate ?? state.getTemplate;
     if (!template) return [];
     const url = new URL(template.url);
-    url.pathname = SHOP_LIST_PATH;
+    url.pathname = shopListPath;
     const init = { ...template.init, method: "GET" };
     delete init.body;
     const response = await state.nativeFetch(new Request(url, init));
@@ -201,11 +300,10 @@
     return accounts;
   }
 
-  const isShopeeChatPage = () => {
-    const pathname = window.location.pathname ?? new URL(window.location.href).pathname;
-    return ["/webchat/conversations", "/new-webchat/conversations"]
-      .some((path) => pathname === path || pathname.startsWith(`${path}/`));
-  };
+  const isShopeeChatPage = () => Boolean(
+    providerAdapter.surfaceForUrl?.(window.location.href)
+      ?? globalThis.OmnichatShopeeUrl?.surfaceForUrl?.(window.location.href),
+  );
 
   async function discoverAccounts() {
     if (state.accountDiscoveryPromise) return state.accountDiscoveryPromise;
@@ -221,8 +319,8 @@
             accounts: [...state.accountsById.values()],
             shopListAccounts,
           };
-          if (shopListAccounts.length || attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) {
-            if (!shopListAccounts.length) {
+          if (shopListAccounts.length || isSellerCentreSurface() || attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) {
+            if (!shopListAccounts.length && !isSellerCentreSurface()) {
               postLog("warn", "shop_discovery_incomplete", "Shopee shop list was empty after account discovery.");
             }
             postAccounts();
@@ -301,6 +399,152 @@
     if (profiles.length) post({ type: "profiles_detected", profiles });
   };
 
+  const messageIdOf = (message) => firstValue(message ?? {}, ["id", "message_id"]);
+  const latestMessageIdOf = (conversation) => firstValue(conversation ?? {}, [
+    "latest_message_id",
+    "last_message_id",
+    "message_id",
+  ]) ?? firstValue(conversation?.latest_message ?? {}, ["id", "message_id"]);
+  const authQueryKeys = ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"];
+
+  const emitRealtimeMessages = (messages, captureMethod = "poll") => {
+    const accepted = [];
+    for (const message of Array.isArray(messages) ? messages : []) {
+      const conversationId = firstValue(message, ["conversation_id"]);
+      const messageId = messageIdOf(message);
+      if (!conversationId || !messageId) continue;
+      const key = `${conversationId}:${messageId}`;
+      if (state.observedMessageKeys.has(key)) continue;
+      state.observedMessageKeys.add(key);
+      accepted.push(message);
+    }
+    if (accepted.length) {
+      post({
+        type: "realtime_event",
+        body: { messages: accepted },
+        capture_method: captureMethod,
+      });
+    }
+    return accepted.length;
+  };
+
+  const messageItems = (body, output = [], depth = 0, seen = new WeakSet()) => {
+    if (depth > 8 || body === null || body === undefined) return output;
+    if (Array.isArray(body)) {
+      for (const item of body) messageItems(item, output, depth + 1, seen);
+      return output;
+    }
+    if (typeof body !== "object" || seen.has(body)) return output;
+    seen.add(body);
+    if (messageIdOf(body) && firstValue(body, ["conversation_id"])) output.push(body);
+    for (const value of Object.values(body)) messageItems(value, output, depth + 1, seen);
+    return output;
+  };
+
+  const sellerCentreHistoryRequest = (conversation, template, offset = 0) => {
+    const sourceUrl = new URL(template.url);
+    const url = new URL(surfaceProfile().historyPath(conversation.id), sourceUrl.origin);
+    for (const key of authQueryKeys) {
+      if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
+    }
+    url.searchParams.set("shop_id", String(conversation.shop_id ?? ""));
+    url.searchParams.set("biz_id", String(conversation.biz_id ?? 0));
+    url.searchParams.set("offset", String(offset));
+    url.searchParams.set("limit", String(HISTORY_LIMIT));
+    url.searchParams.set("direction", "older");
+    url.searchParams.set("on_message_received", "true");
+    const headers = new Headers(template.init?.headers ?? {});
+    headers.delete("content-type");
+    return new Request(url, {
+      ...template.init,
+      method: "GET",
+      headers,
+      body: undefined,
+    });
+  };
+
+  async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId) {
+    const template = state.historyTemplate ?? state.getTemplate;
+    if (!template) return;
+    const response = await state.nativeFetch(sellerCentreHistoryRequest(conversation, template));
+    if (!response.ok) throw new Error(`Shopee Seller Centre message poll returned ${response.status}.`);
+    const body = await response.json();
+    const messages = Array.isArray(body)
+      ? body
+      : conversationItems(body);
+    const ordered = [...messages].sort((left, right) => {
+      const difference = timeMs(left?.created_timestamp ?? left?.created_at)
+        - timeMs(right?.created_timestamp ?? right?.created_at);
+      if (difference) return difference;
+      return String(messageIdOf(left) ?? "").localeCompare(String(messageIdOf(right) ?? ""));
+    });
+    const previousIndex = previousLatestId
+      ? ordered.findIndex((message) => messageIdOf(message) === previousLatestId)
+      : -1;
+    const candidates = previousIndex >= 0
+      ? ordered.slice(previousIndex + 1)
+      : previousLatestId
+        ? ordered
+        : (latestId ? ordered.filter((message) => messageIdOf(message) === latestId) : ordered.slice(-1));
+    const emitted = emitRealtimeMessages(candidates);
+    if (emitted) postLog("debug", "seller_centre_messages_observed", "Seller Centre polling delivered new messages.", {
+      conversation_id: String(conversation.id ?? ""),
+      messages: emitted,
+    });
+  }
+
+  async function captureSellerCentreConversationList(response) {
+    let body;
+    try {
+      body = await response.clone().json();
+    } catch (error) {
+      logAsyncError("seller_centre_conversation_parse", error);
+      return;
+    }
+    const conversations = conversationItems(body);
+    mergeAccounts(accountsFromPayload(body), null, true);
+    captureProfiles(conversations);
+    const wasInitialized = state.sellerCentreListInitialized;
+    const changed = [];
+    for (const conversation of conversations) {
+      const conversationId = String(conversation?.id ?? "").trim();
+      if (!conversationId) continue;
+      const latestId = latestMessageIdOf(conversation);
+      const hadPrevious = state.latestMessageIdsByConversation.has(conversationId);
+      const previousId = state.latestMessageIdsByConversation.get(conversationId) ?? null;
+      state.latestMessageIdsByConversation.set(conversationId, latestId);
+      if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
+        changed.push({ conversation, previousId, latestId });
+      }
+    }
+    state.sellerCentreListInitialized = true;
+    if (!wasInitialized || !changed.length) return;
+    for (const item of changed) {
+      try {
+        await fetchSellerCentreConversationMessages(item.conversation, item.previousId, item.latestId);
+      } catch (error) {
+        logAsyncError("seller_centre_message_poll", error, {
+          conversation_id: String(item.conversation?.id ?? ""),
+        });
+      }
+    }
+  }
+
+  async function refreshSellerCentreConversations() {
+    if (!isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
+    state.pollingRefreshInFlight = true;
+    try {
+      const response = await state.nativeFetch(new Request(state.listTemplate.url, {
+        ...state.listTemplate.init,
+        body: state.listTemplate.body?.slice(0),
+      }));
+      if (!response.ok) throw new Error(`Shopee Seller Centre conversation refresh returned ${response.status}.`);
+      await captureSellerCentreConversationList(response);
+    } finally {
+      state.pollingRefreshInFlight = false;
+    }
+  }
+
   const captureSendTemplate = async (request) => {
     try {
       const payload = JSON.parse(await request.clone().text());
@@ -310,6 +554,7 @@
         headers: Object.fromEntries(request.headers.entries()),
         payload,
       };
+      publishSurfaceStatus();
     } catch (error) {
       logAsyncError("send_template_capture", error);
     }
@@ -320,13 +565,16 @@
     if (!state.getTemplate) return null;
 
     const sourceUrl = new URL(state.getTemplate.url);
-    const url = new URL("/webchat/api/v1.2/messages", sourceUrl.origin);
-    for (const key of ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"]) {
+    const profile = surfaceProfile();
+    const url = new URL(profile.sendPath, sourceUrl.origin);
+    for (const key of authQueryKeys) {
       if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
     }
-    url.searchParams.set("shop_id", routing.shop_id);
-    url.searchParams.set("biz_id", routing.biz_id);
-    url.searchParams.set("uuid", clientMessageId);
+    if (!isSellerCentreSurface()) {
+      url.searchParams.set("shop_id", routing.shop_id);
+      url.searchParams.set("biz_id", routing.biz_id);
+      url.searchParams.set("uuid", clientMessageId);
+    }
 
     const headers = Object.fromEntries(new Headers(state.getTemplate.init.headers).entries());
     headers["content-type"] = "application/json";
@@ -348,7 +596,8 @@
         },
         source_content: {},
         entry_point: "direct_chat_entry_point",
-        choice_info: { real_shop_id: null },
+        choice_info: { real_shop_id: isSellerCentreSurface() ? numericId(routing.shop_id) : null },
+        ...(profile.sendSource ? { source: profile.sendSource } : {}),
       },
     };
   };
@@ -393,7 +642,15 @@
     : content;
 
   const captureShopeeSendError = async (request, response) => {
-    const clientMessageId = new URL(request.url).searchParams.get("uuid");
+    let clientMessageId = new URL(request.url).searchParams.get("uuid");
+    if (!clientMessageId) {
+      try {
+        const payload = await request.clone().json();
+        clientMessageId = firstValue(payload?.content ?? payload, ["uid", "client_message_id"]);
+      } catch (error) {
+        logAsyncError("send_error_request_parse", error);
+      }
+    }
     if (!clientMessageId) return;
     let body = null;
     try {
@@ -414,8 +671,8 @@
     const sourceTemplateUrl = state.getTemplate?.url ?? state.sendTemplate?.url;
     if (!sourceTemplateUrl) throw new Error("Shopee image uploader is still initializing.");
     const sourceUrl = new URL(sourceTemplateUrl);
-    const url = new URL("/webchat/api/coreapi/v1.2/images", sourceUrl.origin);
-    for (const key of ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"]) {
+    const url = new URL(surfaceProfile().imagePath, sourceUrl.origin);
+    for (const key of authQueryKeys) {
       if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
     }
     url.searchParams.set("shop_id", routing.shop_id);
@@ -461,6 +718,16 @@
     let routing = state.conversationsById.get(conversationId);
     if (!requestId || !conversationId || !clientMessageId || !providerAdapter.supportsSend(commandType)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
+      return;
+    }
+    if (isSellerCentreSurface() && (!state.listTemplate || !state.getTemplate)) {
+      post({
+        type: "api_send_result",
+        request_id: requestId,
+        ok: false,
+        error: "Seller Centre chat is still initializing. Open the Chat panel and wait for its conversation list.",
+      });
+      publishSurfaceStatus();
       return;
     }
     if (!routing) {
@@ -517,7 +784,8 @@
         };
       }
       const url = new URL(template.url);
-      url.searchParams.set("uuid", clientMessageId);
+      if (isSellerCentreSurface()) url.searchParams.delete("uuid");
+      else url.searchParams.set("uuid", clientMessageId);
       const response = await poster(url.toString(), payload, { headers: template.headers });
       let body = response;
       if (typeof response?.clone === "function") {
@@ -554,7 +822,9 @@
     }
   };
   const captureActiveConversation = (request) => {
-    const match = pathOf(request.url).match(/^\/webchat\/api\/v1\.2\/conversations\/([^/]+)\/messages$/);
+    const path = pathOf(request.url);
+    if (!isHistoryPath(path)) return;
+    const match = path.match(/\/conversations\/([^/]+)\/messages$/);
     if (!match) return;
     const conversationId = decodeURIComponent(match[1]);
     if (!conversationId || state.activeConversationId === conversationId) return;
@@ -679,10 +949,11 @@
     let queued = 0;
     let latestCursor = null;
     for (let page = 0; ; page += 1) {
-      const sourceUrl = new URL(state.getTemplate.url);
-      const url = new URL(sourceUrl.origin);
-      url.pathname = `/webchat/api/v1.2/conversations/${encodeURIComponent(conversation.id)}/messages`;
-      for (const key of ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"]) {
+      const historyTemplate = state.historyTemplate ?? state.getTemplate;
+      if (!historyTemplate) throw new Error("Shopee message history is still initializing. Refresh Seller Chat.");
+      const sourceUrl = new URL(historyTemplate.url);
+      const url = new URL(surfaceProfile().historyPath(conversation.id), sourceUrl.origin);
+      for (const key of authQueryKeys) {
         if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
       }
       url.searchParams.set("shop_id", conversation.shop_id);
@@ -690,12 +961,14 @@
       url.searchParams.set("limit", String(pageSize));
       url.searchParams.set("direction", "older");
       url.searchParams.set("biz_id", String(conversation.biz_id ?? 0));
-      const headers = new Headers(state.getTemplate.init.headers);
+      if (isSellerCentreSurface()) url.searchParams.set("on_message_received", "true");
+      const headers = new Headers(historyTemplate.init.headers);
       headers.delete("content-type");
       const response = await recoveryFetch(new Request(url, {
-        ...state.getTemplate.init,
+        ...historyTemplate.init,
         method: "GET",
-        headers
+        headers,
+        body: undefined,
       }));
       if (!response.ok) throw new Error(`Shopee message recovery returned ${response.status}. Refresh Seller Chat.`);
       const pageMessages = await response.json();
@@ -945,32 +1218,58 @@
     const observedFetch = async (input, init) => {
       const request = new Request(input, init);
       const path = pathOf(request.url);
-      if (path === "/webchat/api/v1.2/messages" && request.method === "POST") {
+      if (isSendPath(path) && request.method === "POST") {
         void observeAsync("send_template_capture", () => captureSendTemplate(request));
       }
       const response = await originalFetch(input, init);
-      if (path === "/webchat/api/v1.2/messages" && request.method === "POST") {
+      if (isSendPath(path) && request.method === "POST") {
         await captureShopeeSendError(request, response);
       }
-      if (request.method === "GET") captureActiveConversation(request);
+      if (request.method === "GET") {
+        captureActiveConversation(request);
+        if (isHistoryPath(path)) {
+          void observeAsync("history_template", () => templateFrom(request).then((template) => {
+            state.historyTemplate = template;
+            state.getTemplate ??= template;
+            publishSurfaceStatus();
+            postLog("info", "history_template_ready", "Shopee message-history request template captured.");
+          }));
+        }
+      }
       if (path.startsWith("/webchat/api/") && request.method === "GET" && !state.getTemplate) {
         void observeAsync("history_template", () => templateFrom(request).then((template) => {
           state.getTemplate = template;
+          publishSurfaceStatus();
           postLog("info", "history_template_ready", "Shopee history request template captured.");
         }));
       }
-      if ([CONVERSATIONS_PATH, SUBACCOUNT_CONVERSATIONS_PATH].includes(path)) {
+      if (isListPath(path)) {
         void observeAsync("conversation_template", () => templateFrom(request).then((template) => {
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
+          publishSurfaceStatus();
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
           startAutomaticAccountDiscovery();
         }));
+        if (isSellerCentreSurface()) {
+          void observeAsync("seller_centre_conversation_capture", () => captureSellerCentreConversationList(response));
+        } else {
+          captureAccounts(response);
+        }
+      } else if (surfaceProfile().shopListPath && path === surfaceProfile().shopListPath) {
         captureAccounts(response);
-      } else if (path === SHOP_LIST_PATH) {
-        captureAccounts(response);
-      } else if (path === LOGIN_PATH) {
+      } else if (surfaceProfile().loginPath && path === surfaceProfile().loginPath) {
         captureAccount(response);
+      } else if (isSellerCentreSurface() && path === "/webchat/api/workbenchapi/v1.2/mini/shop/setting") {
+        captureAccount(response);
+      } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
+        state.pollingConnected = response.ok;
+        if (state.pollingConnected) state.pollingConnectedAt ??= new Date().toISOString();
+        publishSurfaceStatus();
+        void observeAsync("seller_centre_sync_response", async () => {
+          const body = await response.clone().json();
+          if (body?.have_new_msg) await refreshSellerCentreConversations();
+        });
       }
       return response;
     };
@@ -979,17 +1278,17 @@
   }
 
   function observeSocket() {
+    if (isSellerCentreSurface()) {
+      publishSurfaceStatus();
+      return;
+    }
     const socket = window.__CHAT_GLOBAL__?.socket;
     if (!socket?.on) {
-      post({ type: "provider_status", realtime_connected: false });
+      publishSurfaceStatus();
       return;
     }
     const connected = typeof socket.connected === "boolean" ? socket.connected : true;
-    post({
-      type: "provider_status",
-      realtime_connected: connected,
-      ...(connected ? { connected_at: new Date().toISOString() } : {}),
-    });
+    publishSurfaceStatus();
     if (state.socket === socket) return;
     state.socket = socket;
     if (document.documentElement) {
@@ -1002,11 +1301,11 @@
     socket.on("connect", () => {
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
       post({ type: "socket_connected" });
-      post({ type: "provider_status", realtime_connected: true, connected_at: new Date().toISOString() });
+      publishSurfaceStatus();
     });
     socket.on("disconnect", () => {
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
-      post({ type: "provider_status", realtime_connected: false });
+      publishSurfaceStatus();
     });
     socket.on("message", (event) => {
       const envelope = event?.data ?? event;
@@ -1015,7 +1314,9 @@
         const body = typeof envelope.message_content === "string"
           ? JSON.parse(envelope.message_content)
           : envelope.message_content;
-        post({ type: "realtime_event", body });
+        const messages = messageItems(body);
+        if (messages.length) emitRealtimeMessages(messages, "realtime_socket");
+        else post({ type: "realtime_event", body, capture_method: "realtime_socket" });
       } catch (error) {
         logAsyncError("socket_message", error);
       }
