@@ -31,6 +31,49 @@ function contentRecord(value) {
   try { return record(JSON.parse(value)); } catch { return null; }
 }
 
+function profileUrl(value) {
+  const raw = string(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function participantFromMessage(message, senderId, recipientId, senderAccountId, recipientAccountId) {
+  const shopId = string(message.shop_id);
+  const senderIsShop = Boolean(senderAccountId || (shopId && senderId === shopId));
+  const recipientIsShop = Boolean(recipientAccountId || (shopId && recipientId === shopId));
+  if (senderIsShop === recipientIsShop) return null;
+
+  const incoming = recipientIsShop;
+  const side = incoming ? "from" : "to";
+  const sideUser = record(message[`${side}_user`]) ?? record(message[side]);
+  const id = incoming ? senderId : recipientId;
+  const displayName = string(message[`${side}_user_name`])
+    ?? string(message[`${side}_name`])
+    ?? string(sideUser?.display_name)
+    ?? string(sideUser?.name)
+    ?? string(sideUser?.username);
+  const avatarUrl = [
+    message[`${side}_user_avatar_url`],
+    message[`${side}_avatar_url`],
+    message[`${side}_user_avatar`],
+    message[`${side}_avatar`],
+    sideUser?.avatar_url,
+    sideUser?.avatar,
+    sideUser?.avatarUrl,
+  ].map(profileUrl).find(Boolean) ?? null;
+  if (!id || (!displayName && !avatarUrl)) return null;
+  return {
+    id,
+    ...(displayName ? { display_name: displayName } : {}),
+    ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+  };
+}
+
 const SHOPEE_LEGACY_VIDEO_CDN_ORIGIN = "https://down-tx-sg.vod.susercontent.com/";
 const SHOPEE_VIDEO_PLAYER_ORIGIN = "https://down-ws-sg.vod.susercontent.com";
 
@@ -168,6 +211,13 @@ function parseShopeeMessages(payload, captureMethod) {
       : contentUrl
         ?? (parsedType.type === "sticker" ? stickerCdnUrl(content) : null)
         ?? messageUrl;
+    const participant = participantFromMessage(
+      message,
+      senderId,
+      recipientId,
+      senderAccountId,
+      recipientAccountId,
+    );
     if (!id || !conversationId || !senderId || !recipientId || (parsedType.type === "text" && (!text || text.length > 20_000))) continue;
     const key = `${conversationId}:${id}`;
     if (seen.has(key)) continue;
@@ -187,6 +237,7 @@ function parseShopeeMessages(payload, captureMethod) {
       ...(text && text.length <= 20_000 ? { text } : {}),
       ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
       ...(url ? { media_url: url } : {}),
+      ...(participant ? { participant } : {}),
       ...(parsedType.type === "product" && string(content?.product_id)
         ? {
           product: {

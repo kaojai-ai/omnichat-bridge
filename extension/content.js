@@ -424,12 +424,33 @@
     pending.resolve({ ok: false, error: message.error ?? `${providerLabel} account ID was not found.` });
   }
 
+  function profileField(profile, field) {
+    const value = profile?.[field];
+    return typeof value === "string" && value.trim() ? value.trim() : "";
+  }
+
+  function mergeConversationProfiles(...profiles) {
+    const id = profiles.map((profile) => profileField(profile, "id")).find(Boolean) ?? "";
+    if (!id) return null;
+    const providerAccountId = profiles.map((profile) => profileField(profile, "provider_account_id")).find(Boolean);
+    const displayName = profiles.map((profile) => profileField(profile, "display_name")).find(Boolean);
+    const avatarUrl = profiles
+      .map((profile) => profileField(profile, "avatar_url"))
+      .find((value) => value.startsWith("https://"));
+    return {
+      id,
+      ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
+      ...(displayName ? { display_name: displayName } : {}),
+      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+    };
+  }
+
   function handleProfilesDetected(message) {
     for (const profile of message.profiles ?? []) {
       const conversationId = String(profile?.conversation_id ?? "").trim();
       const id = String(profile?.id ?? "").trim();
       if (!conversationId || !id) continue;
-      profilesByConversation.set(conversationId, {
+      const normalizedProfile = {
         id,
         ...(typeof profile.provider_account_id === "string" && profile.provider_account_id.trim()
           ? { provider_account_id: profile.provider_account_id.trim() }
@@ -440,18 +461,21 @@
         ...(typeof profile.avatar_url === "string" && profile.avatar_url.startsWith("https://")
           ? { avatar_url: profile.avatar_url }
           : {})
-      });
+      };
+      const merged = mergeConversationProfiles(profilesByConversation.get(conversationId), normalizedProfile);
+      if (merged) profilesByConversation.set(conversationId, merged);
     }
   }
 
   function addConversationProfile(messages) {
     return messages.map((message) => {
       const profile = profilesByConversation.get(message.conversation_id);
-      return profile
+      const participant = mergeConversationProfiles(profile, message.participant);
+      return participant
         ? {
           ...message,
-          ...(profile.provider_account_id ? { provider_account_id: profile.provider_account_id } : {}),
-          participant: profile,
+          ...(participant.provider_account_id ? { provider_account_id: participant.provider_account_id } : {}),
+          participant,
         }
         : message;
     });

@@ -75,6 +75,46 @@ test("normalizes a Seller Centre mini message into the canonical Shopee shape", 
   assert.equal(message.capture_method, "poll");
 });
 
+test("derives an incoming Seller Centre buyer profile from message metadata", () => {
+  const [message] = context.OmnichatShopee.parseShopeeMessages([{
+    id: "mini-incoming-profile",
+    conversation_id: "mini-conversation-profile",
+    from_id: 987654321,
+    to_id: 1549058683,
+    to_shop_id: 1549058683,
+    from_user_name: "Buyer from history",
+    from_avatar_url: "https://cdn.example.com/buyer.jpg",
+    type: "text",
+    content: { text: "Hello" },
+  }], "poll");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(message.participant)), {
+    id: "987654321",
+    display_name: "Buyer from history",
+    avatar_url: "https://cdn.example.com/buyer.jpg",
+  });
+});
+
+test("derives an outgoing Seller Centre buyer profile from message metadata", () => {
+  const [message] = context.OmnichatShopee.parseShopeeMessages([{
+    id: "mini-outgoing-profile",
+    conversation_id: "mini-conversation-profile",
+    from_id: 1549058683,
+    from_shop_id: 1549058683,
+    to_id: 987654321,
+    to_user_name: "Buyer reply",
+    to_avatar: "https://cdn.example.com/buyer-reply.jpg",
+    type: "text",
+    content: { text: "Reply" },
+  }], "poll");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(message.participant)), {
+    id: "987654321",
+    display_name: "Buyer reply",
+    avatar_url: "https://cdn.example.com/buyer-reply.jpg",
+  });
+});
+
 test("uses the product Shop ID when message routing metadata is absent", () => {
   const messages = context.OmnichatShopee.parseShopeeMessages({
     id: "message-product-account",
