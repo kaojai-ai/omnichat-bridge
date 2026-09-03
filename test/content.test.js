@@ -188,6 +188,33 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("keeps message-level buyer profile data when the conversation list profile is missing", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+
+  await bridge.providerEvent({
+    type: "realtime_event",
+    body: {
+      messages: [{
+        ...echo,
+        participant: {
+          id: "buyer-1",
+          display_name: "Buyer from history",
+          avatar_url: "https://cdn.example.com/buyer.jpg",
+        },
+      }],
+    },
+  });
+
+  assert.deepEqual(
+    plain(bridge.runtimeMessages.find((message) => message.type === "queue_messages")?.messages[0].participant),
+    {
+      id: "buyer-1",
+      display_name: "Buyer from history",
+      avatar_url: "https://cdn.example.com/buyer.jpg",
+    },
+  );
+});
+
 test("prepares Seller Centre before an outbound command is selected", async () => {
   const bridge = contentBridge("/portal/chat-management");
   const result = bridge.sendCommand({
