@@ -8,8 +8,9 @@ const sources = await Promise.all([
   "../extension/lib/provider-adapters.js",
   "../extension/lib/shopee-adapter.js",
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 
-function createRegistry() {
+function createRegistry({ includeLineOA = false } = {}) {
   const context = vm.createContext({
     URL,
     OmnichatShopee: {
@@ -19,6 +20,7 @@ function createRegistry() {
     },
   });
   for (const source of sources) vm.runInContext(source, context);
+  if (includeLineOA) vm.runInContext(lineOaSource, context);
   return context.OmnichatProviderAdapters;
 }
 
@@ -57,6 +59,27 @@ test("allows a future provider to own config validation and page matching", () =
   assert.deepEqual(plain(registry.list().map((item) => item.id)), ["shopee", "line_oa"]);
   assert.equal(registry.forUrl("https://chat.line.biz/bot-1"), adapter);
   assert.equal(registry.forPage("https://chat.line.biz/bot-1"), adapter);
+});
+
+test("maps LINE OA bot IDs to configured provider accounts without exposing secrets", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+
+  assert.deepEqual(plain(adapter.accountDetectionHints({
+    accounts: [
+      { provider: "line_oa", provider_account_id: " channel-1 ", bot_id: " bot-1 ", hmac_secret: "secret-1" },
+      { provider: "shopee", provider_account_id: "shop-1", bot_id: "not-line" },
+      { provider: "line_oa", provider_account_id: "channel-2", bot_id: "bot-2", events_url: "https://events.example.com" },
+    ],
+  })), [
+    { provider_account_id: "channel-1", bot_id: "bot-1" },
+    { provider_account_id: "channel-2", bot_id: "bot-2" },
+  ]);
+  assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: "channel-1", bot_id: "bot-1" }, "2026-08-30T00:00:00.000Z")), {
+    provider: "line_oa",
+    provider_account_id: "channel-1",
+    bot_id: "bot-1",
+    detected_at: "2026-08-30T00:00:00.000Z",
+  });
 });
 
 test("extracts and merges Shopee accounts without treating user IDs as shop IDs", () => {

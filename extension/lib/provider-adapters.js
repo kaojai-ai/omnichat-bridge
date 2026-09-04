@@ -17,6 +17,9 @@
     if (adapter.configOrigins !== undefined && typeof adapter.configOrigins !== "function") {
       throw new Error(`Provider adapter ${id} has an invalid config origin resolver.`);
     }
+    if (adapter.accountDetectionHints !== undefined && typeof adapter.accountDetectionHints !== "function") {
+      throw new Error(`Provider adapter ${id} has an invalid account detection hint resolver.`);
+    }
     const capabilities = new Set(Array.isArray(adapter.capabilities) ? adapter.capabilities : []);
     const sendCommands = new Set(Array.isArray(adapter.sendCommands) ? adapter.sendCommands : []);
     const registered = Object.freeze({

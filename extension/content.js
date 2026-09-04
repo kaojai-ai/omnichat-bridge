@@ -364,6 +364,11 @@
     if (!providerAdapter.supports("account_detection")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support account detection.` };
     }
+    let accountHints;
+    if (typeof providerAdapter.accountDetectionHints === "function") {
+      const stored = await chrome.storage.local.get(["config"]);
+      accountHints = providerAdapter.accountDetectionHints(stored.config);
+    }
     const requestId = crypto.randomUUID();
     const result = new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -373,7 +378,11 @@
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
-    post({ type: "detect_account_v3", request_id: requestId });
+    post({
+      type: "detect_account_v3",
+      request_id: requestId,
+      ...(Array.isArray(accountHints) ? { account_hints: accountHints } : {}),
+    });
     return result;
   }
 

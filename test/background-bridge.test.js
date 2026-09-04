@@ -41,9 +41,10 @@ test("keeps connection status compatible with the server's strict version 1 enve
 
 test("does not redeclare page bridge dependencies during reattachment", () => {
   assert.match(source, /hasUrl: Boolean\(globalThis\.OmnichatShopeeUrl\)/);
-  assert.match(source, /hasShopeeAdapter: Boolean\(globalThis\.OmnichatProviderAdapters\?\.get\?\.\("shopee"\)\)/);
-  assert.match(source, /const mainFiles = \[/);
-  assert.match(source, /const isolatedFiles = \[/);
+  assert.match(source, /hasProviderAdapter: Boolean\(globalThis\.OmnichatProviderAdapters\?\.get\?\.\(providerId\)\)/);
+  assert.match(source, /adapter\.id === "line_oa"/);
+  assert.match(source, /const mainFiles = adapter\.id === "line_oa"/);
+  assert.match(source, /const isolatedFiles = adapter\.id === "line_oa"/);
   assert.match(source, /\.\.\.\(mainStatus\.hasUrl \? \[\] : \["lib\/shopee-url\.js"\]\)/);
   assert.match(source, /\.\.\.\(isolatedStatus\.hasShopee \? \[\] : \["lib\/shopee\.js"\]\)/);
 });
