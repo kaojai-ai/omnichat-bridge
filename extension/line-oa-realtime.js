@@ -10,7 +10,7 @@
   const acknowledgements = new Map();
   const knownChatIds = new Set();
   const knownMessageIdsByChat = new Map();
-  const accountId = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
+  const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
   const apiBase = "https://chat.line.biz/api";
   const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
@@ -123,7 +123,7 @@
     if (disposed || running) return;
     running = true;
     try {
-      const botId = accountId();
+      const botId = botIdFromUrl();
       if (!botId) throw new Error("LINE OA bot ID was not found in the open page URL.");
       let next = null;
       let parsed = 0;
@@ -165,11 +165,33 @@
     timer = setInterval(() => void poll(`poll:${crypto.randomUUID()}`, providerAccountId), 15_000);
   }
 
+  function configuredAccountForBot(accountHints, botId) {
+    if (!botId) return null;
+    const matches = (Array.isArray(accountHints) ? accountHints : [])
+      .filter((hint) => value(hint?.bot_id) === botId);
+    if (matches.length !== 1) return null;
+    const providerAccountId = value(matches[0]?.provider_account_id);
+    return providerAccountId ? { provider_account_id: providerAccountId, bot_id: botId } : null;
+  }
+
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
-      const id = accountId();
-      if (id) post({ type: "accounts_detected", accounts: [{ provider: "line_oa", provider_account_id: id }] });
+      const botId = botIdFromUrl();
+      const account = configuredAccountForBot(event.data.account_hints, botId);
+      if (!account) {
+        post({
+          type: "account_detection_failed",
+          request_id: event.data.request_id,
+          error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+        });
+      } else {
+        post({
+          type: "accounts_detected",
+          request_id: event.data.request_id,
+          accounts: [{ provider: "line_oa", ...account }],
+        });
+      }
     } else if (event.data.type === "sync_v3") {
       start(event.data.request_id, event.data.provider_account_id);
     } else if (event.data.type === "cancel_sync_v3") {

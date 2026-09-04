@@ -61,12 +61,28 @@
     return results;
   }
 
-  function normalizeAccount(input) {
-    const providerAccountId = id(input?.provider_account_id);
-    return providerAccountId ? { provider: "line_oa", provider_account_id: providerAccountId, detected_at: new Date().toISOString() } : null;
+  function accountDetectionHints(configuration) {
+    const accounts = Array.isArray(configuration?.accounts) ? configuration.accounts : [];
+    return accounts.flatMap((account) => {
+      if (account?.provider !== "line_oa") return [];
+      const providerAccountId = id(account.provider_account_id);
+      const botId = id(account.bot_id);
+      return providerAccountId && botId ? [{ provider_account_id: providerAccountId, bot_id: botId }] : [];
+    });
   }
 
-  globalThis.OmnichatLineOA = { chatItems, normalizeMessages };
+  function normalizeAccount(input, detectedAt = new Date().toISOString()) {
+    const providerAccountId = id(input?.provider_account_id);
+    const botId = id(input?.bot_id);
+    return providerAccountId ? {
+      provider: "line_oa",
+      provider_account_id: providerAccountId,
+      ...(botId ? { bot_id: botId } : {}),
+      detected_at: detectedAt,
+    } : null;
+  }
+
+  globalThis.OmnichatLineOA = { chatItems, normalizeMessages, accountDetectionHints, normalizeAccount };
   globalThis.OmnichatProviderAdapters?.register({
     id: "line_oa",
     displayName: "LINE Official Account",
@@ -79,6 +95,7 @@
     matchesUrl: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     matchesPage: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     configOrigins: (account) => [account.events_url, account.commands_url, account.logs_url],
+    accountDetectionHints,
     validateConfig: (value) => {
       const providerAccountId = id(value?.provider_account_id);
       const botId = id(value?.bot_id);

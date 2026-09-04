@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
+const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /url\.searchParams\.set\("next", next\)/);
@@ -104,6 +105,22 @@ function createBridge() {
   return {
     posts,
     requests,
+    detect(accountHints) {
+      const before = posts.length;
+      for (const listener of listeners) {
+        listener({
+          source: window,
+          origin,
+          data: {
+            source: "omnichat-realtime-bridge-v3",
+            type: "detect_account_v3",
+            request_id: "detect-1",
+            account_hints: accountHints,
+          },
+        });
+      }
+      return posts.slice(before).find((post) => post.request_id === "detect-1");
+    },
     async sync() {
       for (const listener of listeners) {
         listener({
@@ -126,6 +143,31 @@ function createBridge() {
     },
   };
 }
+
+test("LINE OA maps the page bot ID to the configured provider account", () => {
+  const bridge = createBridge();
+
+  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "line-oa-account-1", bot_id: "bot-1" }])), {
+    source: "omnichat-realtime-bridge-v3",
+    type: "accounts_detected",
+    request_id: "detect-1",
+    accounts: [{ provider: "line_oa", provider_account_id: "line-oa-account-1", bot_id: "bot-1" }],
+  });
+});
+
+test("LINE OA rejects missing or ambiguous bot mappings", () => {
+  const bridge = createBridge();
+
+  assert.deepEqual(plain(bridge.detect([
+    { provider_account_id: "line-oa-account-1", bot_id: "bot-1" },
+    { provider_account_id: "line-oa-account-2", bot_id: "bot-1" },
+  ])), {
+    source: "omnichat-realtime-bridge-v3",
+    type: "account_detection_failed",
+    request_id: "detect-1",
+    error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+  });
+});
 
 test("LINE OA recovers every chat and message page only after each page is acknowledged", async () => {
   const bridge = createBridge();
