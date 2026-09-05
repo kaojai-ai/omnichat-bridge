@@ -11,6 +11,7 @@
   const knownChatIds = new Set();
   const knownMessageIdsByChat = new Map();
   const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
+  const basicIdFromPage = () => globalThis.OmnichatLineOA?.basicIdFromHtml?.() ?? "";
   const apiBase = "https://chat.line.biz/api";
   const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
@@ -165,25 +166,20 @@
     timer = setInterval(() => void poll(`poll:${crypto.randomUUID()}`, providerAccountId), 15_000);
   }
 
-  function configuredAccountForBot(accountHints, botId) {
-    if (!botId) return null;
-    const matches = (Array.isArray(accountHints) ? accountHints : [])
-      .filter((hint) => value(hint?.bot_id) === botId);
-    if (matches.length !== 1) return null;
-    const providerAccountId = value(matches[0]?.provider_account_id);
-    return providerAccountId ? { provider_account_id: providerAccountId, bot_id: botId } : null;
+  function configuredAccountForPage(basicId) {
+    return basicId ? { provider_account_id: basicId } : null;
   }
 
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
-      const botId = botIdFromUrl();
-      const account = configuredAccountForBot(event.data.account_hints, botId);
+      const basicId = basicIdFromPage();
+      const account = configuredAccountForPage(basicId);
       if (!account) {
         post({
           type: "account_detection_failed",
           request_id: event.data.request_id,
-          error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+          error: "LINE OA Basic ID was not found in the open page.",
         });
       } else {
         post({

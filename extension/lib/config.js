@@ -45,7 +45,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     if (typeof adapter?.validateConfig !== "function") {
       throw new Error(`Unsupported provider: ${provider}.`);
     }
-    const normalized = adapter.validateConfig(normalizedInput);
+    const normalized = adapter.validateConfig(normalizedInput, version);
     if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
       throw new Error(`Provider ${provider} returned an invalid configuration.`);
     }

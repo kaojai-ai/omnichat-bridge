@@ -28,7 +28,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stop\(\);/);
 });
 
-function createBridge() {
+function createBridge({ basicId = "@159nzygg" } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -92,7 +92,11 @@ function createBridge() {
     window,
     fetch: window.fetch,
     URL,
-    OmnichatLineOA: { chatItems: (body) => body?.list ?? [] },
+    document: { documentElement: { outerHTML: basicId ? `<a href="https://manager.line.biz/account/${basicId}">LINE Official Account</a>` : "" } },
+    OmnichatLineOA: {
+      chatItems: (body) => body?.list ?? [],
+      basicIdFromHtml: () => basicId,
+    },
     crypto: { randomUUID: () => "poll-id" },
     setInterval: () => 1,
     clearInterval() {},
@@ -144,28 +148,25 @@ function createBridge() {
   };
 }
 
-test("LINE OA maps the page bot ID to the configured provider account", () => {
+test("LINE OA maps the page Basic ID to the configured provider account", () => {
   const bridge = createBridge();
 
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "line-oa-account-1", bot_id: "bot-1" }])), {
+  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "accounts_detected",
     request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "line-oa-account-1", bot_id: "bot-1" }],
+    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg" }],
   });
 });
 
-test("LINE OA rejects missing or ambiguous bot mappings", () => {
-  const bridge = createBridge();
+test("LINE OA rejects a page without a Basic ID", () => {
+  const bridge = createBridge({ basicId: "" });
 
-  assert.deepEqual(plain(bridge.detect([
-    { provider_account_id: "line-oa-account-1", bot_id: "bot-1" },
-    { provider_account_id: "line-oa-account-2", bot_id: "bot-1" },
-  ])), {
+  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "account_detection_failed",
     request_id: "detect-1",
-    error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+    error: "LINE OA Basic ID was not found in the open page.",
   });
 });
 
