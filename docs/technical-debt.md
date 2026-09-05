@@ -41,7 +41,8 @@ for existing installations. See the
 [multi-account example](providers/shopee.md#local-setup).
 
 - `events_url` is the HTTPS message-batch receiver. Generated configurations
-  include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
+  provide the receiver URL; the Bridge does not require a particular path
+  layout.
 - `api_url` is the HTTPS account-scoped API base. The extension appends `/ping`
   for a signed API reachability check, `/tickets` for live tickets, and
   `/control` for browser coordination actions such as leader status, claim, and
@@ -62,7 +63,7 @@ for existing installations. See the
 The extension sends [`omnichat.message_batch` version 1](payload-contract.md):
 
 ```http
-POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
+POST <events_url>
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>

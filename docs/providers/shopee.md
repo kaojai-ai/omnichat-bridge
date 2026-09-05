@@ -151,17 +151,17 @@ particular internal URL layout.
     {
       "provider": "shopee",
       "provider_account_id": "shop-1",
-      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-1",
+      "events_url": "https://your-server.example.com/omnichat/events",
       "api_url": "https://your-server.example.com/omnichat/api",
-      "logs_url": "https://collector.example.com/omnichat/logs",
+      "logs_url": "https://your-server.example.com/omnichat/logs",
       "hmac_secret": "your-hmac-secret"
     },
     {
       "provider": "shopee",
       "provider_account_id": "shop-2",
-      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-2",
+      "events_url": "https://your-server.example.com/omnichat/events",
       "api_url": "https://your-server.example.com/omnichat/api",
-      "logs_url": "https://collector.example.com/omnichat/logs",
+      "logs_url": "https://your-server.example.com/omnichat/logs",
       "hmac_secret": "another-hmac-secret"
     }
   ]

@@ -1,6 +1,7 @@
 # Payload contract
 
-Provider adapters send `omnichat.message_batch` version 1 to:
+Provider adapters send `omnichat.message_batch` version 1 to the configured
+`events_url`.
 
 The envelope is provider-shaped and the delivery contract is provider-neutral.
 The current package ships the `shopee` adapter; other providers can use the
@@ -51,7 +52,7 @@ Version 2 remains supported for existing installations. It requires
 coordination endpoint from `commands_url`.
 
 ```http
-POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
+POST <events_url>
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -112,17 +113,18 @@ The UTF-8 HMAC secret signs:
 
 ```text
 POST
-/omnichat/events/{provider}/{tenant_id}/{provider_account_id}
+<request path from events_url>
 <timestamp>
 <nonce>
 <sha256-hex-of-exact-body>
 ```
 
-The server resolves the exact provider/tenant/provider-account route from the
-path, requires the path provider and account to match the signed payload and
-provider account ID header, rejects expired timestamps or reused nonces, and
-validates that the message participants match that account. The legacy
-`POST /omnichat/events` path remains available for older configurations.
+The target server owns URL routing and account lookup. The Bridge treats
+`events_url` as opaque and does not require a particular provider, tenant, or
+account path layout. The receiver validates the signed request against its own
+configuration, rejects expired timestamps or reused nonces, and validates that
+the message participants match the configured account. Existing installations
+continue using their previously configured endpoints.
 
 ## Acknowledgement
 
