@@ -140,6 +140,10 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
    replies. Shops without a matching configuration remain visible as
    **NEED CONFIG**.
 
+The `api_url` values below use a deployment-neutral placeholder. Replace them
+with the API base supplied by your server; the Bridge does not require a
+particular internal URL layout.
+
 ```json
 {
   "version": 3,
@@ -148,7 +152,7 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
       "provider": "shopee",
       "provider_account_id": "shop-1",
       "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-1",
-      "api_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1",
+      "api_url": "https://your-server.example.com/omnichat/api",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "your-hmac-secret"
     },
@@ -156,7 +160,7 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
       "provider": "shopee",
       "provider_account_id": "shop-2",
       "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-2",
-      "api_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-2",
+      "api_url": "https://your-server.example.com/omnichat/api",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "another-hmac-secret"
     }

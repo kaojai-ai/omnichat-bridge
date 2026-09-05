@@ -42,10 +42,10 @@ for existing installations. See the
 
 - `events_url` is the HTTPS message-batch receiver. Generated configurations
   include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
-- `api_url` is the HTTPS account-scoped API base. Generated configurations
-  include `/{provider}/{tenant_id}/{provider_account_id}` in this path. The
-  extension appends `/tickets` for live tickets and `/control` for browser
-  coordination actions such as leader status, claim, and release.
+- `api_url` is the HTTPS account-scoped API base. The extension appends
+  `/tickets` for live tickets and `/control` for browser coordination actions
+  such as leader status, claim, and release. Deployment-specific URL layout is
+  intentionally kept outside the Bridge contract.
 - `commands_url` is the deprecated v2 HTTPS ticket endpoint. Updated
   extensions continue to use it when importing a v2 configuration.
 - `control_url` is an optional compatibility endpoint for v2 or transitional
@@ -141,10 +141,11 @@ the browser, account, or conversation is unavailable.
 
 ### Ticket contract
 
-The extension authenticates the same provider account with HMAC:
+The extension authenticates the same provider account with HMAC. It sends the
+ticket request to `<api_url>/tickets`:
 
 ```http
-POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/tickets
+POST <api_url>/tickets
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -172,10 +173,9 @@ socket URL. The ticket expires after 60 seconds and is deleted when the
 WebSocket connects. Presence expires after two hours unless disconnect or
 stale-connection cleanup removes it earlier.
 
-Leader coordination uses the `/control` action derived from `api_url`, for
-example `POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/control`,
-with the same signed account identity. The unscoped ticket and leader paths
-remain available for older configurations during rollout.
+Leader coordination uses the `/control` action derived from `api_url`, with the
+same signed account identity. The legacy ticket and leader endpoints remain
+available for older configurations during rollout.
 
 ### WebSocket contracts
 
