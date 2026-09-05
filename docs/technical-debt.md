@@ -34,19 +34,22 @@ whole batch. This keeps provider discovery independent from collector outages.
 
 ### Extension configuration contract
 
-Configuration version 2 contains an `accounts` list. Each entry is uniquely
+Configuration version 3 contains an `accounts` list. Each entry is uniquely
 identified by `provider + provider_account_id` and owns its HMAC secret,
-inbound destination, and outbound destination. See the
+inbound destination, and account-scoped API base. Version 2 remains accepted
+for existing installations. See the
 [multi-account example](providers/shopee.md#local-setup).
 
 - `events_url` is the HTTPS message-batch receiver. Generated configurations
   include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
-- `commands_url` is the HTTPS command-channel endpoint. Generated
-  configurations include `/{provider}/{tenant_id}/{provider_account_id}`
-  before the terminal action, such as `/tickets`.
-- `control_url` is the optional HTTPS browser-coordination endpoint. Generated
-  configurations include `/{provider}/{tenant_id}/{provider_account_id}/control`.
-  It carries coordination actions such as leader status, claim, and release.
+- `api_url` is the HTTPS account-scoped API base. Generated configurations
+  include `/{provider}/{tenant_id}/{provider_account_id}` in this path. The
+  extension appends `/tickets` for live tickets and `/control` for browser
+  coordination actions such as leader status, claim, and release.
+- `commands_url` is the deprecated v2 HTTPS ticket endpoint. Updated
+  extensions continue to use it when importing a v2 configuration.
+- `control_url` is an optional compatibility endpoint for v2 or transitional
+  configurations. New configurations do not need it.
 - `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
 - The provider adapter owns any provider-specific configuration validation and
@@ -169,8 +172,8 @@ socket URL. The ticket expires after 60 seconds and is deleted when the
 WebSocket connects. Presence expires after two hours unless disconnect or
 stale-connection cleanup removes it earlier.
 
-Leader coordination uses the generated `control_url`, for example
-`POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/control`,
+Leader coordination uses the `/control` action derived from `api_url`, for
+example `POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/control`,
 with the same signed account identity. The unscoped ticket and leader paths
 remain available for older configurations during rollout.
 

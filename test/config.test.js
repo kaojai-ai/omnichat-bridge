@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { accountOrigins, validateConfigFile } from "../extension/lib/config.js";
 
-test("optional image and logs URLs are validated and included in requested origins", () => {
+test("accepts legacy v2 configurations with only commands_url", () => {
   const config = validateConfigFile({
     version: 2,
     accounts: [{
@@ -11,7 +11,6 @@ test("optional image and logs URLs are validated and included in requested origi
       provider_account_id: "123",
       events_url: "https://collector.example.com/omnichat/events",
       commands_url: "https://admin.example.com/omnichat/tickets",
-      control_url: "https://admin.example.com/omnichat/control",
       image_server_url: "https://images.example.com",
       logs_url: "https://logs.example.com/omnichat/logs",
       hmac_secret: "local-secret",
@@ -23,10 +22,49 @@ test("optional image and logs URLs are validated and included in requested origi
   assert.deepEqual(accountOrigins(config), [
     "https://collector.example.com/omnichat/events",
     "https://admin.example.com/omnichat/tickets",
-    "https://admin.example.com/omnichat/control",
     "https://images.example.com/",
     "https://logs.example.com/omnichat/logs",
   ]);
+});
+
+test("accepts v3 configurations with an account-scoped api_url and no commands_url", () => {
+  const config = validateConfigFile({
+    version: 3,
+    accounts: [{
+      provider: "shopee",
+      provider_account_id: "123",
+      events_url: "https://collector.example.com/omnichat/events/shopee/tenant-1/123",
+      api_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/123",
+      image_server_url: "https://images.example.com",
+      hmac_secret: "local-secret",
+    }],
+  });
+
+  assert.deepEqual(config.accounts[0], {
+    provider: "shopee",
+    provider_account_id: "123",
+    events_url: "https://collector.example.com/omnichat/events/shopee/tenant-1/123",
+    api_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/123",
+    image_server_url: "https://images.example.com/",
+    hmac_secret: "local-secret",
+  });
+  assert.deepEqual(accountOrigins(config), [
+    "https://collector.example.com/omnichat/events/shopee/tenant-1/123",
+    "https://admin.example.com/api/omnichat/shopee/tenant-1/123",
+    "https://images.example.com/",
+  ]);
+});
+
+test("v3 configurations require api_url", () => {
+  assert.throws(() => validateConfigFile({
+    version: 3,
+    accounts: [{
+      provider: "shopee",
+      provider_account_id: "123",
+      events_url: "https://collector.example.com/omnichat/events",
+      hmac_secret: "local-secret",
+    }],
+  }), /API URL must use HTTPS/);
 });
 
 test("image server URL must use HTTPS", () => {

@@ -798,15 +798,40 @@ async function sendTextByUiClick_WIP(message) {
 }
 
 function liveEndpoint(config) {
+  const api = apiEndpoint(config, "tickets");
+  if (api) return api;
   if (typeof config?.commands_url !== "string") return null;
-  const url = new URL(config.commands_url);
-  return url.protocol === "https:" ? url : null;
+  try {
+    const url = new URL(config.commands_url);
+    return url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function apiEndpoint(config, action) {
+  if (typeof config?.api_url !== "string") return null;
+  try {
+    const url = new URL(config.api_url);
+    if (url.protocol !== "https:") return null;
+    const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+    url.pathname = `${basePath}/${action}`;
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function controlEndpoint(config) {
-  if (typeof config?.control_url !== "string") return null;
-  const url = new URL(config.control_url);
-  return url.protocol === "https:" ? url : null;
+  if (typeof config?.control_url === "string") {
+    try {
+      const url = new URL(config.control_url);
+      if (url.protocol === "https:") return url;
+    } catch {
+      // Config validation reports malformed URLs before they reach the bridge.
+    }
+  }
+  return apiEndpoint(config, "control");
 }
 
 function leaderEndpoint(config) {

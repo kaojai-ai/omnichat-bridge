@@ -1,4 +1,5 @@
-export const CONFIG_VERSION = 2;
+export const CONFIG_VERSION = 3;
+const SUPPORTED_CONFIG_VERSIONS = new Set([2, CONFIG_VERSION]);
 const DEFAULT_PROVIDER = "shopee";
 
 function registeredProviderAdapter(provider) {
@@ -33,7 +34,7 @@ export function accountKey(provider, providerAccountId) {
   return `${provider}:${providerAccountId}`;
 }
 
-export function validateAccountConfig(value) {
+export function validateAccountConfig(value, version = CONFIG_VERSION) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Account configuration must be an object.");
   }
@@ -63,7 +64,6 @@ export function validateAccountConfig(value) {
   const provider_account_id = requiredString(value.provider_account_id, "Shop ID is required.");
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
-  const commands_url = secureUrl(value.commands_url, "https:", "Commands URL must use HTTPS.");
   const control_url = value.control_url === undefined || value.control_url === ""
     ? undefined
     : secureUrl(value.control_url, "https:", "Control URL must use HTTPS.");
@@ -73,6 +73,20 @@ export function validateAccountConfig(value) {
   const logs_url = value.logs_url === undefined || value.logs_url === ""
     ? undefined
     : secureUrl(value.logs_url, "https:", "Logs URL must use HTTPS.");
+  if (version === CONFIG_VERSION) {
+    const api_url = secureUrl(value.api_url, "https:", "API URL must use HTTPS.");
+    return {
+      provider,
+      provider_account_id,
+      events_url,
+      api_url,
+      ...(control_url ? { control_url } : {}),
+      ...(image_server_url ? { image_server_url } : {}),
+      ...(logs_url ? { logs_url } : {}),
+      hmac_secret,
+    };
+  }
+  const commands_url = secureUrl(value.commands_url, "https:", "Commands URL must use HTTPS.");
   return {
     provider,
     provider_account_id,
@@ -86,8 +100,9 @@ export function validateAccountConfig(value) {
 }
 
 export function validateConfigFile(value) {
-  if (value?.version !== CONFIG_VERSION || !Array.isArray(value.accounts)) {
-    throw new Error(`Configuration file must be version ${CONFIG_VERSION} with an accounts list.`);
+  const version = value?.version;
+  if (!SUPPORTED_CONFIG_VERSIONS.has(version) || !Array.isArray(value.accounts)) {
+    throw new Error(`Configuration file must be version 2 or ${CONFIG_VERSION} with an accounts list.`);
   }
   const accounts = value.accounts
     .filter((account) => {
@@ -95,10 +110,10 @@ export function validateConfigFile(value) {
       if (!Object.hasOwn(account, "provider") || typeof account.provider !== "string") return true;
       return isSupportedProvider(account.provider);
     })
-    .map(validateAccountConfig);
+    .map((account) => validateAccountConfig(account, version));
   const keys = accounts.map((account) => accountKey(account.provider, account.provider_account_id));
   if (new Set(keys).size !== keys.length) throw new Error("Configuration contains duplicate accounts.");
-  return { version: CONFIG_VERSION, accounts };
+  return { version, accounts };
 }
 
 export function findAccountConfig(config, detectedAccount) {
@@ -121,7 +136,7 @@ export function accountOrigins(config) {
     const adapter = registeredProviderAdapter(account.provider);
     const adapterUrls = typeof adapter?.configOrigins === "function"
       ? adapter.configOrigins(account)
-      : [account.events_url, account.commands_url, account.control_url, account.image_server_url, account.logs_url];
+      : [account.events_url, account.api_url, account.commands_url, account.control_url, account.image_server_url, account.logs_url];
     for (const url of Array.isArray(adapterUrls) ? adapterUrls : []) {
       if (typeof url !== "string" || !url.trim()) continue;
       let parsed;
