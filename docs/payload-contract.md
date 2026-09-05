@@ -1,6 +1,7 @@
 # Payload contract
 
-Provider adapters send `omnichat.message_batch` version 1 to:
+Provider adapters send `omnichat.message_batch` version 1 to the configured
+`events_url`.
 
 The envelope is provider-shaped and the delivery contract is provider-neutral.
 The current package ships the `shopee` adapter; other providers can use the
@@ -14,18 +15,44 @@ whose provider does not have a registered adapter. It still rejects malformed
 records and malformed accounts for a registered provider. Registered adapters
 own their provider-specific validation and requested server origins.
 
-For Shopee, version 3 requires `provider`, `provider_account_id`, `events_url`,
-`api_url`, and `hmac_secret`. `api_url` is the account-scoped HTTPS API base;
-the extension derives `/tickets` for live tickets and `/control` for browser
-coordination. `image_server_url` and `logs_url` are optional HTTPS endpoints.
+Version 3 requires every configured provider account to supply `provider`,
+`provider_account_id`, `events_url`, `api_url`, and `hmac_secret`. Provider
+adapters may require additional provider-specific fields. `api_url` is the
+account-scoped HTTPS API base; the extension derives `/ping` for a signed API
+reachability check, `/tickets` for live tickets, and `/control` for browser
+coordination. `image_server_url` and `logs_url` are optional where the
+provider adapter supports them.
+
+The API ping request is a signed `POST` with this body:
+
+```json
+{
+  "schema": "omnichat.ping",
+  "version": 1,
+  "provider": "shopee",
+  "installation_id": "22222222-2222-4222-8222-222222222222"
+}
+```
+
+The response is:
+
+```json
+{
+  "schema": "omnichat.ping_ack",
+  "version": 1,
+  "ok": true
+}
+```
+
+The ping is read-only and best-effort. A ping failure does not prevent the
+Bridge from forwarding provider events through `events_url`.
 
 Version 2 remains supported for existing installations. It requires
-`commands_url` instead of `api_url`; `control_url` is optional, and when it is
-absent the extension derives a compatible coordination endpoint from
-`commands_url`.
+`commands_url` instead of `api_url`; the extension derives a compatible
+coordination endpoint from `commands_url`.
 
 ```http
-POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
+POST <events_url>
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -86,17 +113,18 @@ The UTF-8 HMAC secret signs:
 
 ```text
 POST
-/omnichat/events/{provider}/{tenant_id}/{provider_account_id}
+<request path from events_url>
 <timestamp>
 <nonce>
 <sha256-hex-of-exact-body>
 ```
 
-The server resolves the exact provider/tenant/provider-account route from the
-path, requires the path provider and account to match the signed payload and
-provider account ID header, rejects expired timestamps or reused nonces, and
-validates that the message participants match that account. The legacy
-`POST /omnichat/events` path remains available for older configurations.
+The target server owns URL routing and account lookup. The Bridge treats
+`events_url` as opaque and does not require a particular provider, tenant, or
+account path layout. The receiver validates the signed request against its own
+configuration, rejects expired timestamps or reused nonces, and validates that
+the message participants match the configured account. Existing installations
+continue using their previously configured endpoints.
 
 ## Acknowledgement
 

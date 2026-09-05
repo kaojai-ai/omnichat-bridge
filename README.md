@@ -42,6 +42,16 @@ batches over HTTPS. For an optional live reply, your server wakes the connected
 extension over WebSocket; the extension types into the matching open
 conversation and immediately returns success or an error.
 
+For example, a self-hosted deployment may expose neutral endpoints such as:
+
+```text
+https://your-server.example.com/omnichat/events
+https://your-server.example.com/omnichat/api
+```
+
+These are examples only; configure the Bridge with the URLs supplied by your
+server.
+
 ## Demo video
 
 [![Watch the video](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)

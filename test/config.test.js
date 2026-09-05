@@ -11,6 +11,7 @@ test("accepts legacy v2 configurations with only commands_url", () => {
       provider_account_id: "123",
       events_url: "https://collector.example.com/omnichat/events",
       commands_url: "https://admin.example.com/omnichat/tickets",
+      control_url: "https://admin.example.com/omnichat/control",
       image_server_url: "https://images.example.com",
       logs_url: "https://logs.example.com/omnichat/logs",
       hmac_secret: "local-secret",
@@ -19,6 +20,7 @@ test("accepts legacy v2 configurations with only commands_url", () => {
 
   assert.equal(config.accounts[0].image_server_url, "https://images.example.com/");
   assert.equal(config.accounts[0].logs_url, "https://logs.example.com/omnichat/logs");
+  assert.equal(Object.hasOwn(config.accounts[0], "control_url"), false);
   assert.deepEqual(accountOrigins(config), [
     "https://collector.example.com/omnichat/events",
     "https://admin.example.com/omnichat/tickets",

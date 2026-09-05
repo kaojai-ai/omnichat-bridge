@@ -103,13 +103,14 @@
     sendCommands: [],
     matchesUrl: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     matchesPage: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
-    configOrigins: (account) => [account.events_url, account.logs_url],
+    configOrigins: (account) => [account.events_url, account.api_url, account.logs_url],
     validateConfig: (value, version = 3) => {
       if (version !== 3) throw new Error("LINE OA requires a version 3 configuration.");
       const providerAccountId = basicId(value?.provider_account_id);
       const eventsUrl = text(value?.events_url);
+      const apiUrl = text(value?.api_url);
       const hmacSecret = text(value?.hmac_secret);
-      if (!providerAccountId || !eventsUrl || !hmacSecret) throw new Error("LINE OA requires a valid basic ID, events_url, and hmac_secret.");
+      if (!providerAccountId || !eventsUrl || !apiUrl || !hmacSecret) throw new Error("LINE OA requires a valid basic ID, events_url, api_url, and hmac_secret.");
       let parsedEventsUrl;
       try { parsedEventsUrl = new URL(eventsUrl); } catch { throw new Error("Events URL must use HTTPS."); }
       if (parsedEventsUrl.protocol !== "https:") throw new Error("Events URL must use HTTPS.");
@@ -119,8 +120,9 @@
         events_url: parsedEventsUrl.toString(),
         hmac_secret: hmacSecret,
       };
-      for (const field of ["api_url", "control_url", "logs_url", "sync_key_url"]) {
+      for (const field of ["api_url", "logs_url", "sync_key_url"]) {
         const raw = text(value?.[field]);
+        if (!raw && field === "api_url") throw new Error("api_url must use HTTPS.");
         if (!raw) continue;
         let parsed;
         try { parsed = new URL(raw); } catch { throw new Error(`${field} must use HTTPS.`); }
