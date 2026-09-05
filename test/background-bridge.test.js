@@ -39,6 +39,33 @@ test("keeps connection status compatible with the server's strict version 1 enve
   assert.doesNotMatch(statusSource, /provider_realtime_transport:/);
 });
 
+test("derives v3 ticket and control endpoints and preserves v2 routes", () => {
+  const start = source.indexOf("function liveEndpoint(config)");
+  const end = source.indexOf("\n\nasync function signedLeaderRequest", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const getEndpoints = vm.runInNewContext(`(function() { ${source.slice(start, end)}; return { liveEndpoint, leaderEndpoint }; })()`, { URL });
+  const v3 = {
+    api_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1",
+  };
+  assert.equal(getEndpoints.liveEndpoint(v3).pathname, "/api/omnichat/shopee/tenant-1/shop-1/tickets");
+  assert.equal(getEndpoints.leaderEndpoint(v3).pathname, "/api/omnichat/shopee/tenant-1/shop-1/control");
+
+  const scoped = getEndpoints.leaderEndpoint({
+    commands_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/tickets",
+    control_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/control",
+  });
+  assert.equal(scoped.pathname, "/api/omnichat/shopee/tenant-1/shop-1/control");
+  const scopedFallback = getEndpoints.leaderEndpoint({
+    commands_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/tickets",
+  });
+  assert.equal(scopedFallback.pathname, "/api/omnichat/shopee/tenant-1/shop-1/control");
+  const legacy = getEndpoints.leaderEndpoint({
+    commands_url: "https://admin.example.com/api/omnichat/tickets",
+  });
+  assert.equal(legacy.pathname, "/api/omnichat/leader");
+});
+
 test("does not redeclare page bridge dependencies during reattachment", () => {
   assert.match(source, /hasUrl: Boolean\(globalThis\.OmnichatShopeeUrl\)/);
   assert.match(source, /hasProviderAdapter: Boolean\(globalThis\.OmnichatProviderAdapters\?\.get\?\.\(providerId\)\)/);

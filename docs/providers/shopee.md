@@ -26,10 +26,10 @@ Shopee surfaces while Shopee retires the legacy page:
 
 See the shared [`omnichat.message_batch` v1 contract](../payload-contract.md).
 
-The Bridge uses the shared version 2 configuration envelope. A configuration
-file may contain entries for other providers; this Shopee adapter ignores
-those entries and ignores fields it does not use. Shopee entries are still
-validated strictly for the required fields shown below.
+The Bridge uses the shared version 3 configuration envelope for new exports. A
+configuration file may contain entries for other providers; this Shopee
+adapter ignores those entries and ignores fields it does not use. Version 2
+configurations remain supported for existing installations.
 
 ```mermaid
 flowchart LR
@@ -140,23 +140,27 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
    replies. Shops without a matching configuration remain visible as
    **NEED CONFIG**.
 
+The `api_url` values below use a deployment-neutral placeholder. Replace them
+with the API base supplied by your server; the Bridge does not require a
+particular internal URL layout.
+
 ```json
 {
-  "version": 2,
+  "version": 3,
   "accounts": [
     {
       "provider": "shopee",
       "provider_account_id": "shop-1",
-      "events_url": "https://collector.example.com/omnichat/events",
-      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-1",
+      "api_url": "https://your-server.example.com/omnichat/api",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "your-hmac-secret"
     },
     {
       "provider": "shopee",
       "provider_account_id": "shop-2",
-      "events_url": "https://collector.example.com/omnichat/events",
-      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-2",
+      "api_url": "https://your-server.example.com/omnichat/api",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "another-hmac-secret"
     }

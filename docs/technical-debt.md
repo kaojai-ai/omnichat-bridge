@@ -34,13 +34,22 @@ whole batch. This keeps provider discovery independent from collector outages.
 
 ### Extension configuration contract
 
-Configuration version 2 contains an `accounts` list. Each entry is uniquely
+Configuration version 3 contains an `accounts` list. Each entry is uniquely
 identified by `provider + provider_account_id` and owns its HMAC secret,
-inbound destination, and outbound destination. See the
+inbound destination, and account-scoped API base. Version 2 remains accepted
+for existing installations. See the
 [multi-account example](providers/shopee.md#local-setup).
 
-- `events_url` is the HTTPS message-batch receiver.
-- `commands_url` is the HTTPS command-channel endpoint.
+- `events_url` is the HTTPS message-batch receiver. Generated configurations
+  include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
+- `api_url` is the HTTPS account-scoped API base. The extension appends
+  `/tickets` for live tickets and `/control` for browser coordination actions
+  such as leader status, claim, and release. Deployment-specific URL layout is
+  intentionally kept outside the Bridge contract.
+- `commands_url` is the deprecated v2 HTTPS ticket endpoint. Updated
+  extensions continue to use it when importing a v2 configuration.
+- `control_url` is an optional compatibility endpoint for v2 or transitional
+  configurations. New configurations do not need it.
 - `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
 - The provider adapter owns any provider-specific configuration validation and
@@ -54,7 +63,7 @@ inbound destination, and outbound destination. See the
 The extension sends [`omnichat.message_batch` version 1](payload-contract.md):
 
 ```http
-POST /omnichat/events
+POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -132,10 +141,11 @@ the browser, account, or conversation is unavailable.
 
 ### Ticket contract
 
-The extension authenticates the same provider account with HMAC:
+The extension authenticates the same provider account with HMAC. It sends the
+ticket request to `<api_url>/tickets`:
 
 ```http
-POST /api/omnichat/tickets
+POST <api_url>/tickets
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -158,10 +168,14 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
 }
 ```
 
-The target server owns the socket address, so an account needs only one
-outbound URL. The ticket expires after 60 seconds and is deleted when the
+The target server owns the socket address, so the ticket endpoint returns the
+socket URL. The ticket expires after 60 seconds and is deleted when the
 WebSocket connects. Presence expires after two hours unless disconnect or
 stale-connection cleanup removes it earlier.
+
+Leader coordination uses the `/control` action derived from `api_url`, with the
+same signed account identity. The legacy ticket and leader endpoints remain
+available for older configurations during rollout.
 
 ### WebSocket contracts
 
