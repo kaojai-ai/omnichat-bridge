@@ -11,6 +11,7 @@
   const knownChatIds = new Set();
   const knownMessageIdsByChat = new Map();
   const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
+  const basicIdFromPage = () => globalThis.OmnichatLineOA?.basicIdFromHtml?.() ?? "";
   const apiBase = "https://chat.line.biz/api";
   const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
@@ -174,16 +175,33 @@
     return providerAccountId ? { provider_account_id: providerAccountId, bot_id: botId } : null;
   }
 
+  function configuredAccountForPage(accountHints, basicId, botId) {
+    const normalizedHints = Array.isArray(accountHints) ? accountHints : [];
+    if (basicId) {
+      const directMatch = normalizedHints.find((hint) => value(hint?.provider_account_id) === basicId);
+      if (directMatch) return { provider_account_id: basicId };
+      const legacyMatch = configuredAccountForBot(normalizedHints, botId);
+      if (legacyMatch) return legacyMatch;
+      return { provider_account_id: basicId };
+    }
+    return configuredAccountForBot(normalizedHints, botId);
+  }
+
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
       const botId = botIdFromUrl();
-      const account = configuredAccountForBot(event.data.account_hints, botId);
+      const basicId = basicIdFromPage();
+      const account = configuredAccountForPage(event.data.account_hints, basicId, botId);
       if (!account) {
+        const hasLegacyBotMapping = Array.isArray(event.data.account_hints)
+          && event.data.account_hints.some((hint) => value(hint?.bot_id));
         post({
           type: "account_detection_failed",
           request_id: event.data.request_id,
-          error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+          error: !basicId && hasLegacyBotMapping
+            ? "LINE OA bot ID is not mapped to exactly one configured provider account."
+            : "LINE OA Basic ID was not found in the open page.",
         });
       } else {
         post({

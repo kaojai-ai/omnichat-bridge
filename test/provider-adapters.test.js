@@ -82,6 +82,64 @@ test("maps LINE OA bot IDs to configured provider accounts without exposing secr
   });
 });
 
+test("accepts new LINE OA configs without bot IDs and keeps the v2 requirement", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+
+  assert.deepEqual(plain(adapter.validateConfig({
+    provider: "line_oa",
+    provider_account_id: "@159nzygg",
+    events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
+    api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
+    hmac_secret: "secret-1",
+  }, 3)), {
+    provider: "line_oa",
+    provider_account_id: "@159nzygg",
+    events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
+    hmac_secret: "secret-1",
+  });
+
+  assert.deepEqual(plain(adapter.validateConfig({
+    provider: "line_oa",
+    provider_account_id: "channel-1",
+    bot_id: "bot-1",
+    events_url: "https://collector.example.com/events",
+    hmac_secret: "secret-1",
+  }, 2)), {
+    provider: "line_oa",
+    provider_account_id: "channel-1",
+    bot_id: "bot-1",
+    events_url: "https://collector.example.com/events",
+    hmac_secret: "secret-1",
+  });
+
+  assert.throws(() => adapter.validateConfig({
+    provider: "line_oa",
+    provider_account_id: "channel-1",
+    events_url: "https://collector.example.com/events",
+    hmac_secret: "secret-1",
+  }, 2), /LINE OA v2 requires bot_id/);
+});
+
+test("extracts a LINE OA Basic ID from the Manager link in page HTML", () => {
+  const context = vm.createContext({
+    URL,
+    document: {
+      documentElement: {
+        outerHTML: '<a href="https://manager.line.biz/account/@159nzygg">LINE Official Account</a>',
+      },
+    },
+  });
+  vm.runInContext(lineOaSource, context);
+
+  assert.equal(context.OmnichatLineOA.basicIdFromHtml(), "@159nzygg");
+  assert.equal(context.OmnichatLineOA.basicIdFromHtml(
+    '<a href="https://manager.line.biz/account/@159nzygg">LINE Official Account</a>',
+  ), "@159nzygg");
+  assert.equal(context.OmnichatLineOA.basicIdFromHtml(
+    '<a href="https://manager.line.biz/account/%40159nzygg">LINE Official Account</a>',
+  ), "@159nzygg");
+});
+
 test("extracts and merges Shopee accounts without treating user IDs as shop IDs", () => {
   const adapter = createRegistry().get("shopee");
   const accounts = adapter.accountsFromPayload({

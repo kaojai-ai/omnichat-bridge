@@ -2,6 +2,13 @@
   const record = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null;
   const text = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
   const id = (value) => typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+  const basicId = (value) => {
+    let normalized = id(value);
+    if (!normalized) return "";
+    try { normalized = decodeURIComponent(normalized); } catch { /* Keep the original value for validation. */ }
+    normalized = normalized.replace(/^@+/, "");
+    return /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(normalized) ? `@${normalized}` : "";
+  };
   const iso = (value, fallback) => {
     const date = new Date(Number(value));
     return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
@@ -61,13 +68,29 @@
     return results;
   }
 
+  function basicIdFromHtml(html) {
+    const source = typeof html === "string"
+      ? html
+      : typeof document !== "undefined"
+        ? document.documentElement?.outerHTML ?? ""
+        : "";
+    if (!source) return "";
+
+    const managerAccount = source.match(/manager\.line\.biz\/account\/(?:%40|@)([a-z0-9][a-z0-9._-]{0,63})/i);
+    const explicitBasicId = source.match(/(?:data-)?basic[_-]?id\s*[:=]\s*["'](@?[a-z0-9][a-z0-9._-]{0,63})["']/i);
+    const jsonBasicId = source.match(/["']basicId["']\s*:\s*["'](@?[a-z0-9][a-z0-9._-]{0,63})["']/i);
+    return basicId(managerAccount?.[1]) || basicId(explicitBasicId?.[1]) || basicId(jsonBasicId?.[1]);
+  }
+
   function accountDetectionHints(configuration) {
     const accounts = Array.isArray(configuration?.accounts) ? configuration.accounts : [];
     return accounts.flatMap((account) => {
       if (account?.provider !== "line_oa") return [];
       const providerAccountId = id(account.provider_account_id);
       const botId = id(account.bot_id);
-      return providerAccountId && botId ? [{ provider_account_id: providerAccountId, bot_id: botId }] : [];
+      return providerAccountId
+        ? [{ provider_account_id: providerAccountId, ...(botId ? { bot_id: botId } : {}) }]
+        : [];
     });
   }
 
@@ -82,7 +105,7 @@
     } : null;
   }
 
-  globalThis.OmnichatLineOA = { chatItems, normalizeMessages, accountDetectionHints, normalizeAccount };
+  globalThis.OmnichatLineOA = { chatItems, normalizeMessages, accountDetectionHints, normalizeAccount, basicIdFromHtml };
   globalThis.OmnichatProviderAdapters?.register({
     id: "line_oa",
     displayName: "LINE Official Account",
@@ -96,15 +119,22 @@
     matchesPage: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     configOrigins: (account) => [account.events_url, account.commands_url, account.logs_url],
     accountDetectionHints,
-    validateConfig: (value) => {
+    validateConfig: (value, version) => {
       const providerAccountId = id(value?.provider_account_id);
       const botId = id(value?.bot_id);
       const eventsUrl = text(value?.events_url);
       const hmacSecret = text(value?.hmac_secret);
-      if (!providerAccountId || !botId || !eventsUrl || !hmacSecret) throw new Error("LINE OA requires provider_account_id, bot_id, events_url, and hmac_secret.");
+      if (!providerAccountId || !eventsUrl || !hmacSecret) throw new Error("LINE OA requires provider_account_id, events_url, and hmac_secret.");
+      if (version === 2 && !botId) throw new Error("LINE OA v2 requires bot_id.");
       const parsed = new URL(eventsUrl);
       if (parsed.protocol !== "https:") throw new Error("Events URL must use HTTPS.");
-      return { provider: "line_oa", provider_account_id: providerAccountId, bot_id: botId, events_url: parsed.toString(), hmac_secret: hmacSecret };
+      return {
+        provider: "line_oa",
+        provider_account_id: providerAccountId,
+        events_url: parsed.toString(),
+        ...(botId ? { bot_id: botId } : {}),
+        hmac_secret: hmacSecret,
+      };
     },
     normalizeAccount,
     normalizeMessages: (body, captureMethod) => globalThis.OmnichatLineOA.normalizeMessages(body, captureMethod),
