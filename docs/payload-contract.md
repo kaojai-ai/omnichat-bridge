@@ -15,11 +15,12 @@ malformed accounts for a registered provider. Registered adapters own their
 provider-specific validation and requested server origins.
 
 For Shopee, `provider`, `provider_account_id`, `events_url`, `commands_url`,
-and `hmac_secret` remain required. `image_server_url` and `logs_url` are
-optional HTTPS endpoints.
+and `hmac_secret` remain required. `control_url`, `image_server_url`, and
+`logs_url` are optional HTTPS endpoints. Older configurations without
+`control_url` derive a compatible coordination endpoint from `commands_url`.
 
 ```http
-POST /omnichat/events
+POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -80,15 +81,17 @@ The UTF-8 HMAC secret signs:
 
 ```text
 POST
-/omnichat/events
+/omnichat/events/{provider}/{tenant_id}/{provider_account_id}
 <timestamp>
 <nonce>
 <sha256-hex-of-exact-body>
 ```
 
-The server resolves the secret from the provider account ID header, rejects
-expired timestamps or reused nonces, and validates that the payload provider
-and message participants match that account.
+The server resolves the exact provider/tenant/provider-account route from the
+path, requires the path provider and account to match the signed payload and
+provider account ID header, rejects expired timestamps or reused nonces, and
+validates that the message participants match that account. The legacy
+`POST /omnichat/events` path remains available for older configurations.
 
 ## Acknowledgement
 

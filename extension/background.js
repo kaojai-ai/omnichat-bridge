@@ -803,10 +803,20 @@ function liveEndpoint(config) {
   return url.protocol === "https:" ? url : null;
 }
 
+function controlEndpoint(config) {
+  if (typeof config?.control_url !== "string") return null;
+  const url = new URL(config.control_url);
+  return url.protocol === "https:" ? url : null;
+}
+
 function leaderEndpoint(config) {
+  const control = controlEndpoint(config);
+  if (control) return control;
   const url = liveEndpoint(config);
   if (!url) return null;
-  url.pathname = url.pathname.replace(/\/tickets$/, "/leader");
+  const pathSegments = url.pathname.split("/").filter(Boolean);
+  const fallbackPath = pathSegments.length >= 4 ? "/control" : "/leader";
+  url.pathname = url.pathname.replace(/\/tickets$/, fallbackPath);
   return url;
 }
 

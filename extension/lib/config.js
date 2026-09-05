@@ -64,6 +64,9 @@ export function validateAccountConfig(value) {
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
   const commands_url = secureUrl(value.commands_url, "https:", "Commands URL must use HTTPS.");
+  const control_url = value.control_url === undefined || value.control_url === ""
+    ? undefined
+    : secureUrl(value.control_url, "https:", "Control URL must use HTTPS.");
   const image_server_url = value.image_server_url === undefined || value.image_server_url === ""
     ? undefined
     : secureUrl(value.image_server_url, "https:", "Image server URL must use HTTPS.");
@@ -75,6 +78,7 @@ export function validateAccountConfig(value) {
     provider_account_id,
     events_url,
     commands_url,
+    ...(control_url ? { control_url } : {}),
     ...(image_server_url ? { image_server_url } : {}),
     ...(logs_url ? { logs_url } : {}),
     hmac_secret,
@@ -117,7 +121,7 @@ export function accountOrigins(config) {
     const adapter = registeredProviderAdapter(account.provider);
     const adapterUrls = typeof adapter?.configOrigins === "function"
       ? adapter.configOrigins(account)
-      : [account.events_url, account.commands_url, account.image_server_url, account.logs_url];
+      : [account.events_url, account.commands_url, account.control_url, account.image_server_url, account.logs_url];
     for (const url of Array.isArray(adapterUrls) ? adapterUrls : []) {
       if (typeof url !== "string" || !url.trim()) continue;
       let parsed;

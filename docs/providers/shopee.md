@@ -147,16 +147,18 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
     {
       "provider": "shopee",
       "provider_account_id": "shop-1",
-      "events_url": "https://collector.example.com/omnichat/events",
-      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-1",
+      "commands_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/tickets",
+      "control_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/control",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "your-hmac-secret"
     },
     {
       "provider": "shopee",
       "provider_account_id": "shop-2",
-      "events_url": "https://collector.example.com/omnichat/events",
-      "commands_url": "https://admin.example.com/api/omnichat/tickets",
+      "events_url": "https://collector.example.com/omnichat/events/shopee/tenant-1/shop-2",
+      "commands_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-2/tickets",
+      "control_url": "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-2/control",
       "logs_url": "https://collector.example.com/omnichat/logs",
       "hmac_secret": "another-hmac-secret"
     }

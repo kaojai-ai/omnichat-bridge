@@ -39,8 +39,14 @@ identified by `provider + provider_account_id` and owns its HMAC secret,
 inbound destination, and outbound destination. See the
 [multi-account example](providers/shopee.md#local-setup).
 
-- `events_url` is the HTTPS message-batch receiver.
-- `commands_url` is the HTTPS command-channel endpoint.
+- `events_url` is the HTTPS message-batch receiver. Generated configurations
+  include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
+- `commands_url` is the HTTPS command-channel endpoint. Generated
+  configurations include `/{provider}/{tenant_id}/{provider_account_id}`
+  before the terminal action, such as `/tickets`.
+- `control_url` is the optional HTTPS browser-coordination endpoint. Generated
+  configurations include `/{provider}/{tenant_id}/{provider_account_id}/control`.
+  It carries coordination actions such as leader status, claim, and release.
 - `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
 - The provider adapter owns any provider-specific configuration validation and
@@ -54,7 +60,7 @@ inbound destination, and outbound destination. See the
 The extension sends [`omnichat.message_batch` version 1](payload-contract.md):
 
 ```http
-POST /omnichat/events
+POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -135,7 +141,7 @@ the browser, account, or conversation is unavailable.
 The extension authenticates the same provider account with HMAC:
 
 ```http
-POST /api/omnichat/tickets
+POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/tickets
 Content-Type: application/json
 X-Omnichat-Provider-Account-Id: <provider account ID>
 X-Omnichat-Timestamp: <ISO 8601 timestamp>
@@ -158,10 +164,15 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
 }
 ```
 
-The target server owns the socket address, so an account needs only one
-outbound URL. The ticket expires after 60 seconds and is deleted when the
+The target server owns the socket address, so the ticket endpoint returns the
+socket URL. The ticket expires after 60 seconds and is deleted when the
 WebSocket connects. Presence expires after two hours unless disconnect or
 stale-connection cleanup removes it earlier.
+
+Leader coordination uses the generated `control_url`, for example
+`POST /api/omnichat/{provider}/{tenant_id}/{provider_account_id}/control`,
+with the same signed account identity. The unscoped ticket and leader paths
+remain available for older configurations during rollout.
 
 ### WebSocket contracts
 

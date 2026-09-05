@@ -11,6 +11,7 @@ test("optional image and logs URLs are validated and included in requested origi
       provider_account_id: "123",
       events_url: "https://collector.example.com/omnichat/events",
       commands_url: "https://admin.example.com/omnichat/tickets",
+      control_url: "https://admin.example.com/omnichat/control",
       image_server_url: "https://images.example.com",
       logs_url: "https://logs.example.com/omnichat/logs",
       hmac_secret: "local-secret",
@@ -22,6 +23,7 @@ test("optional image and logs URLs are validated and included in requested origi
   assert.deepEqual(accountOrigins(config), [
     "https://collector.example.com/omnichat/events",
     "https://admin.example.com/omnichat/tickets",
+    "https://admin.example.com/omnichat/control",
     "https://images.example.com/",
     "https://logs.example.com/omnichat/logs",
   ]);

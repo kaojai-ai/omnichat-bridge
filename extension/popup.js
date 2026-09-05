@@ -36,8 +36,9 @@ const sampleConfig = {
   accounts: [{
     provider: shopeeAdapter.id,
     provider_account_id: "123456789",
-    events_url: "https://your-server.example.com/omnichat/events",
-    commands_url: "https://your-server.example.com/omnichat/tickets",
+    events_url: "https://your-server.example.com/omnichat/events/shopee/tenant-id/provider-account-id",
+    commands_url: "https://your-server.example.com/api/omnichat/shopee/tenant-id/provider-account-id/tickets",
+    control_url: "https://your-server.example.com/api/omnichat/shopee/tenant-id/provider-account-id/control",
     image_server_url: "https://your-images.example.com",
     logs_url: "https://your-server.example.com/omnichat/logs",
     hmac_secret: "replace-with-your-secret",
