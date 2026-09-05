@@ -159,28 +159,14 @@ test("LINE OA maps the page Basic ID to the configured provider account", () => 
   });
 });
 
-test("LINE OA keeps mapping legacy bot IDs for old configurations", () => {
-  const bridge = createBridge();
-
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "line-oa-account-1", bot_id: "bot-1" }])), {
-    source: "omnichat-realtime-bridge-v3",
-    type: "accounts_detected",
-    request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "line-oa-account-1", bot_id: "bot-1" }],
-  });
-});
-
-test("LINE OA rejects missing or ambiguous bot mappings", () => {
+test("LINE OA rejects a page without a Basic ID", () => {
   const bridge = createBridge({ basicId: "" });
 
-  assert.deepEqual(plain(bridge.detect([
-    { provider_account_id: "line-oa-account-1", bot_id: "bot-1" },
-    { provider_account_id: "line-oa-account-2", bot_id: "bot-1" },
-  ])), {
+  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "account_detection_failed",
     request_id: "detect-1",
-    error: "LINE OA bot ID is not mapped to exactly one configured provider account.",
+    error: "LINE OA Basic ID was not found in the open page.",
   });
 });
 

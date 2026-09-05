@@ -166,42 +166,20 @@
     timer = setInterval(() => void poll(`poll:${crypto.randomUUID()}`, providerAccountId), 15_000);
   }
 
-  function configuredAccountForBot(accountHints, botId) {
-    if (!botId) return null;
-    const matches = (Array.isArray(accountHints) ? accountHints : [])
-      .filter((hint) => value(hint?.bot_id) === botId);
-    if (matches.length !== 1) return null;
-    const providerAccountId = value(matches[0]?.provider_account_id);
-    return providerAccountId ? { provider_account_id: providerAccountId, bot_id: botId } : null;
-  }
-
-  function configuredAccountForPage(accountHints, basicId, botId) {
-    const normalizedHints = Array.isArray(accountHints) ? accountHints : [];
-    if (basicId) {
-      const directMatch = normalizedHints.find((hint) => value(hint?.provider_account_id) === basicId);
-      if (directMatch) return { provider_account_id: basicId };
-      const legacyMatch = configuredAccountForBot(normalizedHints, botId);
-      if (legacyMatch) return legacyMatch;
-      return { provider_account_id: basicId };
-    }
-    return configuredAccountForBot(normalizedHints, botId);
+  function configuredAccountForPage(basicId) {
+    return basicId ? { provider_account_id: basicId } : null;
   }
 
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
-      const botId = botIdFromUrl();
       const basicId = basicIdFromPage();
-      const account = configuredAccountForPage(event.data.account_hints, basicId, botId);
+      const account = configuredAccountForPage(basicId);
       if (!account) {
-        const hasLegacyBotMapping = Array.isArray(event.data.account_hints)
-          && event.data.account_hints.some((hint) => value(hint?.bot_id));
         post({
           type: "account_detection_failed",
           request_id: event.data.request_id,
-          error: !basicId && hasLegacyBotMapping
-            ? "LINE OA bot ID is not mapped to exactly one configured provider account."
-            : "LINE OA Basic ID was not found in the open page.",
+          error: "LINE OA Basic ID was not found in the open page.",
         });
       } else {
         post({

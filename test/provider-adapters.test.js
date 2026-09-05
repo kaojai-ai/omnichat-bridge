@@ -61,63 +61,50 @@ test("allows a future provider to own config validation and page matching", () =
   assert.equal(registry.forPage("https://chat.line.biz/bot-1"), adapter);
 });
 
-test("maps LINE OA bot IDs to configured provider accounts without exposing secrets", () => {
+test("normalizes LINE OA Basic IDs without exposing secrets", () => {
   const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
 
-  assert.deepEqual(plain(adapter.accountDetectionHints({
-    accounts: [
-      { provider: "line_oa", provider_account_id: " channel-1 ", bot_id: " bot-1 ", hmac_secret: "secret-1" },
-      { provider: "shopee", provider_account_id: "shop-1", bot_id: "not-line" },
-      { provider: "line_oa", provider_account_id: "channel-2", bot_id: "bot-2", events_url: "https://events.example.com" },
-    ],
-  })), [
-    { provider_account_id: "channel-1", bot_id: "bot-1" },
-    { provider_account_id: "channel-2", bot_id: "bot-2" },
-  ]);
-  assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: "channel-1", bot_id: "bot-1" }, "2026-08-30T00:00:00.000Z")), {
+  assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " 159nzygg ", bot_id: "ignored" }, "2026-08-30T00:00:00.000Z")), {
     provider: "line_oa",
-    provider_account_id: "channel-1",
-    bot_id: "bot-1",
+    provider_account_id: "@159nzygg",
     detected_at: "2026-08-30T00:00:00.000Z",
   });
 });
 
-test("accepts new LINE OA configs without bot IDs and keeps the v2 requirement", () => {
+test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
   const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
 
   assert.deepEqual(plain(adapter.validateConfig({
     provider: "line_oa",
-    provider_account_id: "@159nzygg",
+    provider_account_id: " 159nzygg ",
+    tenant_id: " tenant-1 ",
+    user_id: " user-1 ",
     events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
     api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
+    control_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1/control",
+    logs_url: "https://logs.example.com/omnichat",
+    sync_key_url: "https://sync.example.com/v3",
     hmac_secret: "secret-1",
   }, 3)), {
     provider: "line_oa",
     provider_account_id: "@159nzygg",
+    tenant_id: "tenant-1",
+    user_id: "user-1",
     events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
-    hmac_secret: "secret-1",
-  });
-
-  assert.deepEqual(plain(adapter.validateConfig({
-    provider: "line_oa",
-    provider_account_id: "channel-1",
-    bot_id: "bot-1",
-    events_url: "https://collector.example.com/events",
-    hmac_secret: "secret-1",
-  }, 2)), {
-    provider: "line_oa",
-    provider_account_id: "channel-1",
-    bot_id: "bot-1",
-    events_url: "https://collector.example.com/events",
+    api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
+    control_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1/control",
+    logs_url: "https://logs.example.com/omnichat",
+    sync_key_url: "https://sync.example.com/v3",
     hmac_secret: "secret-1",
   });
 
   assert.throws(() => adapter.validateConfig({
     provider: "line_oa",
     provider_account_id: "channel-1",
+    bot_id: "bot-1",
     events_url: "https://collector.example.com/events",
     hmac_secret: "secret-1",
-  }, 2), /LINE OA v2 requires bot_id/);
+  }, 2), /LINE OA requires a version 3 configuration/);
 });
 
 test("extracts a LINE OA Basic ID from the Manager link in page HTML", () => {
