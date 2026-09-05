@@ -53,17 +53,57 @@ test("derives v3 ticket and control endpoints and preserves v2 routes", () => {
 
   const scoped = getEndpoints.leaderEndpoint({
     commands_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/tickets",
-    control_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/control",
   });
   assert.equal(scoped.pathname, "/api/omnichat/shopee/tenant-1/shop-1/control");
-  const scopedFallback = getEndpoints.leaderEndpoint({
-    commands_url: "https://admin.example.com/api/omnichat/shopee/tenant-1/shop-1/tickets",
-  });
-  assert.equal(scopedFallback.pathname, "/api/omnichat/shopee/tenant-1/shop-1/control");
   const legacy = getEndpoints.leaderEndpoint({
     commands_url: "https://admin.example.com/api/omnichat/tickets",
   });
   assert.equal(legacy.pathname, "/api/omnichat/leader");
+});
+
+test("only opens live command channels for adapters that declare send commands", () => {
+  assert.match(source, /function liveCommandContexts\(contexts\)/);
+  const start = source.indexOf("async function ensureLiveConnection()");
+  const end = source.indexOf("\n}\n\nasync function ensureAccountLiveConnection", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  assert.match(source.slice(start, end), /const contexts = liveCommandContexts\(configuredContexts\)/);
+});
+
+test("uses the account API base for a signed generic ping", () => {
+  assert.match(source, /async function signedApiPing\(context\)/);
+  assert.match(source, /apiEndpoint\(context\.config, "ping"\)/);
+  assert.match(source, /schema: "omnichat\.ping"/);
+  assert.match(source, /schema !== "omnichat\.ping_ack"/);
+  assert.match(source, /ensureApiPings\(pingContexts\)/);
+});
+
+test("keeps API pings periodic and bounds stalled requests", () => {
+  assert.match(source, /const API_PING_ALARM = "omnichat-api-ping"/);
+  assert.match(source, /const API_PING_INTERVAL_MINUTES = 5/);
+  assert.match(source, /const API_PING_TIMEOUT_MS = 15_000/);
+  assert.match(source, /periodInMinutes: API_PING_INTERVAL_MINUTES/);
+  assert.match(source, /async function pingConfiguredAccountApis\(\)/);
+  assert.match(source, /function apiPingContexts\(contexts\)/);
+  assert.match(source, /ensureApiPings\(contexts, \{ force: true \}\)/);
+  assert.match(source, /alarm\.name === API_PING_ALARM/);
+
+  const pingStart = source.indexOf("async function signedApiPing(context)");
+  const pingEnd = source.indexOf("\n}\n\nfunction pingAccountApi", pingStart);
+  assert.ok(pingStart >= 0);
+  assert.ok(pingEnd > pingStart);
+  const pingSource = source.slice(pingStart, pingEnd);
+  assert.match(pingSource, /new AbortController\(\)/);
+  assert.match(pingSource, /setTimeout\(\(\) => controller\.abort\(\), API_PING_TIMEOUT_MS\)/);
+  assert.match(pingSource, /signal: controller\.signal/);
+  assert.match(pingSource, /clearTimeout\(timeoutId\)/);
+
+  const attemptStart = source.indexOf("function pingAccountApi(context");
+  const attemptEnd = source.indexOf("\n}\n\nfunction ensureApiPings", attemptStart);
+  assert.ok(attemptStart >= 0);
+  assert.ok(attemptEnd > attemptStart);
+  assert.match(source.slice(attemptStart, attemptEnd), /\{ force = false \} = \{\}/);
+  assert.match(source.slice(attemptStart, attemptEnd), /!force && Date\.now\(\) - previous\.at < API_PING_COOLDOWN_MS/);
 });
 
 test("does not redeclare page bridge dependencies during reattachment", () => {

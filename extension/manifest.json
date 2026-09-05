@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Omnichat Bridge",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Syncs supported provider chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "scripting", "storage"],
   "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*"],

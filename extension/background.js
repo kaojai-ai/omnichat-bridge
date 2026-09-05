@@ -46,6 +46,10 @@ const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
+const API_PING_COOLDOWN_MS = 5 * 60_000;
+const API_PING_ALARM = "omnichat-api-ping";
+const API_PING_INTERVAL_MINUTES = 5;
+const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
 const PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000;
@@ -99,6 +103,7 @@ let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
 const liveConnections = new Map();
+const apiPingAttempts = new Map();
 const providerBridgeReinjections = new Map();
 const sellerCentreLandingStarts = new Map();
 
@@ -247,6 +252,10 @@ function configuredAccountContexts(stored) {
   return detectedAccounts(stored)
     .map((account) => accountContextFor(stored, account.provider_account_id, account.provider))
     .filter(Boolean);
+}
+
+function liveCommandContexts(contexts) {
+  return contexts.filter((context) => (context?.adapter?.sendCommands?.length ?? 0) > 0);
 }
 
 function messageProviderAccountId(message) {
@@ -822,20 +831,8 @@ function apiEndpoint(config, action) {
   }
 }
 
-function controlEndpoint(config) {
-  if (typeof config?.control_url === "string") {
-    try {
-      const url = new URL(config.control_url);
-      if (url.protocol === "https:") return url;
-    } catch {
-      // Config validation reports malformed URLs before they reach the bridge.
-    }
-  }
-  return apiEndpoint(config, "control");
-}
-
 function leaderEndpoint(config) {
-  const control = controlEndpoint(config);
+  const control = apiEndpoint(config, "control");
   if (control) return control;
   const url = liveEndpoint(config);
   if (!url) return null;
@@ -843,6 +840,109 @@ function leaderEndpoint(config) {
   const fallbackPath = pathSegments.length >= 4 ? "/control" : "/leader";
   url.pathname = url.pathname.replace(/\/tickets$/, fallbackPath);
   return url;
+}
+
+async function signedApiPing(context) {
+  const url = apiEndpoint(context.config, "ping");
+  if (!url) throw new Error("API endpoint is not configured.");
+  const body = JSON.stringify({
+    schema: "omnichat.ping",
+    version: 1,
+    provider: context.account.provider,
+    installation_id: await installationId(),
+  });
+  const timestamp = new Date().toISOString();
+  const nonce = crypto.randomUUID();
+  const bodyHash = await sha256Hex(body);
+  const signature = await hmacHex(context.config.hmac_secret, `POST\n${url.pathname}\n${timestamp}\n${nonce}\n${bodyHash}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_PING_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-omnichat-timestamp": timestamp,
+        "x-omnichat-nonce": nonce,
+        "x-omnichat-signature": signature,
+      },
+      body,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`API ping returned ${response.status}.`);
+    const result = await response.json();
+    if (result?.schema !== "omnichat.ping_ack" || result?.version !== 1 || result?.ok !== true) {
+      throw new Error("API ping returned an invalid acknowledgement.");
+    }
+    return result;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function pingAccountApi(context, { force = false } = {}) {
+  const url = apiEndpoint(context.config, "ping");
+  if (!url) return null;
+  const urlString = url.toString();
+  const previous = apiPingAttempts.get(context.key);
+  if (previous?.url === urlString
+    && (previous.promise || (!force && Date.now() - previous.at < API_PING_COOLDOWN_MS))) {
+    return previous.promise;
+  }
+  const details = {
+    provider: context.account.provider,
+    provider_account_id: context.account.provider_account_id,
+  };
+  const promise = signedApiPing(context)
+    .then(() => recordLog("debug", "api", "ping_succeeded", "Omnichat API ping succeeded.", details))
+    .catch((error) => recordUnexpected("api_ping", error, details))
+    .finally(() => {
+      const current = apiPingAttempts.get(context.key);
+      if (current?.promise === promise) {
+        apiPingAttempts.set(context.key, { url: urlString, at: Date.now(), promise: null });
+      }
+    });
+  apiPingAttempts.set(context.key, { url: urlString, at: Date.now(), promise });
+  return promise;
+}
+
+function ensureApiPings(contexts, options) {
+  for (const context of contexts) void pingAccountApi(context, options);
+}
+
+function apiPingContexts(contexts) {
+  return contexts.filter((context) => apiEndpoint(context.config, "ping"));
+}
+
+async function ensureApiPingAlarm(shouldRun) {
+  if (!shouldRun) {
+    await chrome.alarms.clear(API_PING_ALARM);
+    return;
+  }
+  const existing = await chrome.alarms.get(API_PING_ALARM);
+  if (Number(existing?.periodInMinutes) === API_PING_INTERVAL_MINUTES) return;
+  chrome.alarms.create(API_PING_ALARM, {
+    delayInMinutes: API_PING_INTERVAL_MINUTES,
+    periodInMinutes: API_PING_INTERVAL_MINUTES,
+  });
+}
+
+async function pingConfiguredAccountApis() {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+    STORAGE.serverInitialized,
+  ]);
+  const contexts = apiPingContexts(configuredAccountContexts(stored));
+  const shouldRun = contexts.length > 0
+    && hasServerInitialized(stored)
+    && hasLocalConsent(stored[STORAGE.consent]);
+  if (!shouldRun) {
+    await ensureApiPingAlarm(false);
+    return;
+  }
+  ensureApiPings(contexts, { force: true });
 }
 
 async function signedLeaderRequest(context, action) {
@@ -884,10 +984,11 @@ async function signedLeaderRequest(context, action) {
 
 async function getLiveState(providerAccountId, provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.serverInitialized]);
-  const contexts = providerAccountId
+  const configuredContexts = providerAccountId
     ? [accountContextFor(stored, providerAccountId, provider)].filter(Boolean)
     : configuredAccountContexts(stored);
-  if (!contexts.length) return { ok: false, error: "No configured provider accounts are detected." };
+  const contexts = liveCommandContexts(configuredContexts);
+  if (!contexts.length) return { ok: false, error: "No configured provider accounts support live commands." };
   const results = [];
   for (const context of contexts) {
     try {
@@ -917,8 +1018,8 @@ async function getLiveState(providerAccountId, provider = "") {
 
 async function claimLeader(tabId) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("Provider browser bridge is not configured.");
+  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) {
     await selectCommandTab(context, tabId);
@@ -929,8 +1030,8 @@ async function claimLeader(tabId) {
 
 async function releaseLeader() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("Provider browser bridge is not configured.");
+  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
   return results.at(-1) ?? { ok: true };
@@ -938,8 +1039,8 @@ async function releaseLeader() {
 
 async function openCommandTab() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const context = configuredAccountContexts(stored)[0];
-  if (!context) throw new Error("Provider browser bridge is not configured.");
+  const context = liveCommandContexts(configuredAccountContexts(stored))[0];
+  if (!context) throw new Error("No configured provider accounts support live commands.");
   const tab = await commandTab(context, { createIfMissing: true });
   if (!tab.id) throw new Error(`${providerLabel(context.adapter)} chat tab is unavailable.`);
   await chrome.tabs.update(tab.id, { active: true });
@@ -1082,14 +1183,24 @@ async function ensureLiveConnection() {
     STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
   ]);
-  const contexts = configuredAccountContexts(stored);
+  const configuredContexts = configuredAccountContexts(stored);
+  const pingContexts = apiPingContexts(configuredContexts);
+  const canPing = pingContexts.length > 0
+    && hasServerInitialized(stored)
+    && hasLocalConsent(stored[STORAGE.consent]);
+  await ensureApiPingAlarm(canPing);
+  if (canPing) {
+    ensureApiPings(pingContexts);
+  }
+  const contexts = liveCommandContexts(configuredContexts);
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
     || !contexts.length) {
     stopLiveConnection();
     void recordLog("debug", "live", "not_started", "Live connection is not ready.", {
       consented: hasLocalConsent(stored[STORAGE.consent]),
-      configured: contexts.length > 0,
+      configured: configuredContexts.length > 0,
+      live_capable: contexts.length > 0,
     });
     return;
   }
@@ -2811,7 +2922,9 @@ async function attemptAllDeliveries(options) {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === DELIVERY_RETRY_ALARM) {
+  if (alarm.name === API_PING_ALARM) {
+    void pingConfiguredAccountApis().catch((error) => recordUnexpected("api_ping_schedule", error));
+  } else if (alarm.name === DELIVERY_RETRY_ALARM) {
     void recordLog("info", "delivery", "retry_started", "Retrying queued message delivery.");
     void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
   } else if (alarm.name === LOG_UPLOAD_ALARM) {

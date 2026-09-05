@@ -14,15 +14,41 @@ whose provider does not have a registered adapter. It still rejects malformed
 records and malformed accounts for a registered provider. Registered adapters
 own their provider-specific validation and requested server origins.
 
-For Shopee, version 3 requires `provider`, `provider_account_id`, `events_url`,
-`api_url`, and `hmac_secret`. `api_url` is the account-scoped HTTPS API base;
-the extension derives `/tickets` for live tickets and `/control` for browser
-coordination. `image_server_url` and `logs_url` are optional HTTPS endpoints.
+Version 3 requires every configured provider account to supply `provider`,
+`provider_account_id`, `events_url`, `api_url`, and `hmac_secret`. Provider
+adapters may require additional provider-specific fields. `api_url` is the
+account-scoped HTTPS API base; the extension derives `/ping` for a signed API
+reachability check, `/tickets` for live tickets, and `/control` for browser
+coordination. `image_server_url` and `logs_url` are optional where the
+provider adapter supports them.
+
+The API ping request is a signed `POST` with this body:
+
+```json
+{
+  "schema": "omnichat.ping",
+  "version": 1,
+  "provider": "shopee",
+  "installation_id": "22222222-2222-4222-8222-222222222222"
+}
+```
+
+The response is:
+
+```json
+{
+  "schema": "omnichat.ping_ack",
+  "version": 1,
+  "ok": true
+}
+```
+
+The ping is read-only and best-effort. A ping failure does not prevent the
+Bridge from forwarding provider events through `events_url`.
 
 Version 2 remains supported for existing installations. It requires
-`commands_url` instead of `api_url`; `control_url` is optional, and when it is
-absent the extension derives a compatible coordination endpoint from
-`commands_url`.
+`commands_url` instead of `api_url`; the extension derives a compatible
+coordination endpoint from `commands_url`.
 
 ```http
 POST /omnichat/events/{provider}/{tenant_id}/{provider_account_id}

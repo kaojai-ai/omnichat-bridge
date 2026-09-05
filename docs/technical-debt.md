@@ -42,14 +42,13 @@ for existing installations. See the
 
 - `events_url` is the HTTPS message-batch receiver. Generated configurations
   include `/{provider}/{tenant_id}/{provider_account_id}` in this path.
-- `api_url` is the HTTPS account-scoped API base. The extension appends
-  `/tickets` for live tickets and `/control` for browser coordination actions
-  such as leader status, claim, and release. Deployment-specific URL layout is
-  intentionally kept outside the Bridge contract.
+- `api_url` is the HTTPS account-scoped API base. The extension appends `/ping`
+  for a signed API reachability check, `/tickets` for live tickets, and
+  `/control` for browser coordination actions such as leader status, claim, and
+  release. Deployment-specific URL layout is intentionally kept outside the
+  Bridge contract.
 - `commands_url` is the deprecated v2 HTTPS ticket endpoint. Updated
   extensions continue to use it when importing a v2 configuration.
-- `control_url` is an optional compatibility endpoint for v2 or transitional
-  configurations. New configurations do not need it.
 - `logs_url` is the optional HTTPS operational-log receiver.
 - The ticket response supplies the WSS browser-presence URL.
 - The provider adapter owns any provider-specific configuration validation and

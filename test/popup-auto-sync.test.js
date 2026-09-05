@@ -18,3 +18,10 @@ test("persists the landing preference and asks the active Seller Centre tab to a
   assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);
   assert.match(source, /type: "auto_open_chat_and_sync_v3"/);
 });
+
+test("loads the LINE adapter in the popup context", () => {
+  const providerRegistryImport = source.indexOf('import "./lib/provider-adapters.js";');
+  const lineAdapterImport = source.indexOf('import "./lib/line-oa.js";');
+  assert.ok(providerRegistryImport >= 0);
+  assert.ok(lineAdapterImport > providerRegistryImport);
+});

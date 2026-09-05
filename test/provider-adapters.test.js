@@ -92,7 +92,6 @@ test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
     user_id: "user-1",
     events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
     api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
-    control_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1/control",
     logs_url: "https://logs.example.com/omnichat",
     sync_key_url: "https://sync.example.com/v3",
     hmac_secret: "secret-1",
@@ -105,6 +104,26 @@ test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
     events_url: "https://collector.example.com/events",
     hmac_secret: "secret-1",
   }, 2), /LINE OA requires a version 3 configuration/);
+
+  assert.throws(() => adapter.validateConfig({
+    provider: "line_oa",
+    provider_account_id: "channel-1",
+    events_url: "https://collector.example.com/events",
+    hmac_secret: "secret-1",
+  }, 3), /api_url/);
+});
+
+test("requests the LINE API origin for the generic ping", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+  assert.deepEqual(plain(adapter.configOrigins({
+    events_url: "https://collector.example.com/events",
+    api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
+    logs_url: "https://logs.example.com/omnichat",
+  })), [
+    "https://collector.example.com/events",
+    "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
+    "https://logs.example.com/omnichat",
+  ]);
 });
 
 test("extracts a LINE OA Basic ID from the Manager link in page HTML", () => {
