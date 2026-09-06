@@ -589,7 +589,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "detect_account") {
-    void detectOpenProviderAccount(message?.provider || shopeeAdapter.id).then(
+    void detectOpenProviderAccount(message?.provider || shopeeAdapter.id, message?.tab_id).then(
       (result) => respond(result),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -1405,14 +1405,28 @@ async function reinitializeAfterUpgrade() {
   if (bridgesReady) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
 }
 
-async function detectOpenProviderAccount(provider = shopeeAdapter.id) {
+async function providerChatTabById(adapter, tabId) {
+  const id = Number(tabId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  try {
+    const tab = await chrome.tabs.get(id);
+    return tab?.id && adapter.matchesUrl(tab.url) ? tab : null;
+  } catch {
+    return null;
+  }
+}
+
+async function detectOpenProviderAccount(provider = shopeeAdapter.id, preferredTabId = null) {
   const adapter = providerAdapterForId(provider);
   if (!adapter) return { ok: false, error: `Unsupported provider: ${provider}.` };
   if (!adapter.supports("account_detection")) {
     return { ok: false, error: `${providerLabel(adapter)} does not support account detection.` };
   }
   const label = providerLabel(adapter);
-  const tab = await findReadyProviderChatTab(adapter) ?? await findProviderChatTab(adapter);
+  const hasPreferredTab = preferredTabId !== null && preferredTabId !== undefined;
+  const tab = hasPreferredTab
+    ? await providerChatTabById(adapter, preferredTabId)
+    : await findReadyProviderChatTab(adapter) ?? await findProviderChatTab(adapter);
   if (!tab) {
     await recordLog("warn", "account", "tab_missing", `${label} tab was not found.`, { provider: adapter.id });
     return { ok: false, error: `Open ${label} to detect the account ID.` };

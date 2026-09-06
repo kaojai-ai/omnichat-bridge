@@ -275,6 +275,9 @@ input:focus-visible {
 
 .provider-link:hover { background: var(--shopee-hover); }
 
+.provider-link-line { background: #06c755; }
+.provider-link-line:hover { background: #05a947; }
+
 .provider-link small {
   font-size: 10px;
   font-weight: 500;

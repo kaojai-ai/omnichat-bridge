@@ -588,7 +588,6 @@ function renderLogs() {
 async function refreshStoredState() {
   const stored = await readStorage([
     STORAGE.config,
-    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -598,9 +597,6 @@ async function refreshStoredState() {
     STORAGE.autoOpenSellerCentreChat,
   ]);
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
-    ? stored[STORAGE.detectedAccounts]
-    : [];
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -619,10 +615,12 @@ async function detectAccount() {
   try {
     const result = await chrome.runtime.sendMessage({
       type: "detect_account",
+      tab_id: popupTabId,
       ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
     });
     if (result?.ok) {
-      detectedAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+      detectedAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
+        .filter((account) => account?.provider === activeProviderAdapter?.id);
       renderDashboard();
       return true;
     }
@@ -709,7 +707,6 @@ async function load() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
-    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -721,9 +718,7 @@ async function load() {
   const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  detectedAccounts = Array.isArray(stored[STORAGE.detectedAccounts])
-    ? stored[STORAGE.detectedAccounts]
-    : [];
+  detectedAccounts = [];
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -754,7 +749,9 @@ async function load() {
   renderConsentScreen();
   renderDashboard();
   renderLogs();
-  if (consented) void detectAccount().catch((error) => reportPopupError("detect_account", error));
+  if (consented && isProviderChatTab) {
+    void detectAccount().catch((error) => reportPopupError("detect_account", error));
+  }
 }
 
 consentInput.addEventListener("change", () => {
