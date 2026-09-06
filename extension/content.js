@@ -658,7 +658,9 @@
     if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
       log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
+        request_id: message.request_id,
         provider_account_id: message.provider_account_id,
+        error_message: message.error ?? "Provider recovery failed.",
       });
       if (pending) {
         recoveries.delete(message.request_id);

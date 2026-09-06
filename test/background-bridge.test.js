@@ -153,6 +153,20 @@ test("resumes an interrupted sync after the service worker restarts", () => {
   assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
 });
 
+test("starts provider recovery with visible conversation progress", () => {
+  assert.match(source, /state: "syncing",\n      phase: "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);
+});
+
+test("correlates pending delivery failures to safe per-message batch diagnostics", () => {
+  assert.match(source, /batch_acknowledged/);
+  assert.match(source, /batch_blocked/);
+  assert.match(source, /message_blocked/);
+  assert.match(source, /queue_index/);
+  assert.match(source, /request_bytes/);
+  assert.match(source, /deliveryBatchDetails/);
+  assert.match(source, /accepted_messages: acknowledgedMessages/);
+});
+
 test("requires the local Seller Centre preference before an automatic landing sync", () => {
   assert.match(source, /message\?\.type === "auto_sync_now"/);
   assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);

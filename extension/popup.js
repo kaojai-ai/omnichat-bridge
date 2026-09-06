@@ -28,7 +28,7 @@ const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const SYNC_PHASE_LABELS = {
   preparing: "Preparing sync…",
   sending_pending: "Sending previously queued messages…",
-  loading_conversations: "Loading provider conversations…",
+  loading_conversations: "Starting conversation check…",
   checking_conversations: "Checking conversations for missed messages…",
   sending_recovered: "Sending recovered messages to your server…",
 };
@@ -480,11 +480,12 @@ function renderDashboard(message = "", isError = false) {
   if (progressState?.state === "syncing") {
     const completed = Number(progressState.completed_conversations) || 0;
     const total = Number(progressState.total_conversations) || 0;
-    const percentage = total ? Math.round((completed / total) * 100) : 0;
     syncProgress.hidden = false;
-    syncProgress.value = percentage;
+    syncProgress.value = total ? Math.round((completed / total) * 100) : 0;
     progressArea.hidden = false;
-    status.textContent = `Checking conversation ${completed} of ${total} · ${percentage}%`;
+    status.textContent = total
+      ? `Checking conversation ${completed} of ${total} · ${syncProgress.value}%`
+      : `Checking provider conversations… ${completed} checked`;
   } else if (progressState?.state === "discovering") {
     syncProgress.hidden = true;
     progressArea.hidden = false;

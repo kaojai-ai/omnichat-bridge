@@ -74,3 +74,29 @@ test("keeps useful raw exception details and message fingerprints", () => {
   assert.match(entry.details.error_stack, /Target server returned 403/);
   assert.equal(entry.details.message_fingerprint, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 });
+
+test("retains safe delivery correlation details without message content", () => {
+  const entry = createLogEntry({
+    area: "message_delivery",
+    event: "message_blocked",
+    details: {
+      provider: "line_oa",
+      batch_id: "11111111-1111-4111-8111-111111111111",
+      message_id: "message-1",
+      conversation_id: "conversation-1",
+      provider_type: "text",
+      type: "text",
+      has_text: true,
+      text_length: 42,
+      has_media: false,
+      request_bytes: 4096,
+      message_text: "do-not-store",
+    },
+  }, Date.parse("2026-07-26T00:00:00.000Z"), "log-delivery-correlation");
+
+  assert.equal(entry.details.provider, "line_oa");
+  assert.equal(entry.details.batch_id, "11111111-1111-4111-8111-111111111111");
+  assert.equal(entry.details.text_length, 42);
+  assert.equal(entry.details.request_bytes, 4096);
+  assert.equal(entry.details.message_text, undefined);
+});
