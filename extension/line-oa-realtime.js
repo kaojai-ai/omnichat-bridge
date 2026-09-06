@@ -37,6 +37,15 @@
     return timeMs(event?.timestamp ?? event?.message?.timestamp ?? event?.createdAt ?? event?.created_at);
   }
 
+  function latestEventTimeMs(chat) {
+    return timeMs(chat?.latestEvent?.timestamp);
+  }
+
+  function shouldRecoverChat(chat, checkpointMs) {
+    const latestEventMs = latestEventTimeMs(chat);
+    return checkpointMs <= 0 || latestEventMs <= 0 || latestEventMs >= checkpointMs;
+  }
+
   async function json(url) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const timeout = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS);
@@ -263,15 +272,17 @@
           if (!pollIsActive(generation)) return;
           const chatId = value(chat?.chatId);
           if (!chatId) continue;
-          const result = await recoverChat({
-            requestId,
-            providerAccountId,
-            botId,
-            chat,
-            generation,
-            maxMessages: bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
-            sinceMs: bootstrap ? 0 : checkpointMs,
-          });
+          const result = shouldRecoverChat(chat, checkpointMs)
+            ? await recoverChat({
+              requestId,
+              providerAccountId,
+              botId,
+              chat,
+              generation,
+              maxMessages: bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
+              sinceMs: bootstrap ? 0 : checkpointMs,
+            })
+            : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
           parsed += result.parsed;
           queued += result.queued;

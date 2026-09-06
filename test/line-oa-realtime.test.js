@@ -31,7 +31,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stopTimer\(\);/);
 });
 
-function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount = 2 } = {}) {
+function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -49,7 +49,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
         return {
           ok: true,
           json: async () => ({
-            list: chatId ? [{ chatId }] : [],
+            list: chatId ? [{
+              chatId,
+              ...(chatLatestEventTimestamps[chatId] !== undefined
+                ? { latestEvent: { type: "message", timestamp: chatLatestEventTimestamps[chatId] } }
+                : {}),
+            }] : [],
             ...(pageIndex + 1 < chatIds.length ? { next: `chat-page-${pageIndex + 2}` } : {}),
           }),
         };
@@ -74,7 +79,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-2/messages") {
-        return { ok: true, json: async () => ({ list: [{ id: "message-3", timestamp: 1200 }] }) };
+        return {
+          ok: true,
+          json: async () => ({
+            list: [{ id: "message-3", timestamp: chatLatestEventTimestamps["chat-2"] ?? 1200 }],
+          }),
+        };
       }
       if (url.pathname.startsWith("/api/v3/bots/bot-1/chats/") && url.pathname.endsWith("/messages")) {
         const chatId = url.pathname.split("/").at(-2);
@@ -316,6 +326,42 @@ test("LINE OA incremental recovery stops at the saved watermark", async () => {
       "/api/v3/bots/bot-1/chats/chat-1/messages?limit=100",
       "/api/v3/bots/bot-1/chats/chat-2/messages?limit=100",
     ].sort(),
+  );
+});
+
+test("LINE OA skips unchanged chats using latestEvent timestamp", async () => {
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1000, "chat-2": 3000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 1);
+  assert.deepEqual(
+    bridge.requests
+      .filter((url) => url.pathname.includes("/messages"))
+      .map((url) => `${url.pathname}?${url.searchParams}`),
+    ["/api/v3/bots/bot-1/chats/chat-2/messages?limit=100"],
+  );
+});
+
+test("LINE OA fetches when latestEvent timestamp equals the saved watermark", async () => {
+  const bridge = createBridge({
+    chatCount: 1,
+    chatLatestEventTimestamps: { "chat-1": 2000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(
+    bridge.requests.filter((url) => url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages").length,
+    1,
   );
 });
 
