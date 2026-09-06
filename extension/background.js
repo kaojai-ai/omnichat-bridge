@@ -41,6 +41,7 @@ const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
+const LINE_MAIN_BRIDGE_VERSION = "line-oa-poll-3";
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -314,6 +315,7 @@ async function getAccountScanState(providerAccountId, provider = "") {
     STORAGE.detectedAccounts,
     STORAGE.pending,
     STORAGE.scanState,
+    STORAGE.status,
     STORAGE.targetCursor,
     STORAGE.lastResumeSyncAt,
   ]);
@@ -339,6 +341,107 @@ async function getAccountScanState(providerAccountId, provider = "") {
   await writeStorage({ [STORAGE.scanState]: scanState });
   stored[STORAGE.scanState] = scanState;
   return { context, state, stored };
+}
+
+async function clearDeliveryRetryAlarmIfIdle() {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.detectedAccounts,
+    STORAGE.pending,
+  ]);
+  const hasPending = configuredAccountContexts(stored).some((context) => (
+    readAccountState(stored[STORAGE.pending], context.key, []).length > 0
+  ));
+  if (!hasPending) await clearDeliveryRetryAlarm();
+}
+
+async function discardPending(providerAccountId, provider = "") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+    STORAGE.pending,
+    STORAGE.scanState,
+    STORAGE.status,
+    STORAGE.deliveryRetry,
+  ]);
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    throw new Error("Provider browser bridge is not configured.");
+  }
+  const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+  const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+  if (scanState?.in_progress === true || ["discovering", "syncing"].includes(currentStatus.state)) {
+    throw new Error("Cancel sync before discarding pending messages.");
+  }
+  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+  const discarded = pending.length;
+  const discardedAt = new Date().toISOString();
+  const discardedAtMs = Date.parse(discardedAt);
+  const currentWatermarkMs = Date.parse(scanState?.watermark ?? "");
+  const discardWatermark = discarded > 0
+    ? Number.isFinite(currentWatermarkMs) && currentWatermarkMs > discardedAtMs
+      ? scanState.watermark
+      : discardedAt
+    : scanState?.watermark ?? null;
+  const nextScanState = discarded > 0
+    ? {
+      ...(scanState && typeof scanState === "object" ? scanState : {}),
+      version: 1,
+      watermark: discardWatermark,
+      conversations: scanState?.conversations ?? {},
+      bootstrap: null,
+      in_progress: false,
+      last_auto_at: scanState?.last_auto_at ?? null,
+      updated_at: discardedAt,
+    }
+    : scanState;
+  const nextStatus = {
+    ...currentStatus,
+    ...(discarded > 0
+      ? {
+        state: "watching",
+        phase: null,
+        caught_up: true,
+        sync_error: null,
+        sync_error_at: null,
+      }
+      : {}),
+    delivery_error: null,
+    delivery_error_at: null,
+    pending: 0,
+    ...(currentStatus.last_result
+      ? { last_result: { ...currentStatus.last_result, pending: 0 } }
+      : {}),
+  };
+  const writes = {
+    [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, []),
+    [STORAGE.deliveryRetry]: writeAccountState(
+      stored[STORAGE.deliveryRetry],
+      context.key,
+      { attempt: 0, next_at: null },
+    ),
+    [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, nextStatus),
+  };
+  if (nextScanState) {
+    writes[STORAGE.scanState] = writeAccountState(
+      stored[STORAGE.scanState],
+      context.key,
+      nextScanState,
+    );
+  }
+  await writeStorage(writes);
+  await clearDeliveryRetryAlarmIfIdle();
+  if (discarded) {
+    await recordLog("warn", "delivery", "discarded", "Pending messages discarded by user; sync watermark advanced.", {
+      provider: context.account.provider,
+      provider_account_id: context.account.provider_account_id,
+      discarded,
+      watermark: discardWatermark,
+      watermark_advanced: true,
+    });
+  }
+  return { discarded, pending: 0, watermark: discardWatermark };
 }
 
 async function writeAccountScanState(context, state, container = null) {
@@ -474,6 +577,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "discard_pending") {
+    void exclusive(() => discardPending(message.provider_account_id, message.provider)).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
   if (message?.type === "queue_messages") {
     void exclusive(() => queueMessages(
       message.messages,
@@ -487,6 +597,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "flush_now") {
     void exclusive(() => attemptAllDeliveries({ resetBackoff: true })).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "flush_pending") {
+    void exclusive(() => flushAccountPending(message.provider_account_id, message.provider)).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -1528,6 +1645,13 @@ async function ensureProviderBridge(tabId, adapter) {
       && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
       && response.bridge_source === BRIDGE_SOURCE,
     );
+    if (bridgeReady && adapter.id === "line_oa") {
+      try {
+        bridgeReady = (await providerMainBridgeStatus(tabId, adapter)).ready === true;
+      } catch {
+        bridgeReady = false;
+      }
+    }
     if (bridgeReady) {
       await recordLog("debug", "provider", "content_ready", `${label} content bridge is ready.`, {
         provider: adapter.id,
@@ -1546,6 +1670,13 @@ async function ensureProviderBridge(tabId, adapter) {
         && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
         && response.bridge_source === BRIDGE_SOURCE,
       );
+      if (bridgeReady && adapter.id === "line_oa") {
+        try {
+          bridgeReady = (await providerMainBridgeStatus(tabId, adapter)).ready === true;
+        } catch {
+          bridgeReady = false;
+        }
+      }
       if (bridgeReady) {
         await recordLog("info", "provider", "bridge_reinjected", `${label} content bridge was reattached without refreshing the page.`, {
           provider: adapter.id,
@@ -1644,12 +1775,14 @@ async function providerMainBridgeStatus(tabId, adapter) {
   const mainBridge = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [BRIDGE_SOURCE, adapter?.id],
-    func: (bridgeSource, providerId) => ({
+    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_VERSION],
+    func: (bridgeSource, providerId, lineBridgeVersion) => ({
       ready: Boolean(
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
-            && window.__omnichatLineOABridgeControl
+            && window.__omnichatLineOABridgeControl?.source === bridgeSource
+            && window.__omnichatLineOABridgeControl?.bridge_version === lineBridgeVersion
+            && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
           : globalThis.OmnichatShopeeUrl
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
@@ -1661,6 +1794,9 @@ async function providerMainBridgeStatus(tabId, adapter) {
       hasUrl: Boolean(globalThis.OmnichatShopeeUrl),
       hasAdapters: Boolean(globalThis.OmnichatProviderAdapters?.get),
       hasProviderAdapter: Boolean(globalThis.OmnichatProviderAdapters?.get?.(providerId)),
+      bridge_version: providerId === "line_oa"
+        ? window.__omnichatLineOABridgeControl?.bridge_version ?? null
+        : null,
     }),
   });
   return mainBridge?.[0]?.result ?? {};
@@ -2069,10 +2205,17 @@ async function runAccountSync(trigger, control, context) {
     throwIfSyncCancelled(signal);
     const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
+    const lastSyncAt = Date.parse(
+      readAccountState(stored[STORAGE.status], context.key, {}).last_sync_at ?? "",
+    );
+    const lastCompletedAt = Math.max(
+      Number.isFinite(lastAutoAt) ? lastAutoAt : 0,
+      Number.isFinite(lastSyncAt) ? lastSyncAt : 0,
+    );
     if (automatic
       && !state.in_progress
-      && Number.isFinite(lastAutoAt)
-      && Date.now() - lastAutoAt < RESUME_SYNC_COOLDOWN_MS) {
+      && lastCompletedAt > 0
+      && Date.now() - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS) {
       return { skipped: "cooldown" };
     }
     const startedAt = new Date().toISOString();
@@ -2116,7 +2259,10 @@ async function runAccountSync(trigger, control, context) {
     await attemptDelivery(context, { resetBackoff: true, signal });
     throwIfSyncCancelled(signal);
     await updateScopedState(STORAGE.status, context.key, {
-      phase: "loading_conversations",
+      state: "syncing",
+      phase: "checking_conversations",
+      completed_conversations: 0,
+      total_conversations: 0,
     });
     await recordLog("info", "sync", "provider_recovery", `Requesting missed messages from ${providerLabel(context.adapter)}.`, {
       provider: context.account.provider,
@@ -2662,9 +2808,10 @@ function messageReference(message) {
   return `${message.conversation_id}\u0000${message.id}`;
 }
 
-async function deliveryMessageDetails(context, message, index) {
+async function deliveryMessageDetails(context, message, index, extra = {}) {
   const details = {
     provider_account_id: context.account.provider_account_id,
+    provider: messageProvider(message),
     message_key: messageKey(message),
     message_id: messageIdentifier(message.id),
     conversation_id: messageIdentifier(message.conversation_id),
@@ -2673,6 +2820,10 @@ async function deliveryMessageDetails(context, message, index) {
     sender_account_id: messageIdentifier(message.sender_account_id),
     recipient_account_id: messageIdentifier(message.recipient_account_id),
     type: messageIdentifier(message.type),
+    provider_type: messageIdentifier(message.provider_type),
+    has_text: typeof message.text === "string" && message.text.length > 0,
+    text_length: typeof message.text === "string" ? message.text.length : 0,
+    has_media: typeof message.media_url === "string" && message.media_url.trim().length > 0,
     event_timestamp: messageIdentifier(message.event_timestamp),
     capture_method: messageIdentifier(message.capture_method),
     message_index: index + 1,
@@ -2682,7 +2833,7 @@ async function deliveryMessageDetails(context, message, index) {
   } catch {
     // The identifiers above are still useful if Web Crypto is unavailable.
   }
-  return details;
+  return { ...details, ...extra };
 }
 
 async function flushBatch(context, signal) {
@@ -2714,50 +2865,85 @@ async function flushBatch(context, signal) {
     });
     throw error;
   }
+  let acknowledgedMessages = 0;
+  let duplicateMessages = 0;
+  let skippedMessages = 0;
+  const deliveryBatchDetails = new WeakMap();
+  const skippedMessageDetails = new Map();
+  const batchDetailsFor = (error) => (
+    error && typeof error === "object" ? deliveryBatchDetails.get(error) ?? {} : {}
+  );
   const outcome = await deliverWithIsolation(
     selected,
     async (messages) => {
       const payload = batchFor(messages, installId);
-      if (JSON.stringify(payload).length > 1_000_000) {
-        const error = new Error("Queued batch exceeds the 1 MiB limit.");
-        error.server_error_code = "batch_too_large";
-        throw error;
-      }
-      const acknowledgement = await signedRequest(
-        context.config,
-        context.account.provider_account_id,
-        payload,
-        signal,
-      );
-      if (acknowledgement.schema !== "omnichat.message_batch_ack"
-        || acknowledgement.batch_id !== payload.batch_id
-        || !Number.isInteger(acknowledgement.accepted_messages)
-        || !Number.isInteger(acknowledgement.duplicate_messages)) {
-        throw new Error("Target server acknowledgement is invalid.");
-      }
-      const skippedMessages = Array.isArray(acknowledgement.skipped_messages)
-        ? acknowledgement.skipped_messages
-        : [];
-      const groupReferences = new Set(messages.map(messageReference));
-      const skippedByReference = new Map();
-      for (const skipped of skippedMessages) {
-        const reference = `${skipped?.conversation_id ?? ""}\u0000${skipped?.message_id ?? ""}`;
-        if (!skipped?.conversation_id
-          || !skipped?.message_id
-          || !groupReferences.has(reference)
-          || skippedByReference.has(reference)) {
+      const serializedPayload = JSON.stringify(payload);
+      const batchDetails = {
+        batch_id: payload.batch_id,
+        batch_size: messages.length,
+        conversation_count: payload.conversations.length,
+        request_bytes: serializedPayload.length,
+        pending_before: pending.length,
+      };
+      try {
+        if (serializedPayload.length > 1_000_000) {
+          const error = new Error("Queued batch exceeds the 1 MiB limit.");
+          error.server_error_code = "batch_too_large";
+          throw error;
+        }
+        const acknowledgement = await signedRequest(
+          context.config,
+          context.account.provider_account_id,
+          payload,
+          signal,
+        );
+        if (acknowledgement.schema !== "omnichat.message_batch_ack"
+          || acknowledgement.batch_id !== payload.batch_id
+          || !Number.isInteger(acknowledgement.accepted_messages)
+          || !Number.isInteger(acknowledgement.duplicate_messages)) {
           throw new Error("Target server acknowledgement is invalid.");
         }
-        skippedByReference.set(reference, skipped);
+        const skippedFromServer = Array.isArray(acknowledgement.skipped_messages)
+          ? acknowledgement.skipped_messages
+          : [];
+        const groupReferences = new Set(messages.map(messageReference));
+        const skippedByReference = new Map();
+        for (const skipped of skippedFromServer) {
+          const reference = `${skipped?.conversation_id ?? ""}\u0000${skipped?.message_id ?? ""}`;
+          if (!skipped?.conversation_id
+            || !skipped?.message_id
+            || !groupReferences.has(reference)
+            || skippedByReference.has(reference)) {
+            throw new Error("Target server acknowledgement is invalid.");
+          }
+          skippedByReference.set(reference, skipped);
+          skippedMessageDetails.set(reference, {
+            ...batchDetails,
+            server_error_code: messageIdentifier(skipped.reason) ?? "unknown_skip_reason",
+          });
+        }
+        if (acknowledgement.accepted_messages
+          + acknowledgement.duplicate_messages
+          + skippedFromServer.length !== messages.length) {
+          throw new Error("Target server acknowledgement is invalid.");
+        }
+        acknowledgedMessages += acknowledgement.accepted_messages;
+        duplicateMessages += acknowledgement.duplicate_messages;
+        skippedMessages += skippedFromServer.length;
+        await recordLog("debug", "delivery", "batch_acknowledged", "Target server acknowledged a queued message batch.", {
+          provider_account_id: context.account.provider_account_id,
+          ...batchDetails,
+          accepted_messages: acknowledgement.accepted_messages,
+          duplicate_messages: acknowledgement.duplicate_messages,
+          skipped_messages: skippedFromServer.length,
+        });
+        return {
+          skipped: messages.filter((message) => skippedByReference.has(messageReference(message))),
+        };
+      } catch (error) {
+        if (error && typeof error === "object") deliveryBatchDetails.set(error, batchDetails);
+        throw error;
       }
-      if (acknowledgement.accepted_messages
-        + acknowledgement.duplicate_messages
-        + skippedMessages.length !== messages.length) {
-        throw new Error("Target server acknowledgement is invalid.");
-      }
-      return {
-        skipped: messages.filter((message) => skippedByReference.has(messageReference(message))),
-      };
     },
     isMessageScopedDeliveryError,
   );
@@ -2782,30 +2968,70 @@ async function flushBatch(context, signal) {
     }),
   });
   for (const failed of outcome.failed) {
-    await recordUnexpected("message_delivery", failed.error, {
+    await recordLog("error", "message_delivery", "failed", "A queued message could not be delivered.", {
+      ...diagnosticErrorDetails(failed.error),
       ...(await deliveryMessageDetails(
         context,
         failed.message,
         selected.indexOf(failed.message),
+        {
+          queue_index: pending.indexOf(failed.message) + 1,
+          delivery_scope: "message",
+          ...batchDetailsFor(failed.error),
+        },
       )),
     });
   }
   for (const message of outcome.skipped) {
-    await recordLog("error", "message_delivery", "server_skipped", "Target server skipped a malformed message.", {
-      ...(await deliveryMessageDetails(context, message, selected.indexOf(message))),
-      server_error_code: "provider_account_not_participant",
+    await recordLog("error", "message_delivery", "server_skipped", "Target server skipped a queued message.", {
+      ...(await deliveryMessageDetails(
+        context,
+        message,
+        selected.indexOf(message),
+        {
+          queue_index: pending.indexOf(message) + 1,
+          delivery_scope: "server_skip",
+          ...(skippedMessageDetails.get(messageReference(message)) ?? {
+            server_error_code: "unknown_skip_reason",
+          }),
+        },
+      )),
     });
   }
   if (outcome.blocked) {
-    await recordUnexpected("message_delivery", outcome.blocked.error, {
-      provider_account_id: context.account.provider_account_id,
+    const batchDetails = {
       batch_size: outcome.blocked.messages.length,
+      pending_before: pending.length,
+      ...batchDetailsFor(outcome.blocked.error),
+    };
+    await recordLog("error", "message_delivery", "batch_blocked", "A queued message batch could not be delivered; its messages remain pending.", {
+      ...diagnosticErrorDetails(outcome.blocked.error),
+      provider_account_id: context.account.provider_account_id,
+      ...batchDetails,
     });
+    for (const message of outcome.blocked.messages) {
+      await recordLog("error", "message_delivery", "message_blocked", "A queued message remains pending because its batch failed.", {
+        ...diagnosticErrorDetails(outcome.blocked.error),
+        ...(await deliveryMessageDetails(
+          context,
+          message,
+          selected.indexOf(message),
+          {
+            queue_index: pending.indexOf(message) + 1,
+            delivery_scope: "batch",
+            ...batchDetails,
+          },
+        )),
+      });
+    }
   }
   if (outcome.delivered.length) {
     await recordLog("info", "delivery", "batch_sent", "Message batch accepted by target server.", {
       provider_account_id: context.account.provider_account_id,
       sent: outcome.delivered.length,
+      accepted_messages: acknowledgedMessages,
+      duplicate_messages: duplicateMessages,
+      skipped_messages: skippedMessages,
       pending: remaining.length,
     });
   }
@@ -2933,6 +3159,19 @@ async function attemptAllDeliveries(options) {
     pending,
     accounts: results.length,
   };
+}
+
+async function flushAccountPending(providerAccountId, provider = "") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+  ]);
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    throw new Error("Provider browser bridge is not configured.");
+  }
+  return attemptDelivery(context, { resetBackoff: false });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {

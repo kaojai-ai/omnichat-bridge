@@ -38,3 +38,11 @@ test("keeps manual sync scoped to every configured detected account", () => {
   assert.match(syncSource, /for \(const context of contexts\)/);
   assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
 });
+
+test("offers an account-scoped discard action beside pending messages", () => {
+  assert.match(popupSource, /className = "account-row-pending"/);
+  assert.match(popupSource, /type: "discard_pending"/);
+  assert.match(popupSource, /provider_account_id: providerAccountId/);
+  assert.match(popupSource, /skips older messages for this account and cannot be undone/);
+  assert.match(css, /\.discard-pending-link/);
+});

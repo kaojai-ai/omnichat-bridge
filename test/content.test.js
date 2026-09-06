@@ -188,6 +188,56 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("flushes pending messages when the recurring LINE-style poll completes", async () => {
+  const bridge = contentBridge();
+
+  await bridge.providerEvent({
+    type: "recovery_complete",
+    request_id: "poll:poll-1",
+    provider_account_id: "shop-1",
+    ok: true,
+    recovered: 0,
+    queued: 0,
+  });
+
+  const flush = bridge.runtimeMessages.find((message) => message.type === "flush_pending");
+  assert.deepEqual(plain(flush), {
+    type: "flush_pending",
+    provider: "shopee",
+    provider_account_id: "shop-1",
+  });
+});
+
+test("keeps historical recovery batches deferred until recovery completes", async () => {
+  const bridge = contentBridge();
+
+  await bridge.providerEvent({
+    type: "recovery_batch",
+    request_id: "sync-1:chat-1:0",
+    provider_account_id: "shop-1",
+    body: { messages: [echo] },
+  });
+
+  const queue = bridge.runtimeMessages.find((message) => message.type === "queue_messages");
+  assert.equal(queue?.flush, false);
+  assert.equal(queue?.advance_cursor, false);
+});
+
+test("flushes each recurring poll recovery batch immediately", async () => {
+  const bridge = contentBridge();
+
+  await bridge.providerEvent({
+    type: "recovery_batch",
+    request_id: "poll:poll-1:chat-1:0",
+    provider_account_id: "shop-1",
+    body: { messages: [echo] },
+  });
+
+  const queue = bridge.runtimeMessages.find((message) => message.type === "queue_messages");
+  assert.equal(queue?.flush, true);
+  assert.equal(queue?.advance_cursor, false);
+});
+
 test("keeps message-level buyer profile data when the conversation list profile is missing", async () => {
   const bridge = contentBridge("/portal/chat-management");
 

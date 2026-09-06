@@ -10,6 +10,7 @@ const RAW_ERROR_DETAIL_LIMITS = new Map([
 ]);
 const IDENTIFIER_DETAIL_KEYS = new Set([
   "category",
+  "batch_id",
   "server_error_code",
   "provider_account_id",
   "message_key",
@@ -90,7 +91,7 @@ export function diagnosticErrorDetails(error) {
 export function sanitizeLogDetails(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const details = {};
-  for (const [rawKey, rawValue] of Object.entries(value).slice(0, 20)) {
+  for (const [rawKey, rawValue] of Object.entries(value).slice(0, 32)) {
     const key = safeName(rawKey, "");
     if (!key || BLOCKED_DETAIL_KEY.test(key)) continue;
     if (IDENTIFIER_DETAIL_KEYS.has(key) && typeof rawValue === "string") {

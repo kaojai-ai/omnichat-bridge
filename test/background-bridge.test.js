@@ -153,6 +153,48 @@ test("resumes an interrupted sync after the service worker restarts", () => {
   assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
 });
 
+test("starts provider recovery with visible conversation progress", () => {
+  assert.match(source, /state: "syncing",\n      phase: "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);
+});
+
+test("cooldown also covers a successful manual sync before lifecycle resume", () => {
+  assert.match(source, /STORAGE\.status,/);
+  assert.match(source, /const lastSyncAt = Date\.parse\([\s\S]*last_sync_at/);
+  assert.match(source, /const lastCompletedAt = Math\.max\(/);
+  assert.match(source, /Number\.isFinite\(lastSyncAt\) \? lastSyncAt : 0/);
+  assert.match(source, /Date\.now\(\) - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS/);
+});
+
+test("discards pending messages only for the selected configured account", () => {
+  assert.match(source, /async function discardPending\(providerAccountId, provider = ""\)/);
+  assert.match(source, /message\?\.type === "discard_pending"/);
+  assert.match(source, /exclusive\(\(\) => discardPending\(message\.provider_account_id, message\.provider\)\)/);
+  assert.match(source, /\[STORAGE\.pending\]: writeAccountState\(stored\[STORAGE\.pending\], context\.key, \[\]\)/);
+  assert.match(source, /watermark: discardWatermark/);
+  assert.match(source, /bootstrap: null/);
+  assert.match(source, /caught_up: true/);
+  assert.match(source, /sync_error: null/);
+  assert.match(source, /Cancel sync before discarding pending messages\./);
+  assert.match(source, /clearDeliveryRetryAlarmIfIdle\(\)/);
+});
+
+test("flushes automatic poll delivery for one provider account", () => {
+  assert.match(source, /message\?\.type === "flush_pending"/);
+  assert.match(source, /exclusive\(\(\) => flushAccountPending\(message\.provider_account_id, message\.provider\)\)/);
+  assert.match(source, /async function flushAccountPending\(providerAccountId, provider = ""\)/);
+  assert.match(source, /return attemptDelivery\(context, \{ resetBackoff: false \}\)/);
+});
+
+test("correlates pending delivery failures to safe per-message batch diagnostics", () => {
+  assert.match(source, /batch_acknowledged/);
+  assert.match(source, /batch_blocked/);
+  assert.match(source, /message_blocked/);
+  assert.match(source, /queue_index/);
+  assert.match(source, /request_bytes/);
+  assert.match(source, /deliveryBatchDetails/);
+  assert.match(source, /accepted_messages: acknowledgedMessages/);
+});
+
 test("requires the local Seller Centre preference before an automatic landing sync", () => {
   assert.match(source, /message\?\.type === "auto_sync_now"/);
   assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);

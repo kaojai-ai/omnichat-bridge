@@ -492,6 +492,7 @@
 
   async function handleRecoveryBatch(message) {
     touchRecovery(message.request_id);
+    const automaticPoll = String(message.request_id).startsWith("poll:");
     try {
       const messages = addConversationProfile(
         normalizedMessages(message.body, "history_recovery")
@@ -504,7 +505,7 @@
       const result = await sendRuntimeMessage({
         type: "queue_messages",
         messages,
-        flush: false,
+        flush: automaticPoll,
         advance_cursor: false,
       });
       post({
@@ -654,11 +655,27 @@
   }
 
   async function handleRecoveryComplete(message) {
+    const automaticPoll = String(message.request_id).startsWith("poll:");
+    if (automaticPoll && message.provider_account_id) {
+      const delivery = await sendRuntimeMessage({
+        type: "flush_pending",
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
+      });
+      if (!delivery?.ok) {
+        log("error", "async_error", delivery?.error ?? "Automatic poll delivery flush failed.", {
+          provider_account_id: message.provider_account_id,
+          scope: "automatic_poll_delivery",
+        });
+      }
+    }
     const pending = recoveries.get(message.request_id);
     if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
       log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
+        request_id: message.request_id,
         provider_account_id: message.provider_account_id,
+        error_message: message.error ?? "Provider recovery failed.",
       });
       if (pending) {
         recoveries.delete(message.request_id);
