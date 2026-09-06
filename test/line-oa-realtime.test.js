@@ -96,20 +96,31 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
     },
     postMessage(message) {
       posts.push(message);
-      if (message.type !== "recovery_batch") return;
+      if (!["recovery_batch", "recovery_cursor"].includes(message.type)) return;
       queueMicrotask(() => {
+        const response = {
+          source: "omnichat-realtime-bridge-v3",
+          type: "recovery_ack_v3",
+          request_id: message.request_id,
+          ok: true,
+        };
+        if (message.type === "recovery_batch") {
+          const messages = message.body.conversations[0].messages;
+          const latest = messages.at(-1);
+          response.parsed = messages.length;
+          response.queued = 1;
+          response.latest_cursor = latest
+            ? {
+              event_timestamp: new Date(Number(latest.timestamp)).toISOString(),
+              message_id: String(latest.id),
+            }
+            : null;
+        }
         for (const listener of listeners) {
           listener({
             source: window,
             origin,
-            data: {
-              source: "omnichat-realtime-bridge-v3",
-              type: "recovery_ack_v3",
-              request_id: message.request_id,
-              ok: true,
-              parsed: message.body.conversations[0].messages.length,
-              queued: 1,
-            },
+            data: response,
           });
         }
       });
@@ -239,6 +250,20 @@ test("LINE OA recovers every chat and message page only after each page is ackno
       "/api/v3/bots/bot-1/chats/chat-2/messages?limit=25",
     ].sort(),
   );
+});
+
+test("LINE OA saves a per-conversation cursor after each persisted message page", async () => {
+  const bridge = createBridge();
+
+  await bridge.sync();
+
+  const cursors = bridge.posts.filter((post) => post.type === "recovery_cursor");
+  assert.equal(cursors.length, 3);
+  assert.deepEqual(
+    cursors.map((post) => post.conversation_id),
+    ["chat-1", "chat-1", "chat-2"],
+  );
+  assert.ok(cursors.every((post) => post.cursor?.event_timestamp && post.cursor?.message_id));
 });
 
 test("LINE OA first setup stops after ten conversations", async () => {

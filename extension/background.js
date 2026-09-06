@@ -315,6 +315,7 @@ async function getAccountScanState(providerAccountId, provider = "") {
     STORAGE.detectedAccounts,
     STORAGE.pending,
     STORAGE.scanState,
+    STORAGE.status,
     STORAGE.targetCursor,
     STORAGE.lastResumeSyncAt,
   ]);
@@ -340,6 +341,107 @@ async function getAccountScanState(providerAccountId, provider = "") {
   await writeStorage({ [STORAGE.scanState]: scanState });
   stored[STORAGE.scanState] = scanState;
   return { context, state, stored };
+}
+
+async function clearDeliveryRetryAlarmIfIdle() {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.detectedAccounts,
+    STORAGE.pending,
+  ]);
+  const hasPending = configuredAccountContexts(stored).some((context) => (
+    readAccountState(stored[STORAGE.pending], context.key, []).length > 0
+  ));
+  if (!hasPending) await clearDeliveryRetryAlarm();
+}
+
+async function discardPending(providerAccountId, provider = "") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+    STORAGE.pending,
+    STORAGE.scanState,
+    STORAGE.status,
+    STORAGE.deliveryRetry,
+  ]);
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    throw new Error("Provider browser bridge is not configured.");
+  }
+  const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+  const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+  if (scanState?.in_progress === true || ["discovering", "syncing"].includes(currentStatus.state)) {
+    throw new Error("Cancel sync before discarding pending messages.");
+  }
+  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+  const discarded = pending.length;
+  const discardedAt = new Date().toISOString();
+  const discardedAtMs = Date.parse(discardedAt);
+  const currentWatermarkMs = Date.parse(scanState?.watermark ?? "");
+  const discardWatermark = discarded > 0
+    ? Number.isFinite(currentWatermarkMs) && currentWatermarkMs > discardedAtMs
+      ? scanState.watermark
+      : discardedAt
+    : scanState?.watermark ?? null;
+  const nextScanState = discarded > 0
+    ? {
+      ...(scanState && typeof scanState === "object" ? scanState : {}),
+      version: 1,
+      watermark: discardWatermark,
+      conversations: scanState?.conversations ?? {},
+      bootstrap: null,
+      in_progress: false,
+      last_auto_at: scanState?.last_auto_at ?? null,
+      updated_at: discardedAt,
+    }
+    : scanState;
+  const nextStatus = {
+    ...currentStatus,
+    ...(discarded > 0
+      ? {
+        state: "watching",
+        phase: null,
+        caught_up: true,
+        sync_error: null,
+        sync_error_at: null,
+      }
+      : {}),
+    delivery_error: null,
+    delivery_error_at: null,
+    pending: 0,
+    ...(currentStatus.last_result
+      ? { last_result: { ...currentStatus.last_result, pending: 0 } }
+      : {}),
+  };
+  const writes = {
+    [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, []),
+    [STORAGE.deliveryRetry]: writeAccountState(
+      stored[STORAGE.deliveryRetry],
+      context.key,
+      { attempt: 0, next_at: null },
+    ),
+    [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, nextStatus),
+  };
+  if (nextScanState) {
+    writes[STORAGE.scanState] = writeAccountState(
+      stored[STORAGE.scanState],
+      context.key,
+      nextScanState,
+    );
+  }
+  await writeStorage(writes);
+  await clearDeliveryRetryAlarmIfIdle();
+  if (discarded) {
+    await recordLog("warn", "delivery", "discarded", "Pending messages discarded by user; sync watermark advanced.", {
+      provider: context.account.provider,
+      provider_account_id: context.account.provider_account_id,
+      discarded,
+      watermark: discardWatermark,
+      watermark_advanced: true,
+    });
+  }
+  return { discarded, pending: 0, watermark: discardWatermark };
 }
 
 async function writeAccountScanState(context, state, container = null) {
@@ -475,6 +577,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "discard_pending") {
+    void exclusive(() => discardPending(message.provider_account_id, message.provider)).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
   if (message?.type === "queue_messages") {
     void exclusive(() => queueMessages(
       message.messages,
@@ -488,6 +597,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "flush_now") {
     void exclusive(() => attemptAllDeliveries({ resetBackoff: true })).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "flush_pending") {
+    void exclusive(() => flushAccountPending(message.provider_account_id, message.provider)).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -2089,10 +2205,17 @@ async function runAccountSync(trigger, control, context) {
     throwIfSyncCancelled(signal);
     const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
+    const lastSyncAt = Date.parse(
+      readAccountState(stored[STORAGE.status], context.key, {}).last_sync_at ?? "",
+    );
+    const lastCompletedAt = Math.max(
+      Number.isFinite(lastAutoAt) ? lastAutoAt : 0,
+      Number.isFinite(lastSyncAt) ? lastSyncAt : 0,
+    );
     if (automatic
       && !state.in_progress
-      && Number.isFinite(lastAutoAt)
-      && Date.now() - lastAutoAt < RESUME_SYNC_COOLDOWN_MS) {
+      && lastCompletedAt > 0
+      && Date.now() - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS) {
       return { skipped: "cooldown" };
     }
     const startedAt = new Date().toISOString();
@@ -3036,6 +3159,19 @@ async function attemptAllDeliveries(options) {
     pending,
     accounts: results.length,
   };
+}
+
+async function flushAccountPending(providerAccountId, provider = "") {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+  ]);
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+    throw new Error("Provider browser bridge is not configured.");
+  }
+  return attemptDelivery(context, { resetBackoff: false });
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {

@@ -512,6 +512,35 @@ input[type="checkbox"] {
   outline-offset: 2px;
 }
 
+.account-row-pending {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 10px;
+  gap: 6px;
+}
+
+.discard-pending-link {
+  background: transparent;
+  border: 0;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 650;
+  min-height: auto;
+  padding: 0;
+}
+
+.discard-pending-link:hover {
+  background: transparent;
+  color: #912018;
+  text-decoration: underline;
+}
+
+.discard-pending-link:disabled {
+  background: transparent;
+  color: var(--muted);
+}
+
 .account-row-id {
   align-items: center;
   background: #e9fbf8;

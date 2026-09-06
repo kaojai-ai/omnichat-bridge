@@ -329,6 +329,31 @@ function createCopyIcon() {
   return icon;
 }
 
+async function discardPending(account, button, count) {
+  const adapter = adapterForAccount(account);
+  const providerAccountId = String(account?.provider_account_id ?? "").trim();
+  const label = accountLabel(adapter);
+  if (!providerAccountId || !count) return;
+  if (!confirm(`Discard ${count} pending message${count === 1 ? "" : "s"} for ${label}? This skips older messages for this account and cannot be undone.`)) return;
+  button.disabled = true;
+  button.textContent = "Discarding…";
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "discard_pending",
+      provider: account.provider,
+      provider_account_id: providerAccountId,
+    });
+    if (!result?.ok) throw new Error(result?.error ?? "Could not discard pending messages.");
+    await refreshStoredState();
+    const reportedCount = Number(result.discarded);
+    const discarded = Number.isFinite(reportedCount) ? reportedCount : count;
+    renderDashboard(`Discarded ${discarded} pending message${discarded === 1 ? "" : "s"}.`);
+  } catch (error) {
+    reportPopupError("discard_pending", error);
+    renderDashboard(error.message, true);
+  }
+}
+
 function renderDetectedAccounts() {
   const accounts = detectedAccounts.filter((account) => (
     adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
@@ -385,6 +410,32 @@ function renderDetectedAccounts() {
     shopIdValue.textContent = id;
     shopId.append(shopIdValue, createCopyIcon());
     shopId.addEventListener("click", () => void copyProviderAccountId(id, label, shopId, shopIdValue));
+    const pending = readAccountState(pendingStates, accountConfigKey(account), []);
+    if (pending.length) {
+      const pendingRow = document.createElement("div");
+      pendingRow.className = "account-row-pending";
+      const pendingLabel = document.createElement("span");
+      pendingLabel.textContent = `${pending.length} pending`;
+      const discardButton = document.createElement("button");
+      discardButton.type = "button";
+      discardButton.className = "discard-pending-link";
+      discardButton.textContent = "Discard";
+      discardButton.setAttribute(
+        "aria-label",
+        `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
+      );
+      const accountSyncState = readAccountState(storedStatus, accountConfigKey(account), null);
+      const accountScanState = readAccountState(scanStates, accountConfigKey(account), null);
+      const syncInProgress = accountScanState?.in_progress === true
+        || ["discovering", "syncing"].includes(accountSyncState?.state);
+      discardButton.disabled = syncInProgress;
+      discardButton.title = syncInProgress
+        ? "Cancel sync before discarding pending messages."
+        : "Discard pending messages for this account";
+      discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
+      pendingRow.append(pendingLabel, discardButton);
+      copy.append(pendingRow);
+    }
     card.append(select, shopId);
     accountList.append(card);
   }

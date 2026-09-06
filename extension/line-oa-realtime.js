@@ -121,7 +121,25 @@
     return {
       parsed: Number(acknowledgement.parsed) || 0,
       queued: Number(acknowledgement.queued) || 0,
+      latestCursor: acknowledgement.latest_cursor ?? null,
     };
+  }
+
+  async function advanceRecoveryCursor({ requestId, providerAccountId, chat, page, latestCursor }) {
+    const chatId = value(chat?.chatId);
+    if (!chatId || !latestCursor) return;
+    const cursorRequestId = `${requestId}:${chatId}:cursor:${page}`;
+    post({
+      type: "recovery_cursor",
+      request_id: cursorRequestId,
+      provider_account_id: providerAccountId,
+      conversation_id: chatId,
+      cursor: latestCursor,
+    });
+    const acknowledgement = await waitForAcknowledgement(cursorRequestId);
+    if (!acknowledgement?.ok) {
+      throw new Error(acknowledgement?.error ?? "LINE OA sync cursor could not be saved.");
+    }
   }
 
   function pollIsActive(generation) {
@@ -169,6 +187,13 @@
       parsed += result.parsed;
       queued += result.queued;
       accepted += messages.length;
+      await advanceRecoveryCursor({
+        requestId,
+        providerAccountId,
+        chat,
+        page,
+        latestCursor: result.latestCursor,
+      });
       for (const message of messages) {
         const id = messageId(message);
         if (id) knownMessageIds.add(id);
