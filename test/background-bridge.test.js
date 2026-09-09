@@ -205,6 +205,9 @@ test("requires the local Seller Centre preference before an automatic landing sy
 test("starts opted-in Seller Centre sync after the tab finishes loading", () => {
   assert.match(source, /chrome\.tabs\.onUpdated\.addListener/);
   assert.match(source, /changeInfo\.status !== "complete"/);
+  assert.match(source, /async function reconnectProviderTab\(/);
+  assert.match(source, /await ensureProviderBridge\(tabId, adapter\)/);
+  assert.match(source, /await ensureLiveConnection\(\)/);
   assert.match(source, /async function autoStartSellerCentreTab\(/);
   assert.match(source, /type: "auto_open_chat_and_sync_v3"/);
   assert.match(source, /const sellerCentreLandingStarts = new Map\(\)/);

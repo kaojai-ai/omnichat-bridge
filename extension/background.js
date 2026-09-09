@@ -1489,10 +1489,21 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
+async function reconnectProviderTab(tab) {
+  const tabId = tab?.id;
+  if (!Number.isInteger(tabId)) return;
+  const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
+  if (!adapter) return;
+  await ensureProviderBridge(tabId, adapter);
+  await autoStartSellerCentreTab(tab);
+  await ensureLiveConnection();
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
-  void autoStartSellerCentreTab({ ...tab, id: tabId }).catch((error) => {
-    void recordUnexpected("seller_centre_landing_start", error, { provider: shopeeAdapter.id });
+  void reconnectProviderTab({ ...tab, id: tabId }).catch((error) => {
+    const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
+    void recordUnexpected("provider_bridge_startup", error, { provider: adapter?.id });
   });
 });
 
