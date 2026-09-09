@@ -113,6 +113,24 @@ function adapterForAccount(account) {
   return providerAdapters.get(account?.provider);
 }
 
+function visibleDetectedAccounts(accounts, activeTabUrl = "") {
+  let openLineBotId = "";
+  try {
+    const url = new URL(activeTabUrl);
+    if (url.origin === "https://chat.line.biz") {
+      openLineBotId = String(url.pathname.split("/").filter(Boolean)[0] ?? "").trim();
+    }
+  } catch {
+    // A missing or unsupported active-tab URL has no current LINE account.
+  }
+  return accounts.filter((account) => (
+    Boolean(findAccountConfig(storedConfig, account))
+      || (account?.provider === "line_oa"
+        && openLineBotId
+        && String(account.bot_id ?? "").trim() === openLineBotId)
+  ));
+}
+
 function accountLabel(adapter) {
   return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
 }
@@ -671,8 +689,10 @@ async function detectAccount() {
       ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
     });
     if (result?.ok) {
-      detectedAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
+      const providerAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
         .filter((account) => account?.provider === activeProviderAdapter?.id);
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      detectedAccounts = visibleDetectedAccounts(providerAccounts, activeTab?.url);
       renderDashboard();
       return true;
     }
