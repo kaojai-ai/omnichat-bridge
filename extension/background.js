@@ -1495,6 +1495,13 @@ async function reconnectProviderTab(tab) {
   const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
   if (!adapter) return;
   await ensureProviderBridge(tabId, adapter);
+  if (adapter.id === "line_oa") {
+    const stored = await readStorage([STORAGE.consent]);
+    if (hasLocalConsent(stored[STORAGE.consent])) {
+      const result = await detectOpenProviderAccount(adapter.id, tabId);
+      if (!result?.ok) throw new Error(result?.error ?? "LINE account detection failed.");
+    }
+  }
   await autoStartSellerCentreTab(tab);
   await ensureLiveConnection();
 }
@@ -2013,8 +2020,7 @@ async function reattachOpenProviderBridges() {
     );
     for (const tab of tabs.filter((item) => item.id && adapter.matchesUrl(item.url))) {
       try {
-        await ensureProviderBridge(tab.id, adapter);
-        await autoStartSellerCentreTab(tab);
+        await reconnectProviderTab(tab);
       } catch (error) {
         await recordUnexpected("provider_bridge_startup", error, { provider: adapter.id });
       }
