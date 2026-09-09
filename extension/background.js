@@ -41,7 +41,7 @@ const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
-const LINE_MAIN_BRIDGE_VERSION = "line-oa-poll-3";
+const LINE_MAIN_BRIDGE_VERSION = "line-oa-poll-4";
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -240,13 +240,20 @@ function accountContextFor(stored, providerAccountId, provider = "") {
   if (!id) return null;
   const matches = detectedAccounts(stored).filter((item) => item.provider_account_id === id
     && (!providerId || item.provider === providerId));
-  if (matches.length !== 1) return null;
-  const account = matches[0];
-  const config = findAccountConfig(stored[STORAGE.config], account);
-  if (!account) return null;
-  const key = accountConfigKey(account);
-  const adapter = providerAdapterForAccount(account);
-  return key && config && adapter ? { key, config, account, adapter } : null;
+  const account = matches.length === 1 ? matches[0] : null;
+  const config = account ? findAccountConfig(stored[STORAGE.config], account) : (stored[STORAGE.config]?.accounts ?? []).find(
+    (candidate) => candidate?.provider === "line_oa"
+      && candidate?.canonical_provider_account_id === id
+      && (!providerId || candidate.provider === providerId),
+  );
+  const configuredAccount = account ?? (config ? {
+    provider: config.provider,
+    provider_account_id: config.provider_account_id,
+  } : null);
+  if (!configuredAccount) return null;
+  const key = accountConfigKey(configuredAccount);
+  const adapter = providerAdapterForAccount(configuredAccount);
+  return key && config && adapter ? { key, config, account: configuredAccount, adapter } : null;
 }
 
 function configuredAccountContexts(stored) {
@@ -272,6 +279,13 @@ function liveCommandContexts(contexts) {
 function messageProviderAccountId(message) {
   const value = message?.provider_account_id;
   return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+}
+
+function canonicalProviderAccountId(context) {
+  const canonical = context?.config?.canonical_provider_account_id;
+  return context?.account?.provider === "line_oa" && typeof canonical === "string" && canonical.trim()
+    ? canonical.trim()
+    : context?.account?.provider_account_id ?? "";
 }
 
 function hasServerInitialized(stored) {
@@ -906,6 +920,7 @@ async function sendViaProvider(message) {
     command_type: commandType,
     request_id: requestId,
     conversation_id: conversationId,
+    ...(adapter.id === "line_oa" ? { browser_provider_account_id: context.account.provider_account_id } : {}),
     ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
   });
 }
@@ -1078,9 +1093,10 @@ async function signedLeaderRequest(context, action) {
   if (!hasServerInitialized(initialized)) throw new Error("Sync messages before using live replies.");
   const url = leaderEndpoint(context.config);
   if (!context || !url) throw new Error("Leader endpoint is not configured.");
+  const providerAccountId = canonicalProviderAccountId(context);
   const body = JSON.stringify({
     provider: context.account.provider,
-    provider_account_id: context.account.provider_account_id,
+    provider_account_id: providerAccountId,
     installation_id: await installationId(),
     action,
   });
@@ -1091,7 +1107,7 @@ async function signedLeaderRequest(context, action) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-omnichat-provider-account-id": context.account.provider_account_id,
+      "x-omnichat-provider-account-id": providerAccountId,
       "x-omnichat-timestamp": timestamp,
       "x-omnichat-nonce": nonce,
       "x-omnichat-signature": signature,
@@ -1197,9 +1213,10 @@ async function signedLiveTicket(context) {
   const { config, account } = context;
   const url = liveEndpoint(config);
   if (!url) throw new Error("Live reply endpoint is not configured.");
+  const providerAccountId = canonicalProviderAccountId(context);
   const body = JSON.stringify({
     provider: account.provider,
-    provider_account_id: account.provider_account_id,
+    provider_account_id: providerAccountId,
     installation_id: await installationId(),
   });
   const timestamp = new Date().toISOString();
@@ -1210,7 +1227,7 @@ async function signedLiveTicket(context) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-omnichat-provider-account-id": account.provider_account_id,
+      "x-omnichat-provider-account-id": providerAccountId,
       "x-omnichat-timestamp": timestamp,
       "x-omnichat-nonce": nonce,
       "x-omnichat-signature": signature,
@@ -1279,13 +1296,16 @@ async function connectionStatusSnapshot(context) {
     pendingMessages: pending.length,
     status,
   });
+  const commandCapabilities = adapter?.id === "line_oa"
+    ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
+    : adapter?.sendCommands;
 
   return {
     type: "connection_status",
     schema: "omnichat.connection_status",
     version: 1,
     provider: context.account.provider,
-    provider_account_id: context.account.provider_account_id,
+    provider_account_id: canonicalProviderAccountId(context),
     installation_id: await installationId(),
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
@@ -1295,6 +1315,7 @@ async function connectionStatusSnapshot(context) {
       language: String(navigator.language ?? "").slice(0, 32),
     },
     health,
+    ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
   };
 }
 
@@ -1423,7 +1444,7 @@ async function handleLiveCommand(raw, context, socket) {
   try { command = JSON.parse(raw); } catch { return; }
   const adapter = providerAdapterForCommand(command);
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
-  if (messageProviderAccountId(command) !== context.account.provider_account_id) return;
+  if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   let result;
   try {
     result = await exclusive(() => sendViaProvider(command));
@@ -1440,7 +1461,10 @@ async function handleLiveCommand(raw, context, socket) {
       ok: Boolean(result?.ok),
       ...(result?.ok
         ? { provider_message_id: result.provider_message_id }
-        : { error: result?.error ?? "Reply failed." }),
+        : {
+          error: result?.error ?? "Reply failed.",
+          ...(result?.uncertain === true ? { uncertain: true } : {}),
+        }),
     }));
   }
 }

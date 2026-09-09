@@ -28,6 +28,7 @@
   let providerSurface = null;
   let providerSurfaceReady = false;
   let providerCapabilities = {};
+  let providerCommandCapabilitiesByAccount = {};
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
   let automaticSellerCentreLandingStarted = false;
@@ -190,7 +191,7 @@
         if (pendingApiSends.get(requestId) !== pending) return;
         pendingApiSends.delete(requestId);
         clearTimeout(pending.timeout);
-        pending.resolve({ ok: false, error: `${providerLabel} did not return a provider message ID.` });
+        pending.resolve({ ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.` });
       }, 2_000);
       return;
     }
@@ -765,6 +766,11 @@
         return { ok: false, error: `${providerLabel} product is invalid.` };
       }
     }
+    if (commandType === "send_sticker") {
+      const packageId = typeof message?.package_id === "string" ? message.package_id.trim() : "";
+      const stickerId = typeof message?.sticker_id === "string" ? message.sticker_id.trim() : "";
+      if (!packageId || !stickerId) return { ok: false, error: "Reply sticker is invalid." };
+    }
     let imagePayload = {};
     if (commandType === "send_image") {
       const imageBase64 = typeof message?.image_base64 === "string" ? message.image_base64 : "";
@@ -790,7 +796,7 @@
           resolve({ ok: true, provider_message_id: pending.echo.id });
           return;
         }
-        resolve({ ok: false, error: `${providerLabel} API reply timed out.` });
+        resolve({ ok: false, uncertain: true, error: `${providerLabel} API reply timed out.` });
       }, 30_000);
       pendingApiSends.set(requestId, {
         resolve,
@@ -846,6 +852,10 @@
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
         ? { ...event.data.capabilities }
         : providerCapabilities;
+      providerCommandCapabilitiesByAccount = event.data.command_capabilities_by_account
+        && typeof event.data.command_capabilities_by_account === "object"
+        ? { ...event.data.command_capabilities_by_account }
+        : providerCommandCapabilitiesByAccount;
       providerRealtimeTransport = typeof event.data.realtime_transport === "string"
         ? event.data.realtime_transport
         : providerRealtimeTransport;
@@ -929,6 +939,7 @@
         surface: providerSurface,
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
+        command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
         realtime_transport: providerRealtimeTransport,
         chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,

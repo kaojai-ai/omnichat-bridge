@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-3";
+  const BRIDGE_VERSION = "line-oa-poll-4";
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -18,6 +18,8 @@
   const acknowledgements = new Map();
   const knownChatIdsByAccount = new Map();
   const knownMessageIdsByAccount = new Map();
+  const sendProfilesByBot = new Map();
+  const nativeFetch = window.fetch.bind(window);
   const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
   const basicIdFromPage = () => globalThis.OmnichatLineOA?.basicIdFromHtml?.() ?? "";
   const apiBase = "https://chat.line.biz/api";
@@ -27,6 +29,104 @@
   const normalizeBasicId = (input) => {
     const normalized = value(input).replace(/^@+/, "");
     return normalized ? `@${normalized}` : "";
+  };
+
+  function messageSendPath(url) {
+    const match = url.pathname.match(/^\/api\/v1\/bots\/([^/]+)\/chats\/([^/]+)\/messages\/send$/);
+    return match ? { botId: decodeURIComponent(match[1]), conversationId: decodeURIComponent(match[2]) } : null;
+  }
+
+  function safeHeaders(input) {
+    const headers = new Headers(input ?? {});
+    const result = {};
+    for (const name of ["accept", "content-type", "x-oa-chat-client-version"]) {
+      const value = headers.get(name);
+      if (value) result[name] = value;
+    }
+    return result;
+  }
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function profileFor(botId, type) {
+    return sendProfilesByBot.get(botId)?.get(type) ?? null;
+  }
+
+  function rememberSendProfile(url, init, payload) {
+    const target = messageSendPath(url);
+    if (!target || !payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    const type = value(payload.type);
+    if (!["text", "image", "sticker"].includes(type)) return;
+    const profiles = sendProfilesByBot.get(target.botId) ?? new Map();
+    profiles.set(type, { headers: safeHeaders(init?.headers), payload: clone(payload) });
+    sendProfilesByBot.set(target.botId, profiles);
+    void publishProviderStatus();
+  }
+
+  function firstImageUrlPath(payload, path = []) {
+    if (typeof payload === "string") return /^https:\/\//i.test(payload) ? path : null;
+    if (!payload || typeof payload !== "object") return null;
+    for (const [key, item] of Object.entries(payload)) {
+      const found = firstImageUrlPath(item, [...path, key]);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function setPath(object, path, nextValue) {
+    let current = object;
+    for (let index = 0; index < path.length - 1; index += 1) current = current[path[index]];
+    current[path.at(-1)] = nextValue;
+  }
+
+  function commandCapabilities(botId) {
+    const profiles = sendProfilesByBot.get(botId);
+    if (!profiles) return [];
+    const capabilities = [];
+    if (profiles.has("text")) capabilities.push("send_text");
+    if (profiles.has("sticker")) capabilities.push("send_sticker");
+    const imageProfile = profiles.get("image");
+    if (imageProfile && firstImageUrlPath(imageProfile.payload)) capabilities.push("send_image");
+    return capabilities;
+  }
+
+  async function publishProviderStatus() {
+    const accounts = await availableAccounts().catch(() => []);
+    const commandCapabilitiesByAccount = Object.fromEntries(accounts.map((account) => [
+      account.provider_account_id,
+      commandCapabilities(value(account.bot_id)),
+    ]));
+    post({
+      type: "provider_status",
+      surface: "line-oa",
+      bridge_version: BRIDGE_VERSION,
+      surface_ready: true,
+      capabilities: { account_detection: true, message_observation: true, message_recovery: true },
+      command_capabilities_by_account: commandCapabilitiesByAccount,
+      realtime_transport: "authenticated_polling",
+      realtime_connected: true,
+      connected_at: new Date().toISOString(),
+      chat_open: true,
+    });
+  }
+
+  window.fetch = async (input, init) => {
+    const response = await nativeFetch(input, init);
+    try {
+      const request = input instanceof Request ? input : null;
+      const url = new URL(request?.url ?? String(input), window.location.origin);
+      const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
+      const rawBody = init?.body ?? null;
+      if (method === "POST" && typeof rawBody === "string" && messageSendPath(url)) {
+        const payload = JSON.parse(rawBody);
+        if (response.ok) rememberSendProfile(url, init ?? request, payload);
+      }
+    } catch {
+      // Profile capture is advisory; a provider request must retain its original result.
+    }
+    return response;
   };
 
   async function availableAccounts() {
@@ -410,6 +510,85 @@
     return basicId ? { provider_account_id: basicId } : null;
   }
 
+  function sendId(conversationId) {
+    return `${conversationId}_${Date.now()}_${Math.floor(Math.random() * 100_000_000).toString().padStart(8, "0")}`;
+  }
+
+  function responseMessageId(payload) {
+    return value(payload?.id ?? payload?.message?.id ?? payload?.data?.id ?? payload?.data?.messageId);
+  }
+
+  async function sendBrowserMessage(command) {
+    const commandType = value(command?.command_type ?? command?.type);
+    const browserAccountId = normalizeBasicId(command?.browser_provider_account_id ?? command?.provider_account_id);
+    const conversationId = value(command?.conversation_id);
+    const requestId = value(command?.request_id);
+    if (!requestId || !browserAccountId || !conversationId) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA reply command is invalid." });
+      return;
+    }
+    const botId = await resolveBotId(browserAccountId, "");
+    const expectedType = commandType === "send_text" ? "text"
+      : commandType === "send_sticker" ? "sticker"
+        : commandType === "send_image" ? "image"
+          : "";
+    const profile = botId && expectedType ? profileFor(botId, expectedType) : null;
+    if (!botId || !profile) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA sender is not initialized for this reply type." });
+      return;
+    }
+    const payload = clone(profile.payload);
+    payload.sendId = sendId(conversationId);
+    if (expectedType === "text") {
+      const textValue = value(command?.text);
+      if (!textValue || textValue.length > 2_000) {
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA reply text is invalid." });
+        return;
+      }
+      payload.text = textValue;
+    } else if (expectedType === "sticker") {
+      const packageId = value(command?.package_id);
+      const stickerId = value(command?.sticker_id);
+      if (!packageId || !stickerId) {
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA sticker is invalid." });
+        return;
+      }
+      payload.packageId = packageId;
+      payload.stickerId = stickerId;
+    } else {
+      const imageUrl = value(command?.image_url);
+      const imagePath = firstImageUrlPath(payload);
+      if (!imageUrl || !/^https:\/\//i.test(imageUrl) || !imagePath) {
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA image sender is not initialized." });
+        return;
+      }
+      setPath(payload, imagePath, imageUrl);
+    }
+
+    try {
+      const response = await nativeFetch(`${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/send`, {
+        method: "POST",
+        headers: profile.headers,
+        body: JSON.stringify(payload),
+        credentials: "include",
+      });
+      const responseBody = await response.json().catch(() => null);
+      if (!response.ok) {
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
+        return;
+      }
+      const providerMessageId = responseMessageId(responseBody);
+      post({
+        type: "api_send_result",
+        request_id: requestId,
+        ok: true,
+        ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
+      });
+    } catch (error) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: true, error: `LINE OA send was not acknowledged: ${String(error)}` });
+    }
+  }
+
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
@@ -442,6 +621,8 @@
       start(event.data.request_id, event.data.provider_account_id, event.data.bot_id, event.data.checkpoint);
     } else if (event.data.type === "cancel_sync_v3") {
       cancelPolling("LINE OA recovery was cancelled.", { notifyRequests: false });
+    } else if (event.data.type === "send_api_v3") {
+      void sendBrowserMessage(event.data);
     } else if (event.data.type === "recovery_ack_v3") {
       const acknowledge = acknowledgements.get(event.data.request_id);
       if (acknowledge) {
@@ -461,5 +642,5 @@
       window.removeEventListener("message", listener);
     },
   };
-  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true });
+  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true });
 })();
