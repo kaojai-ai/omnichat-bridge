@@ -252,7 +252,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
 function configuredAccountContexts(stored) {
   const accounts = [...detectedAccounts(stored)];
   for (const config of stored[STORAGE.config]?.accounts ?? []) {
-    if (config.provider !== "line_oa" || !config.bot_id) continue;
+    if (config.provider !== "line_oa") continue;
     if (accounts.some((account) => account.provider === config.provider
       && account.provider_account_id === config.provider_account_id)) continue;
     accounts.push({ provider: config.provider, provider_account_id: config.provider_account_id });
@@ -2094,7 +2094,9 @@ async function syncOpenProvider(control, context) {
     type: "sync_now_v3",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
-    ...(context.config.bot_id ? { bot_id: context.config.bot_id } : {}),
+    ...(context.config.bot_id || context.account.bot_id
+      ? { bot_id: context.config.bot_id || context.account.bot_id }
+      : {}),
   };
   let result = await sendProviderMessage(tab.id, syncMessage, {
     label,

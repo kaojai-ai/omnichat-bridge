@@ -24,6 +24,29 @@
   const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
   const cursor = (input) => value(input) || null;
+  const normalizeBasicId = (input) => {
+    const normalized = value(input).replace(/^@+/, "");
+    return normalized ? `@${normalized}` : "";
+  };
+
+  async function availableAccounts() {
+    const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
+    return (Array.isArray(body?.list) ? body.list : []).map((bot) => ({
+      provider_account_id: normalizeBasicId(bot?.basicSearchId ?? bot?.basicId),
+      bot_id: value(bot?.botId ?? bot?.id),
+    })).filter((account) => account.provider_account_id && account.bot_id);
+  }
+
+  async function resolveBotId(providerAccountId, configuredBotId) {
+    const explicit = value(configuredBotId);
+    if (explicit) return explicit;
+    const pageAccountId = normalizeBasicId(basicIdFromPage());
+    if (pageAccountId === normalizeBasicId(providerAccountId)) return botIdFromUrl();
+    const account = (await availableAccounts()).find(
+      (candidate) => candidate.provider_account_id === normalizeBasicId(providerAccountId),
+    );
+    return account?.bot_id ?? "";
+  }
 
   function timeMs(input) {
     const numeric = Number(input);
@@ -237,9 +260,8 @@
 
   async function poll(requestId, providerAccountId, botId, checkpoint, generation) {
     try {
-      const pageAccountId = value(basicIdFromPage());
-      const resolvedBotId = value(botId) || (pageAccountId === value(providerAccountId) ? botIdFromUrl() : "");
-      if (!resolvedBotId) throw new Error("LINE OA bot ID is required to poll this account from another account tab.");
+      const resolvedBotId = await resolveBotId(providerAccountId, botId);
+      if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
       const knownChatIds = knownChatIdsByAccount.get(providerAccountId) ?? new Set();
       const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
       knownChatIdsByAccount.set(providerAccountId, knownChatIds);
@@ -390,21 +412,31 @@
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
-      const basicId = basicIdFromPage();
-      const account = configuredAccountForPage(basicId);
-      if (!account) {
-        post({
-          type: "account_detection_failed",
-          request_id: event.data.request_id,
-          error: "LINE OA Basic ID was not found in the open page.",
-        });
-      } else {
+      void availableAccounts().then((accounts) => {
+        if (!accounts.length) {
+          const account = configuredAccountForPage(basicIdFromPage());
+          if (account) accounts.push({ ...account, bot_id: botIdFromUrl() });
+        }
+        if (!accounts.length) {
+          post({
+            type: "account_detection_failed",
+            request_id: event.data.request_id,
+            error: "No LINE OA accounts were found for the signed-in user.",
+          });
+          return;
+        }
         post({
           type: "accounts_detected",
           request_id: event.data.request_id,
-          accounts: [{ provider: "line_oa", ...account }],
+          accounts: accounts.map((account) => ({ provider: "line_oa", ...account })),
         });
-      }
+      }).catch((error) => {
+        post({
+          type: "account_detection_failed",
+          request_id: event.data.request_id,
+          error: String(error),
+        });
+      });
     } else if (event.data.type === "sync_v3") {
       start(event.data.request_id, event.data.provider_account_id, event.data.bot_id, event.data.checkpoint);
     } else if (event.data.type === "cancel_sync_v3") {

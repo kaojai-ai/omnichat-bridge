@@ -67,6 +67,7 @@ test("normalizes LINE OA Basic IDs without exposing secrets", () => {
   assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " 159nzygg ", bot_id: "ignored" }, "2026-08-30T00:00:00.000Z")), {
     provider: "line_oa",
     provider_account_id: "@159nzygg",
+    bot_id: "ignored",
     detected_at: "2026-08-30T00:00:00.000Z",
   });
 });

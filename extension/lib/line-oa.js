@@ -87,6 +87,7 @@
     return providerAccountId ? {
       provider: "line_oa",
       provider_account_id: providerAccountId,
+      ...(id(input?.bot_id) ? { bot_id: id(input.bot_id) } : {}),
       detected_at: detectedAt,
     } : null;
   }

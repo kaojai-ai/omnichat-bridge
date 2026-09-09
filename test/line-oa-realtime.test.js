@@ -31,7 +31,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stopTimer\(\);/);
 });
 
-function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -42,6 +42,14 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
     fetch: async (input) => {
       const url = new URL(String(input));
       requests.push(url);
+      if (url.pathname === "/api/v1/bots") {
+        return {
+          ok: true,
+          json: async () => ({
+            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId }] : []),
+          }),
+        };
+      }
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
@@ -158,7 +166,7 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
   return {
     posts,
     requests,
-    detect(accountHints) {
+    async detect(accountHints) {
       const before = posts.length;
       for (const listener of listeners) {
         listener({
@@ -172,7 +180,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
           },
         });
       }
-      return posts.slice(before).find((post) => post.request_id === "detect-1");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const detected = posts.slice(before).find((post) => post.request_id === "detect-1");
+        if (detected) return detected;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error("LINE OA account detection did not complete.");
     },
     async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", botId = "bot-1", checkpoint = null } = {}) {
       for (const listener of listeners) {
@@ -202,26 +215,37 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
   };
 }
 
-test("LINE OA maps the page Basic ID to the configured provider account", () => {
+test("LINE OA discovers and persists the page Basic ID with its bot ID", async () => {
   const bridge = createBridge();
 
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "accounts_detected",
     request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg" }],
+    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg", bot_id: "bot-1" }],
   });
 });
 
-test("LINE OA rejects a page without a Basic ID", () => {
+test("LINE OA rejects a session without an accessible account", async () => {
   const bridge = createBridge({ basicId: "" });
 
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "account_detection_failed",
     request_id: "detect-1",
-    error: "LINE OA Basic ID was not found in the open page.",
+    error: "No LINE OA accounts were found for the signed-in user.",
   });
+});
+
+test("LINE OA discovers a closed account bot ID before polling it", async () => {
+  const bridge = createBridge({
+    availableAccounts: [{ botId: "bot-1", basicSearchId: "@other" }],
+  });
+
+  const complete = await bridge.sync({ providerAccountId: "@other", botId: "" });
+
+  assert.equal(complete.ok, true);
+  assert.ok(bridge.requests.some((url) => url.pathname === "/api/v1/bots"));
 });
 
 test("LINE OA recovers every chat and message page only after each page is acknowledged", async () => {
