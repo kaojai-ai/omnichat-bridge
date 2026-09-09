@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-4";
+  const BRIDGE_VERSION = "line-oa-poll-5";
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -92,8 +92,8 @@
     return capabilities;
   }
 
-  async function publishProviderStatus() {
-    const accounts = await availableAccounts().catch(() => []);
+  async function publishProviderStatus(detectedAccounts) {
+    const accounts = detectedAccounts ?? await availableAccounts().catch(() => []);
     const commandCapabilitiesByAccount = Object.fromEntries(accounts.map((account) => [
       account.provider_account_id,
       commandCapabilities(value(account.bot_id)),
@@ -605,6 +605,7 @@
           });
           return;
         }
+        void publishProviderStatus(accounts);
         post({
           type: "accounts_detected",
           request_id: event.data.request_id,
