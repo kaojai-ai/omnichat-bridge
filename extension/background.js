@@ -250,9 +250,19 @@ function accountContextFor(stored, providerAccountId, provider = "") {
 }
 
 function configuredAccountContexts(stored) {
-  return detectedAccounts(stored)
-    .map((account) => accountContextFor(stored, account.provider_account_id, account.provider))
-    .filter(Boolean);
+  const accounts = [...detectedAccounts(stored)];
+  for (const config of stored[STORAGE.config]?.accounts ?? []) {
+    if (config.provider !== "line_oa" || !config.bot_id) continue;
+    if (accounts.some((account) => account.provider === config.provider
+      && account.provider_account_id === config.provider_account_id)) continue;
+    accounts.push({ provider: config.provider, provider_account_id: config.provider_account_id });
+  }
+  return accounts.map((account) => {
+    const config = findAccountConfig(stored[STORAGE.config], account);
+    const key = accountConfigKey(account);
+    const adapter = providerAdapterForAccount(account);
+    return key && config && adapter ? { key, config, account, adapter } : null;
+  }).filter(Boolean);
 }
 
 function liveCommandContexts(contexts) {
@@ -2084,6 +2094,7 @@ async function syncOpenProvider(control, context) {
     type: "sync_now_v3",
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
+    ...(context.config.bot_id ? { bot_id: context.config.bot_id } : {}),
   };
   let result = await sendProviderMessage(tab.id, syncMessage, {
     label,

@@ -288,33 +288,36 @@
       });
   }
 
-  async function isConfigured(providerAccountId) {
+  async function isConfigured(providerAccountId, botId = "") {
     const stored = await chrome.storage.local.get([
       "config",
       "detected_accounts",
       "local_consent",
     ]);
     const accountId = String(providerAccountId ?? "").trim();
-    return Boolean(
-      stored.local_consent?.accepted_at
-      && accountId
-      && stored.detected_accounts?.some(
-        (account) => account?.provider === providerAdapter.id
-          && account.provider_account_id === accountId,
-      )
-      && stored.config?.accounts?.some(
-        (account) => account.provider === providerAdapter.id
-          && account.provider_account_id === accountId,
-      ),
+    const configured = stored.config?.accounts?.find(
+      (account) => account.provider === providerAdapter.id
+        && account.provider_account_id === accountId,
     );
+    const detected = stored.detected_accounts?.some(
+      (account) => account?.provider === providerAdapter.id
+        && account.provider_account_id === accountId,
+    );
+    const configuredLineBot = providerAdapter.id === "line_oa"
+      && String(botId).trim()
+      && configured?.bot_id === String(botId).trim();
+    return Boolean(stored.local_consent?.accepted_at
+      && accountId
+      && configured
+      && (detected || configuredLineBot));
   }
 
-  async function requestRecovery(providerAccountId) {
+  async function requestRecovery(providerAccountId, botId = "") {
     if (!providerAdapter.supports("message_recovery")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
     }
     const accountId = String(providerAccountId ?? "").trim();
-    if (!await isConfigured(accountId)) {
+    if (!await isConfigured(accountId, botId)) {
       log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
         provider_account_id: accountId,
       });
@@ -340,6 +343,7 @@
       checkpoint: syncState.checkpoint,
       provider: providerAdapter.id,
       provider_account_id: accountId,
+      ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
       provider_account_id: accountId,
@@ -940,7 +944,7 @@
       return false;
     }
     if (message?.type === "sync_now_v3") {
-      void requestRecovery(message.provider_account_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
+      void requestRecovery(message.provider_account_id, message.bot_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "cancel_sync_v3") {

@@ -174,7 +174,7 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
       }
       return posts.slice(before).find((post) => post.request_id === "detect-1");
     },
-    async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", checkpoint = null } = {}) {
+    async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", botId = "bot-1", checkpoint = null } = {}) {
       for (const listener of listeners) {
         listener({
           source: window,
@@ -185,11 +185,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
             request_id: requestId,
             checkpoint,
             provider_account_id: providerAccountId,
+            ...(botId ? { bot_id: botId } : {}),
           },
         });
       }
       for (let attempt = 0; attempt < 100; attempt += 1) {
-        const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === "sync-1");
+        const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === requestId);
         if (complete) return complete;
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -369,12 +370,31 @@ test("LINE OA queues a sync request that arrives during an active recovery", asy
   const bridge = createBridge();
 
   const first = bridge.sync({ requestId: "sync-1" });
-  const second = bridge.sync({ requestId: "sync-2" });
+  const second = bridge.sync({
+    requestId: "sync-2",
+    providerAccountId: "line-oa-account-2",
+    botId: "bot-1",
+  });
   const [firstComplete, secondComplete] = await Promise.all([first, second]);
 
   assert.equal(firstComplete.ok, true);
   assert.equal(secondComplete.ok, true);
+  assert.equal(secondComplete.provider_account_id, "line-oa-account-2");
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete").length, 2);
+});
+
+test("LINE OA uses an explicit bot ID to poll another configured account from one tab", async () => {
+  const bridge = createBridge();
+
+  const complete = await bridge.sync({
+    requestId: "sync-2",
+    providerAccountId: "line-oa-account-2",
+    botId: "bot-1",
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.provider_account_id, "line-oa-account-2");
+  assert.ok(bridge.requests.some((url) => url.pathname === "/api/v2/bots/bot-1/chats"));
 });
 
 test("LINE OA completes a pending request when the page bridge is replaced", async () => {

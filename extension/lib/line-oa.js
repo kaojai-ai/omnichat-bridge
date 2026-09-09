@@ -120,6 +120,8 @@
         events_url: parsedEventsUrl.toString(),
         hmac_secret: hmacSecret,
       };
+      const botId = text(value?.bot_id);
+      if (botId) normalized.bot_id = botId;
       for (const field of ["api_url", "logs_url", "sync_key_url"]) {
         const raw = text(value?.[field]);
         if (!raw && field === "api_url") throw new Error("api_url must use HTTPS.");

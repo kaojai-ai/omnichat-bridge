@@ -12,13 +12,12 @@
   let disposed = false;
   let timer = null;
   let activePoll = null;
-  let pollingAccountId = null;
-  let pollingCheckpoint = null;
+  const pollingAccounts = new Map();
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
-  const knownChatIds = new Set();
-  const knownMessageIdsByChat = new Map();
+  const knownChatIdsByAccount = new Map();
+  const knownMessageIdsByAccount = new Map();
   const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
   const basicIdFromPage = () => globalThis.OmnichatLineOA?.basicIdFromHtml?.() ?? "";
   const apiBase = "https://chat.line.biz/api";
@@ -155,7 +154,7 @@
     return !disposed && generation === pollGeneration;
   }
 
-  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0 }) {
+  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0 }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
     const knownMessageIds = knownMessageIdsByChat.get(chatId) ?? new Set();
@@ -236,10 +235,15 @@
     });
   }
 
-  async function poll(requestId, providerAccountId, checkpoint, generation) {
+  async function poll(requestId, providerAccountId, botId, checkpoint, generation) {
     try {
-      const botId = botIdFromUrl();
-      if (!botId) throw new Error("LINE OA bot ID was not found in the open page URL.");
+      const pageAccountId = value(basicIdFromPage());
+      const resolvedBotId = value(botId) || (pageAccountId === value(providerAccountId) ? botIdFromUrl() : "");
+      if (!resolvedBotId) throw new Error("LINE OA bot ID is required to poll this account from another account tab.");
+      const knownChatIds = knownChatIdsByAccount.get(providerAccountId) ?? new Set();
+      const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
+      knownChatIdsByAccount.set(providerAccountId, knownChatIds);
+      knownMessageIdsByAccount.set(providerAccountId, knownMessageIdsByChat);
       const checkpointMs = timeMs(checkpoint?.watermark);
       const bootstrap = checkpointMs <= 0;
       let next = null;
@@ -251,7 +255,7 @@
       const trackedRequest = !String(requestId).startsWith("poll:");
       postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
       while (pollIsActive(generation)) {
-        const body = await json(chatUrl(botId, next));
+        const body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
@@ -276,9 +280,10 @@
             ? await recoverChat({
               requestId,
               providerAccountId,
-              botId,
+              botId: resolvedBotId,
               chat,
               generation,
+              knownMessageIdsByChat,
               maxMessages: bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
               sinceMs: bootstrap ? 0 : checkpointMs,
             })
@@ -298,7 +303,8 @@
       }
       if (!pollIsActive(generation)) return;
       const watermark = new Date().toISOString();
-      pollingCheckpoint = { watermark };
+      const state = pollingAccounts.get(providerAccountId);
+      if (state) state.checkpoint = { watermark };
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
     } catch (error) {
       if (pollIsActive(generation)) {
@@ -320,36 +326,37 @@
     if (next) startPoll(next);
   }
 
-  function startPoll({ requestId, providerAccountId, checkpoint }) {
+  function startPoll({ requestId, providerAccountId, botId, checkpoint }) {
     const generation = pollGeneration;
     const current = { requestId, providerAccountId, task: null };
     activePoll = current;
-    const task = poll(requestId, providerAccountId, checkpoint, generation);
+    const task = poll(requestId, providerAccountId, botId, checkpoint, generation);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
   }
 
-  function start(requestId, providerAccountId, checkpoint) {
+  function start(requestId, providerAccountId, botId, checkpoint) {
     const accountId = value(providerAccountId);
-    if (activePoll && activePoll.providerAccountId !== accountId) {
-      post({
-        type: "recovery_complete",
-        request_id: requestId,
-        provider_account_id: providerAccountId,
-        ok: false,
-        error: "LINE OA recovery is already running for another account.",
-      });
-      return;
-    }
     stopTimer();
-    if (pollingAccountId && pollingAccountId !== accountId) pollingCheckpoint = null;
-    pollingAccountId = accountId || pollingAccountId;
-    const request = { requestId, providerAccountId, checkpoint: checkpoint ?? pollingCheckpoint };
+    const previous = pollingAccounts.get(accountId);
+    const account = {
+      botId: value(botId) || previous?.botId || "",
+      checkpoint: checkpoint ?? previous?.checkpoint ?? null,
+    };
+    pollingAccounts.set(accountId, account);
+    const request = { requestId, providerAccountId: accountId, ...account };
     if (activePoll) queuedSyncs.push(request);
     else startPoll(request);
     timer = setInterval(() => {
-      if (activePoll || queuedSyncs.length || disposed || !pollingAccountId) return;
-      startPoll({ requestId: `poll:${crypto.randomUUID()}`, providerAccountId: pollingAccountId, checkpoint: pollingCheckpoint });
+      if (activePoll || queuedSyncs.length || disposed || !pollingAccounts.size) return;
+      const requests = [...pollingAccounts].map(([id, state]) => ({
+        requestId: `poll:${crypto.randomUUID()}`,
+        providerAccountId: id,
+        ...state,
+      }));
+      const next = requests.shift();
+      queuedSyncs.push(...requests);
+      if (next) startPoll(next);
     }, 15_000);
   }
 
@@ -399,7 +406,7 @@
         });
       }
     } else if (event.data.type === "sync_v3") {
-      start(event.data.request_id, event.data.provider_account_id, event.data.checkpoint);
+      start(event.data.request_id, event.data.provider_account_id, event.data.bot_id, event.data.checkpoint);
     } else if (event.data.type === "cancel_sync_v3") {
       cancelPolling("LINE OA recovery was cancelled.", { notifyRequests: false });
     } else if (event.data.type === "recovery_ack_v3") {
