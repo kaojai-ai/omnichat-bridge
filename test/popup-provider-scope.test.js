@@ -50,6 +50,9 @@ test("shows provider badges and account names separately", () => {
   assert.match(html, /<h2 id="account-title">Provider<\/h2>/);
   assert.match(html, /id="provider-badges" class="provider-badges"/);
   assert.match(popupSource, /badge\.dataset\.provider = provider/);
+  assert.match(popupSource, /function providerBadgeLabel\(provider, adapter\)/);
+  assert.match(popupSource, /if \(provider === "line_oa"\) return "LINE"/);
+  assert.match(popupSource, /if \(provider === "shopee"\) return "Shopee"/);
   assert.match(css, /\.provider-badge\[data-provider="line_oa"\] \{ background: #06c755; \}/);
   assert.match(css, /\.provider-badge\[data-provider="shopee"\] \{ background: var\(--shopee\); \}/);
   assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);

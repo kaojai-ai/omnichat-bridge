@@ -136,6 +136,12 @@ function accountLabel(adapter) {
   return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
 }
 
+function providerBadgeLabel(provider, adapter) {
+  if (provider === "line_oa") return "LINE";
+  if (provider === "shopee") return "Shopee";
+  return adapter?.displayName || provider;
+}
+
 function accountDisplayLabel(account, adapter) {
   const displayName = String(account?.display_name ?? "").trim();
   if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
@@ -303,7 +309,7 @@ function showAccounts(accounts) {
     const badge = document.createElement("span");
     badge.className = "provider-badge";
     badge.dataset.provider = provider;
-    badge.textContent = adapter?.displayName || provider;
+    badge.textContent = providerBadgeLabel(provider, adapter);
     return badge;
   }));
 }
