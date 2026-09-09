@@ -51,6 +51,14 @@ test("labels a detected LINE account with its provider and display name", () => 
   assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
 });
 
+test("links a detected LINE account name to its LINE Chat page", () => {
+  assert.match(popupSource, /function lineChatUrl\(account\)/);
+  assert.match(popupSource, /https:\/\/chat\.line\.biz\/\$\{encodeURIComponent\(botId\)\}/);
+  assert.match(popupSource, /const name = document\.createElement\(lineUrl \? "a" : "strong"\)/);
+  assert.match(popupSource, /name\.target = "_blank"/);
+  assert.match(css, /\.account-row-line-link/);
+});
+
 test("offers an account-scoped discard action beside pending messages", () => {
   assert.match(popupSource, /className = "account-row-pending"/);
   assert.match(popupSource, /type: "discard_pending"/);

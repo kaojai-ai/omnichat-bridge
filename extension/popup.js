@@ -141,6 +141,11 @@ function accountDisplayLabel(account, adapter) {
   return displayName || accountLabel(adapter);
 }
 
+function lineChatUrl(account) {
+  const botId = account?.provider === "line_oa" ? String(account.bot_id ?? "").trim() : "";
+  return botId ? `https://chat.line.biz/${encodeURIComponent(botId)}` : "";
+}
+
 function logPopup(level, event, message, details = {}) {
   try {
     void chrome.runtime.sendMessage({
@@ -399,8 +404,16 @@ function renderDetectedAccounts() {
     select.className = "account-row-select";
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
-    const name = document.createElement("strong");
+    const lineUrl = lineChatUrl(account);
+    const name = document.createElement(lineUrl ? "a" : "strong");
     name.textContent = accountDisplayLabel(account, adapter);
+    if (lineUrl) {
+      name.href = lineUrl;
+      name.target = "_blank";
+      name.rel = "noreferrer";
+      name.className = "account-row-line-link";
+      name.title = "Open LINE Chat";
+    }
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;

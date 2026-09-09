@@ -487,6 +487,21 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.account-row-line-link {
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.account-row-line-link:hover { text-decoration: underline; }
+
+.account-row-line-link:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .account-row-status {
   color: var(--muted);
   font-size: 10px;
