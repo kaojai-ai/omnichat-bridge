@@ -516,6 +516,10 @@ function renderDashboard(message = "", isError = false) {
   const anySyncing = configuredStates.some((item) => ["discovering", "syncing"].includes(item.syncState?.state));
   const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
   const anyError = configuredStates.some((item) => item.syncState?.delivery_error || item.syncState?.sync_error);
+  const sellerCentreChatClosed = activeProviderSurface === "seller-centre"
+    && configuredStates.some((item) => (
+      item.account.provider === "shopee" && item.live?.provider_chat_open === false
+    ));
   const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
   const progressState = configuredStates.find((item) => ["discovering", "syncing"].includes(item.syncState?.state))?.syncState;
   const latestResult = configuredStates
@@ -563,9 +567,11 @@ function renderDashboard(message = "", isError = false) {
 
   status.classList.toggle("error", isError || anyError);
   setLeaderStatus(anyLeader ? "LEADER" : "STANDBY", anyLeader ? "ready" : "neutral", "leader", anyLeader);
-  syncButton.disabled = anySyncing;
-  syncButton.dataset.action = "sync";
-  syncButton.textContent = anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
+  syncButton.disabled = sellerCentreChatClosed ? false : anySyncing;
+  syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
+  syncButton.textContent = sellerCentreChatClosed
+    ? "Open Webchat mini"
+    : anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
   syncButton.setAttribute("aria-label", syncButton.textContent);
   syncButton.title = "";
   cancelSyncButton.hidden = !anySyncing;
@@ -905,6 +911,25 @@ closePrivacyButton.addEventListener("click", () => {
 syncButton.addEventListener("click", async () => {
   if (syncButton.dataset.action === "configure") {
     openConfig();
+    return;
+  }
+  if (syncButton.dataset.action === "open_webchat_mini") {
+    syncButton.disabled = true;
+    progressArea.hidden = false;
+    status.classList.remove("error");
+    status.textContent = "Opening Webchat mini…";
+    try {
+      const result = await chrome.tabs.sendMessage(popupTabId, {
+        type: "prepare_provider_v3",
+        provider: "shopee",
+        request_id: `popup-open:${crypto.randomUUID()}`,
+      });
+      if (!result?.ok) throw new Error(result?.error ?? "Could not open Webchat mini.");
+      await refreshStoredState();
+      renderDashboard("Webchat mini opened.");
+    } catch (error) {
+      renderDashboard(error.message, true);
+    }
     return;
   }
   syncButton.disabled = true;
