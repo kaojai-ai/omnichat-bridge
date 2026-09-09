@@ -97,7 +97,6 @@ test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
     events_url: "https://collector.example.com/events/line_oa/tenant-1/channel-1",
     api_url: "https://admin.example.com/api/omnichat/line_oa/tenant-1/channel-1",
     logs_url: "https://logs.example.com/omnichat",
-    sync_key_url: "https://sync.example.com/v3",
     hmac_secret: "secret-1",
   });
 
