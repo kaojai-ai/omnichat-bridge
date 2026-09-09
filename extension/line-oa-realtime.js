@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-5";
+  const BRIDGE_VERSION = "line-oa-poll-6";
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -51,7 +51,10 @@
   }
 
   function profileFor(botId, type) {
-    return sendProfilesByBot.get(botId)?.get(type) ?? null;
+    return sendProfilesByBot.get(botId)?.get(type) ?? {
+      headers: { accept: "application/json", "content-type": "application/json", "x-oa-chat-client-version": "20240513144702" },
+      payload: type === "image" ? { type, imageUrl: "" } : { type },
+    };
   }
 
   function rememberSendProfile(url, init, payload) {
@@ -82,14 +85,7 @@
   }
 
   function commandCapabilities(botId) {
-    const profiles = sendProfilesByBot.get(botId);
-    if (!profiles) return [];
-    const capabilities = [];
-    if (profiles.has("text")) capabilities.push("send_text");
-    if (profiles.has("sticker")) capabilities.push("send_sticker");
-    const imageProfile = profiles.get("image");
-    if (imageProfile && firstImageUrlPath(imageProfile.payload)) capabilities.push("send_image");
-    return capabilities;
+    return botId ? ["send_text", "send_image", "send_sticker"] : [];
   }
 
   async function publishProviderStatus(detectedAccounts) {
@@ -557,7 +553,7 @@
       payload.stickerId = stickerId;
     } else {
       const imageUrl = value(command?.image_url);
-      const imagePath = firstImageUrlPath(payload);
+      const imagePath = firstImageUrlPath(payload) ?? (payload.imageUrl === "" ? ["imageUrl"] : null);
       if (!imageUrl || !/^https:\/\//i.test(imageUrl) || !imagePath) {
         post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA image sender is not initialized." });
         return;
