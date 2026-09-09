@@ -23,11 +23,11 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {} } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
-  const responses = new Map();
+  const responses = new Map(Object.entries(initialResponses));
   const requests = [];
   const intervals = [];
   let miniChatClicks = 0;
@@ -343,6 +343,31 @@ test("uses shop.id as the provider account and keeps user IDs as metadata", asyn
     shop_user_id: "1549897350",
   });
   assert.equal(detection.accounts.some((account) => account.provider_account_id === "1549897350"), false);
+});
+
+test("detects the Seller Centre shop before Webchat mini opens", async () => {
+  const bridge = createBridge({
+    pathname: "/portal/chat-management",
+    miniChatOpen: false,
+    initialResponses: {
+      "/api/v2/login/": {
+        user: { id: 4897267 },
+        shop: { id: 1549058683, user_id: 1549897350, name: "KaoJai.ai" },
+      },
+    },
+  });
+
+  const detection = await bridge.detect();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(detection.accounts)), [{
+    provider: "shopee",
+    provider_account_id: "1549058683",
+    display_name: "KaoJai.ai",
+    provider_user_id: "4897267",
+    shop_user_id: "1549897350",
+  }]);
+  assert.equal(bridge.requests.includes("/api/v2/login/"), true);
+  assert.equal(bridge.miniChatClicks, 0);
 });
 
 test("actively detects all shops on initial account detection", async () => {
