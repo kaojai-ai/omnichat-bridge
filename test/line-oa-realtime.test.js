@@ -31,17 +31,34 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stopTimer\(\);/);
 });
 
+test("LINE OA command capabilities require an observed browser send profile", () => {
+  assert.match(source, /const sendProfilesByBot = new Map\(\)/);
+  assert.match(source, /function rememberSendProfile\(/);
+  assert.match(source, /if \(profiles\.has\("text"\)\) capabilities\.push\("send_text"\)/);
+  assert.match(source, /if \(profiles\.has\("sticker"\)\) capabilities\.push\("send_sticker"\)/);
+  assert.match(source, /imageProfile && firstImageUrlPath\(imageProfile\.payload\)/);
+  assert.match(source, /function safeHeaders\(/);
+  assert.match(source, /\["accept", "content-type", "x-oa-chat-client-version"\]/);
+  assert.match(source, /credentials: "include"/);
+  assert.doesNotMatch(source, /cookie\s*:/);
+});
+
 function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
   const requests = [];
+  const sentPayloads = [];
   const chatIds = Array.from({ length: chatCount }, (_value, index) => `chat-${index + 1}`);
   const window = {
     location: { origin, pathname: "/bot-1/chats" },
-    fetch: async (input) => {
+    fetch: async (input, init = {}) => {
       const url = new URL(String(input));
       requests.push(url);
+      if (url.pathname === "/api/v1/bots/bot-1/chats/chat-1/messages/send") {
+        sentPayloads.push({ headers: init.headers, body: init.body });
+        return { ok: true, json: async () => ({ id: `sent-${sentPayloads.length}` }) };
+      }
       if (url.pathname === "/api/v1/bots") {
         return {
           ok: true,
@@ -148,6 +165,8 @@ function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCou
     window,
     fetch: window.fetch,
     URL,
+    Headers,
+    Request,
     document: { documentElement: { outerHTML: basicId ? `<a href="https://manager.line.biz/account/${basicId}">LINE Official Account</a>` : "" } },
     OmnichatLineOA: {
       chatItems: (body) => body?.list ?? [],
@@ -166,6 +185,43 @@ function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCou
   return {
     posts,
     requests,
+    sentPayloads,
+    async captureManualSend(payload) {
+      await context.window.fetch(`${origin}/api/v1/bots/bot-1/chats/chat-1/messages/send`, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "x-oa-chat-client-version": "observed-version",
+          cookie: "must-not-be-copied",
+        },
+        body: JSON.stringify(payload),
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+    async sendCommand(command) {
+      const before = posts.length;
+      for (const listener of listeners) {
+        listener({
+          source: window,
+          origin,
+          data: {
+            source: "omnichat-realtime-bridge-v3",
+            type: "send_api_v3",
+            request_id: "send-1",
+            conversation_id: "chat-1",
+            browser_provider_account_id: basicId,
+            ...command,
+          },
+        });
+      }
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const result = posts.slice(before).find((post) => post.type === "api_send_result" && post.request_id === "send-1");
+        if (result) return result;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error("LINE OA send command did not complete.");
+    },
     async detect(accountHints) {
       const before = posts.length;
       for (const listener of listeners) {
@@ -235,6 +291,66 @@ test("LINE OA rejects a session without an accessible account", async () => {
     request_id: "detect-1",
     error: "No LINE OA accounts were found for the signed-in user.",
   });
+});
+
+test("LINE OA replays an observed text request without copying cookies", async () => {
+  const bridge = createBridge();
+
+  await bridge.captureManualSend({ type: "text", text: "manual message", sendId: "manual-send" });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "bridge message" });
+
+  assert.deepEqual(plain(result), {
+    source: "omnichat-realtime-bridge-v3",
+    type: "api_send_result",
+    request_id: "send-1",
+    ok: true,
+    provider_message_id: "sent-2",
+  });
+  assert.equal(bridge.sentPayloads.length, 2);
+  const sentBody = JSON.parse(bridge.sentPayloads[1].body);
+  assert.equal(sentBody.type, "text");
+  assert.equal(sentBody.text, "bridge message");
+  assert.match(sentBody.sendId, /^chat-1_\d+_\d{8}$/);
+  assert.deepEqual(plain(bridge.sentPayloads[1].headers), {
+    accept: "application/json",
+    "content-type": "application/json",
+    "x-oa-chat-client-version": "observed-version",
+  });
+});
+
+test("LINE OA replays observed image and sticker request shapes", async () => {
+  const bridge = createBridge();
+
+  await bridge.captureManualSend({
+    type: "image",
+    imageUrl: "https://old-image.example/manual.png",
+    sendId: "manual-image",
+  });
+  const imageResult = await bridge.sendCommand({
+    command_type: "send_image",
+    image_url: "https://cdn.kaojai.example/reply.png",
+  });
+  assert.equal(imageResult.ok, true);
+  const imageBody = JSON.parse(bridge.sentPayloads[1].body);
+  assert.equal(imageBody.type, "image");
+  assert.equal(imageBody.imageUrl, "https://cdn.kaojai.example/reply.png");
+
+  await bridge.captureManualSend({
+    type: "sticker",
+    packageId: "manual-package",
+    stickerId: "manual-sticker",
+    sendId: "manual-sticker-send",
+  });
+  const stickerResult = await bridge.sendCommand({
+    command_type: "send_sticker",
+    package_id: "bridge-package",
+    sticker_id: "bridge-sticker",
+  });
+  assert.equal(stickerResult.ok, true);
+  const stickerBody = JSON.parse(bridge.sentPayloads[3].body);
+  assert.equal(stickerBody.type, "sticker");
+  assert.equal(stickerBody.packageId, "bridge-package");
+  assert.equal(stickerBody.stickerId, "bridge-sticker");
 });
 
 test("LINE OA discovers a closed account bot ID before polling it", async () => {

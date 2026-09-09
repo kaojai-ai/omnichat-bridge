@@ -103,10 +103,10 @@
     chatUrl: "https://chat.line.biz/",
     tabQueryPattern: "https://chat.line.biz/*",
     capabilities: ["account_detection", "message_observation", "message_recovery"],
-    sendCommands: [],
+    sendCommands: ["send_text", "send_image", "send_sticker"],
     matchesUrl: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     matchesPage: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
-    configOrigins: (account) => [account.events_url, account.api_url, account.logs_url],
+    configOrigins: (account) => [account.events_url, account.api_url, ...(account.image_server_url ? [account.image_server_url] : []), account.logs_url],
     validateConfig: (value, version = 3) => {
       if (version !== 3) throw new Error("LINE OA requires a version 3 configuration.");
       const providerAccountId = basicId(value?.provider_account_id);
@@ -123,9 +123,11 @@
         events_url: parsedEventsUrl.toString(),
         hmac_secret: hmacSecret,
       };
+      const canonicalProviderAccountId = text(value?.canonical_provider_account_id);
+      if (canonicalProviderAccountId) normalized.canonical_provider_account_id = canonicalProviderAccountId;
       const botId = text(value?.bot_id);
       if (botId) normalized.bot_id = botId;
-      for (const field of ["api_url", "logs_url", "sync_key_url"]) {
+      for (const field of ["api_url", "image_server_url", "logs_url", "sync_key_url"]) {
         const raw = text(value?.[field]);
         if (!raw && field === "api_url") throw new Error("api_url must use HTTPS.");
         if (!raw) continue;
