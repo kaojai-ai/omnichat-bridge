@@ -538,12 +538,15 @@ function renderDashboard(message = "", isError = false) {
 
   if (!detectedAccounts.length) {
     const openProviderChat = !isProviderChatTab;
+    const canOpenSellerCentreChat = activeProviderSurface === "seller-centre";
     setLeaderStatus("NEED CONFIG", "warning", "config");
-    status.textContent = message || (openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
-    syncButton.disabled = true;
-    syncButton.dataset.action = "";
-    syncButton.textContent = "Sync messages";
-    syncButton.setAttribute("aria-label", "Sync messages");
+    status.textContent = message || (canOpenSellerCentreChat
+      ? "Open Webchat mini to detect your Shopee accounts."
+      : openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
+    syncButton.disabled = !canOpenSellerCentreChat;
+    syncButton.dataset.action = canOpenSellerCentreChat ? "open_webchat_mini" : "";
+    syncButton.textContent = canOpenSellerCentreChat ? "Open Webchat mini" : "Sync messages";
+    syncButton.setAttribute("aria-label", syncButton.textContent);
     syncButton.title = "";
     cancelSyncButton.hidden = true;
     syncProgress.hidden = true;
@@ -925,6 +928,7 @@ syncButton.addEventListener("click", async () => {
         request_id: `popup-open:${crypto.randomUUID()}`,
       });
       if (!result?.ok) throw new Error(result?.error ?? "Could not open Webchat mini.");
+      await detectAccount();
       await refreshStoredState();
       renderDashboard("Webchat mini opened.");
     } catch (error) {
