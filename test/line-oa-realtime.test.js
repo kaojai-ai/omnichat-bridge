@@ -32,7 +32,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -46,7 +46,7 @@ function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCou
       requests.push(url);
       if (url.pathname === "/api/v1/bots/bot-1/chats/chat-1/messages/send") {
         sentPayloads.push({ headers: init.headers, body: init.body });
-        return { ok: true, json: async () => ({ id: `sent-${sentPayloads.length}` }) };
+        return { ok: true, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
       }
       if (url.pathname === "/api/v1/bots") {
         return {
@@ -566,4 +566,16 @@ test("LINE OA sends without a training message for an accessible account from on
   }
   assert.deepEqual(bridge.sentPayloads.map(p => JSON.parse(p.body).type), ["text", "image", "sticker"]);
   bridge.dispose();
+});
+
+test("LINE OA acknowledges an accepted send with no response ID using the submitted sendId", async () => {
+  for (const sendResponseBody of [null, {}]) {
+    const bridge = createBridge({ sendResponseBody });
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "accepted" });
+    const submitted = JSON.parse(bridge.sentPayloads[0].body);
+    assert.equal(result.ok, true);
+    assert.equal(result.provider_message_id, submitted.sendId);
+    assert.match(result.provider_message_id, /^chat-1_\d+_\d{8}$/);
+    bridge.dispose();
+  }
 });

@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-6";
+  const BRIDGE_VERSION = "line-oa-poll-7";
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -573,7 +573,7 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
         return;
       }
-      const providerMessageId = responseMessageId(responseBody);
+      const providerMessageId = responseMessageId(responseBody) || payload.sendId;
       post({
         type: "api_send_result",
         request_id: requestId,
