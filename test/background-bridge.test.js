@@ -278,3 +278,19 @@ test("keeps tab creation limited to an explicit open-tab action", () => {
   assert.ok(openEnd > openStart);
   assert.match(source.slice(openStart, openEnd), /commandTab\(context, \{ createIfMissing: true \}\)/);
 });
+
+test("resolves legacy LINE channel identity from the scoped API for both accounts", () => {
+  const start = source.indexOf("function canonicalProviderAccountId(context)");
+  const end = source.indexOf("\nfunction hasServerInitialized", start);
+  const resolve = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { URL });
+  for (const [basic, channel] of [["@first", "2009125912"], ["@second", "2007958960"]]) {
+    const context = {
+      account: { provider: "line_oa", provider_account_id: basic },
+      config: { api_url: `https://admin.example.com/api/omnichat/line_oa/tenant-1/${channel}` },
+    };
+    assert.equal(resolve(context), channel);
+    assert.equal(resolve({ ...context, config: { ...context.config, canonical_provider_account_id: " explicit " } }), "explicit");
+    assert.equal(resolve({ ...context, config: { api_url: "https://server.example.com/custom/api" } }), basic);
+    assert.equal(resolve({ ...context, account: { provider: "shopee", provider_account_id: "shop-1" } }), "shop-1");
+  }
+});

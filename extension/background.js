@@ -243,7 +243,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
   const account = matches.length === 1 ? matches[0] : null;
   const config = account ? findAccountConfig(stored[STORAGE.config], account) : (stored[STORAGE.config]?.accounts ?? []).find(
     (candidate) => candidate?.provider === "line_oa"
-      && candidate?.canonical_provider_account_id === id
+      && canonicalProviderAccountId({ config: candidate, account: candidate }) === id
       && (!providerId || candidate.provider === providerId),
   );
   const configuredAccount = account ?? (config ? {
@@ -282,10 +282,15 @@ function messageProviderAccountId(message) {
 }
 
 function canonicalProviderAccountId(context) {
+  const accountId = context?.account?.provider_account_id ?? "";
+  if (context?.account?.provider !== "line_oa") return accountId;
   const canonical = context?.config?.canonical_provider_account_id;
-  return context?.account?.provider === "line_oa" && typeof canonical === "string" && canonical.trim()
-    ? canonical.trim()
-    : context?.account?.provider_account_id ?? "";
+  if (typeof canonical === "string" && canonical.trim()) return canonical.trim();
+  const apiUrl = context?.config?.api_url;
+  if (!apiUrl) return accountId;
+  const route = new URL(apiUrl).pathname.match(/^\/api\/omnichat\/line_oa\/([^/]+)\/([^/]+)\/?$/);
+  if (!route) return accountId;
+  return decodeURIComponent(route[2]);
 }
 
 function hasServerInitialized(stored) {
