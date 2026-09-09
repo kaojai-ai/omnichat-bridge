@@ -62,6 +62,10 @@
         ...(message?.text ? { text: String(message.text).slice(0, 20_000) } : {}),
         ...(message?.contentProvider?.originalContentUrl ? { media_url: message.contentProvider.originalContentUrl } : {}),
         ...(messageType !== type ? { provider_type: messageType } : {}),
+        ...(messageType === "sticker" && id(message?.stickerId) ? {
+          ...(id(message.packageId) ? { sticker: { sticker_id: id(message.stickerId), package_id: id(message.packageId) } } : {}),
+          media_url: `https://stickershop.line-scdn.net/stickershop/v1/sticker/${encodeURIComponent(id(message.stickerId))}/ANDROID/sticker.png`,
+        } : {}),
         capture_method: captureMethod,
       });
     }

@@ -2677,6 +2677,7 @@ function batchFor(messages, installId) {
       ...(message.text ? { text: message.text } : {}),
       ...(message.media_url ? { media_url: message.media_url } : {}),
       ...(message.provider_type ? { provider_type: message.provider_type } : {}),
+      ...(message.sticker ? { sticker: message.sticker } : {}),
       ...(message.command_id ? { command_id: message.command_id } : {}),
       ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}),
       ...(message.product ? { product: message.product } : {}),
