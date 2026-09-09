@@ -46,19 +46,23 @@ test("shows only configured LINE accounts or the account in the open tab", () =>
   assert.match(popupSource, /detectedAccounts = visibleDetectedAccounts\(providerAccounts, activeTab\?\.url\)/);
 });
 
-test("shows Provider and its detected LINE account display name", () => {
+test("shows provider badges and account names separately", () => {
+  assert.match(html, /<h2 id="account-title">Provider<\/h2>/);
+  assert.match(html, /id="provider-badges" class="provider-badges"/);
+  assert.match(popupSource, /badge\.dataset\.provider = provider/);
+  assert.match(css, /\.provider-badge\[data-provider="line_oa"\] \{ background: #06c755; \}/);
+  assert.match(css, /\.provider-badge\[data-provider="shopee"\] \{ background: var\(--shopee\); \}/);
   assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
-  assert.match(popupSource, /name\.textContent = "Provider"/);
-  assert.match(popupSource, /providerName\.textContent = accountDisplayLabel\(account, adapter\)/);
-  assert.match(css, /\.account-row-provider-badge/);
+  assert.match(popupSource, /return `Shop: \$\{displayName\}`/);
+  assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
 });
 
 test("links a detected LINE account name to its LINE Chat page", () => {
   assert.match(popupSource, /function lineChatUrl\(account\)/);
   assert.match(popupSource, /https:\/\/chat\.line\.biz\/\$\{encodeURIComponent\(botId\)\}/);
-  assert.match(popupSource, /const providerName = document\.createElement\(lineUrl \? "a" : "span"\)/);
-  assert.match(popupSource, /providerName\.target = "_blank"/);
-  assert.match(css, /\.account-row-provider-badge/);
+  assert.match(popupSource, /const name = document\.createElement\(lineUrl \? "a" : "strong"\)/);
+  assert.match(popupSource, /name\.target = "_blank"/);
+  assert.match(css, /\.account-row-line-link/);
 });
 
 test("offers an account-scoped discard action beside pending messages", () => {

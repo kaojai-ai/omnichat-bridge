@@ -59,6 +59,7 @@ const importButton = document.querySelector("#import-config");
 const exportButton = document.querySelector("#export-config");
 const providerUserId = document.querySelector("#provider-user-id");
 const shopUserId = document.querySelector("#shop-user-id");
+const providerBadges = document.querySelector("#provider-badges");
 const accountList = document.querySelector("#account-list");
 const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
@@ -138,6 +139,7 @@ function accountLabel(adapter) {
 function accountDisplayLabel(account, adapter) {
   const displayName = String(account?.display_name ?? "").trim();
   if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
+  if (account?.provider === "shopee" && displayName) return `Shop: ${displayName}`;
   return displayName || accountLabel(adapter);
 }
 
@@ -294,6 +296,16 @@ function showAccounts(accounts) {
   )];
   setUserBadges(providerUserId, values("provider_user_id"));
   setUserBadges(shopUserId, values("shop_user_id"));
+  const providers = [...new Set(accounts.map((account) => account?.provider).filter(Boolean))];
+  providerBadges.hidden = providers.length === 0;
+  providerBadges.replaceChildren(...providers.map((provider) => {
+    const adapter = providerAdapters.get(provider);
+    const badge = document.createElement("span");
+    badge.className = "provider-badge";
+    badge.dataset.provider = provider;
+    badge.textContent = adapter?.displayName || provider;
+    return badge;
+  }));
 }
 
 function setUserBadges(element, values) {
@@ -405,17 +417,15 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const lineUrl = lineChatUrl(account);
-    const name = document.createElement("strong");
-    name.textContent = "Provider";
-    const providerName = document.createElement(lineUrl ? "a" : "span");
-    providerName.textContent = accountDisplayLabel(account, adapter);
+    const name = document.createElement(lineUrl ? "a" : "strong");
+    name.textContent = accountDisplayLabel(account, adapter);
     if (lineUrl) {
-      providerName.href = lineUrl;
-      providerName.target = "_blank";
-      providerName.rel = "noreferrer";
-      providerName.title = "Open LINE Chat";
+      name.href = lineUrl;
+      name.target = "_blank";
+      name.rel = "noreferrer";
+      name.className = "account-row-line-link";
+      name.title = "Open LINE Chat";
     }
-    providerName.classList.add("account-row-provider-badge");
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -438,7 +448,7 @@ function renderDetectedAccounts() {
         else openLogs("error");
       });
     }
-    copy.append(name, providerName, statusLabel);
+    copy.append(name, statusLabel);
     select.append(copy);
     const shopId = document.createElement("button");
     shopId.type = "button";
