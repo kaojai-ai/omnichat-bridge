@@ -46,9 +46,26 @@ test("shows only configured LINE accounts or the account in the open tab", () =>
   assert.match(popupSource, /detectedAccounts = visibleDetectedAccounts\(providerAccounts, activeTab\?\.url\)/);
 });
 
-test("labels a detected LINE account with its provider and display name", () => {
+test("shows provider badges and account names separately", () => {
+  assert.match(html, /<h2 id="account-title">Provider<\/h2>/);
+  assert.match(html, /id="provider-badges" class="provider-badges"/);
+  assert.match(popupSource, /badge\.dataset\.provider = provider/);
+  assert.match(popupSource, /function providerBadgeLabel\(provider, adapter\)/);
+  assert.match(popupSource, /if \(provider === "line_oa"\) return "LINE"/);
+  assert.match(popupSource, /if \(provider === "shopee"\) return "Shopee"/);
+  assert.match(css, /\.provider-badge\[data-provider="line_oa"\] \{ background: #06c755; \}/);
+  assert.match(css, /\.provider-badge\[data-provider="shopee"\] \{ background: var\(--shopee\); \}/);
   assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
+  assert.match(popupSource, /return `Shop: \$\{displayName\}`/);
   assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
+});
+
+test("links a detected LINE account name to its LINE Chat page", () => {
+  assert.match(popupSource, /function lineChatUrl\(account\)/);
+  assert.match(popupSource, /https:\/\/chat\.line\.biz\/\$\{encodeURIComponent\(botId\)\}/);
+  assert.match(popupSource, /const name = document\.createElement\(lineUrl \? "a" : "strong"\)/);
+  assert.match(popupSource, /name\.target = "_blank"/);
+  assert.match(css, /\.account-row-line-link/);
 });
 
 test("offers an account-scoped discard action beside pending messages", () => {
@@ -57,4 +74,16 @@ test("offers an account-scoped discard action beside pending messages", () => {
   assert.match(popupSource, /provider_account_id: providerAccountId/);
   assert.match(popupSource, /skips older messages for this account and cannot be undone/);
   assert.match(css, /\.discard-pending-link/);
+});
+
+test("offers to open Shopee Webchat mini before sync", () => {
+  assert.match(popupSource, /const canOpenSellerCentreChat = activeProviderSurface === "seller-centre"/);
+  assert.match(popupSource, /syncButton\.disabled = !canOpenSellerCentreChat/);
+  assert.match(popupSource, /canOpenSellerCentreChat \? "Open Webchat mini" : "Sync messages"/);
+  assert.match(popupSource, /item\.account\.provider === "shopee" && item\.live\?\.provider_chat_open === false/);
+  assert.match(popupSource, /syncButton\.dataset\.action = sellerCentreChatClosed \? "open_webchat_mini" : "sync"/);
+  assert.match(popupSource, /\? "Open Webchat mini"/);
+  assert.match(popupSource, /syncButton\.dataset\.action === "open_webchat_mini"/);
+  assert.match(popupSource, /type: "prepare_provider_v3"/);
+  assert.match(popupSource, /await detectAccount\(\)/);
 });

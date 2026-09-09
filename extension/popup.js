@@ -59,6 +59,7 @@ const importButton = document.querySelector("#import-config");
 const exportButton = document.querySelector("#export-config");
 const providerUserId = document.querySelector("#provider-user-id");
 const shopUserId = document.querySelector("#shop-user-id");
+const providerBadges = document.querySelector("#provider-badges");
 const accountList = document.querySelector("#account-list");
 const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
@@ -135,10 +136,22 @@ function accountLabel(adapter) {
   return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
 }
 
+function providerBadgeLabel(provider, adapter) {
+  if (provider === "line_oa") return "LINE";
+  if (provider === "shopee") return "Shopee";
+  return adapter?.displayName || provider;
+}
+
 function accountDisplayLabel(account, adapter) {
   const displayName = String(account?.display_name ?? "").trim();
   if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
+  if (account?.provider === "shopee" && displayName) return `Shop: ${displayName}`;
   return displayName || accountLabel(adapter);
+}
+
+function lineChatUrl(account) {
+  const botId = account?.provider === "line_oa" ? String(account.bot_id ?? "").trim() : "";
+  return botId ? `https://chat.line.biz/${encodeURIComponent(botId)}` : "";
 }
 
 function logPopup(level, event, message, details = {}) {
@@ -289,6 +302,16 @@ function showAccounts(accounts) {
   )];
   setUserBadges(providerUserId, values("provider_user_id"));
   setUserBadges(shopUserId, values("shop_user_id"));
+  const providers = [...new Set(accounts.map((account) => account?.provider).filter(Boolean))];
+  providerBadges.hidden = providers.length === 0;
+  providerBadges.replaceChildren(...providers.map((provider) => {
+    const adapter = providerAdapters.get(provider);
+    const badge = document.createElement("span");
+    badge.className = "provider-badge";
+    badge.dataset.provider = provider;
+    badge.textContent = providerBadgeLabel(provider, adapter);
+    return badge;
+  }));
 }
 
 function setUserBadges(element, values) {
@@ -399,8 +422,16 @@ function renderDetectedAccounts() {
     select.className = "account-row-select";
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
-    const name = document.createElement("strong");
+    const lineUrl = lineChatUrl(account);
+    const name = document.createElement(lineUrl ? "a" : "strong");
     name.textContent = accountDisplayLabel(account, adapter);
+    if (lineUrl) {
+      name.href = lineUrl;
+      name.target = "_blank";
+      name.rel = "noreferrer";
+      name.className = "account-row-line-link";
+      name.title = "Open LINE Chat";
+    }
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -491,6 +522,10 @@ function renderDashboard(message = "", isError = false) {
   const anySyncing = configuredStates.some((item) => ["discovering", "syncing"].includes(item.syncState?.state));
   const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
   const anyError = configuredStates.some((item) => item.syncState?.delivery_error || item.syncState?.sync_error);
+  const sellerCentreChatClosed = activeProviderSurface === "seller-centre"
+    && configuredStates.some((item) => (
+      item.account.provider === "shopee" && item.live?.provider_chat_open === false
+    ));
   const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
   const progressState = configuredStates.find((item) => ["discovering", "syncing"].includes(item.syncState?.state))?.syncState;
   const latestResult = configuredStates
@@ -509,12 +544,15 @@ function renderDashboard(message = "", isError = false) {
 
   if (!detectedAccounts.length) {
     const openProviderChat = !isProviderChatTab;
+    const canOpenSellerCentreChat = activeProviderSurface === "seller-centre";
     setLeaderStatus("NEED CONFIG", "warning", "config");
-    status.textContent = message || (openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
-    syncButton.disabled = true;
-    syncButton.dataset.action = "";
-    syncButton.textContent = "Sync messages";
-    syncButton.setAttribute("aria-label", "Sync messages");
+    status.textContent = message || (canOpenSellerCentreChat
+      ? "Open Webchat mini to detect your Shopee accounts."
+      : openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
+    syncButton.disabled = !canOpenSellerCentreChat;
+    syncButton.dataset.action = canOpenSellerCentreChat ? "open_webchat_mini" : "";
+    syncButton.textContent = canOpenSellerCentreChat ? "Open Webchat mini" : "Sync messages";
+    syncButton.setAttribute("aria-label", syncButton.textContent);
     syncButton.title = "";
     cancelSyncButton.hidden = true;
     syncProgress.hidden = true;
@@ -538,9 +576,11 @@ function renderDashboard(message = "", isError = false) {
 
   status.classList.toggle("error", isError || anyError);
   setLeaderStatus(anyLeader ? "LEADER" : "STANDBY", anyLeader ? "ready" : "neutral", "leader", anyLeader);
-  syncButton.disabled = anySyncing;
-  syncButton.dataset.action = "sync";
-  syncButton.textContent = anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
+  syncButton.disabled = sellerCentreChatClosed ? false : anySyncing;
+  syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
+  syncButton.textContent = sellerCentreChatClosed
+    ? "Open Webchat mini"
+    : anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
   syncButton.setAttribute("aria-label", syncButton.textContent);
   syncButton.title = "";
   cancelSyncButton.hidden = !anySyncing;
@@ -880,6 +920,26 @@ closePrivacyButton.addEventListener("click", () => {
 syncButton.addEventListener("click", async () => {
   if (syncButton.dataset.action === "configure") {
     openConfig();
+    return;
+  }
+  if (syncButton.dataset.action === "open_webchat_mini") {
+    syncButton.disabled = true;
+    progressArea.hidden = false;
+    status.classList.remove("error");
+    status.textContent = "Opening Webchat mini…";
+    try {
+      const result = await chrome.tabs.sendMessage(popupTabId, {
+        type: "prepare_provider_v3",
+        provider: "shopee",
+        request_id: `popup-open:${crypto.randomUUID()}`,
+      });
+      if (!result?.ok) throw new Error(result?.error ?? "Could not open Webchat mini.");
+      await detectAccount();
+      await refreshStoredState();
+      renderDashboard("Webchat mini opened.");
+    } catch (error) {
+      renderDashboard(error.message, true);
+    }
     return;
   }
   syncButton.disabled = true;

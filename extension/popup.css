@@ -376,6 +376,25 @@ input[type="checkbox"] {
   gap: 6px 8px;
 }
 
+.provider-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.provider-badge {
+  border-radius: 999px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 4px 8px;
+}
+
+.provider-badge[data-provider="line_oa"] { background: #06c755; }
+.provider-badge[data-provider="shopee"] { background: var(--shopee); }
+
 .account-identifier {
   align-items: center;
   color: var(--muted);
@@ -485,6 +504,21 @@ input[type="checkbox"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.account-row-line-link {
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.account-row-line-link:hover { text-decoration: underline; }
+
+.account-row-line-link:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .account-row-status {

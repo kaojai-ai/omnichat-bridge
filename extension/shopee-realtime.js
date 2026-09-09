@@ -402,6 +402,17 @@
       mergeAccounts(accountsFromPayload(body));
     }).catch((error) => logAsyncError("account_capture", error));
   };
+  const detectSellerCentreSessionAccount = async () => {
+    if (!isSellerCentreSurface()) return [];
+    const url = new URL(surfaceProfile().loginPath, window.location.origin);
+    const response = await state.nativeFetch(new Request(url, {
+      method: "GET",
+      credentials: "include",
+    }));
+    if (!response.ok) throw new Error(`Shopee Seller Centre account lookup returned ${response.status}.`);
+    const accounts = accountsFromPayload(await response.json());
+    return mergeAccounts(accounts);
+  };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
       mergeAccounts(accountsFromPayload(body));
@@ -1213,6 +1224,11 @@
 
   async function detectCurrentAccount(requestId) {
     try {
+      if (isSellerCentreSurface()) {
+        if (postAccounts(requestId)) return;
+        await detectSellerCentreSessionAccount();
+        if (postAccounts(requestId)) return;
+      }
       await discoverAccounts();
       if (!postAccounts(requestId)) throw new Error("Shopee Shop ID was not found.");
     } catch (error) {
@@ -1572,6 +1588,10 @@
     Object.defineProperty(observedFetch, "__omnichatRealtimeBridge", { value: true });
     Object.defineProperty(observedFetch, "__omnichatRealtimeBridgeSource", { value: SOURCE });
     window.fetch = observedFetch;
+  }
+
+  if (isSellerCentreSurface()) {
+    void observeAsync("seller_centre_session_account", detectSellerCentreSessionAccount);
   }
 
   const detachObservedSocket = () => {

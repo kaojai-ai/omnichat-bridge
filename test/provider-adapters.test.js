@@ -178,6 +178,18 @@ test("extracts and merges Shopee accounts without treating user IDs as shop IDs"
   assert.equal(accounts.some((account) => account.provider_account_id === "1549897350"), false);
 });
 
+test("extracts a Shopee display name from the nested Seller Centre session", () => {
+  const adapter = createRegistry().get("shopee");
+
+  assert.deepEqual(plain(adapter.accountsFromPayload({
+    data: { shop_id: 1549058683, shop_name: "kaojai.ai" },
+  })), [{
+    provider: "shopee",
+    provider_account_id: "1549058683",
+    display_name: "kaojai.ai",
+  }]);
+});
+
 test("normalizes detected account metadata and rejects unsafe avatar URLs", () => {
   const adapter = createRegistry().get("shopee");
   assert.deepEqual(plain(adapter.normalizeAccount({
