@@ -31,19 +31,8 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stopTimer\(\);/);
 });
 
-test("LINE OA command capabilities require an observed browser send profile", () => {
-  assert.match(source, /const sendProfilesByBot = new Map\(\)/);
-  assert.match(source, /function rememberSendProfile\(/);
-  assert.match(source, /if \(profiles\.has\("text"\)\) capabilities\.push\("send_text"\)/);
-  assert.match(source, /if \(profiles\.has\("sticker"\)\) capabilities\.push\("send_sticker"\)/);
-  assert.match(source, /imageProfile && firstImageUrlPath\(imageProfile\.payload\)/);
-  assert.match(source, /function safeHeaders\(/);
-  assert.match(source, /\["accept", "content-type", "x-oa-chat-client-version"\]/);
-  assert.match(source, /credentials: "include"/);
-  assert.doesNotMatch(source, /cookie\s*:/);
-});
 
-function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -57,7 +46,7 @@ function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCou
       requests.push(url);
       if (url.pathname === "/api/v1/bots/bot-1/chats/chat-1/messages/send") {
         sentPayloads.push({ headers: init.headers, body: init.body });
-        return { ok: true, json: async () => ({ id: `sent-${sentPayloads.length}` }) };
+        return { ok: true, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
       }
       if (url.pathname === "/api/v1/bots") {
         return {
@@ -561,6 +550,32 @@ test("LINE OA republishes realtime health when a replacement content bridge dete
   const status = bridge.posts.find((post) => post.type === "provider_status");
   assert.equal(status?.realtime_connected, true);
   assert.equal(status?.realtime_transport, "authenticated_polling");
-  assert.deepEqual(plain(status.command_capabilities_by_account), { "@159nzygg": [] });
+  assert.deepEqual(plain(status.command_capabilities_by_account), { "@159nzygg": ["send_text", "send_image", "send_sticker"] });
   bridge.dispose();
+});
+
+test("LINE OA sends without a training message for an accessible account from one tab", async () => {
+  const bridge = createBridge({ availableAccounts: [{ botId: "bot-1", basicSearchId: "@other" }] });
+  for (const command of [
+    { command_type: "send_text", text: "hello" },
+    { command_type: "send_image", image_url: "https://cdn.example/image.png" },
+    { command_type: "send_sticker", package_id: "1", sticker_id: "2" },
+  ]) {
+    const result = await bridge.sendCommand({ ...command, browser_provider_account_id: "@other" });
+    assert.equal(result.ok, true);
+  }
+  assert.deepEqual(bridge.sentPayloads.map(p => JSON.parse(p.body).type), ["text", "image", "sticker"]);
+  bridge.dispose();
+});
+
+test("LINE OA acknowledges an accepted send with no response ID using the submitted sendId", async () => {
+  for (const sendResponseBody of [null, {}]) {
+    const bridge = createBridge({ sendResponseBody });
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "accepted" });
+    const submitted = JSON.parse(bridge.sentPayloads[0].body);
+    assert.equal(result.ok, true);
+    assert.equal(result.provider_message_id, submitted.sendId);
+    assert.match(result.provider_message_id, /^chat-1_\d+_\d{8}$/);
+    bridge.dispose();
+  }
 });
