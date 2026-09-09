@@ -113,8 +113,32 @@ function adapterForAccount(account) {
   return providerAdapters.get(account?.provider);
 }
 
+function visibleDetectedAccounts(accounts, activeTabUrl = "") {
+  let openLineBotId = "";
+  try {
+    const url = new URL(activeTabUrl);
+    if (url.origin === "https://chat.line.biz") {
+      openLineBotId = String(url.pathname.split("/").filter(Boolean)[0] ?? "").trim();
+    }
+  } catch {
+    // A missing or unsupported active-tab URL has no current LINE account.
+  }
+  return accounts.filter((account) => (
+    Boolean(findAccountConfig(storedConfig, account))
+      || (account?.provider === "line_oa"
+        && openLineBotId
+        && String(account.bot_id ?? "").trim() === openLineBotId)
+  ));
+}
+
 function accountLabel(adapter) {
   return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
+}
+
+function accountDisplayLabel(account, adapter) {
+  const displayName = String(account?.display_name ?? "").trim();
+  if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
+  return displayName || accountLabel(adapter);
 }
 
 function logPopup(level, event, message, details = {}) {
@@ -376,7 +400,7 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const name = document.createElement("strong");
-    name.textContent = account.display_name || label;
+    name.textContent = accountDisplayLabel(account, adapter);
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -671,8 +695,10 @@ async function detectAccount() {
       ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
     });
     if (result?.ok) {
-      detectedAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
+      const providerAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
         .filter((account) => account?.provider === activeProviderAdapter?.id);
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      detectedAccounts = visibleDetectedAccounts(providerAccounts, activeTab?.url);
       renderDashboard();
       return true;
     }

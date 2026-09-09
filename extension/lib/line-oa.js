@@ -84,9 +84,12 @@
 
   function normalizeAccount(input, detectedAt = new Date().toISOString()) {
     const providerAccountId = basicId(input?.provider_account_id);
+    const displayName = text(input?.display_name);
     return providerAccountId ? {
       provider: "line_oa",
       provider_account_id: providerAccountId,
+      ...(id(input?.bot_id) ? { bot_id: id(input.bot_id) } : {}),
+      ...(displayName ? { display_name: displayName } : {}),
       detected_at: detectedAt,
     } : null;
   }
@@ -120,6 +123,8 @@
         events_url: parsedEventsUrl.toString(),
         hmac_secret: hmacSecret,
       };
+      const botId = text(value?.bot_id);
+      if (botId) normalized.bot_id = botId;
       for (const field of ["api_url", "logs_url", "sync_key_url"]) {
         const raw = text(value?.[field]);
         if (!raw && field === "api_url") throw new Error("api_url must use HTTPS.");

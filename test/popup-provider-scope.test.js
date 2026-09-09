@@ -39,6 +39,18 @@ test("keeps manual sync scoped to every configured detected account", () => {
   assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
 });
 
+test("shows only configured LINE accounts or the account in the open tab", () => {
+  assert.match(popupSource, /function visibleDetectedAccounts\(accounts, activeTabUrl = ""\)/);
+  assert.match(popupSource, /Boolean\(findAccountConfig\(storedConfig, account\)\)/);
+  assert.match(popupSource, /String\(account\.bot_id \?\? ""\)\.trim\(\) === openLineBotId/);
+  assert.match(popupSource, /detectedAccounts = visibleDetectedAccounts\(providerAccounts, activeTab\?\.url\)/);
+});
+
+test("labels a detected LINE account with its provider and display name", () => {
+  assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
+  assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
+});
+
 test("offers an account-scoped discard action beside pending messages", () => {
   assert.match(popupSource, /className = "account-row-pending"/);
   assert.match(popupSource, /type: "discard_pending"/);

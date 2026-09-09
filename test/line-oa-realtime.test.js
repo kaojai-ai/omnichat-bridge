@@ -31,7 +31,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
   assert.match(source.slice(start, end), /stopTimer\(\);/);
 });
 
-function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount = 2 } = {}) {
+function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -42,6 +42,14 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
     fetch: async (input) => {
       const url = new URL(String(input));
       requests.push(url);
+      if (url.pathname === "/api/v1/bots") {
+        return {
+          ok: true,
+          json: async () => ({
+            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId, name: "KaoJai.ai" }] : []),
+          }),
+        };
+      }
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
@@ -49,7 +57,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
         return {
           ok: true,
           json: async () => ({
-            list: chatId ? [{ chatId }] : [],
+            list: chatId ? [{
+              chatId,
+              ...(chatLatestEventTimestamps[chatId] !== undefined
+                ? { latestEvent: { type: "message", timestamp: chatLatestEventTimestamps[chatId] } }
+                : {}),
+            }] : [],
             ...(pageIndex + 1 < chatIds.length ? { next: `chat-page-${pageIndex + 2}` } : {}),
           }),
         };
@@ -74,7 +87,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-2/messages") {
-        return { ok: true, json: async () => ({ list: [{ id: "message-3", timestamp: 1200 }] }) };
+        return {
+          ok: true,
+          json: async () => ({
+            list: [{ id: "message-3", timestamp: chatLatestEventTimestamps["chat-2"] ?? 1200 }],
+          }),
+        };
       }
       if (url.pathname.startsWith("/api/v3/bots/bot-1/chats/") && url.pathname.endsWith("/messages")) {
         const chatId = url.pathname.split("/").at(-2);
@@ -148,7 +166,7 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
   return {
     posts,
     requests,
-    detect(accountHints) {
+    async detect(accountHints) {
       const before = posts.length;
       for (const listener of listeners) {
         listener({
@@ -162,9 +180,14 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
           },
         });
       }
-      return posts.slice(before).find((post) => post.request_id === "detect-1");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const detected = posts.slice(before).find((post) => post.request_id === "detect-1");
+        if (detected) return detected;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error("LINE OA account detection did not complete.");
     },
-    async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", checkpoint = null } = {}) {
+    async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", botId = "bot-1", checkpoint = null } = {}) {
       for (const listener of listeners) {
         listener({
           source: window,
@@ -175,11 +198,12 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
             request_id: requestId,
             checkpoint,
             provider_account_id: providerAccountId,
+            ...(botId ? { bot_id: botId } : {}),
           },
         });
       }
       for (let attempt = 0; attempt < 100; attempt += 1) {
-        const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === "sync-1");
+        const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === requestId);
         if (complete) return complete;
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -191,26 +215,37 @@ function createBridge({ basicId = "@159nzygg", chatCount = 2, chat1MessageCount 
   };
 }
 
-test("LINE OA maps the page Basic ID to the configured provider account", () => {
+test("LINE OA discovers and persists the page Basic ID with its bot ID", async () => {
   const bridge = createBridge();
 
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "accounts_detected",
     request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg" }],
+    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg", bot_id: "bot-1", display_name: "KaoJai.ai" }],
   });
 });
 
-test("LINE OA rejects a page without a Basic ID", () => {
+test("LINE OA rejects a session without an accessible account", async () => {
   const bridge = createBridge({ basicId: "" });
 
-  assert.deepEqual(plain(bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "account_detection_failed",
     request_id: "detect-1",
-    error: "LINE OA Basic ID was not found in the open page.",
+    error: "No LINE OA accounts were found for the signed-in user.",
   });
+});
+
+test("LINE OA discovers a closed account bot ID before polling it", async () => {
+  const bridge = createBridge({
+    availableAccounts: [{ botId: "bot-1", basicSearchId: "@other" }],
+  });
+
+  const complete = await bridge.sync({ providerAccountId: "@other", botId: "" });
+
+  assert.equal(complete.ok, true);
+  assert.ok(bridge.requests.some((url) => url.pathname === "/api/v1/bots"));
 });
 
 test("LINE OA recovers every chat and message page only after each page is acknowledged", async () => {
@@ -319,16 +354,71 @@ test("LINE OA incremental recovery stops at the saved watermark", async () => {
   );
 });
 
+test("LINE OA skips unchanged chats using latestEvent timestamp", async () => {
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1000, "chat-2": 3000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 1);
+  assert.deepEqual(
+    bridge.requests
+      .filter((url) => url.pathname.includes("/messages"))
+      .map((url) => `${url.pathname}?${url.searchParams}`),
+    ["/api/v3/bots/bot-1/chats/chat-2/messages?limit=100"],
+  );
+});
+
+test("LINE OA fetches when latestEvent timestamp equals the saved watermark", async () => {
+  const bridge = createBridge({
+    chatCount: 1,
+    chatLatestEventTimestamps: { "chat-1": 2000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(
+    bridge.requests.filter((url) => url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages").length,
+    1,
+  );
+});
+
 test("LINE OA queues a sync request that arrives during an active recovery", async () => {
   const bridge = createBridge();
 
   const first = bridge.sync({ requestId: "sync-1" });
-  const second = bridge.sync({ requestId: "sync-2" });
+  const second = bridge.sync({
+    requestId: "sync-2",
+    providerAccountId: "line-oa-account-2",
+    botId: "bot-1",
+  });
   const [firstComplete, secondComplete] = await Promise.all([first, second]);
 
   assert.equal(firstComplete.ok, true);
   assert.equal(secondComplete.ok, true);
+  assert.equal(secondComplete.provider_account_id, "line-oa-account-2");
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete").length, 2);
+});
+
+test("LINE OA uses an explicit bot ID to poll another configured account from one tab", async () => {
+  const bridge = createBridge();
+
+  const complete = await bridge.sync({
+    requestId: "sync-2",
+    providerAccountId: "line-oa-account-2",
+    botId: "bot-1",
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.provider_account_id, "line-oa-account-2");
+  assert.ok(bridge.requests.some((url) => url.pathname === "/api/v2/bots/bot-1/chats"));
 });
 
 test("LINE OA completes a pending request when the page bridge is replaced", async () => {
