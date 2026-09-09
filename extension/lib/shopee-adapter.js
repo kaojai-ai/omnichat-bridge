@@ -44,6 +44,29 @@
     };
   }
 
+  function accountFromSession(session) {
+    if (!session || typeof session !== "object" || Array.isArray(session)) return null;
+    const shop = session.shop ?? session.shop_info ?? session.shopInfo;
+    const fromShop = accountFromShop(shop, session.user);
+    if (fromShop) return fromShop;
+    const id = firstValue(session, ["shop_id", "shopid", "shopId"]);
+    if (!id) return null;
+    const name = firstValue(session, [
+      "shop_name",
+      "shopname",
+      "shopName",
+      "display_name",
+      "displayName",
+      "username",
+      "name",
+    ]);
+    return {
+      provider: "shopee",
+      provider_account_id: id,
+      ...(name ? { display_name: name } : {}),
+    };
+  }
+
   function shopListItems(body) {
     if (Array.isArray(body)) {
       return body.filter((item) => firstValue(item, ["name", "shop_name", "shopname", "shopName"]));
@@ -79,9 +102,9 @@
         accounts.push(account);
       }
     };
-    add(accountFromShop(body?.shop, body?.user));
-    const directShopId = firstValue(body, ["shop_id", "shopId"]);
-    if (directShopId) add({ provider: "shopee", provider_account_id: directShopId });
+    for (const session of [body, body?.data, body?.result, body?.data?.data]) {
+      add(accountFromSession(session));
+    }
     for (const shop of shopListItems(body)) add(accountFromShop(shop, body?.user));
     for (const conversation of conversationItems(body)) add(accountFromConversation(conversation));
     const shopIds = Array.isArray(body?.ShopIds)

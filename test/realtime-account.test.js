@@ -351,8 +351,7 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
     miniChatOpen: false,
     initialResponses: {
       "/api/v2/login/": {
-        user: { id: 4897267 },
-        shop: { id: 1549058683, user_id: 1549897350, name: "KaoJai.ai" },
+        data: { shop_id: 1549058683, shop_name: "kaojai.ai" },
       },
     },
   });
@@ -362,9 +361,7 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(detection.accounts)), [{
     provider: "shopee",
     provider_account_id: "1549058683",
-    display_name: "KaoJai.ai",
-    provider_user_id: "4897267",
-    shop_user_id: "1549897350",
+    display_name: "kaojai.ai",
   }]);
   assert.equal(bridge.requests.includes("/api/v2/login/"), true);
   assert.equal(bridge.miniChatClicks, 0);
