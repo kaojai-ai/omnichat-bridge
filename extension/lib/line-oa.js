@@ -127,7 +127,7 @@
       if (canonicalProviderAccountId) normalized.canonical_provider_account_id = canonicalProviderAccountId;
       const botId = text(value?.bot_id);
       if (botId) normalized.bot_id = botId;
-      for (const field of ["api_url", "image_server_url", "logs_url", "sync_key_url"]) {
+      for (const field of ["api_url", "image_server_url", "logs_url"]) {
         const raw = text(value?.[field]);
         if (!raw && field === "api_url") throw new Error("api_url must use HTTPS.");
         if (!raw) continue;
