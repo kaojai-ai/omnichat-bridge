@@ -46,7 +46,7 @@ function createBridge({ basicId = "@159nzygg", availableAccounts = null, chatCou
         return {
           ok: true,
           json: async () => ({
-            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId }] : []),
+            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId, name: "KaoJai.ai" }] : []),
           }),
         };
       }
@@ -222,7 +222,7 @@ test("LINE OA discovers and persists the page Basic ID with its bot ID", async (
     source: "omnichat-realtime-bridge-v3",
     type: "accounts_detected",
     request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg", bot_id: "bot-1" }],
+    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg", bot_id: "bot-1", display_name: "KaoJai.ai" }],
   });
 });
 

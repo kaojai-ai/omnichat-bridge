@@ -135,6 +135,12 @@ function accountLabel(adapter) {
   return adapter?.accountName || adapter?.displayName || `${adapter?.id || "Provider"} account`;
 }
 
+function accountDisplayLabel(account, adapter) {
+  const displayName = String(account?.display_name ?? "").trim();
+  if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
+  return displayName || accountLabel(adapter);
+}
+
 function logPopup(level, event, message, details = {}) {
   try {
     void chrome.runtime.sendMessage({
@@ -394,7 +400,7 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const name = document.createElement("strong");
-    name.textContent = account.display_name || label;
+    name.textContent = accountDisplayLabel(account, adapter);
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;

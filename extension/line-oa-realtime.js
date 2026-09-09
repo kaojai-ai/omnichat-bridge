@@ -34,6 +34,7 @@
     return (Array.isArray(body?.list) ? body.list : []).map((bot) => ({
       provider_account_id: normalizeBasicId(bot?.basicSearchId ?? bot?.basicId),
       bot_id: value(bot?.botId ?? bot?.id),
+      display_name: value(bot?.name ?? bot?.displayName),
     })).filter((account) => account.provider_account_id && account.bot_id);
   }
 
