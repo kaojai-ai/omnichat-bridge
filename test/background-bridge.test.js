@@ -6,6 +6,27 @@ import vm from "node:vm";
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
 
+test("reopening LINE refreshes account readiness before publishing live status without a popup", async () => {
+  const calls = [];
+  const start = source.indexOf("async function reconnectProviderTab(tab)");
+  const end = source.indexOf("\nchrome.tabs.onUpdated", start);
+  const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    providerAdapters: { list: () => [{ id: "line_oa", matchesUrl: (url) => url.startsWith("https://chat.line.biz/") }] },
+    STORAGE: { consent: "consent" },
+    readStorage: async () => ({ consent: true }),
+    hasLocalConsent: (consent) => consent,
+    ensureProviderBridge: async () => calls.push("bridge"),
+    detectOpenProviderAccount: async (provider, tabId) => {
+      calls.push(`${provider}:${tabId}`);
+      return { ok: true };
+    },
+    autoStartSellerCentreTab: async () => {},
+    ensureLiveConnection: async () => calls.push("live"),
+  });
+  await reconnect({ id: 42, url: "https://chat.line.biz/account/chat" });
+  assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
+});
+
 test("does not reload provider tabs when the content bridge is unavailable", () => {
   assert.doesNotMatch(source, /chrome\.tabs\.reload\s*\(/);
   assert.match(source, /content_unready/);
