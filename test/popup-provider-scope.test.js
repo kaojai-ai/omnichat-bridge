@@ -46,17 +46,19 @@ test("shows only configured LINE accounts or the account in the open tab", () =>
   assert.match(popupSource, /detectedAccounts = visibleDetectedAccounts\(providerAccounts, activeTab\?\.url\)/);
 });
 
-test("labels a detected LINE account with its provider and display name", () => {
+test("shows Provider and its detected LINE account display name", () => {
   assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
-  assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
+  assert.match(popupSource, /name\.textContent = "Provider"/);
+  assert.match(popupSource, /providerName\.textContent = accountDisplayLabel\(account, adapter\)/);
+  assert.match(css, /\.account-row-provider-badge/);
 });
 
 test("links a detected LINE account name to its LINE Chat page", () => {
   assert.match(popupSource, /function lineChatUrl\(account\)/);
   assert.match(popupSource, /https:\/\/chat\.line\.biz\/\$\{encodeURIComponent\(botId\)\}/);
-  assert.match(popupSource, /const name = document\.createElement\(lineUrl \? "a" : "strong"\)/);
-  assert.match(popupSource, /name\.target = "_blank"/);
-  assert.match(css, /\.account-row-line-link/);
+  assert.match(popupSource, /const providerName = document\.createElement\(lineUrl \? "a" : "span"\)/);
+  assert.match(popupSource, /providerName\.target = "_blank"/);
+  assert.match(css, /\.account-row-provider-badge/);
 });
 
 test("offers an account-scoped discard action beside pending messages", () => {

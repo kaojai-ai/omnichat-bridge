@@ -405,15 +405,17 @@ function renderDetectedAccounts() {
     const copy = document.createElement("span");
     copy.className = "account-row-copy";
     const lineUrl = lineChatUrl(account);
-    const name = document.createElement(lineUrl ? "a" : "strong");
-    name.textContent = accountDisplayLabel(account, adapter);
+    const name = document.createElement("strong");
+    name.textContent = "Provider";
+    const providerName = document.createElement(lineUrl ? "a" : "span");
+    providerName.textContent = accountDisplayLabel(account, adapter);
     if (lineUrl) {
-      name.href = lineUrl;
-      name.target = "_blank";
-      name.rel = "noreferrer";
-      name.className = "account-row-line-link";
-      name.title = "Open LINE Chat";
+      providerName.href = lineUrl;
+      providerName.target = "_blank";
+      providerName.rel = "noreferrer";
+      providerName.title = "Open LINE Chat";
     }
+    providerName.classList.add("account-row-provider-badge");
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
@@ -436,7 +438,7 @@ function renderDetectedAccounts() {
         else openLogs("error");
       });
     }
-    copy.append(name, statusLabel);
+    copy.append(name, providerName, statusLabel);
     select.append(copy);
     const shopId = document.createElement("button");
     shopId.type = "button";
