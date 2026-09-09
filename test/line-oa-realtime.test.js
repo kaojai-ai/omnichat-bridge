@@ -553,3 +553,14 @@ test("LINE OA completes a pending request when the page bridge is replaced", asy
     error: "LINE OA bridge was replaced.",
   });
 });
+
+test("LINE OA republishes realtime health when a replacement content bridge detects accounts", async () => {
+  const bridge = createBridge();
+  bridge.posts.length = 0;
+  await bridge.detect();
+  const status = bridge.posts.find((post) => post.type === "provider_status");
+  assert.equal(status?.realtime_connected, true);
+  assert.equal(status?.realtime_transport, "authenticated_polling");
+  assert.deepEqual(plain(status.command_capabilities_by_account), { "@159nzygg": [] });
+  bridge.dispose();
+});
