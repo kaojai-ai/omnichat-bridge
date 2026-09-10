@@ -534,7 +534,7 @@
       return;
     }
     const payload = clone(profile.payload);
-    payload.sendId = sendId(conversationId);
+    payload.sendId = value(command?.client_message_id) || sendId(conversationId);
     if (expectedType === "text") {
       const textValue = value(command?.text);
       if (!textValue || textValue.length > 2_000) {
