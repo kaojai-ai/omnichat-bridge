@@ -188,6 +188,20 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("waits for the recovered native ID after an acknowledged API send", async () => {
+  const bridge = contentBridge();
+  const result = bridge.sendCommand(command);
+
+  await bridge.providerEvent({
+    type: "api_send_result",
+    request_id: "request-1",
+    ok: true,
+  });
+  await bridge.providerEvent({ type: "realtime_event", body: { messages: [echo] } });
+
+  assert.deepEqual(plain(await result), { ok: true, provider_message_id: "provider-1" });
+});
+
 test("flushes pending messages when the recurring LINE-style poll completes", async () => {
   const bridge = contentBridge();
 
