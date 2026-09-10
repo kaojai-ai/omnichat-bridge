@@ -213,10 +213,9 @@ test("keeps message normalization behind the provider boundary", () => {
   }]);
 });
 
-test("LINE OA retains sticker identity, a display URL, and its send correlation ID", () => {
+test("LINE OA retains sticker identity and a display URL", () => {
   const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
-  const messages = adapter.normalizeMessages({ provider_account_id: "@test", messages: [{ type: "message", timestamp: 1000, source: { chatId: "chat-1", userId: "user-1" }, message: { id: "msg-1", sendId: "admin-client-message-1", type: "sticker", packageId: "123", stickerId: "10445608" } }] }, "history_recovery");
+  const messages = adapter.normalizeMessages({ provider_account_id: "@test", messages: [{ type: "message", timestamp: 1000, source: { chatId: "chat-1", userId: "user-1" }, message: { id: "msg-1", type: "sticker", packageId: "123", stickerId: "10445608" } }] }, "history_recovery");
   assert.deepEqual(plain(messages[0].sticker), { package_id: "123", sticker_id: "10445608" });
-  assert.equal(messages[0].client_message_id, "admin-client-message-1");
   assert.match(messages[0].media_url, /10445608\/ANDROID\/sticker.png$/);
 });
