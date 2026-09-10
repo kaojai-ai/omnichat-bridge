@@ -821,6 +821,19 @@
   }
 
   function handleApiSendResult(message) {
+    const providerMessageIdSource = ["response", "submitted_send_id"].includes(message.provider_message_id_source)
+      ? message.provider_message_id_source
+      : "unknown";
+    if (providerMessageIdSource === "submitted_send_id") {
+      log("warn", "api_send_provider_id_fallback", `${providerLabel} accepted the send without returning a provider message ID.`, {
+        provider_message_id_source: providerMessageIdSource,
+        ...(Number.isInteger(message.response_status) ? { response_status: message.response_status } : {}),
+        ...(typeof message.response_body_type === "string" ? { response_body_type: message.response_body_type } : {}),
+        response_body_keys: Array.isArray(message.response_body_keys)
+          ? message.response_body_keys.filter((key) => typeof key === "string").slice(0, 20)
+          : [],
+      });
+    }
     const pending = pendingApiSends.get(message.request_id);
     if (!pending) return;
     pending.result = message;

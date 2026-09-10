@@ -188,6 +188,41 @@ test("queues an API echo after the provider result completes the send", async ()
   );
 });
 
+test("logs sanitized response metadata when an API send uses the submitted provider ID", async () => {
+  const bridge = contentBridge();
+  const result = bridge.sendCommand(command);
+
+  await bridge.providerEvent({
+    type: "api_send_result",
+    request_id: "request-1",
+    ok: true,
+    provider_message_id: "synthetic-provider-id",
+    provider_message_id_source: "submitted_send_id",
+    response_status: 200,
+    response_body_type: "object",
+    response_body_keys: ["status", 123, "messages"],
+  });
+  await result;
+
+  assert.deepEqual(
+    plain(bridge.runtimeMessages.find((message) => message.event === "api_send_provider_id_fallback")),
+    {
+      type: "record_log",
+      level: "warn",
+      area: "provider",
+      event: "api_send_provider_id_fallback",
+      message: "Shopee Seller Chat accepted the send without returning a provider message ID.",
+      details: {
+        provider_message_id_source: "submitted_send_id",
+        response_status: 200,
+        response_body_type: "object",
+        response_body_keys: ["status", "messages"],
+        provider: "shopee",
+      },
+    },
+  );
+});
+
 test("flushes pending messages when the recurring LINE-style poll completes", async () => {
   const bridge = contentBridge();
 

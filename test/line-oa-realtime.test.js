@@ -46,7 +46,7 @@ function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccoun
       requests.push(url);
       if (url.pathname === "/api/v1/bots/bot-1/chats/chat-1/messages/send") {
         sentPayloads.push({ headers: init.headers, body: init.body });
-        return { ok: true, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
+        return { ok: true, status: 200, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
       }
       if (url.pathname === "/api/v1/bots") {
         return {
@@ -294,6 +294,10 @@ test("LINE OA replays an observed text request without copying cookies", async (
     request_id: "send-1",
     ok: true,
     provider_message_id: "sent-2",
+    provider_message_id_source: "response",
+    response_status: 200,
+    response_body_type: "object",
+    response_body_keys: ["id"],
   });
   assert.equal(bridge.sentPayloads.length, 2);
   const sentBody = JSON.parse(bridge.sentPayloads[1].body);
@@ -568,14 +572,18 @@ test("LINE OA sends without a training message for an accessible account from on
   bridge.dispose();
 });
 
-test("LINE OA does not report the submitted sendId as a provider message ID", async () => {
+test("LINE OA reports sanitized response metadata when it falls back to the submitted sendId", async () => {
   for (const sendResponseBody of [null, {}]) {
     const bridge = createBridge({ sendResponseBody });
     const result = await bridge.sendCommand({ command_type: "send_text", text: "accepted" });
     const submitted = JSON.parse(bridge.sentPayloads[0].body);
     assert.equal(result.ok, true);
     assert.match(submitted.sendId, /^chat-1_\d+_\d{8}$/);
-    assert.equal(result.provider_message_id, undefined);
+    assert.equal(result.provider_message_id, submitted.sendId);
+    assert.equal(result.provider_message_id_source, "submitted_send_id");
+    assert.equal(result.response_status, 200);
+    assert.equal(result.response_body_type, sendResponseBody === null ? "null" : "object");
+    assert.deepEqual(plain(result.response_body_keys), []);
     bridge.dispose();
   }
 });

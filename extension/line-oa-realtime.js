@@ -573,12 +573,23 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
         return;
       }
-      const providerMessageId = responseMessageId(responseBody);
+      const nativeProviderMessageId = responseMessageId(responseBody);
+      const providerMessageId = nativeProviderMessageId || payload.sendId;
+      const responseBodyType = responseBody === null
+        ? "null"
+        : Array.isArray(responseBody) ? "array" : typeof responseBody;
+      const responseBodyKeys = responseBodyType === "object"
+        ? Object.keys(responseBody).slice(0, 20)
+        : [];
       post({
         type: "api_send_result",
         request_id: requestId,
         ok: true,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
+        provider_message_id_source: nativeProviderMessageId ? "response" : "submitted_send_id",
+        response_status: response.status,
+        response_body_type: responseBodyType,
+        response_body_keys: responseBodyKeys,
       });
     } catch (error) {
       post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: true, error: `LINE OA send was not acknowledged: ${String(error)}` });
