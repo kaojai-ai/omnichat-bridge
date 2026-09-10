@@ -579,3 +579,19 @@ test("LINE OA acknowledges an accepted send with no response ID using the submit
     bridge.dispose();
   }
 });
+
+test("LINE OA uses the Admin client message ID as its send correlation ID", async () => {
+  const bridge = createBridge({ sendResponseBody: null });
+
+  const result = await bridge.sendCommand({
+    command_type: "send_sticker",
+    package_id: "1669",
+    sticker_id: "31690",
+    client_message_id: "admin-client-message-1",
+  });
+
+  const submitted = JSON.parse(bridge.sentPayloads[0].body);
+  assert.equal(submitted.sendId, "admin-client-message-1");
+  assert.equal(result.provider_message_id, "admin-client-message-1");
+  bridge.dispose();
+});
