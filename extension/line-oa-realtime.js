@@ -573,7 +573,7 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
         return;
       }
-      const providerMessageId = responseMessageId(responseBody) || payload.sendId;
+      const providerMessageId = responseMessageId(responseBody);
       post({
         type: "api_send_result",
         request_id: requestId,

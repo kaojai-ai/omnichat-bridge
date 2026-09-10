@@ -568,14 +568,14 @@ test("LINE OA sends without a training message for an accessible account from on
   bridge.dispose();
 });
 
-test("LINE OA acknowledges an accepted send with no response ID using the submitted sendId", async () => {
+test("LINE OA does not report the submitted sendId as a provider message ID", async () => {
   for (const sendResponseBody of [null, {}]) {
     const bridge = createBridge({ sendResponseBody });
     const result = await bridge.sendCommand({ command_type: "send_text", text: "accepted" });
     const submitted = JSON.parse(bridge.sentPayloads[0].body);
     assert.equal(result.ok, true);
-    assert.equal(result.provider_message_id, submitted.sendId);
-    assert.match(result.provider_message_id, /^chat-1_\d+_\d{8}$/);
+    assert.match(submitted.sendId, /^chat-1_\d+_\d{8}$/);
+    assert.equal(result.provider_message_id, undefined);
     bridge.dispose();
   }
 });
