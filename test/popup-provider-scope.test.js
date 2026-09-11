@@ -40,10 +40,26 @@ test("keeps manual sync scoped to every configured detected account", () => {
 });
 
 test("shows only configured LINE accounts or the account in the open tab", () => {
-  assert.match(popupSource, /function visibleDetectedAccounts\(accounts, activeTabUrl = ""\)/);
-  assert.match(popupSource, /Boolean\(findAccountConfig\(storedConfig, account\)\)/);
-  assert.match(popupSource, /String\(account\.bot_id \?\? ""\)\.trim\(\) === openLineBotId/);
-  assert.match(popupSource, /detectedAccounts = visibleDetectedAccounts\(providerAccounts, activeTab\?\.url\)/);
+  assert.match(popupSource, /from "\.\/lib\/popup-accounts\.js"/);
+  assert.match(popupSource, /function bestEffortAccounts\(storedAccounts, tabUrl = ""\)/);
+  assert.match(popupSource, /detectedAccounts = bestEffortAccounts\(/);
+  assert.match(popupSource, /hydrateDetectedAccounts\(/);
+});
+
+test("gates the popup on local consent and clears it with erase all data", () => {
+  assert.match(popupSource, /function routeTo\(target\)/);
+  assert.match(popupSource, /if \(!consented\(\) && screen !== "consent" && screen !== "privacy"\)/);
+  assert.match(popupSource, /storedConsent = null;/);
+  assert.match(popupSource, /await chrome\.storage\.local\.clear\(\);/);
+  assert.match(popupSource, /routeTo\("consent"\);/);
+  assert.match(popupSource, /if \(!consented\(\)\) \{\n    routeTo\("consent"\);\n    return;\n  \}/);
+});
+
+test("hydrates saved accounts and sync status before live detection returns", () => {
+  assert.match(popupSource, /STORAGE\.detectedAccounts,/);
+  assert.match(popupSource, /detectedAccounts = bestEffortAccounts\(stored\[STORAGE\.detectedAccounts\], activeTab\?\.url\);/);
+  assert.match(popupSource, /from "\.\/lib\/popup-sync-progress\.js"/);
+  assert.match(popupSource, /syncProgressPresentation\(progressState\)/);
 });
 
 test("shows provider badges and account names separately", () => {

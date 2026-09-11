@@ -20,18 +20,13 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
+import { hydrateDetectedAccounts } from "./lib/popup-accounts.js";
+import { syncProgressPresentation } from "./lib/popup-sync-progress.js";
 import { sellerCentreConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
-const SYNC_PHASE_LABELS = {
-  preparing: "Preparing sync…",
-  sending_pending: "Sending previously queued messages…",
-  loading_conversations: "Starting conversation check…",
-  checking_conversations: "Checking conversations for missed messages…",
-  sending_recovered: "Sending recovered messages to your server…",
-};
 const sampleConfig = {
   version: CONFIG_VERSION,
   accounts: [{
@@ -55,7 +50,6 @@ const configScreen = document.querySelector("#config-screen");
 const brandHeader = document.querySelector(".brand");
 const clearButton = document.querySelector("#clear");
 const settingsButton = document.querySelector("#open-config");
-const importButton = document.querySelector("#import-config");
 const exportButton = document.querySelector("#export-config");
 const providerUserId = document.querySelector("#provider-user-id");
 const shopUserId = document.querySelector("#shop-user-id");
@@ -114,22 +108,45 @@ function adapterForAccount(account) {
   return providerAdapters.get(account?.provider);
 }
 
-function visibleDetectedAccounts(accounts, activeTabUrl = "") {
-  let openLineBotId = "";
-  try {
-    const url = new URL(activeTabUrl);
-    if (url.origin === "https://chat.line.biz") {
-      openLineBotId = String(url.pathname.split("/").filter(Boolean)[0] ?? "").trim();
-    }
-  } catch {
-    // A missing or unsupported active-tab URL has no current LINE account.
+function consented() {
+  return hasLocalConsent(storedConsent);
+}
+
+function defaultScreen() {
+  if (!consented()) return "consent";
+  return isProviderChatTab ? "dashboard" : "hint";
+}
+
+function routeTo(target) {
+  let screen = target;
+  if (!consented() && screen !== "consent" && screen !== "privacy") {
+    screen = "consent";
   }
-  return accounts.filter((account) => (
-    Boolean(findAccountConfig(storedConfig, account))
-      || (account?.provider === "line_oa"
-        && openLineBotId
-        && String(account.bot_id ?? "").trim() === openLineBotId)
-  ));
+  viewingPrivacy = screen === "privacy";
+  const onConsentGate = screen === "consent" || screen === "privacy";
+  brandHeader.hidden = screen === "config" || screen === "logs" || screen === "privacy";
+  consentScreen.hidden = !onConsentGate;
+  hintScreen.hidden = screen !== "hint";
+  dashboardScreen.hidden = screen !== "dashboard";
+  configScreen.hidden = screen !== "config";
+  logsScreen.hidden = screen !== "logs";
+  setHeaderActionsVisible(screen === "dashboard");
+  setSettingsButtonVisible(consented() && !onConsentGate && screen !== "config" && screen !== "logs");
+  if (onConsentGate) renderConsentScreen();
+}
+
+async function currentActiveTabUrl() {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return activeTab?.url ?? "";
+}
+
+function bestEffortAccounts(storedAccounts, tabUrl = "") {
+  return hydrateDetectedAccounts({
+    storedAccounts,
+    config: storedConfig,
+    providerId: activeProviderAdapter?.id,
+    activeTabUrl: tabUrl,
+  });
 }
 
 function accountLabel(adapter) {
@@ -214,18 +231,18 @@ function formatConsentDate(value) {
 }
 
 function renderConsentScreen() {
-  const consented = hasLocalConsent(storedConsent);
+  const hasConsent = consented();
   const recordedAt = formatConsentDate(storedConsent?.accepted_at);
   consentIntroTitle.textContent = viewingPrivacy ? "Privacy and consent" : "Before you continue";
   consentIntroDescription.textContent = viewingPrivacy ? "What this extension transfers from this browser." : "Review what leaves this browser.";
-  closePrivacyButton.hidden = !viewingPrivacy;
-  consentRecord.hidden = !consented;
+  closePrivacyButton.hidden = !viewingPrivacy || !hasConsent;
+  consentRecord.hidden = !hasConsent;
   consentRecord.textContent = recordedAt ? `✔️ Consent recorded ${recordedAt} on this device.` : "✔️ Consent recorded on this device.";
-  consentLabel.hidden = consented;
-  continueButton.hidden = consented;
-  consentInput.disabled = consented;
-  consentInput.checked = consented;
-  continueButton.disabled = consented || !consentInput.checked;
+  consentLabel.hidden = hasConsent;
+  continueButton.hidden = hasConsent;
+  consentInput.disabled = hasConsent;
+  consentInput.checked = hasConsent;
+  continueButton.disabled = hasConsent || !consentInput.checked;
 }
 
 function configOrEmpty(value) {
@@ -519,7 +536,10 @@ function renderDashboard(message = "", isError = false) {
     };
   });
   const configuredStates = accountStates.filter((item) => item.config);
-  const anySyncing = configuredStates.some((item) => ["discovering", "syncing"].includes(item.syncState?.state));
+  const anySyncing = configuredStates.some((item) => (
+    ["discovering", "syncing"].includes(item.syncState?.state)
+    || item.scanState?.in_progress === true
+  ));
   const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
   const anyError = configuredStates.some((item) => item.syncState?.delivery_error || item.syncState?.sync_error);
   const sellerCentreChatClosed = activeProviderSurface === "seller-centre"
@@ -527,7 +547,10 @@ function renderDashboard(message = "", isError = false) {
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
   const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
-  const progressState = configuredStates.find((item) => ["discovering", "syncing"].includes(item.syncState?.state))?.syncState;
+  const progressState = configuredStates.find((item) => (
+    ["discovering", "syncing"].includes(item.syncState?.state)
+  ))?.syncState ?? null;
+  const progressView = syncProgressPresentation(progressState);
   const latestResult = configuredStates
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
@@ -592,19 +615,11 @@ function renderDashboard(message = "", isError = false) {
     lastSync.hidden = false;
   }
 
-  if (progressState?.state === "syncing") {
-    const completed = Number(progressState.completed_conversations) || 0;
-    const total = Number(progressState.total_conversations) || 0;
-    syncProgress.hidden = false;
-    syncProgress.value = total ? Math.round((completed / total) * 100) : 0;
+  if (progressView?.active) {
+    syncProgress.hidden = !progressView.showBar;
+    syncProgress.value = progressView.value;
     progressArea.hidden = false;
-    status.textContent = total
-      ? `Checking conversation ${completed} of ${total} · ${syncProgress.value}%`
-      : `Checking provider conversations… ${completed} checked`;
-  } else if (progressState?.state === "discovering") {
-    syncProgress.hidden = true;
-    progressArea.hidden = false;
-    status.textContent = SYNC_PHASE_LABELS[progressState.phase] ?? "Starting sync…";
+    status.textContent = progressView.text;
   } else {
     const resultMessage = message
       || (anyError
@@ -704,6 +719,8 @@ function renderLogs() {
 async function refreshStoredState() {
   const stored = await readStorage([
     STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -712,6 +729,11 @@ async function refreshStoredState() {
     STORAGE.deviceName,
     STORAGE.autoOpenSellerCentreChat,
   ]);
+  storedConsent = stored[STORAGE.consent] ?? null;
+  if (!consented()) {
+    routeTo("consent");
+    return;
+  }
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
@@ -723,6 +745,14 @@ async function refreshStoredState() {
     : "";
   autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
   autoOpenChatInput.checked = autoOpenSellerCentreChat;
+  detectedAccounts = bestEffortAccounts(
+    stored[STORAGE.detectedAccounts],
+    await currentActiveTabUrl(),
+  );
+  if (!configScreen.hidden || !logsScreen.hidden || viewingPrivacy) {
+    renderLogs();
+    return;
+  }
   renderDashboard();
   renderLogs();
 }
@@ -735,20 +765,20 @@ async function detectAccount() {
       ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
     });
     if (result?.ok) {
-      const providerAccounts = (Array.isArray(result.accounts) ? result.accounts : [])
-        .filter((account) => account?.provider === activeProviderAdapter?.id);
-      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      detectedAccounts = visibleDetectedAccounts(providerAccounts, activeTab?.url);
+      const tabUrl = await currentActiveTabUrl();
+      detectedAccounts = bestEffortAccounts(
+        Array.isArray(result.accounts) ? result.accounts : [],
+        tabUrl,
+      );
       renderDashboard();
-      return true;
+      return detectedAccounts.length > 0;
     }
   } catch (error) {
     reportPopupError("detect_account", error);
-    // The retry state below remains available.
   }
-  setLeaderStatus("NEED CONFIG", "warning", "config");
-  progressArea.hidden = true;
-  return false;
+  // Keep best-effort hydrated accounts so provider/config UI stays visible.
+  renderDashboard();
+  return detectedAccounts.length > 0;
 }
 
 function renderConfigEditor() {
@@ -763,28 +793,19 @@ function renderConfigEditor() {
 }
 
 function openConfig() {
-  brandHeader.hidden = true;
-  hintScreen.hidden = true;
-  dashboardScreen.hidden = true;
-  logsScreen.hidden = true;
-  configScreen.hidden = false;
-  setHeaderActionsVisible(false);
+  if (!consented()) {
+    routeTo("consent");
+    return;
+  }
+  routeTo("config");
   setConfigStatus("");
   renderConfigEditor();
 }
 
 function closeConfig() {
-  brandHeader.hidden = false;
-  configScreen.hidden = true;
-  logsScreen.hidden = true;
-  const consented = hasLocalConsent(storedConsent);
-  const showHintScreen = consented && !isProviderChatTab;
-  const showDashboard = consented && isProviderChatTab;
-  hintScreen.hidden = !showHintScreen;
-  dashboardScreen.hidden = !showDashboard;
-  setHeaderActionsVisible(showDashboard);
-  setSettingsButtonVisible(consented);
-  if (showDashboard) renderDashboard();
+  const screen = defaultScreen();
+  routeTo(screen);
+  if (screen === "dashboard") renderDashboard();
 }
 
 async function showSyncResult(result) {
@@ -825,6 +846,7 @@ async function load() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
+    STORAGE.detectedAccounts,
     STORAGE.status,
     STORAGE.scanState,
     STORAGE.pending,
@@ -833,10 +855,8 @@ async function load() {
     STORAGE.deviceName,
     STORAGE.autoOpenSellerCentreChat,
   ]);
-  const consented = hasLocalConsent(stored[STORAGE.consent]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  detectedAccounts = [];
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -852,23 +872,15 @@ async function load() {
   activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
   activeProviderSurface = activeProviderAdapter?.surfaceForUrl?.(activeTab?.url) ?? null;
   isProviderChatTab = Boolean(activeProviderAdapter?.matchesUrl(activeTab?.url));
-  const showConsentScreen = !consented;
-  const showHintScreen = consented && !isProviderChatTab;
-  const showDashboard = consented && isProviderChatTab;
-  consentScreen.hidden = !showConsentScreen;
-  hintScreen.hidden = !showHintScreen;
-  brandHeader.hidden = false;
-  dashboardScreen.hidden = !showDashboard;
-  configScreen.hidden = true;
-  logsScreen.hidden = true;
-  setHeaderActionsVisible(consented && isProviderChatTab);
-  setSettingsButtonVisible(consented);
+  detectedAccounts = bestEffortAccounts(stored[STORAGE.detectedAccounts], activeTab?.url);
   viewingPrivacy = false;
-  renderConsentScreen();
-  renderDashboard();
-  renderLogs();
-  if (consented && isProviderChatTab) {
+  routeTo(defaultScreen());
+  if (consented() && isProviderChatTab) {
+    renderDashboard();
+    renderLogs();
     void detectAccount().catch((error) => reportPopupError("detect_account", error));
+  } else if (consented()) {
+    renderLogs();
   }
 }
 
@@ -893,28 +905,13 @@ continueButton.addEventListener("click", async () => {
 });
 
 openPrivacyButton.addEventListener("click", () => {
-  brandHeader.hidden = true;
-  viewingPrivacy = true;
-  dashboardScreen.hidden = true;
-  hintScreen.hidden = true;
-  configScreen.hidden = true;
-  logsScreen.hidden = true;
-  consentScreen.hidden = false;
-  setHeaderActionsVisible(false);
-  renderConsentScreen();
+  routeTo(consented() ? "privacy" : "consent");
 });
 
 closePrivacyButton.addEventListener("click", () => {
-  const consented = hasLocalConsent(storedConsent);
-  const showConsentScreen = !consented;
-  const showHintScreen = consented && !isProviderChatTab;
-  brandHeader.hidden = false;
-  viewingPrivacy = false;
-  consentScreen.hidden = !showConsentScreen;
-  hintScreen.hidden = !showHintScreen;
-  dashboardScreen.hidden = !isProviderChatTab || showConsentScreen;
-  setHeaderActionsVisible(consented && isProviderChatTab);
-  setSettingsButtonVisible(consented);
+  const screen = defaultScreen();
+  routeTo(screen);
+  if (screen === "dashboard") renderDashboard();
 });
 
 syncButton.addEventListener("click", async () => {
@@ -1023,19 +1020,19 @@ leaderStatus.addEventListener("click", async () => {
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);
 function openLogs(level = null) {
-  brandHeader.hidden = true;
-  dashboardScreen.hidden = true;
-  setHeaderActionsVisible(false);
-  logsScreen.hidden = false;
+  if (!consented()) {
+    routeTo("consent");
+    return;
+  }
+  routeTo("logs");
   if (level) logLevel.value = level;
   renderLogs();
 }
 openLogsButton.addEventListener("click", () => openLogs("all"));
 document.querySelector("#close-logs").addEventListener("click", () => {
-  brandHeader.hidden = false;
-  logsScreen.hidden = true;
-  dashboardScreen.hidden = false;
-  setHeaderActionsVisible(true);
+  const screen = defaultScreen();
+  routeTo(screen);
+  if (screen === "dashboard") renderDashboard();
 });
 copyLogsButton.addEventListener("click", async () => {
   try {
@@ -1169,6 +1166,18 @@ clearButton.addEventListener("click", async () => {
   await chrome.alarms.clear("omnichat-delivery-retry");
   await chrome.alarms.clear("omnichat-log-upload");
   await chrome.storage.local.clear();
+  storedConsent = null;
+  storedConfig = emptyConfig();
+  detectedAccounts = [];
+  storedStatus = null;
+  liveState = null;
+  scanStates = null;
+  pendingStates = null;
+  logs = [];
+  storedDeviceName = "";
+  autoOpenSellerCentreChat = false;
+  viewingPrivacy = false;
+  routeTo("consent");
   await load();
 });
 
@@ -1184,7 +1193,7 @@ installationIdButton.addEventListener("click", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat]) {
+  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat]) {
     void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
   }
 });
