@@ -7,6 +7,8 @@
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
+  const SEND_CONFIRM_TIMEOUT_MS = 10_000;
+  const SEND_CONFIRM_POLL_MS = 1_000;
   const previous = window.__omnichatLineOABridgeControl;
   previous?.dispose?.();
   let disposed = false;
@@ -208,6 +210,31 @@
 
   function messageId(event) {
     return value(event?.message?.id ?? event?.id ?? event?.provider_message_id);
+  }
+
+  function messageSendId(event) {
+    return value(event?.message?.sendId ?? event?.sendId ?? event?.message?.client_message_id ?? event?.client_message_id);
+  }
+
+  function messageConversationId(event) {
+    return value(event?.source?.chatId ?? event?.conversation_id ?? event?.source?.conversationId);
+  }
+
+  async function waitForSentMessage({ botId, conversationId, sendId }) {
+    const deadline = Date.now() + SEND_CONFIRM_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      // Always request the newest messages for this conversation. Do not walk
+      // backward through history because a newly sent message appears at the front.
+      const body = await json(messagesUrl(botId, conversationId, null, PAGE_LIMIT));
+      const messages = Array.isArray(body?.list) ? body.list : [];
+      const confirmed = messages.find((message) => (
+        messageConversationId(message) === conversationId
+        && messageSendId(message) === sendId
+      ));
+      if (confirmed) return messageId(confirmed);
+      await new Promise((resolve) => setTimeout(resolve, SEND_CONFIRM_POLL_MS));
+    }
+    return "";
   }
 
   function waitForAcknowledgement(requestId) {
@@ -534,7 +561,9 @@
       return;
     }
     const payload = clone(profile.payload);
-    payload.sendId = value(command?.client_message_id) || sendId(conversationId);
+    const requestedSendId = value(command?.client_message_id);
+    const confirmationSendId = requestedSendId || sendId(conversationId);
+    payload.sendId = confirmationSendId;
     if (expectedType === "text") {
       const textValue = value(command?.text);
       if (!textValue || textValue.length > 2_000) {
@@ -573,12 +602,21 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
         return;
       }
-      const providerMessageId = responseMessageId(responseBody);
+      const responseMessageIdValue = responseMessageId(responseBody);
+      const confirmedMessageId = await waitForSentMessage({
+        botId,
+        conversationId,
+        sendId: confirmationSendId,
+      });
+      const providerMessageId = confirmedMessageId || responseMessageIdValue;
       post({
         type: "api_send_result",
         request_id: requestId,
-        ok: true,
+        ok: Boolean(confirmedMessageId || responseMessageIdValue),
+        ...(confirmedMessageId ? { confirmed: true } : { uncertain: true }),
+        send_id: confirmationSendId,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
+        ...(!confirmedMessageId ? { error: "LINE OA send was accepted but could not be confirmed in message history." } : {}),
       });
     } catch (error) {
       post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: true, error: `LINE OA send was not acknowledged: ${String(error)}` });

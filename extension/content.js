@@ -182,7 +182,11 @@
       pendingApiSends.delete(requestId);
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
-      pending.resolve({ ok: true, provider_message_id: providerMessageId });
+      pending.resolve({
+        ok: true,
+        provider_message_id: providerMessageId,
+        ...(pending.result?.send_id ? { send_id: pending.result.send_id } : {}),
+      });
       return;
     }
     if (pending.result?.ok) {

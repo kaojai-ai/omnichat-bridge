@@ -17,6 +17,16 @@ test("LINE OA recovery paginates chat and message history", () => {
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
+test("LINE OA uses caller client_message_id as sendId and confirms it from message history", () => {
+  assert.match(source, /const confirmationSendId = requestedSendId \|\| sendId\(conversationId\)/);
+  assert.match(source, /payload\.sendId = confirmationSendId/);
+  assert.match(source, /waitForSentMessage\(\{[\s\S]*sendId: confirmationSendId/);
+  assert.match(source, /messageConversationId\(message\) === conversationId/);
+  assert.match(source, /messageSendId\(message\) === sendId/);
+  assert.match(source, /messagesUrl\(botId, conversationId, null, PAGE_LIMIT\)/);
+  assert.match(source, /send_id: confirmationSendId/);
+});
+
 test("LINE OA recovery waits for local persistence before completing", () => {
   assert.match(source, /await waitForAcknowledgement\(batchRequestId\)/);
   assert.match(source, /event\.data\.type === "recovery_ack_v3"/);
@@ -286,19 +296,22 @@ test("LINE OA replays an observed text request without copying cookies", async (
   const bridge = createBridge();
 
   await bridge.captureManualSend({ type: "text", text: "manual message", sendId: "manual-send" });
-  const result = await bridge.sendCommand({ command_type: "send_text", text: "bridge message" });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "bridge message", client_message_id: "caller-send-id" });
 
   assert.deepEqual(plain(result), {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "send-1",
     ok: true,
+    send_id: "caller-send-id",
+    confirmed: true,
     provider_message_id: "sent-2",
   });
   assert.equal(bridge.sentPayloads.length, 2);
   const sentBody = JSON.parse(bridge.sentPayloads[1].body);
   assert.equal(sentBody.type, "text");
   assert.equal(sentBody.text, "bridge message");
+  assert.equal(sentBody.sendId, "caller-send-id");
   assert.match(sentBody.sendId, /^chat-1_\d+_\d{8}$/);
   assert.deepEqual(plain(bridge.sentPayloads[1].headers), {
     accept: "application/json",
