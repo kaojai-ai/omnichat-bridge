@@ -34,7 +34,7 @@ test("reports a connected installation as inactive when Seller Chat is closed", 
   assert.equal(result.reason_code, "seller_chat_tab_closed");
 });
 
-test("prioritizes delivery failure and keeps its timestamp", () => {
+test("keeps delivery failure out of server-facing connection health", () => {
   const result = buildConnectionHealth({
     ...healthy,
     pendingMessages: 3,
@@ -44,11 +44,8 @@ test("prioritizes delivery failure and keeps its timestamp", () => {
       delivery_error_at: "2026-07-31T00:00:04.000Z",
     },
   });
-  assert.equal(result.reason_code, "message_delivery_failed");
-  assert.deepEqual(result.last_error, {
-    code: "message_delivery_failed",
-    occurred_at: "2026-07-31T00:00:04.000Z",
-  });
+  assert.equal(result.reason_code, "messages_pending");
+  assert.equal(result.last_error, null);
   assert.equal(result.metrics.pending_messages, 3);
 });
 

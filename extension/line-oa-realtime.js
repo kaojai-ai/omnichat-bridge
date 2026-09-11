@@ -476,7 +476,7 @@
       const next = requests.shift();
       queuedSyncs.push(...requests);
       if (next) startPoll(next);
-    }, 15_000);
+    }, 3_000);
   }
 
   function cancelPolling(reason, { notifyRequests = true } = {}) {
@@ -514,6 +514,54 @@
     return value(payload?.id ?? payload?.message?.id ?? payload?.data?.id ?? payload?.data?.messageId);
   }
 
+  function sentProviderSendId(message) {
+    return value(message?.sendId ?? message?.send_id ?? message?.message?.sendId ?? message?.message?.send_id);
+  }
+
+  function sentMessageMatches(message, command, providerSendId) {
+    if (providerSendId && sentProviderSendId(message) === providerSendId) return true;
+    const expectedType = command.command_type === "send_text" ? "text"
+      : command.command_type === "send_sticker" ? "sticker"
+        : command.command_type === "send_image" ? "image"
+          : "";
+    const actualType = value(message?.message?.type ?? message?.type);
+    if (actualType !== expectedType) return false;
+    if (expectedType === "text") return value(message?.message?.text ?? message?.text) === value(command.text);
+    if (expectedType === "sticker") {
+      return value(message?.message?.packageId ?? message?.package_id) === value(command.package_id)
+        && value(message?.message?.stickerId ?? message?.sticker_id) === value(command.sticker_id);
+    }
+    return false;
+  }
+
+  async function verifySentConversation({ requestId, providerAccountId, botId, conversationId, command, providerSendId }) {
+    if (disposed || !providerAccountId || !botId || !conversationId) {
+      post({ type: "bridge_log", level: "warn", event: "send_messages_check_skipped", request_id: requestId, provider_account_id: providerAccountId, bot_id: botId, conversation_id: conversationId, reason: "missing_context_or_disposed" });
+      return;
+    }
+    const url = messagesUrl(botId, conversationId, null, PAGE_LIMIT);
+    const deadline = Date.now() + 4_500;
+    let attempt = 0;
+    post({ type: "bridge_log", level: "info", event: "send_messages_check_started", request_id: requestId, provider_account_id: providerAccountId, bot_id: botId, conversation_id: conversationId, url });
+    while (Date.now() < deadline) {
+      attempt += 1;
+      try {
+        const body = await json(url);
+        const messages = Array.isArray(body?.list) ? body.list : [];
+        const matchingMessage = messages.find((message) => sentMessageMatches(message, command, providerSendId));
+        post({ type: "bridge_log", level: "info", event: "send_messages_check_completed", request_id: requestId, provider_account_id: providerAccountId, conversation_id: conversationId, attempt, message_count: messages.length, message_ids: messages.slice(0, 10).map(messageId).filter(Boolean), matched_message_id: matchingMessage ? messageId(matchingMessage) : null });
+        if (matchingMessage) {
+          post({ type: "realtime_event", body: { provider_account_id: providerAccountId, messages: [matchingMessage] }, capture_method: "send_verification" });
+        }
+        if (matchingMessage) return;
+      } catch (error) {
+        post({ type: "bridge_log", level: "warn", event: "send_messages_check_failed", request_id: requestId, provider_account_id: providerAccountId, conversation_id: conversationId, attempt, url, error: String(error) });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    post({ type: "bridge_log", level: "warn", event: "send_messages_check_timeout", request_id: requestId, provider_account_id: providerAccountId, conversation_id: conversationId, attempts: attempt });
+  }
+
   async function sendBrowserMessage(command) {
     const commandType = value(command?.command_type ?? command?.type);
     const browserAccountId = normalizeBasicId(command?.browser_provider_account_id ?? command?.provider_account_id);
@@ -534,7 +582,9 @@
       return;
     }
     const payload = clone(profile.payload);
-    payload.sendId = value(command?.client_message_id) || sendId(conversationId);
+    const providerSendId = sendId(conversationId);
+    payload.sendId = providerSendId;
+    post({ type: "bridge_log", level: "info", event: "send_started", request_id: requestId, provider_account_id: browserAccountId, bot_id: botId, conversation_id: conversationId, command_type: commandType, provider_send_id: providerSendId });
     if (expectedType === "text") {
       const textValue = value(command?.text);
       if (!textValue || textValue.length > 2_000) {
@@ -569,15 +619,18 @@
         credentials: "include",
       });
       const responseBody = await response.json().catch(() => null);
+      post({ type: "bridge_log", level: response.ok ? "info" : "error", event: "send_response", request_id: requestId, provider_account_id: browserAccountId, conversation_id: conversationId, status: response.status, ok: response.ok, response_message_id: responseMessageId(responseBody) || null, response_keys: responseBody && typeof responseBody === "object" ? Object.keys(responseBody) : [] });
       if (!response.ok) {
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
         return;
       }
       const providerMessageId = responseMessageId(responseBody);
+      void verifySentConversation({ requestId, providerAccountId: browserAccountId, botId, conversationId, command, providerSendId });
       post({
         type: "api_send_result",
         request_id: requestId,
         ok: true,
+        provider_send_id: providerSendId,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
       });
     } catch (error) {

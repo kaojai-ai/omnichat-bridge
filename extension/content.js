@@ -162,12 +162,12 @@
   }
 
   function findPendingApiSend(message) {
-    if (!message.client_message_id) return null;
     for (const [requestId, pending] of pendingApiSends) {
-      if (
-        pending.clientMessageId === message.client_message_id
-        && pending.conversationId === message.conversation_id
-      ) {
+      if (pending.conversationId !== message.conversation_id) continue;
+      if (pending.providerSendId && pending.providerSendId === message.provider_send_id) {
+        return { requestId, pending };
+      }
+      if (pending.clientMessageId && pending.clientMessageId === message.client_message_id) {
         return { requestId, pending };
       }
     }
@@ -803,6 +803,7 @@
         timeout,
         conversationId,
         clientMessageId,
+        providerSendId: null,
         echo: null,
         result: null,
         providerIdTimeout: null,
@@ -824,6 +825,7 @@
     const pending = pendingApiSends.get(message.request_id);
     if (!pending) return;
     pending.result = message;
+    pending.providerSendId = typeof message.provider_send_id === "string" ? message.provider_send_id : null;
     finishPendingApiSend(message.request_id, pending);
   }
 

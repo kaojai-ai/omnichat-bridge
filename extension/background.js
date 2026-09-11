@@ -1318,6 +1318,10 @@ async function connectionStatusSnapshot(context) {
     client: {
       platform: String(navigator.platform ?? "").slice(0, 120),
       language: String(navigator.language ?? "").slice(0, 32),
+      transport_status: ["healthy", "messages_pending", "message_sync_failed"].includes(health.reason_code)
+        ? "ready"
+        : "unavailable",
+      sending_available: !["seller_chat_tab_closed", "seller_chat_bridge_unavailable", "line_oa_tab_closed", "line_oa_bridge_unavailable"].includes(health.reason_code),
     },
     health,
     ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
@@ -2386,7 +2390,7 @@ async function runAccountSync(trigger, control, context) {
       }, stored[STORAGE.scanState]);
     }
     await updateScopedState(STORAGE.status, context.key, {
-      state: cancelled ? "watching" : "error",
+      state: "watching",
       phase: null,
       caught_up: false,
       sync_error: cancelled ? null : message,

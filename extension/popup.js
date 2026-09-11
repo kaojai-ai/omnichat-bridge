@@ -335,8 +335,10 @@ function accountRowStatus(account) {
   if (!config) return { label: "NEED CONFIG", state: "warning", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
-  const currentError = syncState?.delivery_error || syncState?.sync_error;
-  if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
+  const syncError = syncState?.sync_error;
+  const deliveryError = syncState?.delivery_error;
+  if (syncError) return { label: "SYNC DEGRADED · open Logs", state: "warning", action: "logs" };
+  if (deliveryError) return { label: "CONNECTED · delivery pending", state: "warning", action: "logs" };
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
   const sellerCentreStatus = sellerCentreConnectionStatus(live);
   if (sellerCentreStatus) return sellerCentreStatus;

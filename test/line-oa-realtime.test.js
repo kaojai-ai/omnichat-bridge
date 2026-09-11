@@ -288,15 +288,16 @@ test("LINE OA replays an observed text request without copying cookies", async (
   await bridge.captureManualSend({ type: "text", text: "manual message", sendId: "manual-send" });
   const result = await bridge.sendCommand({ command_type: "send_text", text: "bridge message" });
 
+  assert.equal(bridge.sentPayloads.length, 2);
+  const sentBody = JSON.parse(bridge.sentPayloads[1].body);
   assert.deepEqual(plain(result), {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "send-1",
     ok: true,
     provider_message_id: "sent-2",
+    provider_send_id: sentBody.sendId,
   });
-  assert.equal(bridge.sentPayloads.length, 2);
-  const sentBody = JSON.parse(bridge.sentPayloads[1].body);
   assert.equal(sentBody.type, "text");
   assert.equal(sentBody.text, "bridge message");
   assert.match(sentBody.sendId, /^chat-1_\d+_\d{8}$/);
@@ -591,7 +592,8 @@ test("LINE OA uses the Admin client message ID as its send correlation ID", asyn
   });
 
   const submitted = JSON.parse(bridge.sentPayloads[0].body);
-  assert.equal(submitted.sendId, "admin-client-message-1");
+  assert.match(submitted.sendId, /^chat-1_\d+_\d{8}$/);
   assert.equal(result.provider_message_id, undefined);
+  assert.equal(result.provider_send_id, submitted.sendId);
   bridge.dispose();
 });

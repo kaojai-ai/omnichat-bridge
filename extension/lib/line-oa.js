@@ -39,7 +39,7 @@
       const message = record(item?.message);
       const conversationId = id(item?.source?.chatId ?? item?.conversation_id);
       const messageId = id(message?.id ?? item?.provider_message_id);
-      const clientMessageId = id(message?.sendId ?? item?.sendId);
+      const providerSendId = id(item?.sendId);
       const timestamp = Number(item?.timestamp);
       if (!conversationId || !messageId || !Number.isFinite(timestamp)) continue;
       const key = `${conversationId}:${messageId}`;
@@ -54,7 +54,7 @@
         provider_account_id: providerAccountId || undefined,
         conversation_id: conversationId,
         id: messageId,
-        ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+        ...(providerSendId ? { provider_send_id: providerSendId } : {}),
         event_timestamp: iso(timestamp, new Date().toISOString()),
         observed_at: new Date().toISOString(),
         sender_id: incoming ? userId : providerAccountId,

@@ -78,17 +78,11 @@ export function buildConnectionHealth({
     },
   ];
 
-  const lastError = deliveryErrorAt
-    ? { code: "message_delivery_failed", occurred_at: deliveryErrorAt }
-    : syncErrorAt
-      ? { code: "message_sync_failed", occurred_at: syncErrorAt }
-      : null;
+  const lastError = syncErrorAt
+    ? { code: "message_sync_failed", occurred_at: syncErrorAt }
+    : null;
   let reasonCode = "healthy";
-  if (deliveryErrorAt) {
-    reasonCode = "message_delivery_failed";
-  } else if (syncErrorAt && !hasRecoveredFromSyncError) {
-    reasonCode = "message_sync_failed";
-  } else if (!tabCount) {
+  if (!tabCount) {
     reasonCode = tabClosedReason;
   } else if (!contentReady) {
     reasonCode = bridgeUnavailableReason;
@@ -98,6 +92,8 @@ export function buildConnectionHealth({
     reasonCode = accountMismatchReason;
   } else if (!realtimeConnected) {
     reasonCode = realtimeDisconnectedReason;
+  } else if (syncErrorAt && !hasRecoveredFromSyncError) {
+    reasonCode = "message_sync_failed";
   } else if (pendingMessages) {
     reasonCode = "messages_pending";
   }
