@@ -591,6 +591,22 @@
     }
   }
 
+  function handleRecoveryPhase(message) {
+    touchRecovery(message.request_id);
+    void sendRuntimeMessage({
+      type: "sync_phase",
+      provider: providerAdapter.id,
+      provider_account_id: message.provider_account_id,
+      request_id: message.request_id,
+      phase: message.phase,
+      conversation_id: message.conversation_id,
+      completed_conversations: message.completed_conversations,
+      total_conversations: message.total_conversations,
+    }, (error) => logAsyncError("sync_phase", error, {
+      provider_account_id: message.provider_account_id,
+    }));
+  }
+
   function handleRecoveryProgress(message) {
     touchRecovery(message.request_id);
     void sendRuntimeMessage({
@@ -902,6 +918,8 @@
       void observeAsync("recovery_bootstrap", () => handleBootstrapSelection(event.data));
     } else if (event.data.type === "recovery_progress") {
       handleRecoveryProgress(event.data);
+    } else if (event.data.type === "recovery_phase") {
+      handleRecoveryPhase(event.data);
     } else if (event.data.type === "sync_plan") {
       touchRecovery(event.data.request_id);
       void sendRuntimeMessage({

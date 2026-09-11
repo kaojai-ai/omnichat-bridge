@@ -5,6 +5,7 @@
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
+  const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -327,17 +328,29 @@
       const messages = rawMessages
         .filter((message) => {
           const timestamp = messageTimeMs(message);
-          return !sinceMs || !timestamp || timestamp >= sinceMs;
+          // Bootstrap and incremental recovery both have a lower bound. Never
+          // enqueue timestamp-less messages when a lower bound is active.
+          return sinceMs > 0
+            ? timestamp > 0 && timestamp >= sinceMs
+            : true;
         })
         .slice(0, maxMessages === null ? undefined : Math.max(0, maxMessages - accepted));
       const pageIsBeforeCheckpoint = sinceMs > 0
         && rawMessages.length > 0
         && rawMessages.every((message) => {
           const timestamp = messageTimeMs(message);
-          return timestamp > 0 && timestamp < sinceMs;
+          return timestamp <= 0 || timestamp < sinceMs;
         });
       const limitReached = maxMessages !== null && accepted >= maxMessages;
       if (!messages.length && (pageIsBeforeCheckpoint || limitReached)) break;
+      if (!messages.length && sinceMs > 0) {
+        const nextBackward = cursor(body?.backward);
+        if (!nextBackward || seenCursors.has(nextBackward)) break;
+        seenCursors.add(nextBackward);
+        backward = nextBackward;
+        page += 1;
+        continue;
+      }
       const result = await queueMessagePage({ requestId, providerAccountId, chat, messages, page });
       parsed += result.parsed;
       queued += result.queued;
@@ -392,6 +405,9 @@
       knownMessageIdsByAccount.set(providerAccountId, knownMessageIdsByChat);
       const checkpointMs = timeMs(checkpoint?.watermark);
       const bootstrap = checkpointMs <= 0;
+      const lowerBoundMs = bootstrap
+        ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
+        : checkpointMs;
       let next = null;
       let parsed = 0;
       let queued = 0;
@@ -418,6 +434,16 @@
         const chatsToRecover = bootstrap
           ? chats.slice(0, Math.max(0, INITIAL_SYNC_MAX_CONVERSATIONS - completedConversations))
           : chats;
+        if (trackedRequest) {
+          post({
+            type: "recovery_phase",
+            request_id: requestId,
+            provider_account_id: providerAccountId,
+            phase: "fetching_messages",
+            completed_conversations: completedConversations,
+            total_conversations: totalConversations ?? 0,
+          });
+        }
         for (const chat of chatsToRecover) {
           if (!pollIsActive(generation)) return;
           const chatId = value(chat?.chatId);
@@ -431,7 +457,7 @@
               generation,
               knownMessageIdsByChat,
               maxMessages: bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
-              sinceMs: bootstrap ? 0 : checkpointMs,
+              sinceMs: lowerBoundMs,
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
@@ -440,6 +466,17 @@
           knownChatIds.add(chatId);
           completedConversations += 1;
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
+          if (trackedRequest) {
+            post({
+              type: "recovery_phase",
+              request_id: requestId,
+              provider_account_id: providerAccountId,
+              phase: "conversation_complete",
+              conversation_id: chatId,
+              completed_conversations: completedConversations,
+              total_conversations: totalConversations ?? 0,
+            });
+          }
         }
         if (bootstrap && completedConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
         const nextCursor = cursor(body?.next);

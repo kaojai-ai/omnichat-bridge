@@ -692,6 +692,26 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "sync_phase") {
+    void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
+      const context = accountContextFor(stored, message.provider_account_id, message.provider);
+      const key = context?.key;
+      if (!key) throw new Error("Provider account is not detected.");
+      const current = readAccountState(stored[STORAGE.status], key, {});
+      if (!["discovering", "syncing"].includes(current.state)) return;
+      return updateScopedState(STORAGE.status, key, {
+        state: "syncing",
+        phase: message.phase || "fetching_messages",
+        active_conversation_id: message.conversation_id || null,
+        completed_conversations: message.completed_conversations,
+        total_conversations: message.total_conversations,
+      });
+    })).then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
   if (message?.type === "record_sync_plan") {
     const conversations = Array.isArray(message.conversations) ? message.conversations.slice(0, 50) : [];
     const details = {

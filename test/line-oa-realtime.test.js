@@ -9,11 +9,13 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /const INITIAL_SYNC_MAX_CONVERSATIONS = 10/);
   assert.match(source, /const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25/);
+  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 24 \* 60 \* 60 \* 1_000/);
   assert.match(source, /url\.searchParams\.set\("next", next\)/);
   assert.match(source, /url\.searchParams\.set\("backward", backward\)/);
   assert.match(source, /const nextCursor = cursor\(body\?\.next\)/);
   assert.match(source, /const nextBackward = cursor\(body\?\.backward\)/);
   assert.match(source, /const bootstrap = checkpointMs <= 0/);
+  assert.match(source, /const lowerBoundMs = bootstrap/);
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
