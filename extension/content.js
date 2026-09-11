@@ -192,7 +192,7 @@
         pendingApiSends.delete(requestId);
         clearTimeout(pending.timeout);
         pending.resolve({ ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.` });
-      }, 2_000);
+      }, 10_000);
       return;
     }
     if (!pending.result) return;
