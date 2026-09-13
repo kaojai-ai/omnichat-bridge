@@ -125,6 +125,8 @@ button {
 }
 
 button:hover { background: var(--shopee-hover); }
+#sync[data-provider="line_oa"]:not(:disabled) { background: #06c755; }
+#sync[data-provider="line_oa"]:not(:disabled):hover { background: #05a947; }
 button:active { transform: translateY(1px); }
 button:disabled {
   background: #f2f4f7;

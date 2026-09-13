@@ -512,6 +512,7 @@ function renderDetectedAccounts() {
 }
 
 function renderDashboard(message = "", isError = false) {
+  syncButton.dataset.provider = activeProviderAdapter?.id || detectedAccounts[0]?.provider || "";
   renderDeviceNameBadge();
   autoSyncOption.hidden = activeProviderSurface !== "seller-centre";
   autoOpenChatInput.checked = autoOpenSellerCentreChat;
