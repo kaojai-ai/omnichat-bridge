@@ -536,17 +536,29 @@ function renderDashboard(message = "", isError = false) {
     };
   });
   const configuredStates = accountStates.filter((item) => item.config);
+  const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
+  const configuredAccountIds = new Set(configuredStates.map((item) => item.account.provider_account_id));
+  const latestLoggedDeliveryFailure = logs.find((item) => (
+    item.level === "error"
+      && item.area === "message_delivery"
+      && ["failed", "batch_blocked", "message_blocked"].includes(item.event)
+      && configuredAccountIds.has(item.details?.provider_account_id)
+      && item.details?.error_message
+  ));
   const anySyncing = configuredStates.some((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
     || item.scanState?.in_progress === true
   ));
   const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
-  const anyError = configuredStates.some((item) => item.syncState?.delivery_error || item.syncState?.sync_error);
+  const statusFailure = latestSyncFailure(configuredStates.map((item) => item.syncState));
+  const latestFailure = statusFailure
+    || (pendingTotal ? latestLoggedDeliveryFailure?.details.error_message : "")
+    || "";
+  const anyError = Boolean(latestFailure);
   const sellerCentreChatClosed = activeProviderSurface === "seller-centre"
     && configuredStates.some((item) => (
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
-  const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
   const progressState = configuredStates.find((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
   ))?.syncState ?? null;
@@ -637,7 +649,7 @@ function renderDashboard(message = "", isError = false) {
       }
       const error = document.createElement("span");
       error.className = "status-error";
-      error.textContent = latestSyncFailure(configuredStates.map((item) => item.syncState));
+      error.textContent = latestFailure;
       status.append(error);
       const logsLink = document.createElement("a");
       logsLink.href = "#logs";
