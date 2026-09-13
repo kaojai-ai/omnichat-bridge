@@ -76,7 +76,7 @@ test("resets detected accounts from saved config without copying secrets", async
             version: 2,
             accounts: [{
               provider: "shopee",
-              provider_account_id: "1549058683",
+              provider_account_id: "100000001",
               events_url: "https://collector.example.com/events",
               commands_url: "https://admin.example.com/tickets",
               hmac_secret: "must-not-be-copied",
@@ -92,7 +92,7 @@ test("resets detected accounts from saved config without copying secrets", async
   assert.deepEqual(written, {
     [STORAGE.detectedAccounts]: [{
       provider: "shopee",
-      provider_account_id: "1549058683",
+      provider_account_id: "100000001",
     }],
   });
 });

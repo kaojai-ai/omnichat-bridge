@@ -73,7 +73,7 @@ test("keeps useful raw exception details and message fingerprints", () => {
     event: "failed",
     details: {
       ...diagnosticErrorDetails(error),
-      provider_account_id: "1549058683",
+      provider_account_id: "100000001",
       message_id: "message-1",
       conversation_id: "conversation-1",
       message_fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

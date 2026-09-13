@@ -9,7 +9,7 @@ test("strips local routing metadata from outbound participants", () => {
       id: "buyer-1",
       display_name: "Buyer",
       avatar_url: "https://example.com/avatar.jpg",
-      provider_account_id: "1549058683",
+      provider_account_id: "100000001",
     }),
     {
       id: "buyer-1",

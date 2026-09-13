@@ -15,9 +15,9 @@ const lineConfig = {
   version: 3,
   accounts: [{
     provider: "line_oa",
-    provider_account_id: "@kaojai",
+    provider_account_id: "@exampleoa",
     bot_id: "bot-1",
-    display_name: "KaoJai OA",
+    display_name: "Example OA",
     events_url: "https://example.com/events",
     api_url: "https://example.com/api",
     hmac_secret: "secret",
@@ -27,9 +27,9 @@ const lineConfig = {
 test("seeds configured accounts for the active provider", () => {
   assert.deepEqual(configuredProviderAccounts(lineConfig, "line_oa"), [{
     provider: "line_oa",
-    provider_account_id: "@kaojai",
+    provider_account_id: "@exampleoa",
     bot_id: "bot-1",
-    display_name: "KaoJai OA",
+    display_name: "Example OA",
   }]);
   assert.deepEqual(configuredProviderAccounts(lineConfig, "shopee"), []);
 });
@@ -42,15 +42,15 @@ test("keeps configured accounts visible before live detection finishes", () => {
     activeTabUrl: "https://chat.line.biz/bot-1/",
   });
   assert.equal(accounts.length, 1);
-  assert.equal(accounts[0].provider_account_id, "@kaojai");
-  assert.equal(accounts[0].display_name, "KaoJai OA");
+  assert.equal(accounts[0].provider_account_id, "@exampleoa");
+  assert.equal(accounts[0].display_name, "Example OA");
 });
 
 test("merges live detection on top of configured seeds", () => {
   const accounts = hydrateDetectedAccounts({
     storedAccounts: [{
       provider: "line_oa",
-      provider_account_id: "@kaojai",
+      provider_account_id: "@exampleoa",
       bot_id: "bot-1",
       display_name: "Live name",
       detected_at: "2026-09-11T00:00:00.000Z",

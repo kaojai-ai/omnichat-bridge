@@ -44,7 +44,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
@@ -64,7 +64,7 @@ function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccoun
         return {
           ok: true,
           json: async () => ({
-            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId, name: "KaoJai.ai" }] : []),
+            list: availableAccounts ?? (basicId ? [{ botId: "bot-1", basicSearchId: basicId, name: "Example Store" }] : []),
           }),
         };
       }
@@ -275,18 +275,18 @@ function createBridge({ sendResponseBody, basicId = "@159nzygg", availableAccoun
 test("LINE OA discovers and persists the page Basic ID with its bot ID", async () => {
   const bridge = createBridge();
 
-  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@exampleoa" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "accounts_detected",
     request_id: "detect-1",
-    accounts: [{ provider: "line_oa", provider_account_id: "@159nzygg", bot_id: "bot-1", display_name: "KaoJai.ai" }],
+    accounts: [{ provider: "line_oa", provider_account_id: "@exampleoa", bot_id: "bot-1", display_name: "Example Store" }],
   });
 });
 
 test("LINE OA rejects a session without an accessible account", async () => {
   const bridge = createBridge({ basicId: "" });
 
-  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@159nzygg" }])), {
+  assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@exampleoa" }])), {
     source: "omnichat-realtime-bridge-v3",
     type: "account_detection_failed",
     request_id: "detect-1",
@@ -332,12 +332,12 @@ test("LINE OA replays observed image and sticker request shapes", async () => {
   });
   const imageResult = await bridge.sendCommand({
     command_type: "send_image",
-    image_url: "https://cdn.kaojai.example/reply.png",
+    image_url: "https://cdn.example.com/reply.png",
   });
   assert.equal(imageResult.ok, true);
   const imageBody = JSON.parse(bridge.sentPayloads[1].body);
   assert.equal(imageBody.type, "image");
-  assert.equal(imageBody.imageUrl, "https://cdn.kaojai.example/reply.png");
+  assert.equal(imageBody.imageUrl, "https://cdn.example.com/reply.png");
 
   await bridge.captureManualSend({
     type: "sticker",
@@ -565,7 +565,7 @@ test("LINE OA republishes realtime health when a replacement content bridge dete
   const status = bridge.posts.find((post) => post.type === "provider_status");
   assert.equal(status?.realtime_connected, true);
   assert.equal(status?.realtime_transport, "authenticated_polling");
-  assert.deepEqual(plain(status.command_capabilities_by_account), { "@159nzygg": ["send_text", "send_image", "send_sticker"] });
+  assert.deepEqual(plain(status.command_capabilities_by_account), { "@exampleoa": ["send_text", "send_image", "send_sticker"] });
   bridge.dispose();
 });
 

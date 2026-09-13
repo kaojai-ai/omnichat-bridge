@@ -48,7 +48,7 @@ its named capabilities, and the realtime transport (`polling` or `socket`). A
 command is rejected with an explicit initialization error when the selected
 surface has not exposed the required request profile.
 
-The popup separates the Seller Centre connection states so a live KaoJai
+The popup separates the Seller Centre connection states so a live server
 connection is not confused with a ready Shopee chat: **CONNECTED · OPEN CHAT**
 means the mini-chat is closed, **CONNECTED · INITIALIZING** means it is open
 but still capturing its request templates, and **CONNECTED · CHAT READY** means

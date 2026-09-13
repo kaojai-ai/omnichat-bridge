@@ -330,19 +330,19 @@ test("uses shop.id as the provider account and keeps user IDs as metadata", asyn
   const bridge = createBridge();
   await bridge.fetch("/webchat/api/coreapi/v1.2/login", {
     user: { id: 4897267 },
-    shop: { id: 1549058683, user_id: 1549897350, name: "2Days Ago Badminton" },
+    shop: { id: 100000001, user_id: 100000002, name: "Example Sports Shop" },
   });
 
   const detection = bridge.posts.findLast((post) => post.type === "accounts_detected");
   assert.equal(detection.accounts.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(detection.accounts[0])), {
     provider: "shopee",
-    provider_account_id: "1549058683",
-    display_name: "2Days Ago Badminton",
+    provider_account_id: "100000001",
+    display_name: "Example Sports Shop",
     provider_user_id: "4897267",
-    shop_user_id: "1549897350",
+    shop_user_id: "100000002",
   });
-  assert.equal(detection.accounts.some((account) => account.provider_account_id === "1549897350"), false);
+  assert.equal(detection.accounts.some((account) => account.provider_account_id === "100000002"), false);
 });
 
 test("detects the Seller Centre shop before Webchat mini opens", async () => {
@@ -351,7 +351,7 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
     miniChatOpen: false,
     initialResponses: {
       "/api/v2/login/": {
-        data: { shop_id: 1549058683, shop_name: "kaojai.ai" },
+        data: { shop_id: 100000001, shop_name: "example-store" },
       },
     },
   });
@@ -360,8 +360,8 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
 
   assert.deepEqual(JSON.parse(JSON.stringify(detection.accounts)), [{
     provider: "shopee",
-    provider_account_id: "1549058683",
-    display_name: "kaojai.ai",
+    provider_account_id: "100000001",
+    display_name: "example-store",
   }]);
   assert.equal(bridge.requests.includes("/api/v2/login/"), true);
   assert.equal(bridge.miniChatClicks, 0);
@@ -370,18 +370,18 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
 test("actively detects all shops on initial account detection", async () => {
   const bridge = createBridge();
   await bridge.fetch("/webchat/api/v1.2/conversations", [
-    { id: "conversation-th", shop_id: 1549058683 },
+    { id: "conversation-th", shop_id: 100000001 },
   ]);
   bridge.setResponse("/webchat/api/v1.2/shop_list", {
     shops: [
-      { id: 1549058683, name: "2Days Ago Badminton" },
+      { id: 100000001, name: "Example Sports Shop" },
       { id: 1698999861, name: "2daysagobadminton.my" },
       { id: 1698999856, name: "2daysagobadminton.ph" },
     ],
   });
   bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [
-      { id: "conversation-th", shop_id: 1549058683 },
+      { id: "conversation-th", shop_id: 100000001 },
     ],
   });
 
@@ -390,7 +390,7 @@ test("actively detects all shops on initial account detection", async () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
     [
-      ["1549058683", "2Days Ago Badminton"],
+      ["100000001", "Example Sports Shop"],
       ["1698999861", "2daysagobadminton.my"],
       ["1698999856", "2daysagobadminton.ph"],
     ],
@@ -401,19 +401,19 @@ test("automatically detects all shops when the chat page initializes", async () 
   const bridge = createBridge();
   bridge.setResponse("/webchat/api/v1.2/shop_list", {
     shops: [
-      { id: 1549058683, name: "2Days Ago Badminton" },
+      { id: 100000001, name: "Example Sports Shop" },
       { id: 1698999861, name: "2daysagobadminton.my" },
       { id: 1698999856, name: "2daysagobadminton.ph" },
     ],
   });
   bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [
-      { id: "conversation-th", shop_id: 1549058683 },
+      { id: "conversation-th", shop_id: 100000001 },
     ],
   });
   await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [
-      { id: "conversation-th", shop_id: 1549058683 },
+      { id: "conversation-th", shop_id: 100000001 },
     ],
   });
 
@@ -422,7 +422,7 @@ test("automatically detects all shops when the chat page initializes", async () 
   assert.deepEqual(
     JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
     [
-      ["1549058683", "2Days Ago Badminton"],
+      ["100000001", "Example Sports Shop"],
       ["1698999861", "2daysagobadminton.my"],
       ["1698999856", "2daysagobadminton.ph"],
     ],
@@ -440,13 +440,13 @@ test("merges shop-list names with the special multi-shop conversation endpoint",
     shops: [
       { id: 1698999861, name: "2daysagobadminton.my" },
       { id: 1698999856, name: "2daysagobadminton.ph" },
-      { id: 1549058683, name: "2Days Ago Badminton" },
+      { id: 100000001, name: "Example Sports Shop" },
     ],
   });
   await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [
       { id: "conversation-my", shop_id: 1698999861 },
-      { id: "conversation-th", shop_id: 1549058683 },
+      { id: "conversation-th", shop_id: 100000001 },
     ],
   });
 
@@ -456,7 +456,7 @@ test("merges shop-list names with the special multi-shop conversation endpoint",
     [
       ["1698999861", "2daysagobadminton.my"],
       ["1698999856", "2daysagobadminton.ph"],
-      ["1549058683", "2Days Ago Badminton"],
+      ["100000001", "Example Sports Shop"],
     ],
   );
 });
@@ -466,12 +466,12 @@ test("limits recovery to the requested Shop ID", async () => {
   await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
     conversations: [
       { id: "conversation-my", shop_id: 1698999861, last_message_time: "2026-08-16T10:00:00.000Z" },
-      { id: "conversation-th", shop_id: 1549058683, last_message_time: "2026-08-16T11:00:00.000Z" },
+      { id: "conversation-th", shop_id: 100000001, last_message_time: "2026-08-16T11:00:00.000Z" },
     ],
   });
   await bridge.fetch("/webchat/api/v1.2/conversations/conversation-th/messages", []);
 
-  const complete = await bridge.sync("1549058683");
+  const complete = await bridge.sync("100000001");
   const plan = bridge.posts.findLast((post) => post.type === "sync_plan");
   assert.equal(complete.ok, true);
   assert.deepEqual(
@@ -484,7 +484,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
   const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   const conversation = {
     id: "seller-centre-conversation",
-    shop_id: 1549058683,
+    shop_id: 100000001,
     to_id: 987654321,
     to_name: "Test buyer",
     latest_message_id: "seller-message-1",
@@ -495,13 +495,13 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
   };
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   await bridge.fetch("/webchat/api/v1.2/mini/conversations", [conversation]);
-  await bridge.fetch("/webchat/api/workbenchapi/v1.2/mini/shop/setting", { shop_id: 1549058683 });
+  await bridge.fetch("/webchat/api/workbenchapi/v1.2/mini/shop/setting", { shop_id: 100000001 });
 
   const detection = await bridge.detect();
   assert.ok(detection);
   assert.deepEqual(
     JSON.parse(JSON.stringify(detection.accounts.map((account) => account.provider_account_id))),
-    ["1549058683"],
+    ["100000001"],
   );
 
   bridge.setResponse("/webchat/api/v1.2/mini/conversations", [{
@@ -513,8 +513,8 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     id: "seller-message-1",
     conversation_id: "seller-centre-conversation",
     from_id: 987654321,
-    to_id: 1549058683,
-    shop_id: 1549058683,
+    to_id: 100000001,
+    shop_id: 100000001,
     type: "text",
     content: { text: "First" },
     created_timestamp: 1_724_141_000,
@@ -522,8 +522,8 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     id: "seller-message-2",
     conversation_id: "seller-centre-conversation",
     from_id: 987654321,
-    to_id: 1549058683,
-    shop_id: 1549058683,
+    to_id: 100000001,
+    shop_id: 100000001,
     type: "text",
     content: { text: "Second" },
     created_timestamp: 1_724_141_060,
@@ -545,7 +545,7 @@ test("recovers Seller Centre history through the mini conversation route", async
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
     id: "seller-centre-recovery",
-    shop_id: 1549058683,
+    shop_id: 100000001,
     to_id: 987654321,
     last_message_time: "2026-08-20T10:00:00.000Z",
     latest_message_id: "seller-recovery-message",
@@ -553,7 +553,7 @@ test("recovers Seller Centre history through the mini conversation route", async
   }]);
   await bridge.fetch("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages", []);
 
-  const complete = await bridge.sync("1549058683");
+  const complete = await bridge.sync("100000001");
   assert.equal(complete.ok, true);
   assert.equal(bridge.miniChatClicks, 1);
   assert.equal(bridge.miniChatIsOpen, true);
