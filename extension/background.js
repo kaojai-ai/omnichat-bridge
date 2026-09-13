@@ -791,14 +791,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "claim_leader") {
-    void claimLeader(message.tab_id).then(respond, async (error) => {
+    void claimLeader(message.tab_id, message.provider).then(respond, async (error) => {
       await recordUnexpected("claim_leader", error);
       respond({ ok: false, error: String(error) });
     });
     return true;
   }
   if (message?.type === "release_leader") {
-    void releaseLeader().then(respond, async (error) => {
+    void releaseLeader(message.provider).then(respond, async (error) => {
       await recordUnexpected("release_leader", error);
       respond({ ok: false, error: String(error) });
     });
@@ -1317,9 +1317,14 @@ async function getLiveState(providerAccountId, provider = "") {
   };
 }
 
-async function claimLeader(tabId) {
+function providerLiveCommandContexts(contexts, provider) {
+  const providerId = normalizedProviderId(provider);
+  return liveCommandContexts(contexts).filter((context) => !providerId || context.adapter.id === providerId);
+}
+
+async function claimLeader(tabId, provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) {
@@ -1329,9 +1334,9 @@ async function claimLeader(tabId) {
   return results.at(-1) ?? { ok: true };
 }
 
-async function releaseLeader() {
+async function releaseLeader(provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
@@ -1353,6 +1358,7 @@ function stopLiveConnection() {
   for (const connection of liveConnections.values()) {
     clearTimeout(connection.reconnectTimer);
     clearInterval(connection.heartbeatTimer);
+    clearTimeout(connection.leaderStatusTimer);
     connection.socket?.close();
   }
   liveConnections.clear();
@@ -1519,6 +1525,7 @@ async function ensureLiveConnection() {
     if (contextKeys.has(key)) continue;
     clearTimeout(connection.reconnectTimer);
     clearInterval(connection.heartbeatTimer);
+    clearTimeout(connection.leaderStatusTimer);
     connection.socket?.close();
     liveConnections.delete(key);
   }
@@ -1532,6 +1539,7 @@ async function ensureAccountLiveConnection(context) {
     socket: null,
     reconnectTimer: null,
     heartbeatTimer: null,
+    leaderStatusTimer: null,
     reconnectAttempt: 0,
   };
   liveConnections.set(context.key, existing);
@@ -1569,13 +1577,10 @@ async function ensureAccountLiveConnection(context) {
         }
       }, 20_000);
       void sendConnectionStatus(socket, context)
+        .then(() => scheduleLeaderStatusRefresh(context, socket))
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
         }));
-      void getLiveState(context.account.provider_account_id, context.account.provider).catch((error) => recordUnexpected("leader_status", error, {
-        provider: context.account.provider,
-        provider_account_id: context.account.provider_account_id,
-      }));
     });
     socket.addEventListener("message", (event) => { void handleLiveCommand(event.data, context, socket); });
     socket.addEventListener("close", () => {
@@ -1583,6 +1588,8 @@ async function ensureAccountLiveConnection(context) {
         existing.socket = null;
         clearInterval(existing.heartbeatTimer);
         existing.heartbeatTimer = null;
+        clearTimeout(existing.leaderStatusTimer);
+        existing.leaderStatusTimer = null;
         void updateLiveState(context, { socket: "reconnecting", leader: false });
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
           provider_account_id: context.account.provider_account_id,
@@ -1599,6 +1606,21 @@ async function ensureAccountLiveConnection(context) {
     });
     scheduleLiveReconnect(context);
   }
+}
+
+function scheduleLeaderStatusRefresh(context, socket, attemptsRemaining = 2) {
+  const connection = liveConnections.get(context.key);
+  if (!connection || connection.socket !== socket) return;
+  clearTimeout(connection.leaderStatusTimer);
+  connection.leaderStatusTimer = setTimeout(() => {
+    void getLiveState(context.account.provider_account_id, context.account.provider).then((result) => {
+      if (result?.leader || attemptsRemaining <= 0 || socket.readyState !== WebSocket.OPEN) return;
+      scheduleLeaderStatusRefresh(context, socket, attemptsRemaining - 1);
+    }).catch((error) => recordUnexpected("leader_status", error, {
+      provider: context.account.provider,
+      provider_account_id: context.account.provider_account_id,
+    }));
+  }, 1_000);
 }
 
 async function handleLiveCommand(raw, context, socket) {

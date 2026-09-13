@@ -143,3 +143,8 @@ test("shows a lightweight shell before popup state finishes loading", () => {
   assert.match(popupSource, /async function loadLogs\(\)/);
   assert.match(popupSource, /changes\[STORAGE\.logs\] && !logsScreen\.hidden/);
 });
+
+test("changes leader status only for the active provider", () => {
+  assert.match(popupSource, /\{ type: "release_leader", provider: activeProviderAdapter\?\.id \}/);
+  assert.match(popupSource, /\{ type: "claim_leader", provider: activeProviderAdapter\?\.id, tab_id: popupTabId \}/);
+});
