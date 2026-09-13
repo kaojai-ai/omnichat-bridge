@@ -197,7 +197,7 @@ button:disabled {
   border-radius: var(--card-radius);
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(0, 1fr) minmax(145px, .9fr);
+  grid-template-columns: minmax(0, .7fr) minmax(185px, 1.3fr);
   min-width: 0;
   padding: 12px;
 }
