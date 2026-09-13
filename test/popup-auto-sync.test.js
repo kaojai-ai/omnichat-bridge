@@ -5,18 +5,18 @@ import test from "node:test";
 const html = await readFile(new URL("../extension/popup.html", import.meta.url), "utf8");
 const source = await readFile(new URL("../extension/popup.js", import.meta.url), "utf8");
 
-test("shows an opt-in Seller Centre landing sync control above the manual sync action", () => {
-  const optionIndex = html.indexOf('id="auto-sync-option"');
+test("uses unattended recovery as the only automatic provider control", () => {
+  const optionIndex = html.indexOf('id="unattended-recovery-option"');
   const syncIndex = html.indexOf('id="sync"');
   assert.ok(optionIndex >= 0);
   assert.ok(syncIndex > optionIndex);
-  assert.match(html, /id="auto-open-chat" type="checkbox"/);
-  assert.match(html, /Open chat and sync automatically/);
+  assert.doesNotMatch(html, /id="auto-open-chat"/);
+  assert.doesNotMatch(html, /Open chat and sync automatically/);
 });
 
-test("persists the landing preference and asks the active Seller Centre tab to apply it", () => {
-  assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);
-  assert.match(source, /type: "auto_open_chat_and_sync_v3"/);
+test("persists unattended recovery without a Shopee-only preference", () => {
+  assert.match(source, /STORAGE\.unattendedRecovery/);
+  assert.doesNotMatch(source, /STORAGE\.autoOpenSellerCentreChat/);
 });
 
 test("loads the LINE adapter in the popup context", () => {

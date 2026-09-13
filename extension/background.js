@@ -660,7 +660,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "auto_sync_now") {
-    void startAutomaticSellerCentreSync(message.provider).then(
+    void startUnattendedSellerCentreSync(message.provider).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -821,21 +821,21 @@ async function initializeAndStartSync(trigger) {
     "sync",
     trigger === "automatic" ? "automatic_requested" : "requested",
     trigger === "automatic"
-      ? "Automatic sync requested by the Seller Centre preference."
+      ? "Automatic sync requested by unattended recovery."
       : "Manual sync requested.",
   );
   await ensureLiveConnection();
   return startSync(trigger);
 }
 
-async function startAutomaticSellerCentreSync(provider) {
+async function startUnattendedSellerCentreSync(provider) {
   const stored = await readStorage([
-    STORAGE.autoOpenSellerCentreChat,
+    STORAGE.unattendedRecovery,
     STORAGE.consent,
   ]);
   if (
     provider !== shopeeAdapter.id
-    || stored[STORAGE.autoOpenSellerCentreChat] !== true
+    || stored[STORAGE.unattendedRecovery] !== true
     || !hasLocalConsent(stored[STORAGE.consent])
   ) {
     return { skipped: "automatic_sync_disabled" };
@@ -1195,7 +1195,7 @@ async function runProviderHealthWatchdog() {
     }
     for (const tab of tabs) {
       try {
-        await reconnectProviderTab(tab, { forceAutomaticStart: allowTabRecovery });
+        await reconnectProviderTab(tab);
         const status = await providerTabStatus(tab);
         if (!providerTabHealthy(status, adapter)) {
           throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
@@ -1634,6 +1634,9 @@ async function handleLiveCommand(raw, context, socket) {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccounts] || changes[STORAGE.unattendedRecovery]) void ensureLiveConnection();
+  if (changes[STORAGE.unattendedRecovery]) {
+    void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
+  }
   if (
     changes[STORAGE.deviceName]
     || changes[STORAGE.detectedAccounts]
@@ -1646,7 +1649,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-async function reconnectProviderTab(tab, { forceAutomaticStart = false } = {}) {
+async function reconnectProviderTab(tab) {
   const tabId = tab?.id;
   if (!Number.isInteger(tabId)) return;
   const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
@@ -1659,7 +1662,7 @@ async function reconnectProviderTab(tab, { forceAutomaticStart = false } = {}) {
       if (!result?.ok) throw new Error(result?.error ?? "LINE account detection failed.");
     }
   }
-  await autoStartSellerCentreTab(tab, { force: forceAutomaticStart });
+  await autoStartSellerCentreTab(tab);
   await ensureLiveConnection();
 }
 
@@ -2201,7 +2204,7 @@ async function reattachOpenProviderBridges() {
   await ensureLiveConnection();
 }
 
-async function autoStartSellerCentreTab(tab, { force = false } = {}) {
+async function autoStartSellerCentreTab(tab) {
   const tabId = tab?.id;
   if (!Number.isInteger(tabId)) return { skipped: "tab_missing" };
   const existing = sellerCentreLandingStarts.get(tabId);
@@ -2213,7 +2216,7 @@ async function autoStartSellerCentreTab(tab, { force = false } = {}) {
       return { skipped: "not_seller_centre" };
     }
     const stored = await readStorage([
-      STORAGE.autoOpenSellerCentreChat,
+      STORAGE.unattendedRecovery,
       STORAGE.consent,
       STORAGE.config,
     ]);
@@ -2221,7 +2224,7 @@ async function autoStartSellerCentreTab(tab, { force = false } = {}) {
       (account) => account?.provider === shopeeAdapter.id,
     );
     if (
-      (stored[STORAGE.autoOpenSellerCentreChat] !== true && !force)
+      stored[STORAGE.unattendedRecovery] !== true
       || !hasLocalConsent(stored[STORAGE.consent])
       || !configured
     ) {

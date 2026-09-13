@@ -1,7 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_PROTOCOL_VERSION = 5;
-  const AUTO_OPEN_SELLER_CENTRE_CHAT = "auto_open_seller_centre_chat";
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -34,10 +33,10 @@
   let providerChatOpen = null;
   let providerPollingActive = false;
   let lastProviderCheckAt = null;
-  let automaticSellerCentreLandingStarted = false;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
   let automaticSellerCentreLandingRerun = false;
+  let automaticSellerCentreLandingStarted = false;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -235,11 +234,10 @@
     && providerAdapter.surfaceForUrl?.(currentUrl) === "seller-centre";
 
   async function automaticSellerCentreLandingSync() {
-    if (!isBridgeActive() || !isSellerCentrePage() || automaticSellerCentreLandingStarted) {
+    if (!isBridgeActive() || !isSellerCentrePage() || providerChatOpen === true || automaticSellerCentreLandingStarted) {
       return { skipped: "not_eligible" };
     }
     const stored = await chrome.storage.local.get([
-      AUTO_OPEN_SELLER_CENTRE_CHAT,
       UNATTENDED_RECOVERY,
       "local_consent",
       "config",
@@ -248,8 +246,7 @@
       (account) => account?.provider === providerAdapter.id,
     );
     if (
-      stored[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true
-      && stored[UNATTENDED_RECOVERY] !== true
+      stored[UNATTENDED_RECOVERY] !== true
       || !stored.local_consent?.accepted_at
       || !configured
     ) {
@@ -267,8 +264,8 @@
     if (!detection?.ok) {
       throw new Error(detection?.error ?? "Shopee account detection failed after opening Chat.");
     }
-    const latest = await chrome.storage.local.get([AUTO_OPEN_SELLER_CENTRE_CHAT]);
-    if (latest[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true) {
+    const latest = await chrome.storage.local.get([UNATTENDED_RECOVERY]);
+    if (latest[UNATTENDED_RECOVERY] !== true) {
       return { skipped: "disabled_during_startup" };
     }
     const result = await sendRuntimeMessage({
@@ -286,10 +283,10 @@
     }
     automaticSellerCentreLandingPromise = automaticSellerCentreLandingSync()
       .catch((error) => {
-        automaticSellerCentreLandingStarted = false;
         logAsyncError("automatic_seller_centre_sync", error);
       })
       .finally(() => {
+        automaticSellerCentreLandingStarted = false;
         automaticSellerCentreLandingPromise = null;
         if (automaticSellerCentreLandingRerun) {
           automaticSellerCentreLandingRerun = false;

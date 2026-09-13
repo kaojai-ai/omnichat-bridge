@@ -8,7 +8,7 @@ const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json",
 
 test("reopening LINE refreshes account readiness before publishing live status without a popup", async () => {
   const calls = [];
-  const start = source.indexOf("async function reconnectProviderTab(tab, ");
+  const start = source.indexOf("async function reconnectProviderTab(tab)");
   const end = source.indexOf("\nchrome.tabs.onUpdated", start);
   const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     providerAdapters: { list: () => [{ id: "line_oa", matchesUrl: (url) => url.startsWith("https://chat.line.biz/") }] },
@@ -217,14 +217,14 @@ test("correlates pending delivery failures to safe per-message batch diagnostics
   assert.match(source, /accepted_messages: acknowledgedMessages/);
 });
 
-test("requires the local Seller Centre preference before an automatic landing sync", () => {
+test("requires unattended recovery before an automatic Seller Centre sync", () => {
   assert.match(source, /message\?\.type === "auto_sync_now"/);
-  assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);
-  assert.match(source, /stored\[STORAGE\.autoOpenSellerCentreChat\] !== true/);
+  assert.match(source, /STORAGE\.unattendedRecovery/);
+  assert.match(source, /stored\[STORAGE\.unattendedRecovery\] !== true/);
   assert.match(source, /initializeAndStartSync\("automatic"\)/);
 });
 
-test("starts opted-in Seller Centre sync after the tab finishes loading", () => {
+test("opens Seller Centre mini chat during unattended recovery", () => {
   assert.match(source, /chrome\.tabs\.onUpdated\.addListener/);
   assert.match(source, /changeInfo\.status !== "complete"/);
   assert.match(source, /async function reconnectProviderTab\(/);

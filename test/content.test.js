@@ -376,11 +376,11 @@ test("does not reopen Seller Centre from lifecycle events after Chat is closed",
   );
 });
 
-test("waits for the Seller Centre page bridge before starting saved landing sync", async () => {
+test("waits for the Seller Centre page bridge before unattended recovery opens mini chat", async () => {
   const bridge = contentBridge("/portal/sale/order", {
     localConsent: true,
     storage: {
-      auto_open_seller_centre_chat: true,
+      unattended_recovery: true,
       config: {
         version: 2,
         accounts: [{ provider: "shopee", provider_account_id: "shop-1" }],
@@ -433,6 +433,24 @@ test("waits for the Seller Centre page bridge before starting saved landing sync
     bridge.runtimeMessages.filter((message) => message.type === "resume_sync").length,
     0,
   );
+
+  await bridge.providerEvent({
+    type: "provider_status",
+    surface: "seller-centre",
+    surface_ready: true,
+    chat_open: false,
+  });
+  await bridge.sendCommand({ type: "auto_open_chat_and_sync_v3" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const preparations = bridge.runtimeMessages.filter((message) => message.type === "prepare_provider_v3");
+  assert.equal(preparations.length, 2);
+  await bridge.providerEvent({
+    type: "prepare_provider_result",
+    request_id: preparations[1].request_id,
+    ok: false,
+    error: "Test recovery stopped.",
+  });
 });
 
 test("does not deliver the same provider message twice across realtime surfaces", async () => {
@@ -483,7 +501,7 @@ for (const pathname of [
   "/portal/chat-management",
   "/portal/sale/order",
 ]) {
-  test(`does not open Seller Centre automatically when the option is disabled on ${pathname}`, async () => {
+  test(`does not open Seller Centre automatically when unattended recovery is disabled on ${pathname}`, async () => {
     const bridge = contentBridge(pathname);
 
     await new Promise((resolve) => setTimeout(resolve, 550));
