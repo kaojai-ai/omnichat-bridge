@@ -639,25 +639,28 @@ function renderDashboard(message = "", isError = false) {
     if (message || !anyError) {
       status.textContent = resultMessage;
     } else {
-      if (pendingTotal) {
-        const pending = document.createElement("span");
-        pending.className = "status-pending";
-        pending.textContent = `${pendingTotal} pending`;
-        status.append(pending);
-      }
       const error = document.createElement("span");
       error.className = "status-error";
       error.textContent = latestFailure;
       status.append(error);
+      const details = document.createElement("span");
+      details.className = "status-error-details";
+      if (pendingTotal) {
+        const pending = document.createElement("span");
+        pending.className = "status-pending";
+        pending.textContent = `${pendingTotal} pending`;
+        details.append(pending, document.createTextNode(" · "));
+      }
       const logsLink = document.createElement("a");
       logsLink.href = "#logs";
       logsLink.className = "status-log-link";
-      logsLink.textContent = "Open Logs for details";
+      logsLink.textContent = "Open Logs";
       logsLink.addEventListener("click", (event) => {
         event.preventDefault();
         openLogs("error");
       });
-      status.append(logsLink);
+      details.append(logsLink);
+      status.append(details);
     }
   }
 }

@@ -685,6 +685,7 @@ input[type="checkbox"] {
 }
 
 .status-error { color: var(--danger); }
+.status-error-details { color: var(--muted); }
 .status-pending { color: var(--muted); }
 
 .status-log-link {
