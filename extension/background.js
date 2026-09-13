@@ -791,14 +791,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "claim_leader") {
-    void claimLeader(message.tab_id).then(respond, async (error) => {
+    void claimLeader(message.tab_id, message.provider).then(respond, async (error) => {
       await recordUnexpected("claim_leader", error);
       respond({ ok: false, error: String(error) });
     });
     return true;
   }
   if (message?.type === "release_leader") {
-    void releaseLeader().then(respond, async (error) => {
+    void releaseLeader(message.provider).then(respond, async (error) => {
       await recordUnexpected("release_leader", error);
       respond({ ok: false, error: String(error) });
     });
@@ -1317,9 +1317,14 @@ async function getLiveState(providerAccountId, provider = "") {
   };
 }
 
-async function claimLeader(tabId) {
+function providerLiveCommandContexts(contexts, provider) {
+  const providerId = normalizedProviderId(provider);
+  return liveCommandContexts(contexts).filter((context) => !providerId || context.adapter.id === providerId);
+}
+
+async function claimLeader(tabId, provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) {
@@ -1329,9 +1334,9 @@ async function claimLeader(tabId) {
   return results.at(-1) ?? { ok: true };
 }
 
-async function releaseLeader() {
+async function releaseLeader(provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = liveCommandContexts(configuredAccountContexts(stored));
+  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));

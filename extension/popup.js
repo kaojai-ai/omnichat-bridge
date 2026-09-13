@@ -1124,8 +1124,8 @@ leaderStatus.addEventListener("click", async () => {
   }
   const isLeader = leaderStatus.dataset.leader === "true";
   const result = await chrome.runtime.sendMessage(isLeader
-    ? { type: "release_leader" }
-    : { type: "claim_leader", tab_id: popupTabId });
+    ? { type: "release_leader", provider: activeProviderAdapter?.id }
+    : { type: "claim_leader", provider: activeProviderAdapter?.id, tab_id: popupTabId });
   if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
 });
 document.querySelector("#close-config").addEventListener("click", closeConfig);

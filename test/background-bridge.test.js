@@ -99,6 +99,13 @@ test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /attemptsRemaining - 1/);
 });
 
+test("scopes leader changes to the provider shown in the popup", () => {
+  assert.match(source, /function providerLiveCommandContexts\(contexts, provider\)/);
+  assert.match(source, /context\.adapter\.id === providerId/);
+  assert.match(source, /claimLeader\(message\.tab_id, message\.provider\)/);
+  assert.match(source, /releaseLeader\(message\.provider\)/);
+});
+
 test("uses the account API base for a signed generic ping", () => {
   assert.match(source, /async function signedApiPing\(context\)/);
   assert.match(source, /apiEndpoint\(context\.config, "ping"\)/);
