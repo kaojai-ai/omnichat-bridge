@@ -22,7 +22,7 @@ import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 import { hydrateDetectedAccounts } from "./lib/popup-accounts.js";
 import { syncProgressPresentation } from "./lib/popup-sync-progress.js";
-import { sellerCentreConnectionStatus } from "./lib/popup-status.js";
+import { latestSyncFailure, sellerCentreConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -633,6 +633,7 @@ function renderDashboard(message = "", isError = false) {
       status.textContent = resultMessage;
     } else {
       if (pendingTotal) status.append(`${pendingTotal} pending. `);
+      status.append(`${latestSyncFailure(configuredStates.map((item) => item.syncState))} `);
       const logsLink = document.createElement("a");
       logsLink.href = "#logs";
       logsLink.className = "status-log-link";
