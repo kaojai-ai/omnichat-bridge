@@ -27,8 +27,9 @@ test("reopening LINE refreshes account readiness before publishing live status w
   assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
 });
 
-test("does not reload provider tabs when the content bridge is unavailable", () => {
-  assert.doesNotMatch(source, /chrome\.tabs\.reload\s*\(/);
+test("reloads a provider tab only after unattended recovery health checks fail repeatedly", () => {
+  assert.match(source, /chrome\.tabs\.reload\s*\(tab\.id\)/);
+  assert.match(source, /allowTabRecovery && attempts >= 2/);
   assert.match(source, /content_unready/);
   assert.match(source, /Refresh the tab manually and try again/);
 });
@@ -216,14 +217,14 @@ test("correlates pending delivery failures to safe per-message batch diagnostics
   assert.match(source, /accepted_messages: acknowledgedMessages/);
 });
 
-test("requires the local Seller Centre preference before an automatic landing sync", () => {
+test("requires unattended recovery before an automatic Seller Centre sync", () => {
   assert.match(source, /message\?\.type === "auto_sync_now"/);
-  assert.match(source, /STORAGE\.autoOpenSellerCentreChat/);
-  assert.match(source, /stored\[STORAGE\.autoOpenSellerCentreChat\] !== true/);
+  assert.match(source, /STORAGE\.unattendedRecovery/);
+  assert.match(source, /stored\[STORAGE\.unattendedRecovery\] !== true/);
   assert.match(source, /initializeAndStartSync\("automatic"\)/);
 });
 
-test("starts opted-in Seller Centre sync after the tab finishes loading", () => {
+test("opens Seller Centre mini chat during unattended recovery", () => {
   assert.match(source, /chrome\.tabs\.onUpdated\.addListener/);
   assert.match(source, /changeInfo\.status !== "complete"/);
   assert.match(source, /async function reconnectProviderTab\(/);

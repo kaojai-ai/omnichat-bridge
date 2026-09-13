@@ -91,11 +91,78 @@ p { color: var(--muted); }
   gap: 16px;
 }
 
+.loading-screen {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+}
+
+.loading-spinner {
+  animation: loading-spin 700ms linear infinite;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  border-top-color: var(--green);
+  height: 24px;
+  width: 24px;
+}
+
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner { animation: none; }
+}
+
 .screen-intro {
   display: grid;
   gap: 3px;
   position: relative;
   font-size: 11px;
+}
+
+.language-switch {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  justify-content: flex-end;
+}
+
+.screen-heading .language-switch { margin-left: auto; }
+
+.language-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1;
+  min-height: 30px;
+  padding: 3px 4px;
+  width: 31px;
+}
+
+.language-button:hover {
+  background: var(--subtle);
+  color: var(--ink);
+}
+
+.language-button[aria-pressed="true"] {
+  background: var(--soft-green);
+  border-color: var(--green);
+}
+
+.language-button:focus-visible {
+  outline: 3px solid #ffd5ca;
+  outline-offset: 1px;
+}
+
+.language-button:disabled:not([aria-pressed="true"]) {
+  background: var(--subtle);
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: wait;
 }
 
 .privacy-back {
@@ -125,6 +192,8 @@ button {
 }
 
 button:hover { background: var(--shopee-hover); }
+#sync[data-provider="line_oa"]:not(:disabled) { background: #06c755; }
+#sync[data-provider="line_oa"]:not(:disabled):hover { background: #05a947; }
 button:active { transform: translateY(1px); }
 button:disabled {
   background: #f2f4f7;
@@ -139,17 +208,91 @@ button:disabled {
   gap: 3px;
 }
 
-.auto-sync-option {
-  align-items: center;
-  color: #344054;
-  cursor: pointer;
-  display: flex;
-  font-size: 11px;
-  font-weight: 550;
+.settings-preferences {
+  display: grid;
   gap: 8px;
 }
 
-.auto-sync-option input { flex: 0 0 auto; margin: 0; }
+.settings-preference {
+  align-items: center;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, .7fr) minmax(185px, 1.3fr);
+  min-width: 0;
+  padding: 12px;
+}
+
+.settings-preference > label,
+.recovery-option > span:first-child {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.recovery-option {
+  align-items: center;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  cursor: pointer;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px 12px;
+}
+
+.toggle-control {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.toggle-control input {
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 1px;
+}
+
+.toggle-track {
+  background: #d0d5dd;
+  border-radius: 999px;
+  display: block;
+  height: 22px;
+  padding: 3px;
+  transition: background-color 120ms ease;
+  width: 38px;
+}
+
+.toggle-thumb {
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 22%);
+  display: block;
+  height: 16px;
+  transform: translateX(0);
+  transition: transform 120ms ease;
+  width: 16px;
+}
+
+.toggle-control input:checked + .toggle-track { background: var(--green); }
+.toggle-control input:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
+
+.toggle-control input:focus-visible + .toggle-track {
+  outline: 3px solid #ffd5ca;
+  outline-offset: 2px;
+}
+
+@media (max-width: 360px) {
+  .settings-preference {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
 
 .cancel-sync-link {
   background: transparent;
@@ -679,17 +822,23 @@ input[type="checkbox"] {
 
 #status {
   color: #475467;
+  display: grid;
   font-size: 11px;
+  gap: 4px;
 }
 
+.status-error { color: var(--danger); }
+.status-error-details { color: var(--muted); }
+.status-pending { color: var(--muted); }
+
 .status-log-link {
-  color: inherit;
+  color: var(--shopee);
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
 }
 
-.status-log-link:hover { color: var(--danger); }
+.status-log-link:hover { color: var(--shopee-hover); }
 
 progress {
   accent-color: var(--shopee);
@@ -703,7 +852,7 @@ progress {
   gap: 10px;
 }
 
-.screen-heading > div {
+.screen-heading > div:not(.language-switch) {
   display: grid;
   gap: 2px;
 }

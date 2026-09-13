@@ -95,11 +95,51 @@ test("offers an account-scoped discard action beside pending messages", () => {
 test("offers to open Shopee Webchat mini before sync", () => {
   assert.match(popupSource, /const canOpenSellerCentreChat = activeProviderSurface === "seller-centre"/);
   assert.match(popupSource, /syncButton\.disabled = !canOpenSellerCentreChat/);
-  assert.match(popupSource, /canOpenSellerCentreChat \? "Open Webchat mini" : "Sync messages"/);
+  assert.match(popupSource, /canOpenSellerCentreChat \? t\("openWebchat"\) : t\("sync"\)/);
   assert.match(popupSource, /item\.account\.provider === "shopee" && item\.live\?\.provider_chat_open === false/);
   assert.match(popupSource, /syncButton\.dataset\.action = sellerCentreChatClosed \? "open_webchat_mini" : "sync"/);
-  assert.match(popupSource, /\? "Open Webchat mini"/);
+  assert.match(popupSource, /\? t\("openWebchat"\)/);
   assert.match(popupSource, /syncButton\.dataset\.action === "open_webchat_mini"/);
   assert.match(popupSource, /type: "prepare_provider_v3"/);
   assert.match(popupSource, /await detectAccount\(\)/);
+});
+
+test("keeps unattended provider recovery opt-in and runs through one health alarm", () => {
+  assert.match(html, /class="language-switch" role="group" aria-label="Language"/);
+  assert.match(html, /id="language-en"[^>]*data-language="en"/);
+  assert.match(html, /id="language-th"[^>]*data-language="th"/);
+  assert.match(html, /class="settings-preferences"/);
+  assert.equal((html.match(/class="settings-preference(?:\s|")/g) || []).length, 1);
+  assert.match(html, /id="unattended-recovery-label"/);
+  assert.match(html, /class="toggle-track"/);
+  assert.match(html, /id="unattended-recovery"/);
+  assert.match(popupSource, /STORAGE\.unattendedRecovery/);
+  assert.match(popupSource, /button\.setAttribute\("aria-pressed", String\(selected\)\)/);
+  assert.match(popupSource, /writeStorage\(\{ \[STORAGE\.language\]: language \}\)/);
+  assert.match(backgroundSource, /const PROVIDER_HEALTH_ALARM = "omnichat-provider-health"/);
+  assert.match(backgroundSource, /async function runProviderHealthWatchdog\(\)/);
+  assert.match(backgroundSource, /chrome\.tabs\.create\(\{ url: adapter\.chatUrl, active: false \}\)/);
+  assert.match(backgroundSource, /chrome\.tabs\.reload\(tab\.id\)/);
+  assert.match(backgroundSource, /providerTabHealthy\(status, adapter\)/);
+  assert.match(backgroundSource, /last_provider_check_at/);
+  assert.match(backgroundSource, /startUnattendedProviderSync\(tab, context\)/);
+  assert.match(backgroundSource, /type: "sync_now_v3"/);
+  assert.match(backgroundSource, /providerAutomaticRetryAt/);
+});
+
+test("shows a lightweight shell before popup state finishes loading", () => {
+  const loadStart = popupSource.indexOf("async function load()");
+  const loadEnd = popupSource.indexOf("\nconsentInput.addEventListener", loadStart);
+  const loadSource = popupSource.slice(loadStart, loadEnd);
+
+  assert.match(html, /id="loading-screen" class="loading-screen"/);
+  assert.match(html, /id="consent-screen" class="screen" hidden/);
+  assert.match(popupSource, /const \[stored, \[activeTab\]\] = await Promise\.all\(\[/);
+  assert.match(popupSource, /readStorage\(\[/);
+  assert.match(popupSource, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/);
+  assert.match(popupSource, /void installationId\(\)\.then/);
+  assert.match(popupSource, /void detectAccount\(\)\.catch/);
+  assert.doesNotMatch(loadSource, /STORAGE\.logs/);
+  assert.match(popupSource, /async function loadLogs\(\)/);
+  assert.match(popupSource, /changes\[STORAGE\.logs\] && !logsScreen\.hidden/);
 });

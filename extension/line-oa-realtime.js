@@ -15,6 +15,7 @@
   let disposed = false;
   let timer = null;
   let activePoll = null;
+  let lastProviderCheckAt = null;
   const pollingAccounts = new Map();
   let pollGeneration = 0;
   const queuedSyncs = [];
@@ -91,8 +92,7 @@
     return botId ? ["send_text", "send_image", "send_sticker"] : [];
   }
 
-  async function publishProviderStatus(detectedAccounts) {
-    const accounts = detectedAccounts ?? await availableAccounts().catch(() => []);
+  function postProviderStatus(accounts) {
     const commandCapabilitiesByAccount = Object.fromEntries(accounts.map((account) => [
       account.provider_account_id,
       commandCapabilities(value(account.bot_id)),
@@ -105,10 +105,17 @@
       capabilities: { account_detection: true, message_observation: true, message_recovery: true },
       command_capabilities_by_account: commandCapabilitiesByAccount,
       realtime_transport: "authenticated_polling",
-      realtime_connected: true,
+      realtime_connected: !lastProviderCheckAt || Date.now() - Date.parse(lastProviderCheckAt) < 45_000,
       connected_at: new Date().toISOString(),
       chat_open: true,
+      last_provider_check_at: lastProviderCheckAt,
+      provider_polling_active: Boolean(timer || activePoll || pollingAccounts.size),
     });
+  }
+
+  async function publishProviderStatus(detectedAccounts) {
+    const accounts = detectedAccounts ?? await availableAccounts().catch(() => []);
+    postProviderStatus(accounts);
   }
 
   window.fetch = async (input, init) => {
@@ -178,7 +185,9 @@
         ...(controller ? { signal: controller.signal } : {}),
       });
       if (!response.ok) throw new Error(`LINE OA request failed (${response.status}).`);
-      return await response.json();
+      const body = await response.json();
+      lastProviderCheckAt = new Date().toISOString();
+      return body;
     } catch (error) {
       if (error?.name === "AbortError") throw new Error("LINE OA request timed out.");
       throw error;
@@ -488,9 +497,17 @@
       const watermark = new Date().toISOString();
       const state = pollingAccounts.get(providerAccountId);
       if (state) state.checkpoint = { watermark };
+      postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
+        provider_account_id,
+        bot_id: account.botId,
+      })));
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
     } catch (error) {
       if (pollIsActive(generation)) {
+        postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
+          provider_account_id,
+          bot_id: account.botId,
+        })));
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: String(error) });
       }
     }
@@ -714,5 +731,5 @@
       window.removeEventListener("message", listener);
     },
   };
-  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true });
+  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true, last_provider_check_at: lastProviderCheckAt, provider_polling_active: false });
 })();

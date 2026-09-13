@@ -24,7 +24,11 @@
         <input id="config-file" type="file" accept="application/json,.json" hidden>
       </header>
 
-      <section id="consent-screen" class="screen">
+      <section id="loading-screen" class="loading-screen" role="status" aria-label="Loading">
+        <span class="loading-spinner" aria-hidden="true"></span>
+      </section>
+
+      <section id="consent-screen" class="screen" hidden>
         <div class="screen-intro">
           <button id="close-privacy" class="icon-button privacy-back" type="button" aria-label="Back" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
@@ -48,7 +52,7 @@
 
       <section id="hint-screen" class="screen hint-screen" hidden>
         <div class="screen-intro">
-          <h2 class="provider-links-title">Supported providers</h2>
+          <h2 id="provider-links-title" class="provider-links-title">Supported providers</h2>
           <p>Choose a provider to manage its account here.</p>
         </div>
         <div class="provider-links">
@@ -90,9 +94,12 @@
           <p id="account-list-empty" class="account-list-empty" hidden>No provider accounts detected yet.</p>
         </section>
 
-        <label id="auto-sync-option" class="auto-sync-option" hidden>
-          <input id="auto-open-chat" type="checkbox">
-          <span>Open chat and sync automatically</span>
+        <label id="unattended-recovery-option" class="recovery-option">
+          <span id="unattended-recovery-label">Recover provider tabs automatically</span>
+          <span class="toggle-control">
+            <input id="unattended-recovery" type="checkbox">
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          </span>
         </label>
 
         <div class="sync-actions">
@@ -116,17 +123,22 @@
             <h2>Settings</h2>
             <p id="config-count">Current saved configuration</p>
           </div>
+          <div class="language-switch" role="group" aria-label="Language">
+            <button id="language-en" class="language-button" type="button" data-language="en" aria-label="English" title="English" aria-pressed="false">🇬🇧</button>
+            <button id="language-th" class="language-button" type="button" data-language="th" aria-label="ไทย" title="ไทย" aria-pressed="false">🇹🇭</button>
+          </div>
         </header>
 
-        <div class="field">
-          <label for="device-name">Device name</label>
-          <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
-          <small>Shown to KaoJai admins for connection diagnostics.</small>
+        <div class="settings-preferences">
+          <div class="settings-preference settings-device-name">
+            <label id="device-name-label" for="device-name">Device name</label>
+            <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
+          </div>
         </div>
 
         <div class="field">
           <div class="field-heading">
-            <label for="config">Configuration</label>
+            <label id="config-label" for="config">Configuration</label>
             <div class="settings-actions">
               <button id="import-config" class="icon-button" type="button" aria-label="Import configuration" title="Import configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 13v6h14v-6"/></svg></button>
               <button id="export-config" class="icon-button" type="button" aria-label="Export configuration" title="Export configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0 4 4m-4-4L8 7M5 13v6h14v-6"/></svg></button>
@@ -156,7 +168,7 @@
           </button>
           <div>
             <h2>Logs</h2>
-            <p>Safe operational logs · kept for 2 days</p>
+          <p id="logs-description">Safe operational logs · kept for 2 days</p>
           </div>
         </header>
         <div class="log-toolbar">

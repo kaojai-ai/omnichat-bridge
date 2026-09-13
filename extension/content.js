@@ -1,7 +1,7 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_PROTOCOL_VERSION = 5;
-  const AUTO_OPEN_SELLER_CENTRE_CHAT = "auto_open_seller_centre_chat";
+  const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
     previousBridge.dispose("Content bridge reattached.");
@@ -31,10 +31,12 @@
   let providerCommandCapabilitiesByAccount = {};
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
-  let automaticSellerCentreLandingStarted = false;
+  let providerPollingActive = false;
+  let lastProviderCheckAt = null;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
   let automaticSellerCentreLandingRerun = false;
+  let automaticSellerCentreLandingStarted = false;
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -232,11 +234,11 @@
     && providerAdapter.surfaceForUrl?.(currentUrl) === "seller-centre";
 
   async function automaticSellerCentreLandingSync() {
-    if (!isBridgeActive() || !isSellerCentrePage() || automaticSellerCentreLandingStarted) {
+    if (!isBridgeActive() || !isSellerCentrePage() || providerChatOpen === true || automaticSellerCentreLandingStarted) {
       return { skipped: "not_eligible" };
     }
     const stored = await chrome.storage.local.get([
-      AUTO_OPEN_SELLER_CENTRE_CHAT,
+      UNATTENDED_RECOVERY,
       "local_consent",
       "config",
     ]);
@@ -244,7 +246,7 @@
       (account) => account?.provider === providerAdapter.id,
     );
     if (
-      stored[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true
+      stored[UNATTENDED_RECOVERY] !== true
       || !stored.local_consent?.accepted_at
       || !configured
     ) {
@@ -262,8 +264,8 @@
     if (!detection?.ok) {
       throw new Error(detection?.error ?? "Shopee account detection failed after opening Chat.");
     }
-    const latest = await chrome.storage.local.get([AUTO_OPEN_SELLER_CENTRE_CHAT]);
-    if (latest[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true) {
+    const latest = await chrome.storage.local.get([UNATTENDED_RECOVERY]);
+    if (latest[UNATTENDED_RECOVERY] !== true) {
       return { skipped: "disabled_during_startup" };
     }
     const result = await sendRuntimeMessage({
@@ -281,10 +283,10 @@
     }
     automaticSellerCentreLandingPromise = automaticSellerCentreLandingSync()
       .catch((error) => {
-        automaticSellerCentreLandingStarted = false;
         logAsyncError("automatic_seller_centre_sync", error);
       })
       .finally(() => {
+        automaticSellerCentreLandingStarted = false;
         automaticSellerCentreLandingPromise = null;
         if (automaticSellerCentreLandingRerun) {
           automaticSellerCentreLandingRerun = false;
@@ -882,6 +884,10 @@
       providerChatOpen = typeof event.data.chat_open === "boolean"
         ? event.data.chat_open
         : providerChatOpen;
+      providerPollingActive = event.data.provider_polling_active === true;
+      lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
+        ? event.data.last_provider_check_at
+        : lastProviderCheckAt;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
@@ -965,7 +971,9 @@
         realtime_transport: providerRealtimeTransport,
         chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,
+        provider_polling_active: providerPollingActive,
         last_realtime_connected_at: lastRealtimeConnectedAt,
+        last_provider_check_at: lastProviderCheckAt,
         page_visible: document.visibilityState === "visible",
       });
       return false;
