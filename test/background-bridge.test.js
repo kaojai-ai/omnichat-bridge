@@ -92,6 +92,13 @@ test("only opens live command channels for adapters that declare send commands",
   assert.match(source.slice(start, end), /const contexts = liveCommandContexts\(configuredContexts\)/);
 });
 
+test("refreshes leader status after live presence is sent", () => {
+  assert.match(source, /function scheduleLeaderStatusRefresh\(context, socket, attemptsRemaining = 2\)/);
+  assert.match(source, /sendConnectionStatus\(socket, context\)\n        \.then\(\(\) => scheduleLeaderStatusRefresh\(context, socket\)\)/);
+  assert.match(source, /getLiveState\(context\.account\.provider_account_id, context\.account\.provider\)/);
+  assert.match(source, /attemptsRemaining - 1/);
+});
+
 test("uses the account API base for a signed generic ping", () => {
   assert.match(source, /async function signedApiPing\(context\)/);
   assert.match(source, /apiEndpoint\(context\.config, "ping"\)/);

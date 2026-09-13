@@ -1353,6 +1353,7 @@ function stopLiveConnection() {
   for (const connection of liveConnections.values()) {
     clearTimeout(connection.reconnectTimer);
     clearInterval(connection.heartbeatTimer);
+    clearTimeout(connection.leaderStatusTimer);
     connection.socket?.close();
   }
   liveConnections.clear();
@@ -1519,6 +1520,7 @@ async function ensureLiveConnection() {
     if (contextKeys.has(key)) continue;
     clearTimeout(connection.reconnectTimer);
     clearInterval(connection.heartbeatTimer);
+    clearTimeout(connection.leaderStatusTimer);
     connection.socket?.close();
     liveConnections.delete(key);
   }
@@ -1532,6 +1534,7 @@ async function ensureAccountLiveConnection(context) {
     socket: null,
     reconnectTimer: null,
     heartbeatTimer: null,
+    leaderStatusTimer: null,
     reconnectAttempt: 0,
   };
   liveConnections.set(context.key, existing);
@@ -1569,13 +1572,10 @@ async function ensureAccountLiveConnection(context) {
         }
       }, 20_000);
       void sendConnectionStatus(socket, context)
+        .then(() => scheduleLeaderStatusRefresh(context, socket))
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
         }));
-      void getLiveState(context.account.provider_account_id, context.account.provider).catch((error) => recordUnexpected("leader_status", error, {
-        provider: context.account.provider,
-        provider_account_id: context.account.provider_account_id,
-      }));
     });
     socket.addEventListener("message", (event) => { void handleLiveCommand(event.data, context, socket); });
     socket.addEventListener("close", () => {
@@ -1583,6 +1583,8 @@ async function ensureAccountLiveConnection(context) {
         existing.socket = null;
         clearInterval(existing.heartbeatTimer);
         existing.heartbeatTimer = null;
+        clearTimeout(existing.leaderStatusTimer);
+        existing.leaderStatusTimer = null;
         void updateLiveState(context, { socket: "reconnecting", leader: false });
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
           provider_account_id: context.account.provider_account_id,
@@ -1599,6 +1601,21 @@ async function ensureAccountLiveConnection(context) {
     });
     scheduleLiveReconnect(context);
   }
+}
+
+function scheduleLeaderStatusRefresh(context, socket, attemptsRemaining = 2) {
+  const connection = liveConnections.get(context.key);
+  if (!connection || connection.socket !== socket) return;
+  clearTimeout(connection.leaderStatusTimer);
+  connection.leaderStatusTimer = setTimeout(() => {
+    void getLiveState(context.account.provider_account_id, context.account.provider).then((result) => {
+      if (result?.leader || attemptsRemaining <= 0 || socket.readyState !== WebSocket.OPEN) return;
+      scheduleLeaderStatusRefresh(context, socket, attemptsRemaining - 1);
+    }).catch((error) => recordUnexpected("leader_status", error, {
+      provider: context.account.provider,
+      provider_account_id: context.account.provider_account_id,
+    }));
+  }, 1_000);
 }
 
 async function handleLiveCommand(raw, context, socket) {
