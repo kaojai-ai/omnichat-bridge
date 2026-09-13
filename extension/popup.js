@@ -597,7 +597,7 @@ function renderDashboard(message = "", isError = false) {
     return;
   }
 
-  status.classList.toggle("error", isError || anyError);
+  status.classList.toggle("error", isError);
   setLeaderStatus(anyLeader ? "LEADER" : "STANDBY", anyLeader ? "ready" : "neutral", "leader", anyLeader);
   syncButton.disabled = sellerCentreChatClosed ? false : anySyncing;
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
@@ -622,9 +622,6 @@ function renderDashboard(message = "", isError = false) {
     status.textContent = progressView.text;
   } else {
     const resultMessage = message
-      || (anyError
-        ? `${pendingTotal ? `${pendingTotal} pending. ` : ""}Open Logs for details.`
-        : "")
       || surfaceHint?.hint
       || formatSyncResult(latestResult);
     syncProgress.hidden = true;
@@ -632,8 +629,16 @@ function renderDashboard(message = "", isError = false) {
     if (message || !anyError) {
       status.textContent = resultMessage;
     } else {
-      if (pendingTotal) status.append(`${pendingTotal} pending. `);
-      status.append(`${latestSyncFailure(configuredStates.map((item) => item.syncState))} `);
+      if (pendingTotal) {
+        const pending = document.createElement("span");
+        pending.className = "status-pending";
+        pending.textContent = `${pendingTotal} pending`;
+        status.append(pending);
+      }
+      const error = document.createElement("span");
+      error.className = "status-error";
+      error.textContent = latestSyncFailure(configuredStates.map((item) => item.syncState));
+      status.append(error);
       const logsLink = document.createElement("a");
       logsLink.href = "#logs";
       logsLink.className = "status-log-link";

@@ -679,11 +679,16 @@ input[type="checkbox"] {
 
 #status {
   color: #475467;
+  display: grid;
   font-size: 11px;
+  gap: 4px;
 }
 
+.status-error { color: var(--danger); }
+.status-pending { color: var(--muted); }
+
 .status-log-link {
-  color: inherit;
+  color: var(--shopee);
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
