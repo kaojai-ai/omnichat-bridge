@@ -105,9 +105,13 @@ test("offers to open Shopee Webchat mini before sync", () => {
 });
 
 test("keeps unattended provider recovery opt-in and runs through one health alarm", () => {
-  assert.match(html, /id="language-select"/);
+  assert.match(html, /class="language-switch" role="group" aria-label="Language"/);
+  assert.match(html, /id="language-en"[^>]*data-language="en"/);
+  assert.match(html, /id="language-th"[^>]*data-language="th"/);
   assert.match(html, /id="unattended-recovery"/);
   assert.match(popupSource, /STORAGE\.unattendedRecovery/);
+  assert.match(popupSource, /button\.setAttribute\("aria-pressed", String\(selected\)\)/);
+  assert.match(popupSource, /writeStorage\(\{ \[STORAGE\.language\]: language \}\)/);
   assert.match(backgroundSource, /const PROVIDER_HEALTH_ALARM = "omnichat-provider-health"/);
   assert.match(backgroundSource, /async function runProviderHealthWatchdog\(\)/);
   assert.match(backgroundSource, /chrome\.tabs\.create\(\{ url: adapter\.chatUrl, active: false \}\)/);

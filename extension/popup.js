@@ -85,10 +85,7 @@ const openPrivacyButton = document.querySelector("#open-privacy");
 const closePrivacyButton = document.querySelector("#close-privacy");
 const installationIdButton = document.querySelector("#installation-id");
 const consentRecord = document.querySelector("#consent-record");
-const languageSelect = document.querySelector("#language-select");
-const languageLabel = document.querySelector("#language-label");
-const consentIntroTitle = consentScreen.querySelector("h2");
-const consentIntroDescription = consentScreen.querySelector(".screen-intro p");
+const languageButtons = [...document.querySelectorAll(".language-button")];
 const consentLabel = consentScreen.querySelector(".consent");
 
 let storedConfig = emptyConfig();
@@ -139,9 +136,13 @@ function defaultLanguage() {
 
 function applyTranslations() {
   document.documentElement.lang = language;
-  languageSelect.value = language;
+  for (const button of languageButtons) {
+    const selected = button.dataset.language === language;
+    button.setAttribute("aria-pressed", String(selected));
+    button.disabled = selected;
+  }
   const text = new Map([
-    [".brand-copy span", t("subtitle")], ["#language-label", t("language")], ["#language-select", t("language")],
+    [".brand-copy span", t("subtitle")],
     ["#consent-screen .screen-intro h2", viewingPrivacy ? t("privacyTitle") : t("beforeContinue")],
     ["#consent-screen .screen-intro p", viewingPrivacy ? t("privacyDescription") : t("review")],
     ["#consent-screen .consent-copy p:first-child", `<strong>${t("transfers")}</strong> ${t("transfersRest")}`],
@@ -158,8 +159,7 @@ function applyTranslations() {
   for (const [selector, value] of text) {
     const element = document.querySelector(selector);
     if (!element) continue;
-    if (selector === "#language-select") element.setAttribute("aria-label", value);
-    else if (selector === "#open-config") {
+    if (selector === "#open-config") {
       element.setAttribute("aria-label", value);
       element.title = value;
     } else if (selector === "#clear") {
@@ -1013,13 +1013,24 @@ consentInput.addEventListener("change", () => {
   if (consentInput.checked) consentError.textContent = "";
 });
 
-languageSelect.addEventListener("change", async () => {
-  language = languageSelect.value === "th" ? "th" : "en";
-  await writeStorage({ [STORAGE.language]: language });
-  applyTranslations();
-  renderConsentScreen();
-  if (!dashboardScreen.hidden) renderDashboard();
-});
+for (const button of languageButtons) {
+  button.addEventListener("click", async () => {
+    const nextLanguage = button.dataset.language === "th" ? "th" : "en";
+    if (nextLanguage === language) return;
+    const previousLanguage = language;
+    language = nextLanguage;
+    applyTranslations();
+    try {
+      await writeStorage({ [STORAGE.language]: language });
+      renderConsentScreen();
+      if (!dashboardScreen.hidden) renderDashboard();
+    } catch (error) {
+      language = previousLanguage;
+      applyTranslations();
+      reportPopupError("language_change", error);
+    }
+  });
+}
 
 continueButton.addEventListener("click", async () => {
   try {

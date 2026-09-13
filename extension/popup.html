@@ -15,13 +15,10 @@
           <h1>Omnichat Bridge</h1>
           <span>Secured bridge to your server</span>
         </div>
-        <label class="language-switch" for="language-select">
-          <span id="language-label">Language</span>
-          <select id="language-select" aria-label="Language">
-            <option value="en">English</option>
-            <option value="th">ไทย</option>
-          </select>
-        </label>
+        <div class="language-switch" role="group" aria-label="Language">
+          <button id="language-en" class="language-button" type="button" data-language="en" aria-label="English" title="English" aria-pressed="false">🇬🇧</button>
+          <button id="language-th" class="language-button" type="button" data-language="th" aria-label="ไทย" title="ไทย" aria-pressed="false">🇹🇭</button>
+        </div>
         <div class="header-actions">
         <button id="open-logs" class="header-log-button" type="button" aria-label="Logs" title="Logs" hidden>Logs</button>
         <button id="open-config" class="header-icon-button" type="button" aria-label="Settings" title="Settings" hidden>

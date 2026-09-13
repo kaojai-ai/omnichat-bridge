@@ -100,20 +100,44 @@ p { color: var(--muted); }
 
 .language-switch {
   align-items: center;
-  color: var(--muted);
   display: flex;
-  font-size: 11px;
-  gap: 8px;
+  flex: 0 0 auto;
+  gap: 3px;
   justify-content: flex-end;
 }
 
-.language-switch select {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--control-radius);
+.language-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--ink);
-  font: inherit;
-  padding: 5px 8px;
+  font-size: 18px;
+  line-height: 1;
+  min-height: 30px;
+  padding: 3px 4px;
+  width: 31px;
+}
+
+.language-button:hover {
+  background: var(--subtle);
+  color: var(--ink);
+}
+
+.language-button[aria-pressed="true"] {
+  background: var(--soft-green);
+  border-color: var(--green);
+}
+
+.language-button:focus-visible {
+  outline: 3px solid #ffd5ca;
+  outline-offset: 1px;
+}
+
+.language-button:disabled:not([aria-pressed="true"]) {
+  background: var(--subtle);
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: wait;
 }
 
 .privacy-back {
