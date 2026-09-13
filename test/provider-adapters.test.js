@@ -64,6 +64,9 @@ test("allows a future provider to own config validation and page matching", () =
 test("normalizes LINE OA Basic IDs without exposing secrets", () => {
   const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
 
+  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "@159nzygg" }), "https://chat.line.biz/account/@159nzygg");
+  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "159nzygg" }), "https://chat.line.biz/account/@159nzygg");
+
   assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " 159nzygg ", bot_id: "ignored", display_name: " KaoJai.ai " }, "2026-08-30T00:00:00.000Z")), {
     provider: "line_oa",
     provider_account_id: "@159nzygg",
