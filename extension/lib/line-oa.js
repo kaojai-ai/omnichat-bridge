@@ -107,6 +107,12 @@
     accountName: "LINE Official Account",
     adapterVersion: "line-oa-poll-1",
     chatUrl: "https://chat.line.biz/",
+    chatUrlForAccount: (account) => {
+      const providerAccountId = basicId(account?.provider_account_id);
+      return providerAccountId
+        ? `https://chat.line.biz/account/@${encodeURIComponent(providerAccountId.slice(1))}`
+        : "https://chat.line.biz/";
+    },
     tabQueryPattern: "https://chat.line.biz/*",
     capabilities: ["account_detection", "message_observation", "message_recovery"],
     sendCommands: ["send_text", "send_image", "send_sticker"],

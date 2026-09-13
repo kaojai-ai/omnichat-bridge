@@ -876,8 +876,11 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
     }
   }
   if (!tab) tab = orderedTabs[0] ?? selectedTab ?? null;
-  if (!tab && createIfMissing && typeof adapter.chatUrl === "string" && adapter.chatUrl.trim()) {
-    tab = await chrome.tabs.create({ url: adapter.chatUrl, active: false });
+  const chatUrl = typeof adapter.chatUrlForAccount === "function"
+    ? adapter.chatUrlForAccount(context.account)
+    : adapter.chatUrl;
+  if (!tab && createIfMissing && typeof chatUrl === "string" && chatUrl.trim()) {
+    tab = await chrome.tabs.create({ url: chatUrl, active: false });
   }
   if (!tab?.id) {
     await recordLog("warn", "provider", "tab_missing", `${label} chat tab is unavailable for an outbound reply.`, {
@@ -1184,7 +1187,11 @@ async function runProviderHealthWatchdog() {
     }
     if (!tabs.length && allowTabRecovery) {
       try {
-        await chrome.tabs.create({ url: adapter.chatUrl, active: false });
+        const context = contexts.find((candidate) => candidate.adapter.id === adapter.id);
+        const chatUrl = typeof adapter.chatUrlForAccount === "function"
+          ? adapter.chatUrlForAccount(context?.account)
+          : adapter.chatUrl;
+        await chrome.tabs.create({ url: chatUrl, active: false });
         await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
           provider: adapter.id,
         });
