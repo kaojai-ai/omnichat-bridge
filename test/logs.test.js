@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   LOG_RETENTION_MS,
+  MAX_LOG_ENTRIES,
   createLogEntry,
   diagnosticErrorDetails,
   logEntryForUpload,
@@ -38,6 +39,18 @@ test("logs older than two days are removed", () => {
   const recent = createLogEntry({ event: "recent" }, now - LOG_RETENTION_MS + 1, "recent");
   const expired = createLogEntry({ event: "expired" }, now - LOG_RETENTION_MS - 1, "expired");
   assert.deepEqual(pruneLogs([recent, expired], now).map((item) => item.id), ["recent"]);
+});
+
+test("keeps only the newest 100 logs", () => {
+  const now = Date.parse("2026-07-26T12:00:00.000Z");
+  const entries = Array.from({ length: 101 }, (_, index) => (
+    createLogEntry({ event: `event-${index}` }, now - index, `log-${index}`)
+  ));
+  const retained = pruneLogs(entries, now);
+
+  assert.equal(MAX_LOG_ENTRIES, 100);
+  assert.equal(retained.length, 100);
+  assert.equal(retained.at(-1).id, "log-99");
 });
 
 test("remote log payload omits internal account routing", () => {

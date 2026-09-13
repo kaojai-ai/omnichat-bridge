@@ -1,5 +1,5 @@
 export const LOG_RETENTION_MS = 2 * 24 * 60 * 60_000;
-export const MAX_LOG_ENTRIES = 4_000;
+export const MAX_LOG_ENTRIES = 100;
 
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const BLOCKED_DETAIL_KEY = /authorization|body|content|cookie|credential|headers?|hmac|message_text|password|payload|secret|token|url/i;

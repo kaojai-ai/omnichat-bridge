@@ -128,6 +128,10 @@ test("keeps unattended provider recovery opt-in and runs through one health alar
 });
 
 test("shows a lightweight shell before popup state finishes loading", () => {
+  const loadStart = popupSource.indexOf("async function load()");
+  const loadEnd = popupSource.indexOf("\nconsentInput.addEventListener", loadStart);
+  const loadSource = popupSource.slice(loadStart, loadEnd);
+
   assert.match(html, /id="loading-screen" class="loading-screen"/);
   assert.match(html, /id="consent-screen" class="screen" hidden/);
   assert.match(popupSource, /const \[stored, \[activeTab\]\] = await Promise\.all\(\[/);
@@ -135,4 +139,7 @@ test("shows a lightweight shell before popup state finishes loading", () => {
   assert.match(popupSource, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/);
   assert.match(popupSource, /void installationId\(\)\.then/);
   assert.match(popupSource, /void detectAccount\(\)\.catch/);
+  assert.doesNotMatch(loadSource, /STORAGE\.logs/);
+  assert.match(popupSource, /async function loadLogs\(\)/);
+  assert.match(popupSource, /changes\[STORAGE\.logs\] && !logsScreen\.hidden/);
 });
