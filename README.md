@@ -3,11 +3,8 @@
 **Omnichat Bridge is an open-source Chrome extension that helps shops stay
 available by bringing scattered platform chats into one workflow.**
 
-![Omnichat Bridge is an open-source Chrome extension that helps shops stay
-available by bringing scattered platform chats into one workflow](docs/assets/omnichat-bridge.png)
-
 From an open Chrome chat tab, it **forwards messages** from supported platforms
-(such as **Shopee**; **LINE Official Account** is in development) to your chosen server, where your team can work from one place WITHOUT taking browser credentials. Since this tool is *open-source*, its code and behavior are transparent for you to review or use [NotebookLM](https://notebooklm.google.com/notebook/d4a77915-88d3-4960-b589-bd10b8784f36) to scrutinize the design and risks or read more on the [Privacy Policy](PRIVACY.md).
+(such as **Shopee**; **LINE Official Account** is in development) to your chosen server, where your team can work from one place WITHOUT taking browser credentials. Since this tool is *open-source*, its code and behavior are transparent for you to review alongside the [Privacy Policy](PRIVACY.md).
 
 It works like like a **coppilot**, require **human-in-the-loop**, not a hosted bot.
 

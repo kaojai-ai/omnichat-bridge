@@ -970,7 +970,7 @@
     const type = String(message.image_type ?? "image/jpeg").trim();
     const extension = type.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "jpg";
     const form = new FormData();
-    form.append("file", new Blob([message.image_bytes], { type }), `kaojai-reply.${extension}`);
+    form.append("file", new Blob([message.image_bytes], { type }), `omnichat-reply.${extension}`);
     form.append("conversation_id", routing.conversation_id);
     const headers = new Headers(
       state.getTemplate?.init?.headers ?? state.sendTemplate?.headers ?? {},

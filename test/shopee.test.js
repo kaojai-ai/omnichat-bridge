@@ -44,15 +44,15 @@ test("keeps the Shopee Shop ID on normalized messages", () => {
     conversation_id: "conversation-1",
     from_id: "buyer-1",
     to_id: "shop-user-1",
-    to_shop_id: 1549058683,
+    to_shop_id: 100000001,
     type: "text",
     created_timestamp: 1_753_225_200,
     content: { text: "Hello" },
   }, "realtime_socket");
 
-  assert.equal(messages[0].provider_account_id, "1549058683");
+  assert.equal(messages[0].provider_account_id, "100000001");
   assert.equal(messages[0].sender_account_id, undefined);
-  assert.equal(messages[0].recipient_account_id, "1549058683");
+  assert.equal(messages[0].recipient_account_id, "100000001");
 });
 
 test("normalizes a Seller Centre mini message into the canonical Shopee shape", () => {
@@ -60,8 +60,8 @@ test("normalizes a Seller Centre mini message into the canonical Shopee shape", 
     id: "mini-message-1",
     conversation_id: "mini-conversation-1",
     from_id: 987654321,
-    to_id: 1549058683,
-    shop_id: 1549058683,
+    to_id: 100000001,
+    shop_id: 100000001,
     type: "text",
     content: { text: "Hello from Seller Centre" },
     created_timestamp: 1_724_141_000,
@@ -70,7 +70,7 @@ test("normalizes a Seller Centre mini message into the canonical Shopee shape", 
   assert.equal(message.provider, "shopee");
   assert.equal(message.id, "mini-message-1");
   assert.equal(message.conversation_id, "mini-conversation-1");
-  assert.equal(message.provider_account_id, "1549058683");
+  assert.equal(message.provider_account_id, "100000001");
   assert.equal(message.text, "Hello from Seller Centre");
   assert.equal(message.capture_method, "poll");
 });
@@ -80,8 +80,8 @@ test("derives an incoming Seller Centre buyer profile from message metadata", ()
     id: "mini-incoming-profile",
     conversation_id: "mini-conversation-profile",
     from_id: 987654321,
-    to_id: 1549058683,
-    to_shop_id: 1549058683,
+    to_id: 100000001,
+    to_shop_id: 100000001,
     from_user_name: "Buyer from history",
     from_avatar_url: "https://cdn.example.com/buyer.jpg",
     type: "text",
@@ -99,8 +99,8 @@ test("derives an outgoing Seller Centre buyer profile from message metadata", ()
   const [message] = context.OmnichatShopee.parseShopeeMessages([{
     id: "mini-outgoing-profile",
     conversation_id: "mini-conversation-profile",
-    from_id: 1549058683,
-    from_shop_id: 1549058683,
+    from_id: 100000001,
+    from_shop_id: 100000001,
     to_id: 987654321,
     to_user_name: "Buyer reply",
     to_avatar: "https://cdn.example.com/buyer-reply.jpg",
@@ -123,10 +123,10 @@ test("uses the product Shop ID when message routing metadata is absent", () => {
     to_id: "shop-user-1",
     type: "product",
     created_timestamp: 1_753_225_200,
-    content: { product_id: 123, product_name: "Car cover", shop_id: 1549058683 },
+    content: { product_id: 123, product_name: "Car cover", shop_id: 100000001 },
   }, "realtime_socket");
 
-  assert.equal(messages[0].provider_account_id, "1549058683");
+  assert.equal(messages[0].provider_account_id, "100000001");
 });
 
 test("normalizes Shopee stickers with a renderable media URL", () => {

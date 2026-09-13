@@ -15,13 +15,13 @@ export function sellerCentreConnectionStatus(live) {
     return {
       label: "CONNECTED · OPEN CHAT",
       state: "warning",
-      hint: "Connected to KaoJai. Open Seller Centre Chat to start syncing.",
+      hint: "Connected to your server. Open Seller Centre Chat to start syncing.",
     };
   }
   return {
     label: "CONNECTED · INITIALIZING",
     state: "warning",
-    hint: "Connected to KaoJai. Seller Centre Chat is initializing.",
+    hint: "Connected to your server. Seller Centre Chat is initializing.",
   };
 }
 

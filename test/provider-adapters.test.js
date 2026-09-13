@@ -64,14 +64,14 @@ test("allows a future provider to own config validation and page matching", () =
 test("normalizes LINE OA Basic IDs without exposing secrets", () => {
   const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
 
-  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "@159nzygg" }), "https://chat.line.biz/account/@159nzygg");
-  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "159nzygg" }), "https://chat.line.biz/account/@159nzygg");
+  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "@exampleoa" }), "https://chat.line.biz/account/@exampleoa");
+  assert.equal(adapter.chatUrlForAccount({ provider_account_id: "exampleoa" }), "https://chat.line.biz/account/@exampleoa");
 
-  assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " 159nzygg ", bot_id: "ignored", display_name: " KaoJai.ai " }, "2026-08-30T00:00:00.000Z")), {
+  assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " exampleoa ", bot_id: "ignored", display_name: " Example Store " }, "2026-08-30T00:00:00.000Z")), {
     provider: "line_oa",
-    provider_account_id: "@159nzygg",
+    provider_account_id: "@exampleoa",
     bot_id: "ignored",
-    display_name: "KaoJai.ai",
+    display_name: "Example Store",
     detected_at: "2026-08-30T00:00:00.000Z",
   });
 });
@@ -81,7 +81,7 @@ test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
 
   assert.deepEqual(plain(adapter.validateConfig({
     provider: "line_oa",
-    provider_account_id: " 159nzygg ",
+    provider_account_id: " exampleoa ",
     bot_id: " U74ab0151a03134a97b85e685f69434f5 ",
     tenant_id: " tenant-1 ",
     user_id: " user-1 ",
@@ -93,7 +93,7 @@ test("accepts only v3 LINE OA configs and preserves shared endpoints", () => {
     hmac_secret: "secret-1",
   }, 3)), {
     provider: "line_oa",
-    provider_account_id: "@159nzygg",
+    provider_account_id: "@exampleoa",
     bot_id: "U74ab0151a03134a97b85e685f69434f5",
     tenant_id: "tenant-1",
     user_id: "user-1",
@@ -137,58 +137,58 @@ test("extracts a LINE OA Basic ID from the Manager link in page HTML", () => {
     URL,
     document: {
       documentElement: {
-        outerHTML: '<a href="https://manager.line.biz/account/@159nzygg">LINE Official Account</a>',
+        outerHTML: '<a href="https://manager.line.biz/account/@exampleoa">LINE Official Account</a>',
       },
     },
   });
   vm.runInContext(lineOaSource, context);
 
-  assert.equal(context.OmnichatLineOA.basicIdFromHtml(), "@159nzygg");
+  assert.equal(context.OmnichatLineOA.basicIdFromHtml(), "@exampleoa");
   assert.equal(context.OmnichatLineOA.basicIdFromHtml(
-    '<a href="https://manager.line.biz/account/@159nzygg">LINE Official Account</a>',
-  ), "@159nzygg");
+    '<a href="https://manager.line.biz/account/@exampleoa">LINE Official Account</a>',
+  ), "@exampleoa");
   assert.equal(context.OmnichatLineOA.basicIdFromHtml(
-    '<a href="https://manager.line.biz/account/%40159nzygg">LINE Official Account</a>',
-  ), "@159nzygg");
+    '<a href="https://manager.line.biz/account/%40exampleoa">LINE Official Account</a>',
+  ), "@exampleoa");
 });
 
 test("extracts and merges Shopee accounts without treating user IDs as shop IDs", () => {
   const adapter = createRegistry().get("shopee");
   const accounts = adapter.accountsFromPayload({
     user: { id: 4897267 },
-    shop: { id: 1549058683, user_id: 1549897350, name: "Thailand shop" },
+    shop: { id: 100000001, user_id: 100000002, name: "Example Shop" },
     shops: [
-      { id: 1549058683, name: "Thailand shop", logo: "https://cdn.example.com/shop.jpg" },
-      { id: 1698999861, name: "Malaysia shop" },
+      { id: 100000001, name: "Example Shop", logo: "https://cdn.example.com/shop.jpg" },
+      { id: 100000003, name: "Example Shop Two" },
     ],
-    conversations: [{ shop_id: 1698999856, shop_name: "Philippines shop" }],
-    ShopIds: [1549058683, 1698999861, 1698999856],
+    conversations: [{ shop_id: 100000004, shop_name: "Example Shop Three" }],
+    ShopIds: [100000001, 100000003, 100000004],
   });
 
   assert.deepEqual(plain(accounts), [
     {
       provider: "shopee",
-      provider_account_id: "1549058683",
-      display_name: "Thailand shop",
+      provider_account_id: "100000001",
+      display_name: "Example Shop",
       provider_user_id: "4897267",
-      shop_user_id: "1549897350",
+      shop_user_id: "100000002",
       avatar_url: "https://cdn.example.com/shop.jpg",
     },
-    { provider: "shopee", provider_account_id: "1698999861", display_name: "Malaysia shop", provider_user_id: "4897267" },
-    { provider: "shopee", provider_account_id: "1698999856", display_name: "Philippines shop" },
+    { provider: "shopee", provider_account_id: "100000003", display_name: "Example Shop Two", provider_user_id: "4897267" },
+    { provider: "shopee", provider_account_id: "100000004", display_name: "Example Shop Three" },
   ]);
-  assert.equal(accounts.some((account) => account.provider_account_id === "1549897350"), false);
+  assert.equal(accounts.some((account) => account.provider_account_id === "100000002"), false);
 });
 
 test("extracts a Shopee display name from the nested Seller Centre session", () => {
   const adapter = createRegistry().get("shopee");
 
   assert.deepEqual(plain(adapter.accountsFromPayload({
-    data: { shop_id: 1549058683, shop_name: "kaojai.ai" },
+    data: { shop_id: 100000001, shop_name: "example-store" },
   })), [{
     provider: "shopee",
-    provider_account_id: "1549058683",
-    display_name: "kaojai.ai",
+    provider_account_id: "100000001",
+    display_name: "example-store",
   }]);
 });
 

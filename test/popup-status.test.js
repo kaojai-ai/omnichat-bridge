@@ -14,7 +14,7 @@ test("distinguishes a connected Seller Centre bridge before mini-chat is open", 
     {
       label: "CONNECTED · OPEN CHAT",
       state: "warning",
-      hint: "Connected to KaoJai. Open Seller Centre Chat to start syncing.",
+      hint: "Connected to your server. Open Seller Centre Chat to start syncing.",
     },
   );
 });
