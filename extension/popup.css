@@ -195,7 +195,115 @@ button:disabled {
 
 .auto-sync-option input { flex: 0 0 auto; margin: 0; }
 
-#unattended-recovery-option { margin-top: -6px; }
+.settings-preferences {
+  align-items: stretch;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  padding: 12px;
+}
+
+.settings-preference {
+  min-width: 0;
+}
+
+.settings-device-name {
+  align-content: start;
+  color: #344054;
+  display: grid;
+  font-size: 11px;
+  font-weight: 650;
+  gap: 6px;
+}
+
+.settings-device-name small,
+.settings-toggle-copy small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.settings-toggle {
+  align-items: center;
+  border-left: 1px solid var(--line);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding-left: 16px;
+}
+
+.settings-toggle-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-toggle-copy strong {
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.toggle-control {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.toggle-control input {
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 1px;
+}
+
+.toggle-track {
+  background: #d0d5dd;
+  border-radius: 999px;
+  display: block;
+  height: 22px;
+  padding: 3px;
+  transition: background-color 120ms ease;
+  width: 38px;
+}
+
+.toggle-thumb {
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 22%);
+  display: block;
+  height: 16px;
+  transform: translateX(0);
+  transition: transform 120ms ease;
+  width: 16px;
+}
+
+.toggle-control input:checked + .toggle-track { background: var(--green); }
+.toggle-control input:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
+
+.toggle-control input:focus-visible + .toggle-track {
+  outline: 3px solid #ffd5ca;
+  outline-offset: 2px;
+}
+
+@media (max-width: 360px) {
+  .settings-preferences {
+    gap: 10px;
+    grid-template-columns: 1fr;
+  }
+
+  .settings-toggle {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+    padding-top: 10px;
+  }
+}
 
 .cancel-sync-link {
   background: transparent;
