@@ -352,8 +352,6 @@ function accountRowStatus(account) {
   if (!config) return { label: "NEED CONFIG", state: "warning", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
-  const currentError = syncState?.delivery_error || syncState?.sync_error;
-  if (currentError) return { label: "Error · open Logs", state: "error", action: "logs" };
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
   const sellerCentreStatus = sellerCentreConnectionStatus(live);
   if (sellerCentreStatus) return sellerCentreStatus;
@@ -637,7 +635,7 @@ function renderDashboard(message = "", isError = false) {
       || surfaceHint?.hint
       || formatSyncResult(latestResult);
     syncProgress.hidden = true;
-    progressArea.hidden = !lastSyncText && !resultMessage;
+    progressArea.hidden = !lastSyncText && !resultMessage && !anyError;
     if (message || !anyError) {
       status.textContent = resultMessage;
     } else {
