@@ -131,6 +131,7 @@
     sellerCentrePollingTimer: null,
     pollingConnected: false,
     pollingConnectedAt: null,
+    lastProviderCheckAt: null,
     pollingRefreshInFlight: false,
     sellerCentreChatOpenPromise: null,
   };
@@ -149,6 +150,7 @@
     state.sellerCentrePollingTimer = null;
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
+    state.lastProviderCheckAt = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
   }
@@ -173,6 +175,7 @@
   state.sellerCentrePollingTimer ??= null;
   state.pollingConnected ??= false;
   state.pollingConnectedAt ??= null;
+  state.lastProviderCheckAt ??= null;
   state.pollingRefreshInFlight ??= false;
   state.sellerCentreChatOpenPromise ??= null;
   if ([SOURCE, LEGACY_BRIDGE_SOURCE].includes(previousBridge?.source)) {
@@ -181,6 +184,7 @@
     state.sellerCentrePollingStarted = false;
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
+    state.lastProviderCheckAt = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
     state.socket = null;
@@ -237,6 +241,7 @@
       ...(isSellerCentreSurface() ? { chat_open: chatOpen } : {}),
       realtime_connected: isSellerCentreSurface() ? state.pollingConnected : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
+      last_provider_check_at: state.lastProviderCheckAt,
     });
   };
 
@@ -772,6 +777,7 @@
       }));
       if (!response.ok) throw new Error(`Shopee Seller Centre conversation refresh returned ${response.status}.`);
       await captureSellerCentreConversationList(response);
+      state.lastProviderCheckAt = new Date().toISOString();
     } finally {
       state.pollingRefreshInFlight = false;
     }
@@ -1576,7 +1582,10 @@
         captureAccount(response);
       } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
         state.pollingConnected = response.ok;
-        if (state.pollingConnected) state.pollingConnectedAt ??= new Date().toISOString();
+        if (state.pollingConnected) {
+          state.pollingConnectedAt ??= new Date().toISOString();
+          state.lastProviderCheckAt = new Date().toISOString();
+        }
         publishSurfaceStatus();
         void observeAsync("seller_centre_sync_response", async () => {
           const body = await response.clone().json();
@@ -1622,6 +1631,7 @@
       return;
     }
     const connected = typeof socket.connected === "boolean" ? socket.connected : true;
+    if (connected) state.lastProviderCheckAt = new Date().toISOString();
     publishSurfaceStatus();
     if (state.socket === socket && observedSocket === socket) return;
     detachObservedSocket();
@@ -1637,6 +1647,7 @@
     const onConnect = () => {
       if (!isBridgeActive()) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
+      state.lastProviderCheckAt = new Date().toISOString();
       post({ type: "socket_connected" });
       publishSurfaceStatus();
     };
@@ -1725,6 +1736,7 @@
     state.pollingRefreshInFlight = false;
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
+    state.lastProviderCheckAt = null;
     state.sellerCentreChatOpenPromise = null;
     detachObservedSocket();
     state.socket = null;

@@ -2,6 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_PROTOCOL_VERSION = 5;
   const AUTO_OPEN_SELLER_CENTRE_CHAT = "auto_open_seller_centre_chat";
+  const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
     previousBridge.dispose("Content bridge reattached.");
@@ -31,6 +32,8 @@
   let providerCommandCapabilitiesByAccount = {};
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
+  let providerPollingActive = false;
+  let lastProviderCheckAt = null;
   let automaticSellerCentreLandingStarted = false;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -237,6 +240,7 @@
     }
     const stored = await chrome.storage.local.get([
       AUTO_OPEN_SELLER_CENTRE_CHAT,
+      UNATTENDED_RECOVERY,
       "local_consent",
       "config",
     ]);
@@ -245,6 +249,7 @@
     );
     if (
       stored[AUTO_OPEN_SELLER_CENTRE_CHAT] !== true
+      && stored[UNATTENDED_RECOVERY] !== true
       || !stored.local_consent?.accepted_at
       || !configured
     ) {
@@ -882,6 +887,10 @@
       providerChatOpen = typeof event.data.chat_open === "boolean"
         ? event.data.chat_open
         : providerChatOpen;
+      providerPollingActive = event.data.provider_polling_active === true;
+      lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
+        ? event.data.last_provider_check_at
+        : lastProviderCheckAt;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
@@ -965,7 +974,9 @@
         realtime_transport: providerRealtimeTransport,
         chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,
+        provider_polling_active: providerPollingActive,
         last_realtime_connected_at: lastRealtimeConnectedAt,
+        last_provider_check_at: lastProviderCheckAt,
         page_visible: document.visibilityState === "visible",
       });
       return false;

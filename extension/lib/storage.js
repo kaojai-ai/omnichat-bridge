@@ -13,6 +13,8 @@ export const STORAGE = {
   live: "live_status",
   commandTab: "command_tab",
   autoOpenSellerCentreChat: "auto_open_seller_centre_chat",
+  unattendedRecovery: "unattended_recovery",
+  language: "language",
   serverInitialized: "server_initialized",
   logs: "operational_logs",
   logOutbox: "operational_log_outbox",

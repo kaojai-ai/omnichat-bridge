@@ -15,6 +15,13 @@
           <h1>Omnichat Bridge</h1>
           <span>Secured bridge to your server</span>
         </div>
+        <label class="language-switch" for="language-select">
+          <span id="language-label">Language</span>
+          <select id="language-select" aria-label="Language">
+            <option value="en">English</option>
+            <option value="th">ไทย</option>
+          </select>
+        </label>
         <div class="header-actions">
         <button id="open-logs" class="header-log-button" type="button" aria-label="Logs" title="Logs" hidden>Logs</button>
         <button id="open-config" class="header-icon-button" type="button" aria-label="Settings" title="Settings" hidden>
@@ -48,7 +55,7 @@
 
       <section id="hint-screen" class="screen hint-screen" hidden>
         <div class="screen-intro">
-          <h2 class="provider-links-title">Supported providers</h2>
+          <h2 id="provider-links-title" class="provider-links-title">Supported providers</h2>
           <p>Choose a provider to manage its account here.</p>
         </div>
         <div class="provider-links">
@@ -119,14 +126,19 @@
         </header>
 
         <div class="field">
-          <label for="device-name">Device name</label>
+          <label id="device-name-label" for="device-name">Device name</label>
           <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
-          <small>Shown to KaoJai admins for connection diagnostics.</small>
+          <small id="device-name-help">Shown to KaoJai admins for connection diagnostics.</small>
         </div>
+
+        <label id="unattended-recovery-option" class="auto-sync-option">
+          <input id="unattended-recovery" type="checkbox">
+          <span>Recover provider tabs automatically</span>
+        </label>
 
         <div class="field">
           <div class="field-heading">
-            <label for="config">Configuration</label>
+            <label id="config-label" for="config">Configuration</label>
             <div class="settings-actions">
               <button id="import-config" class="icon-button" type="button" aria-label="Import configuration" title="Import configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 13v6h14v-6"/></svg></button>
               <button id="export-config" class="icon-button" type="button" aria-label="Export configuration" title="Export configuration"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0 4 4m-4-4L8 7M5 13v6h14v-6"/></svg></button>
@@ -156,7 +168,7 @@
           </button>
           <div>
             <h2>Logs</h2>
-            <p>Safe operational logs · kept for 2 days</p>
+          <p id="logs-description">Safe operational logs · kept for 2 days</p>
           </div>
         </header>
         <div class="log-toolbar">

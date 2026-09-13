@@ -8,7 +8,7 @@ const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json",
 
 test("reopening LINE refreshes account readiness before publishing live status without a popup", async () => {
   const calls = [];
-  const start = source.indexOf("async function reconnectProviderTab(tab)");
+  const start = source.indexOf("async function reconnectProviderTab(tab, ");
   const end = source.indexOf("\nchrome.tabs.onUpdated", start);
   const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     providerAdapters: { list: () => [{ id: "line_oa", matchesUrl: (url) => url.startsWith("https://chat.line.biz/") }] },
@@ -27,8 +27,9 @@ test("reopening LINE refreshes account readiness before publishing live status w
   assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
 });
 
-test("does not reload provider tabs when the content bridge is unavailable", () => {
-  assert.doesNotMatch(source, /chrome\.tabs\.reload\s*\(/);
+test("reloads a provider tab only after unattended recovery health checks fail repeatedly", () => {
+  assert.match(source, /chrome\.tabs\.reload\s*\(tab\.id\)/);
+  assert.match(source, /allowTabRecovery && attempts >= 2/);
   assert.match(source, /content_unready/);
   assert.match(source, /Refresh the tab manually and try again/);
 });

@@ -95,11 +95,26 @@ test("offers an account-scoped discard action beside pending messages", () => {
 test("offers to open Shopee Webchat mini before sync", () => {
   assert.match(popupSource, /const canOpenSellerCentreChat = activeProviderSurface === "seller-centre"/);
   assert.match(popupSource, /syncButton\.disabled = !canOpenSellerCentreChat/);
-  assert.match(popupSource, /canOpenSellerCentreChat \? "Open Webchat mini" : "Sync messages"/);
+  assert.match(popupSource, /canOpenSellerCentreChat \? t\("openWebchat"\) : t\("sync"\)/);
   assert.match(popupSource, /item\.account\.provider === "shopee" && item\.live\?\.provider_chat_open === false/);
   assert.match(popupSource, /syncButton\.dataset\.action = sellerCentreChatClosed \? "open_webchat_mini" : "sync"/);
-  assert.match(popupSource, /\? "Open Webchat mini"/);
+  assert.match(popupSource, /\? t\("openWebchat"\)/);
   assert.match(popupSource, /syncButton\.dataset\.action === "open_webchat_mini"/);
   assert.match(popupSource, /type: "prepare_provider_v3"/);
   assert.match(popupSource, /await detectAccount\(\)/);
+});
+
+test("keeps unattended provider recovery opt-in and runs through one health alarm", () => {
+  assert.match(html, /id="language-select"/);
+  assert.match(html, /id="unattended-recovery"/);
+  assert.match(popupSource, /STORAGE\.unattendedRecovery/);
+  assert.match(backgroundSource, /const PROVIDER_HEALTH_ALARM = "omnichat-provider-health"/);
+  assert.match(backgroundSource, /async function runProviderHealthWatchdog\(\)/);
+  assert.match(backgroundSource, /chrome\.tabs\.create\(\{ url: adapter\.chatUrl, active: false \}\)/);
+  assert.match(backgroundSource, /chrome\.tabs\.reload\(tab\.id\)/);
+  assert.match(backgroundSource, /providerTabHealthy\(status, adapter\)/);
+  assert.match(backgroundSource, /last_provider_check_at/);
+  assert.match(backgroundSource, /startUnattendedProviderSync\(tab, context\)/);
+  assert.match(backgroundSource, /type: "sync_now_v3"/);
+  assert.match(backgroundSource, /providerAutomaticRetryAt/);
 });

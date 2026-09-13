@@ -50,6 +50,9 @@ const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
 const API_PING_COOLDOWN_MS = 5 * 60_000;
 const API_PING_ALARM = "omnichat-api-ping";
 const API_PING_INTERVAL_MINUTES = 5;
+const PROVIDER_HEALTH_ALARM = "omnichat-provider-health";
+const PROVIDER_HEALTH_INTERVAL_MINUTES = 1;
+const PROVIDER_HEALTH_STALE_MS = 60_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -107,6 +110,10 @@ const liveConnections = new Map();
 const apiPingAttempts = new Map();
 const providerBridgeReinjections = new Map();
 const sellerCentreLandingStarts = new Map();
+const providerRecoveryAttempts = new Map();
+const providerAutomaticRecoveries = new Map();
+const providerAutomaticRetryAttempts = new Map();
+const providerAutomaticRetryAt = new Map();
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -1094,6 +1101,132 @@ async function ensureApiPingAlarm(shouldRun) {
   });
 }
 
+async function ensureProviderHealthAlarm(shouldRun) {
+  if (!shouldRun) {
+    await chrome.alarms.clear(PROVIDER_HEALTH_ALARM);
+    return;
+  }
+  const existing = await chrome.alarms.get(PROVIDER_HEALTH_ALARM);
+  if (Number(existing?.periodInMinutes) === PROVIDER_HEALTH_INTERVAL_MINUTES) return;
+  await chrome.alarms.create(PROVIDER_HEALTH_ALARM, {
+    delayInMinutes: PROVIDER_HEALTH_INTERVAL_MINUTES,
+    periodInMinutes: PROVIDER_HEALTH_INTERVAL_MINUTES,
+  });
+}
+
+function startUnattendedProviderSync(tab, context) {
+  const tabId = tab?.id;
+  const recoveryKey = context?.key;
+  if (!Number.isInteger(tabId) || !recoveryKey || providerAutomaticRecoveries.has(recoveryKey)) return;
+  if ((providerAutomaticRetryAt.get(recoveryKey) ?? 0) > Date.now()) return;
+  const adapter = context.adapter;
+  const request = sendProviderMessage(tabId, {
+    type: "sync_now_v3",
+    provider: adapter.id,
+    provider_account_id: context.account.provider_account_id,
+    ...(context.config.bot_id || context.account.bot_id
+      ? { bot_id: context.config.bot_id || context.account.bot_id }
+      : {}),
+  }, {
+    label: providerLabel(adapter),
+    operation: "unattended recovery sync",
+    timeoutMs: PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
+  }).then((result) => {
+    if (!result?.ok) throw new Error(result?.error ?? `${providerLabel(adapter)} unattended sync failed.`);
+    providerAutomaticRetryAttempts.delete(recoveryKey);
+    providerAutomaticRetryAt.delete(recoveryKey);
+    return result;
+  }).catch(async (error) => {
+    const attempts = (providerAutomaticRetryAttempts.get(recoveryKey) ?? 0) + 1;
+    providerAutomaticRetryAttempts.set(recoveryKey, attempts);
+    providerAutomaticRetryAt.set(recoveryKey, Date.now() + Math.min(30 * 60_000, 60_000 * (2 ** Math.min(attempts - 1, 5))));
+    await recordUnexpected("provider_unattended_sync", error, {
+      provider: adapter.id,
+      provider_account_id: context.account.provider_account_id,
+      tab_id: tabId,
+      recovery_attempt: attempts,
+    });
+  }).finally(() => {
+    if (providerAutomaticRecoveries.get(recoveryKey) === request) providerAutomaticRecoveries.delete(recoveryKey);
+  });
+  providerAutomaticRecoveries.set(recoveryKey, request);
+  void recordLog("info", "recovery", "provider_sync_started", `${providerLabel(adapter)} unattended recovery sync started.`, {
+    provider: adapter.id,
+    provider_account_id: context.account.provider_account_id,
+  });
+}
+
+async function runProviderHealthWatchdog() {
+  const stored = await readStorage([
+    STORAGE.config,
+    STORAGE.consent,
+    STORAGE.detectedAccounts,
+    STORAGE.serverInitialized,
+    STORAGE.unattendedRecovery,
+  ]);
+  const contexts = configuredAccountContexts(stored);
+  const enabled = contexts.length > 0
+    && hasServerInitialized(stored)
+    && hasLocalConsent(stored[STORAGE.consent]);
+  if (!enabled) {
+    await ensureProviderHealthAlarm(false);
+    return;
+  }
+  const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
+  for (const adapter of providerAdapters.list()) {
+    if (!contexts.some((context) => context.adapter.id === adapter.id)) continue;
+    let tabs;
+    try {
+      tabs = await providerChatTabs(adapter);
+    } catch (error) {
+      await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
+      continue;
+    }
+    if (!tabs.length && allowTabRecovery) {
+      try {
+        await chrome.tabs.create({ url: adapter.chatUrl, active: false });
+        await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
+          provider: adapter.id,
+        });
+      } catch (error) {
+        await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
+      }
+      continue;
+    }
+    for (const tab of tabs) {
+      try {
+        await reconnectProviderTab(tab, { forceAutomaticStart: allowTabRecovery });
+        const status = await providerTabStatus(tab);
+        if (!providerTabHealthy(status, adapter)) {
+          throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+        }
+        if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
+          const context = contexts.find((candidate) => candidate.adapter.id === adapter.id);
+          startUnattendedProviderSync(tab, context);
+        }
+        providerRecoveryAttempts.delete(tab.id);
+      } catch (error) {
+        const attempts = (providerRecoveryAttempts.get(tab.id) ?? 0) + 1;
+        providerRecoveryAttempts.set(tab.id, attempts);
+        await recordUnexpected("provider_watchdog", error, {
+          provider: adapter.id,
+          tab_id: tab.id,
+          recovery_attempt: attempts,
+        });
+        if (allowTabRecovery && attempts >= 2 && tab.status !== "loading") {
+          await chrome.tabs.reload(tab.id);
+          providerRecoveryAttempts.set(tab.id, 0);
+          await recordLog("warn", "recovery", "provider_tab_reloaded", `${providerLabel(adapter)} tab reloaded after automatic bridge recovery failed.`, {
+            provider: adapter.id,
+          });
+        }
+      }
+    }
+  }
+  await ensureLiveConnection();
+  await exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+}
+
 async function pingConfiguredAccountApis() {
   const stored = await readStorage([
     STORAGE.config,
@@ -1362,6 +1495,10 @@ async function ensureLiveConnection() {
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
   await ensureApiPingAlarm(canPing);
+  const canWatch = configuredContexts.length > 0
+    && hasServerInitialized(stored)
+    && hasLocalConsent(stored[STORAGE.consent]);
+  await ensureProviderHealthAlarm(canWatch);
   if (canPing) {
     ensureApiPings(pingContexts);
   }
@@ -1496,7 +1633,7 @@ async function handleLiveCommand(raw, context, socket) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccounts]) void ensureLiveConnection();
+  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccounts] || changes[STORAGE.unattendedRecovery]) void ensureLiveConnection();
   if (
     changes[STORAGE.deviceName]
     || changes[STORAGE.detectedAccounts]
@@ -1509,7 +1646,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-async function reconnectProviderTab(tab) {
+async function reconnectProviderTab(tab, { forceAutomaticStart = false } = {}) {
   const tabId = tab?.id;
   if (!Number.isInteger(tabId)) return;
   const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
@@ -1522,7 +1659,7 @@ async function reconnectProviderTab(tab) {
       if (!result?.ok) throw new Error(result?.error ?? "LINE account detection failed.");
     }
   }
-  await autoStartSellerCentreTab(tab);
+  await autoStartSellerCentreTab(tab, { force: forceAutomaticStart });
   await ensureLiveConnection();
 }
 
@@ -1536,6 +1673,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   sellerCentreLandingStarts.delete(tabId);
+  providerRecoveryAttempts.delete(tabId);
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -1694,6 +1832,20 @@ function providerTabIsReady(status, adapter) {
     && status?.capabilities?.send_image === true
     && status?.capabilities?.send_product === true,
   );
+}
+
+function providerTabHealthy(status, adapter) {
+  if (!providerTabIsReady(status, adapter)) return false;
+  if (adapter?.id === "shopee" && status?.surface === "seller-centre" && status?.chat_open === false) {
+    return true;
+  }
+  if (status?.realtime_connected !== true) return false;
+  const checkedAtValue = typeof status?.last_provider_check_at === "string"
+    ? status.last_provider_check_at.trim()
+    : "";
+  if (!checkedAtValue) return true;
+  const checkedAt = Date.parse(checkedAtValue);
+  return Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
 }
 
 async function isReadyProviderTab(tab, adapter) {
@@ -2049,7 +2201,7 @@ async function reattachOpenProviderBridges() {
   await ensureLiveConnection();
 }
 
-async function autoStartSellerCentreTab(tab) {
+async function autoStartSellerCentreTab(tab, { force = false } = {}) {
   const tabId = tab?.id;
   if (!Number.isInteger(tabId)) return { skipped: "tab_missing" };
   const existing = sellerCentreLandingStarts.get(tabId);
@@ -2069,7 +2221,7 @@ async function autoStartSellerCentreTab(tab) {
       (account) => account?.provider === shopeeAdapter.id,
     );
     if (
-      stored[STORAGE.autoOpenSellerCentreChat] !== true
+      (stored[STORAGE.autoOpenSellerCentreChat] !== true && !force)
       || !hasLocalConsent(stored[STORAGE.consent])
       || !configured
     ) {
@@ -3260,6 +3412,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   } else if (alarm.name === DELIVERY_RETRY_ALARM) {
     void recordLog("info", "delivery", "retry_started", "Retrying queued message delivery.");
     void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+  } else if (alarm.name === PROVIDER_HEALTH_ALARM) {
+    void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   } else if (alarm.name === LOG_UPLOAD_ALARM) {
     void flushLogBatch();
   }

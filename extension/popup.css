@@ -98,6 +98,24 @@ p { color: var(--muted); }
   font-size: 11px;
 }
 
+.language-switch {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.language-switch select {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  color: var(--ink);
+  font: inherit;
+  padding: 5px 8px;
+}
+
 .privacy-back {
   left: 0;
   margin-left: -6px;
@@ -152,6 +170,8 @@ button:disabled {
 }
 
 .auto-sync-option input { flex: 0 0 auto; margin: 0; }
+
+#unattended-recovery-option { margin-top: -6px; }
 
 .cancel-sync-link {
   background: transparent;
@@ -697,7 +717,7 @@ input[type="checkbox"] {
   text-decoration: underline;
 }
 
-.status-log-link:hover { color: var(--danger); }
+.status-log-link:hover { color: var(--shopee-hover); }
 
 progress {
   accent-color: var(--shopee);

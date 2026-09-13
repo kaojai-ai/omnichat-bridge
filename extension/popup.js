@@ -60,6 +60,7 @@ const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
 const autoSyncOption = document.querySelector("#auto-sync-option");
 const autoOpenChatInput = document.querySelector("#auto-open-chat");
+const unattendedRecoveryInput = document.querySelector("#unattended-recovery");
 const cancelSyncButton = document.querySelector("#cancel-sync");
 const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
@@ -84,6 +85,8 @@ const openPrivacyButton = document.querySelector("#open-privacy");
 const closePrivacyButton = document.querySelector("#close-privacy");
 const installationIdButton = document.querySelector("#installation-id");
 const consentRecord = document.querySelector("#consent-record");
+const languageSelect = document.querySelector("#language-select");
+const languageLabel = document.querySelector("#language-label");
 const consentIntroTitle = consentScreen.querySelector("h2");
 const consentIntroDescription = consentScreen.querySelector(".screen-intro p");
 const consentLabel = consentScreen.querySelector(".consent");
@@ -99,10 +102,86 @@ let popupTabId = null;
 let storedConsent = null;
 let storedDeviceName = "";
 let autoOpenSellerCentreChat = false;
+let unattendedRecovery = false;
 let viewingPrivacy = false;
 let activeProviderAdapter = null;
 let activeProviderSurface = null;
 let isProviderChatTab = false;
+let language = defaultLanguage();
+
+const TRANSLATIONS = {
+  en: {
+    language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
+    review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
+    transfers: "This extension transfers", transfersRest: "chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.",
+    never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
+    supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", provider: "Provider", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNameHelp: "Shown to KaoJai admins for connection diagnostics.", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Safe operational logs · kept for 2 days", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
+    autoSync: "Open chat and sync automatically", sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug",
+    ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", openingAndSyncing: "Opening Chat and starting sync…", automaticEnabled: "Automatic sync enabled. Configure a Shopee account to apply it.", automaticChatOpeningEnabled: "Automatic chat opening enabled.", automaticChatOpeningDisabled: "Automatic chat opening disabled.", reloadSellerCentre: "Automatic sync enabled. Reload Seller Centre to apply it.", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
+    noNew: "No new messages.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
+  },
+  th: {
+    language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
+    transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
+    supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", provider: "ผู้ให้บริการ", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNameHelp: "แสดงให้ผู้ดูแล KaoJai ใช้ตรวจสอบการเชื่อมต่อ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "บันทึกการทำงานที่ปลอดภัย · เก็บไว้ 2 วัน", filterLogs: "กรองบันทึกตามระดับ", clearLogs: "ล้างบันทึก", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", autoSync: "เปิดแชตและซิงค์อัตโนมัติ", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "บันทึก", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
+    ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิดบันทึก", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", openingAndSyncing: "กำลังเปิดแชตและเริ่มซิงค์…", automaticEnabled: "เปิดการซิงค์อัตโนมัติแล้ว ตั้งค่าบัญชี Shopee เพื่อใช้งาน", automaticChatOpeningEnabled: "เปิดการเปิดแชตอัตโนมัติแล้ว", automaticChatOpeningDisabled: "ปิดการเปิดแชตอัตโนมัติแล้ว", reloadSellerCentre: "เปิดการซิงค์อัตโนมัติแล้ว โหลด Seller Centre ใหม่เพื่อใช้งาน", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มีบันทึกที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มีบันทึก", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee",
+  },
+};
+
+function t(key, ...args) {
+  const value = TRANSLATIONS[language]?.[key] ?? TRANSLATIONS.en[key] ?? key;
+  return typeof value === "function" ? value(...args) : value;
+}
+
+function defaultLanguage() {
+  return String(navigator.language ?? "").toLowerCase().startsWith("th") ? "th" : "en";
+}
+
+function applyTranslations() {
+  document.documentElement.lang = language;
+  languageSelect.value = language;
+  const text = new Map([
+    [".brand-copy span", t("subtitle")], ["#language-label", t("language")], ["#language-select", t("language")],
+    ["#consent-screen .screen-intro h2", viewingPrivacy ? t("privacyTitle") : t("beforeContinue")],
+    ["#consent-screen .screen-intro p", viewingPrivacy ? t("privacyDescription") : t("review")],
+    ["#consent-screen .consent-copy p:first-child", `<strong>${t("transfers")}</strong> ${t("transfersRest")}`],
+    ["#consent-screen .consent-copy p:nth-child(2)", `<strong>${t("never")}</strong> ${t("neverRest")}`],
+    ["#privacy-github", `${t("learnMore")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>.`],
+    ["label.consent span", t("consent")], ["#continue", t("continue")], ["#provider-links-title", t("supported")],
+    ["#hint-screen .screen-intro p", t("chooseProvider")], ["#dashboard-screen #account-title", t("provider")], ["#detected-shops-title", t("detectedAccounts")],
+    ["#account-list-empty", t("noAccounts")], ["#auto-sync-option span", t("autoSync")], ["#unattended-recovery-option span", t("unattendedRecovery")], ["#cancel-sync", t("cancel")],
+    ["#open-logs", t("logs")], ["#open-config", t("settings")], ["#open-privacy", t("privacy")], ["#clear", t("erase")],
+    ["#config-screen h2", t("settings")], ["#save-config", t("save")], ["#logs-screen h2", t("logs")],
+    ["#device-name-label", t("deviceName")], ["#device-name-help", t("deviceNameHelp")], ["#config-label", t("configuration")],
+    ["#download-logs", t("download")], ["#copy-logs", t("copy")], ["#logs-description", t("logsDescription")], ["#log-level", t("filterLogs")], ["#clear-logs", t("clearLogs")], ["#footer-privacy", t("privacy")],
+  ]);
+  for (const [selector, value] of text) {
+    const element = document.querySelector(selector);
+    if (!element) continue;
+    if (selector === "#language-select") element.setAttribute("aria-label", value);
+    else if (selector === "#open-config") {
+      element.setAttribute("aria-label", value);
+      element.title = value;
+    } else if (selector === "#clear") {
+      const label = element.querySelector("span");
+      if (label) label.textContent = value;
+      element.title = value;
+    } else if (selector === "#open-logs" || selector === "#open-privacy") element.textContent = value;
+    else if (selector === "#log-level" || selector === "#clear-logs") {
+      element.setAttribute("aria-label", value);
+      element.title = value;
+    }
+    else element.innerHTML = value;
+  }
+  for (const [value, key] of [["info", "info"], ["warn", "warnings"], ["error", "errors"], ["debug", "debug"]]) {
+    const option = logLevel.querySelector(`option[value="${value}"]`);
+    if (option) option.textContent = t(key);
+  }
+  for (const link of document.querySelectorAll(".provider-link small")) link.textContent = t("openChat");
+  if (document.querySelector("#hint-screen .hint-guide")) {
+    document.querySelector("#hint-screen .hint-guide").innerHTML = `${t("help")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">${t("documentation")}</a>.`;
+  }
+}
 
 function adapterForAccount(account) {
   return providerAdapters.get(account?.provider);
@@ -231,13 +310,14 @@ function formatConsentDate(value) {
 }
 
 function renderConsentScreen() {
+  applyTranslations();
   const hasConsent = consented();
   const recordedAt = formatConsentDate(storedConsent?.accepted_at);
-  consentIntroTitle.textContent = viewingPrivacy ? "Privacy and consent" : "Before you continue";
-  consentIntroDescription.textContent = viewingPrivacy ? "What this extension transfers from this browser." : "Review what leaves this browser.";
   closePrivacyButton.hidden = !viewingPrivacy || !hasConsent;
   consentRecord.hidden = !hasConsent;
-  consentRecord.textContent = recordedAt ? `✔️ Consent recorded ${recordedAt} on this device.` : "✔️ Consent recorded on this device.";
+  consentRecord.textContent = recordedAt
+    ? `✔️ ${language === "th" ? `บันทึกความยินยอม ${recordedAt} บนอุปกรณ์นี้` : `Consent recorded ${recordedAt} on this device.`}`
+    : `✔️ ${language === "th" ? "บันทึกความยินยอมบนอุปกรณ์นี้แล้ว" : "Consent recorded on this device."}`;
   consentLabel.hidden = hasConsent;
   continueButton.hidden = hasConsent;
   consentInput.disabled = hasConsent;
@@ -292,21 +372,22 @@ function setConfigStatus(message, isError = false) {
 function formatLastSync(value) {
   const timestamp = Date.parse(value ?? "");
   if (!Number.isFinite(timestamp)) return "";
-  return `Last synced ${new Date(timestamp).toLocaleString([], {
+  const formatted = new Date(timestamp).toLocaleString([], {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  })}`;
+  });
+  return t("lastSynced", formatted);
 }
 
 function formatSyncResult(result) {
   if (!result) return "";
   const sent = Number(result.sent) || 0;
   const pending = Number(result.pending) || 0;
-  if (pending) return `${pending} message${pending === 1 ? "" : "s"} pending.`;
-  if (sent) return `Sent ${sent} message${sent === 1 ? "" : "s"}.`;
-  return "No new messages.";
+  if (pending) return `${t("messagesPending", pending)}`;
+  if (sent) return `${t("sent", sent)}.`;
+  return t("noNew");
 }
 
 function showAccounts(accounts) {
@@ -349,29 +430,29 @@ function setUserBadges(element, values) {
 function accountRowStatus(account) {
   const key = accountConfigKey(account);
   const config = findAccountConfig(storedConfig, account);
-  if (!config) return { label: "NEED CONFIG", state: "warning", action: "config" };
+  if (!config) return { label: t("needConfig"), state: "warning", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
-  if (["discovering", "syncing"].includes(syncState?.state)) return { label: "SYNCING", state: "ready" };
+  if (["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "ready" };
   const sellerCentreStatus = sellerCentreConnectionStatus(live);
   if (sellerCentreStatus) return sellerCentreStatus;
-  if (live?.socket === "connected") return { label: "CONNECTED", state: "ready" };
-  if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: "OFFLINE", state: "warning" };
-  return { label: "READY", state: "ready" };
+  if (live?.socket === "connected") return { label: t("connected"), state: "ready" };
+  if (["disconnected", "reconnecting"].includes(live?.socket)) return { label: t("offline"), state: "warning" };
+  return { label: t("ready"), state: "ready" };
 }
 
 async function copyProviderAccountId(providerAccountId, label, button, valueElement) {
   try {
     await navigator.clipboard.writeText(providerAccountId);
-    valueElement.textContent = "Copied";
-    button.title = "Copied";
+    valueElement.textContent = t("copied");
+    button.title = t("copied");
   } catch {
-    valueElement.textContent = "Could not copy";
-    button.title = `Could not copy ${label} ID`;
+    valueElement.textContent = t("couldNotCopy");
+    button.title = `${t("couldNotCopy")} ${t("copyId", label)}`;
   }
   setTimeout(() => {
     valueElement.textContent = providerAccountId;
-    button.title = `Copy ${label} ID`;
+    button.title = t("copyId", label);
   }, 900);
 }
 
@@ -474,8 +555,8 @@ function renderDetectedAccounts() {
     const shopId = document.createElement("button");
     shopId.type = "button";
     shopId.className = "account-row-id";
-    shopId.title = `Copy ${label} ID`;
-    shopId.setAttribute("aria-label", `Copy ${label} ID ${id}`);
+    shopId.title = t("copyId", label);
+    shopId.setAttribute("aria-label", `${t("copyId", label)} ${id}`);
     const shopIdValue = document.createElement("span");
     shopIdValue.textContent = id;
     shopId.append(shopIdValue, createCopyIcon());
@@ -485,11 +566,11 @@ function renderDetectedAccounts() {
       const pendingRow = document.createElement("div");
       pendingRow.className = "account-row-pending";
       const pendingLabel = document.createElement("span");
-      pendingLabel.textContent = `${pending.length} pending`;
+      pendingLabel.textContent = t("pending", pending.length);
       const discardButton = document.createElement("button");
       discardButton.type = "button";
       discardButton.className = "discard-pending-link";
-      discardButton.textContent = "Discard";
+      discardButton.textContent = t("discard");
       discardButton.setAttribute(
         "aria-label",
         `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
@@ -544,6 +625,12 @@ function renderDashboard(message = "", isError = false) {
       && configuredAccountIds.has(item.details?.provider_account_id)
       && item.details?.error_message
   ));
+  const latestLoggedProviderFailure = logs.find((item) => (
+    item.level === "error"
+      && ["provider_watchdog", "provider_bridge_reinject", "provider_bridge_startup"].includes(item.area)
+      && (!item.details?.provider || item.details.provider === activeProviderAdapter?.id)
+      && item.details?.error_message
+  ));
   const anySyncing = configuredStates.some((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
     || item.scanState?.in_progress === true
@@ -552,6 +639,7 @@ function renderDashboard(message = "", isError = false) {
   const statusFailure = latestSyncFailure(configuredStates.map((item) => item.syncState));
   const latestFailure = statusFailure
     || (pendingTotal ? latestLoggedDeliveryFailure?.details.error_message : "")
+    || latestLoggedProviderFailure?.details.error_message
     || "";
   const anyError = Boolean(latestFailure);
   const sellerCentreChatClosed = activeProviderSurface === "seller-centre"
@@ -579,13 +667,13 @@ function renderDashboard(message = "", isError = false) {
   if (!detectedAccounts.length) {
     const openProviderChat = !isProviderChatTab;
     const canOpenSellerCentreChat = activeProviderSurface === "seller-centre";
-    setLeaderStatus("NEED CONFIG", "warning", "config");
+    setLeaderStatus(t("needConfig"), "warning", "config");
     status.textContent = message || (canOpenSellerCentreChat
-      ? "Open Webchat mini to detect your Shopee accounts."
-      : openProviderChat ? "Open a supported provider chat to detect your accounts." : "");
+      ? t("openShopeeChat")
+      : openProviderChat ? t("openProviderChat") : "");
     syncButton.disabled = !canOpenSellerCentreChat;
     syncButton.dataset.action = canOpenSellerCentreChat ? "open_webchat_mini" : "";
-    syncButton.textContent = canOpenSellerCentreChat ? "Open Webchat mini" : "Sync messages";
+    syncButton.textContent = canOpenSellerCentreChat ? t("openWebchat") : t("sync");
     syncButton.setAttribute("aria-label", syncButton.textContent);
     syncButton.title = "";
     cancelSyncButton.hidden = true;
@@ -595,12 +683,12 @@ function renderDashboard(message = "", isError = false) {
   }
 
   if (!configuredStates.length) {
-    setLeaderStatus("NEED CONFIG", "warning", "config");
+    setLeaderStatus(t("needConfig"), "warning", "config");
     status.textContent = message;
     syncButton.disabled = false;
     syncButton.dataset.action = "configure";
-    syncButton.textContent = "Configure";
-    syncButton.setAttribute("aria-label", "Configure");
+    syncButton.textContent = t("configure");
+    syncButton.setAttribute("aria-label", t("configure"));
     syncButton.title = "";
     cancelSyncButton.hidden = true;
     syncProgress.hidden = true;
@@ -609,17 +697,17 @@ function renderDashboard(message = "", isError = false) {
   }
 
   status.classList.toggle("error", isError);
-  setLeaderStatus(anyLeader ? "LEADER" : "STANDBY", anyLeader ? "ready" : "neutral", "leader", anyLeader);
+  setLeaderStatus(anyLeader ? t("leader") : t("standby"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
   syncButton.disabled = sellerCentreChatClosed ? false : anySyncing;
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
-    ? "Open Webchat mini"
-    : anySyncing ? "Syncing…" : anyPending || anyError ? "Retry now" : "Sync messages";
+    ? t("openWebchat")
+    : anySyncing ? t("syncing") : anyPending || anyError ? t("retry") : t("sync");
   syncButton.setAttribute("aria-label", syncButton.textContent);
   syncButton.title = "";
   cancelSyncButton.hidden = !anySyncing;
   cancelSyncButton.disabled = false;
-  cancelSyncButton.textContent = "Cancel sync";
+  cancelSyncButton.textContent = t("cancel");
   const lastSyncText = formatLastSync(latestSync);
   if (lastSyncText) {
     lastSync.textContent = lastSyncText;
@@ -649,13 +737,13 @@ function renderDashboard(message = "", isError = false) {
       if (pendingTotal) {
         const pending = document.createElement("span");
         pending.className = "status-pending";
-        pending.textContent = `${pendingTotal} pending`;
+        pending.textContent = t("pending", pendingTotal);
         details.append(pending, document.createTextNode(" · "));
       }
       const logsLink = document.createElement("a");
       logsLink.href = "#logs";
       logsLink.className = "status-log-link";
-      logsLink.textContent = "Open Logs";
+      logsLink.textContent = t("openLogs");
       logsLink.addEventListener("click", (event) => {
         event.preventDefault();
         openLogs("error");
@@ -728,8 +816,8 @@ function renderLogs() {
     logList.append(row);
   }
   logEmpty.textContent = logs.length
-    ? "No logs match this level."
-    : "No logs recorded yet.";
+    ? t("noLogsMatch")
+    : t("noLogsRecorded");
   logEmpty.hidden = visible.length !== 0;
   copyLogsButton.disabled = visible.length === 0;
   downloadLogsButton.disabled = visible.length === 0;
@@ -748,9 +836,15 @@ async function refreshStoredState() {
     STORAGE.logs,
     STORAGE.deviceName,
     STORAGE.autoOpenSellerCentreChat,
+    STORAGE.unattendedRecovery,
+    STORAGE.language,
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
+  language = stored[STORAGE.language] === "th"
+    ? "th"
+    : stored[STORAGE.language] === "en" ? "en" : defaultLanguage();
   if (!consented()) {
+    applyTranslations();
     routeTo("consent");
     return;
   }
@@ -764,7 +858,10 @@ async function refreshStoredState() {
     ? stored[STORAGE.deviceName]
     : "";
   autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  unattendedRecovery = stored[STORAGE.unattendedRecovery] === true;
   autoOpenChatInput.checked = autoOpenSellerCentreChat;
+  unattendedRecoveryInput.checked = unattendedRecovery;
+  applyTranslations();
   detectedAccounts = bestEffortAccounts(
     stored[STORAGE.detectedAccounts],
     await currentActiveTabUrl(),
@@ -804,11 +901,12 @@ async function detectAccount() {
 function renderConfigEditor() {
   const empty = storedConfig.accounts.length === 0;
   deviceNameInput.value = storedDeviceName;
+  unattendedRecoveryInput.checked = unattendedRecovery;
   configInput.value = empty ? "" : JSON.stringify(storedConfig, null, 2);
   configInput.placeholder = JSON.stringify(sampleConfig, null, 2);
   configInput.disabled = false;
   document.querySelector("#save-config").disabled = false;
-  configCount.textContent = empty ? "No saved accounts · sample shown below" : "Current saved configuration";
+  configCount.textContent = empty ? t("noSavedAccounts") : t("currentConfig");
   exportButton.disabled = empty;
 }
 
@@ -862,7 +960,7 @@ async function load() {
   document.querySelector("#version").textContent = `v${chrome.runtime.getManifest().version}`;
   const installId = await installationId();
   installationIdButton.dataset.installationId = installId;
-  installationIdButton.textContent = `Installation ID: ${installId}`;
+  installationIdButton.textContent = t("installationId", installId);
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -874,6 +972,8 @@ async function load() {
     STORAGE.logs,
     STORAGE.deviceName,
     STORAGE.autoOpenSellerCentreChat,
+    STORAGE.unattendedRecovery,
+    STORAGE.language,
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
@@ -886,7 +986,11 @@ async function load() {
     ? stored[STORAGE.deviceName]
     : "";
   autoOpenSellerCentreChat = stored[STORAGE.autoOpenSellerCentreChat] === true;
+  language = stored[STORAGE.language] === "th" ? "th" : stored[STORAGE.language] === "en" ? "en" : defaultLanguage();
   autoOpenChatInput.checked = autoOpenSellerCentreChat;
+  unattendedRecovery = stored[STORAGE.unattendedRecovery] === true;
+  unattendedRecoveryInput.checked = unattendedRecovery;
+  applyTranslations();
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   popupTabId = activeTab?.id ?? null;
   activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
@@ -907,6 +1011,14 @@ async function load() {
 consentInput.addEventListener("change", () => {
   continueButton.disabled = !consentInput.checked;
   if (consentInput.checked) consentError.textContent = "";
+});
+
+languageSelect.addEventListener("change", async () => {
+  language = languageSelect.value === "th" ? "th" : "en";
+  await writeStorage({ [STORAGE.language]: language });
+  applyTranslations();
+  renderConsentScreen();
+  if (!dashboardScreen.hidden) renderDashboard();
 });
 
 continueButton.addEventListener("click", async () => {
@@ -943,7 +1055,7 @@ syncButton.addEventListener("click", async () => {
     syncButton.disabled = true;
     progressArea.hidden = false;
     status.classList.remove("error");
-    status.textContent = "Opening Webchat mini…";
+    status.textContent = t("openingWebchat");
     try {
       const result = await chrome.tabs.sendMessage(popupTabId, {
         type: "prepare_provider_v3",
@@ -953,7 +1065,7 @@ syncButton.addEventListener("click", async () => {
       if (!result?.ok) throw new Error(result?.error ?? "Could not open Webchat mini.");
       await detectAccount();
       await refreshStoredState();
-      renderDashboard("Webchat mini opened.");
+      renderDashboard(t("webchatOpened"));
     } catch (error) {
       renderDashboard(error.message, true);
     }
@@ -963,7 +1075,7 @@ syncButton.addEventListener("click", async () => {
   progressArea.hidden = false;
   syncProgress.hidden = true;
   status.classList.remove("error");
-  status.textContent = "Checking for missed messages…";
+  status.textContent = t("checking");
   try {
     await requestTargetPermission(accountOrigins(storedConfig));
     await showSyncResult(await chrome.runtime.sendMessage({ type: "sync_now" }));
@@ -979,13 +1091,13 @@ autoOpenChatInput.addEventListener("change", async () => {
     await writeStorage({ [STORAGE.autoOpenSellerCentreChat]: enabled });
     autoOpenSellerCentreChat = enabled;
     let message = enabled
-      ? "Automatic chat opening enabled."
-      : "Automatic chat opening disabled.";
+      ? t("automaticChatOpeningEnabled")
+      : t("automaticChatOpeningDisabled");
     const hasShopeeConfig = storedConfig.accounts.some(
       (account) => account.provider === activeProviderAdapter?.id,
     );
     if (enabled && !hasShopeeConfig) {
-      message = "Automatic sync enabled. Configure a Shopee account to apply it.";
+      message = t("automaticEnabled");
     } else if (enabled && popupTabId && activeProviderSurface === "seller-centre") {
       try {
         const result = await chrome.tabs.sendMessage(popupTabId, {
@@ -993,10 +1105,10 @@ autoOpenChatInput.addEventListener("change", async () => {
           provider: activeProviderAdapter?.id,
         });
         message = result?.ok
-          ? "Opening Chat and starting sync…"
-          : "Automatic sync enabled. Reload Seller Centre to apply it.";
+          ? t("openingAndSyncing")
+          : t("reloadSellerCentre");
       } catch {
-        message = "Automatic sync enabled. Reload Seller Centre to apply it.";
+        message = t("reloadSellerCentre");
       }
     }
     renderDashboard(message);
@@ -1009,16 +1121,31 @@ autoOpenChatInput.addEventListener("change", async () => {
   }
 });
 
+unattendedRecoveryInput.addEventListener("change", async () => {
+  const enabled = unattendedRecoveryInput.checked;
+  unattendedRecoveryInput.disabled = true;
+  try {
+    await writeStorage({ [STORAGE.unattendedRecovery]: enabled });
+    unattendedRecovery = enabled;
+    setConfigStatus(enabled ? t("unattendedEnabled") : t("unattendedDisabled"));
+  } catch (error) {
+    unattendedRecoveryInput.checked = unattendedRecovery;
+    setConfigStatus(error.message, true);
+  } finally {
+    unattendedRecoveryInput.disabled = false;
+  }
+});
+
 cancelSyncButton.addEventListener("click", async () => {
   cancelSyncButton.disabled = true;
-  cancelSyncButton.textContent = "Cancelling…";
+  cancelSyncButton.textContent = t("cancelling");
   status.classList.remove("error");
-  status.textContent = "Cancelling sync…";
+  status.textContent = t("cancellingSync");
   try {
     const result = await chrome.runtime.sendMessage({ type: "cancel_sync" });
     await refreshStoredState();
     renderDashboard(
-      result?.ok && result.cancelled ? "Sync cancelled." : result?.error ?? "No sync in progress.",
+      result?.ok && result.cancelled ? t("syncCancelled") : result?.error ?? t("noSyncInProgress"),
       !result?.ok,
     );
   } catch (error) {
@@ -1057,11 +1184,11 @@ document.querySelector("#close-logs").addEventListener("click", () => {
 copyLogsButton.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(formatVisibleLogs());
-    copyLogsButton.textContent = "Copied";
+    copyLogsButton.textContent = t("copied");
   } catch {
-    copyLogsButton.textContent = "Could not copy";
+    copyLogsButton.textContent = t("couldNotCopy");
   }
-  setTimeout(() => { copyLogsButton.textContent = "Copy"; }, 1_200);
+  setTimeout(() => { copyLogsButton.textContent = t("copy"); }, 1_200);
 });
 
 downloadLogsButton.addEventListener("click", () => {
@@ -1184,6 +1311,7 @@ document.querySelector("#export-config").addEventListener("click", () => {
 clearButton.addEventListener("click", async () => {
   if (!confirm("Erase all local extension data, including device name, accounts, consent, pending messages, sync cursors, and logs?")) return;
   await chrome.alarms.clear("omnichat-delivery-retry");
+  await chrome.alarms.clear("omnichat-provider-health");
   await chrome.alarms.clear("omnichat-log-upload");
   await chrome.storage.local.clear();
   storedConsent = null;
@@ -1196,6 +1324,8 @@ clearButton.addEventListener("click", async () => {
   logs = [];
   storedDeviceName = "";
   autoOpenSellerCentreChat = false;
+  unattendedRecovery = false;
+  language = defaultLanguage();
   viewingPrivacy = false;
   routeTo("consent");
   await load();
@@ -1205,15 +1335,15 @@ installationIdButton.addEventListener("click", async () => {
   const id = installationIdButton.dataset.installationId;
   if (!id) return;
   await navigator.clipboard.writeText(id);
-  installationIdButton.textContent = "Installation ID copied";
+  installationIdButton.textContent = t("installationCopied");
   setTimeout(() => {
-    installationIdButton.textContent = `Installation ID: ${installationIdButton.dataset.installationId}`;
+    installationIdButton.textContent = t("installationId", installationIdButton.dataset.installationId);
   }, 900);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat]) {
+  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.logs] || changes[STORAGE.commandTab] || changes[STORAGE.autoOpenSellerCentreChat] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language]) {
     void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
   }
 });
