@@ -24,7 +24,11 @@
         <input id="config-file" type="file" accept="application/json,.json" hidden>
       </header>
 
-      <section id="consent-screen" class="screen">
+      <section id="loading-screen" class="loading-screen" role="status" aria-label="Loading">
+        <span class="loading-spinner" aria-hidden="true"></span>
+      </section>
+
+      <section id="consent-screen" class="screen" hidden>
         <div class="screen-intro">
           <button id="close-privacy" class="icon-button privacy-back" type="button" aria-label="Back" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>

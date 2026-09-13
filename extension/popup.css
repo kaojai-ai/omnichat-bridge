@@ -91,6 +91,29 @@ p { color: var(--muted); }
   gap: 16px;
 }
 
+.loading-screen {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+}
+
+.loading-spinner {
+  animation: loading-spin 700ms linear infinite;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  border-top-color: var(--green);
+  height: 24px;
+  width: 24px;
+}
+
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner { animation: none; }
+}
+
 .screen-intro {
   display: grid;
   gap: 3px;

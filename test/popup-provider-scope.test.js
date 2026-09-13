@@ -126,3 +126,13 @@ test("keeps unattended provider recovery opt-in and runs through one health alar
   assert.match(backgroundSource, /type: "sync_now_v3"/);
   assert.match(backgroundSource, /providerAutomaticRetryAt/);
 });
+
+test("shows a lightweight shell before popup state finishes loading", () => {
+  assert.match(html, /id="loading-screen" class="loading-screen"/);
+  assert.match(html, /id="consent-screen" class="screen" hidden/);
+  assert.match(popupSource, /const \[stored, \[activeTab\]\] = await Promise\.all\(\[/);
+  assert.match(popupSource, /readStorage\(\[/);
+  assert.match(popupSource, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/);
+  assert.match(popupSource, /void installationId\(\)\.then/);
+  assert.match(popupSource, /void detectAccount\(\)\.catch/);
+});
