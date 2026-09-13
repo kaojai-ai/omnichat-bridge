@@ -15,10 +15,6 @@
           <h1>Omnichat Bridge</h1>
           <span>Secured bridge to your server</span>
         </div>
-        <div class="language-switch" role="group" aria-label="Language">
-          <button id="language-en" class="language-button" type="button" data-language="en" aria-label="English" title="English" aria-pressed="false">🇬🇧</button>
-          <button id="language-th" class="language-button" type="button" data-language="th" aria-label="ไทย" title="ไทย" aria-pressed="false">🇹🇭</button>
-        </div>
         <div class="header-actions">
         <button id="open-logs" class="header-log-button" type="button" aria-label="Logs" title="Logs" hidden>Logs</button>
         <button id="open-config" class="header-icon-button" type="button" aria-label="Settings" title="Settings" hidden>
@@ -99,6 +95,14 @@
           <span>Open chat and sync automatically</span>
         </label>
 
+        <label id="unattended-recovery-option" class="recovery-option">
+          <span id="unattended-recovery-label">Recover provider tabs automatically</span>
+          <span class="toggle-control">
+            <input id="unattended-recovery" type="checkbox">
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+          </span>
+        </label>
+
         <div class="sync-actions">
           <button id="sync" type="button" disabled>Sync messages</button>
           <button id="cancel-sync" class="cancel-sync-link" type="button" hidden>Cancel sync</button>
@@ -120,27 +124,17 @@
             <h2>Settings</h2>
             <p id="config-count">Current saved configuration</p>
           </div>
+          <div class="language-switch" role="group" aria-label="Language">
+            <button id="language-en" class="language-button" type="button" data-language="en" aria-label="English" title="English" aria-pressed="false">🇬🇧</button>
+            <button id="language-th" class="language-button" type="button" data-language="th" aria-label="ไทย" title="ไทย" aria-pressed="false">🇹🇭</button>
+          </div>
         </header>
 
         <div class="settings-preferences">
           <div class="settings-preference settings-device-name">
-            <span class="settings-setting-copy">
-              <label id="device-name-label" for="device-name">Device name</label>
-              <small id="device-name-help">Shown to KaoJai admins for connection diagnostics.</small>
-            </span>
+            <label id="device-name-label" for="device-name">Device name</label>
             <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
           </div>
-
-          <label id="unattended-recovery-option" class="settings-preference settings-toggle">
-            <span class="settings-setting-copy">
-              <strong id="unattended-recovery-label">Recover provider tabs automatically</strong>
-              <small id="unattended-recovery-help">Reopen provider tabs and resume sync while you are away.</small>
-            </span>
-            <span class="toggle-control">
-              <input id="unattended-recovery" type="checkbox">
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-            </span>
-          </label>
         </div>
 
         <div class="field">

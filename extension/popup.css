@@ -106,6 +106,8 @@ p { color: var(--muted); }
   justify-content: flex-end;
 }
 
+.screen-heading .language-switch { margin-left: auto; }
+
 .language-button {
   background: transparent;
   border: 1px solid transparent;
@@ -212,31 +214,24 @@ button:disabled {
   padding: 12px;
 }
 
-.settings-setting-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.settings-setting-copy label,
-.settings-setting-copy strong {
+.settings-preference > label,
+.recovery-option > span:first-child {
   color: var(--ink);
   font-size: 11px;
   font-weight: 650;
   line-height: 1.25;
 }
 
-.settings-setting-copy small,
-.settings-setting-copy small {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.35;
-}
-
-.settings-toggle {
+.recovery-option {
+  align-items: center;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
   cursor: pointer;
+  display: grid;
+  gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px 12px;
 }
 
 .toggle-control {
@@ -846,7 +841,7 @@ progress {
   gap: 10px;
 }
 
-.screen-heading > div {
+.screen-heading > div:not(.language-switch) {
   display: grid;
   gap: 2px;
 }
