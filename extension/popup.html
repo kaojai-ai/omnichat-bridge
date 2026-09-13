@@ -124,13 +124,15 @@
 
         <div class="settings-preferences">
           <div class="settings-preference settings-device-name">
-            <label id="device-name-label" for="device-name">Device name</label>
+            <span class="settings-setting-copy">
+              <label id="device-name-label" for="device-name">Device name</label>
+              <small id="device-name-help">Shown to KaoJai admins for connection diagnostics.</small>
+            </span>
             <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
-            <small id="device-name-help">Shown to KaoJai admins for connection diagnostics.</small>
           </div>
 
           <label id="unattended-recovery-option" class="settings-preference settings-toggle">
-            <span class="settings-toggle-copy">
+            <span class="settings-setting-copy">
               <strong id="unattended-recovery-label">Recover provider tabs automatically</strong>
               <small id="unattended-recovery-help">Reopen provider tabs and resume sync while you are away.</small>
             </span>

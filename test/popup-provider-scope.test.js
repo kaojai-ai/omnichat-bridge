@@ -109,6 +109,7 @@ test("keeps unattended provider recovery opt-in and runs through one health alar
   assert.match(html, /id="language-en"[^>]*data-language="en"/);
   assert.match(html, /id="language-th"[^>]*data-language="th"/);
   assert.match(html, /class="settings-preferences"/);
+  assert.equal((html.match(/class="settings-preference(?:\s|")/g) || []).length, 2);
   assert.match(html, /id="unattended-recovery-label"/);
   assert.match(html, /class="toggle-track"/);
   assert.match(html, /id="unattended-recovery"/);

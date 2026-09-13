@@ -196,31 +196,38 @@ button:disabled {
 .auto-sync-option input { flex: 0 0 auto; margin: 0; }
 
 .settings-preferences {
-  align-items: stretch;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-preference {
+  align-items: center;
   background: var(--subtle);
   border: 1px solid var(--line);
   border-radius: var(--card-radius);
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(145px, .9fr);
+  min-width: 0;
   padding: 12px;
 }
 
-.settings-preference {
+.settings-setting-copy {
+  display: grid;
+  gap: 3px;
   min-width: 0;
 }
 
-.settings-device-name {
-  align-content: start;
-  color: #344054;
-  display: grid;
+.settings-setting-copy label,
+.settings-setting-copy strong {
+  color: var(--ink);
   font-size: 11px;
   font-weight: 650;
-  gap: 6px;
+  line-height: 1.25;
 }
 
-.settings-device-name small,
-.settings-toggle-copy small {
+.settings-setting-copy small,
+.settings-setting-copy small {
   color: var(--muted);
   font-size: 10px;
   font-weight: 400;
@@ -228,25 +235,8 @@ button:disabled {
 }
 
 .settings-toggle {
-  align-items: center;
-  border-left: 1px solid var(--line);
   cursor: pointer;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-  padding-left: 16px;
-}
-
-.settings-toggle-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.settings-toggle-copy strong {
-  color: var(--ink);
-  font-size: 11px;
-  line-height: 1.25;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .toggle-control {
@@ -292,16 +282,9 @@ button:disabled {
 }
 
 @media (max-width: 360px) {
-  .settings-preferences {
-    gap: 10px;
+  .settings-preference {
     grid-template-columns: 1fr;
-  }
-
-  .settings-toggle {
-    border-left: 0;
-    border-top: 1px solid var(--line);
-    padding-left: 0;
-    padding-top: 10px;
+    gap: 8px;
   }
 }
 
