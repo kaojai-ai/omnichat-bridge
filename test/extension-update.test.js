@@ -16,6 +16,8 @@ const storeUrl = "https://chromewebstore.google.com/detail/omnichat-bridge/blfmm
 test("links the README and title to the Chrome Web Store without changing title color", () => {
   assert.match(readme, new RegExp(`\\(${storeUrl.replaceAll("/", "\\/")}\\)`));
   assert.match(html, new RegExp(`<a class="store-link" href="${storeUrl}" target="_blank" rel="noreferrer">Omnichat Bridge<\\/a>`));
+  assert.match(html, new RegExp(`<a id="version" href="${storeUrl}" target="_blank" rel="noreferrer"><\\/a>`));
+  assert.match(html, /<a class="ok-production-link" href="https:\/\/okproduction\.co\.th" target="_blank" rel="noreferrer">OK Production Co\.?, Ltd\.<\/a>/);
   assert.match(css, /\.store-link \{[\s\S]*color: inherit;[\s\S]*cursor: pointer;/);
   assert.match(css, /\.store-link:hover \{ color: inherit; \}/);
   assert.match(css, /\.store-link:focus-visible/);
