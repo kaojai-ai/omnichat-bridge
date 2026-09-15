@@ -17,7 +17,8 @@ export const STORAGE = {
   serverInitialized: "server_initialized",
   logs: "operational_logs",
   logOutbox: "operational_log_outbox",
-  logUploadEnabled: "operational_log_upload_enabled"
+  logUploadEnabled: "operational_log_upload_enabled",
+  extensionUpdate: "extension_update"
 };
 
 export const LEGACY_STORAGE = {

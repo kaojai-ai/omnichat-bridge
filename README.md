@@ -8,6 +8,8 @@ From an open Chrome chat tab, it **forwards messages** from supported platforms
 
 It works like like a **coppilot**, require **human-in-the-loop**, not a hosted bot.
 
+[Install Omnichat Bridge from the Chrome Web Store](https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn)
+
 > [!IMPORTANT]
 > - **NOT affiliated with or endorsed by Shopee, LINE, or any other provider.**
 > - ⚠️ RISK: This extension may conflict with provider rules, leading to

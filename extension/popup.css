@@ -71,6 +71,20 @@ h1 {
   line-height: 1.2;
 }
 
+.store-link {
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.store-link:hover { color: inherit; }
+
+.store-link:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--shopee);
+  outline-offset: 2px;
+}
+
 h2 {
   font-size: 14px;
   letter-spacing: -0.01em;
@@ -1059,7 +1073,8 @@ footer a {
 }
 
 .footer-link,
-.settings-link {
+.settings-link,
+.update-extension {
   background: transparent;
   border: 0;
   color: inherit;
@@ -1075,8 +1090,23 @@ footer a {
 
 footer a:hover,
 .footer-link:hover,
-.settings-link:hover {
+.settings-link:hover,
+.update-extension:hover {
   background: transparent;
   color: var(--shopee-hover);
   text-decoration: underline;
 }
+
+.update-extension {
+  color: var(--shopee);
+  cursor: pointer;
+}
+
+.update-extension[data-state="current"] {
+  color: var(--green);
+  cursor: default;
+}
+
+.update-extension:disabled { cursor: wait; }
+
+.update-extension[data-state="current"]:disabled { cursor: default; }

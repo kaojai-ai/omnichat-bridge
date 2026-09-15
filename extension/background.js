@@ -47,6 +47,8 @@ const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
+const UPDATE_CHECK_CACHE_MS = 6 * 60 * 60_000;
+const UPDATE_RETRY_DELAY_MS = 5 * 60_000;
 const API_PING_COOLDOWN_MS = 5 * 60_000;
 const API_PING_ALARM = "omnichat-api-ping";
 const API_PING_INTERVAL_MINUTES = 5;
@@ -552,7 +554,69 @@ function exclusive(task) {
   return result;
 }
 
+function currentExtensionVersion() {
+  return chrome.runtime.getManifest().version;
+}
+
+function updateStateForCurrentVersion(state) {
+  return state?.installed_version === currentExtensionVersion() ? state : null;
+}
+
+async function storeExtensionUpdate(state) {
+  await writeStorage({ [STORAGE.extensionUpdate]: { ...state, installed_version: currentExtensionVersion() } });
+}
+
+async function checkForExtensionUpdate({ force = false } = {}) {
+  const stored = await readStorage([STORAGE.extensionUpdate]);
+  const state = updateStateForCurrentVersion(stored[STORAGE.extensionUpdate]);
+  const now = Date.now();
+  if (!force && state?.status === "current" && now - state.checked_at < UPDATE_CHECK_CACHE_MS) return state;
+  if (!force && state?.attempted_at && now - state.attempted_at < UPDATE_RETRY_DELAY_MS) return state;
+
+  try {
+    const result = await chrome.runtime.requestUpdateCheck();
+    const next = {
+      status: result.status === "update_available" ? "available" : result.status === "no_update" ? "current" : "unknown",
+      ...(typeof result.version === "string" ? { available_version: result.version } : {}),
+      attempted_at: now,
+      ...(result.status === "no_update" ? { checked_at: now } : {}),
+    };
+    await storeExtensionUpdate(next);
+    return { ...next, installed_version: currentExtensionVersion() };
+  } catch {
+    const next = { status: "unknown", attempted_at: now };
+    await storeExtensionUpdate(next);
+    return { ...next, installed_version: currentExtensionVersion() };
+  }
+}
+
+async function applyExtensionUpdate() {
+  const stored = await readStorage([STORAGE.extensionUpdate]);
+  if (updateStateForCurrentVersion(stored[STORAGE.extensionUpdate])?.status !== "available") {
+    throw new Error("No extension update is ready to install.");
+  }
+  await storeExtensionUpdate({ status: "updating", attempted_at: Date.now() });
+  await activeSync?.catch(() => undefined);
+  await exclusive(async () => {
+    chrome.runtime.reload();
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "check_extension_update") {
+    void checkForExtensionUpdate().then(
+      (update) => respond({ ok: true, update }),
+      (error) => respond({ ok: false, error: String(error) }),
+    );
+    return true;
+  }
+  if (message?.type === "apply_extension_update") {
+    void applyExtensionUpdate().then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) }),
+    );
+    return true;
+  }
   if (message?.type === "accounts_detected") {
     void exclusive(async () => {
       const provider = normalizedProviderId(message.provider);
@@ -1638,14 +1702,25 @@ async function handleLiveCommand(raw, context, socket) {
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   let result;
   try {
-    result = await exclusive(() => sendViaProvider(command));
+    result = await exclusive(async () => {
+      const sent = await sendViaProvider(command);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: "send_result",
+          request_id: command.request_id,
+          ok: true,
+          provider_message_id: sent.provider_message_id,
+        }));
+      }
+      return sent;
+    });
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
     provider_account_id: context.account.provider_account_id,
   });
-  if (socket.readyState === WebSocket.OPEN) {
+  if (!result?.ok && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({
       type: "send_result",
       request_id: command.request_id,
@@ -1714,6 +1789,14 @@ chrome.runtime.onStartup.addListener(() => {
   void ensureLiveConnection();
   void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
   void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+});
+
+chrome.runtime.onUpdateAvailable.addListener((details) => {
+  void storeExtensionUpdate({
+    status: "available",
+    available_version: details.version,
+    attempted_at: Date.now(),
+  });
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
