@@ -1100,6 +1100,7 @@ footer a:hover,
 .update-extension {
   color: var(--shopee);
   cursor: pointer;
+  padding: 0 3px;
 }
 
 .update-extension[data-state="current"] {

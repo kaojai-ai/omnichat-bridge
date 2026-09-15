@@ -32,6 +32,7 @@ test("shows a compact, translated update state beside the manifest version", () 
   assert.match(popupSource, /upToDate: "เป็นเวอร์ชันล่าสุด"/);
   assert.match(popupSource, /updateNow: "อัปเดตตอนนี้"/);
   assert.match(popupSource, /updateExtensionButton\.textContent = "Latest"/);
+  assert.match(css, /\.update-extension \{[\s\S]*padding: 0 3px;/);
   assert.match(popupSource, /STORAGE\.extensionUpdate/);
 });
 
