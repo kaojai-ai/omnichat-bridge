@@ -121,7 +121,7 @@ function renderExtensionUpdate(update) {
     updateExtensionButton.hidden = false;
     updateExtensionButton.disabled = true;
     updateExtensionButton.dataset.state = "current";
-    updateExtensionButton.textContent = "✓";
+    updateExtensionButton.textContent = "Latest";
     updateExtensionButton.setAttribute("aria-label", t("upToDate"));
     updateExtensionButton.title = `${t("upToDate")} · ${checkedAt}`;
   } else if (update.status === "available") {
