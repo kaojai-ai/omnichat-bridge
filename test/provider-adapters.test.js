@@ -53,12 +53,18 @@ test("allows a future provider to own config validation and page matching", () =
     matchesPage: (url) => String(url).startsWith("https://chat.line.biz/"),
     validateConfig: () => ({ provider: "line_oa" }),
     configOrigins: () => ["https://sync.example.com/events"],
+    recoveryUrlForAccount: () => "https://chat.line.biz/",
+    providerStatusReady: () => true,
+    providerStatusHealthy: () => true,
   });
 
   assert.equal(registry.get(" line_oa "), adapter);
   assert.deepEqual(plain(registry.list().map((item) => item.id)), ["shopee", "line_oa"]);
   assert.equal(registry.forUrl("https://chat.line.biz/bot-1"), adapter);
   assert.equal(registry.forPage("https://chat.line.biz/bot-1"), adapter);
+  assert.equal(adapter.recoveryUrlForAccount(), "https://chat.line.biz/");
+  assert.equal(adapter.providerStatusReady({}), true);
+  assert.equal(adapter.providerStatusHealthy({}), true);
 });
 
 test("normalizes LINE OA Basic IDs without exposing secrets", () => {

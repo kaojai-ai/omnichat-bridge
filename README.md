@@ -26,9 +26,10 @@ access to bring Shopee conversations into one shared customer-service workflow.
 ![Shopee Agent response stating that applications for Customer Service Apps have been closed since November 18, 2024](docs/assets/shopee-customer-service-app-applications-closed.png)
 
 Omnichat Bridge gives shops a transparent, self-hostable browser-side bridge
-instead. It works only through an already authenticated, open provider tab; it
-does not bypass login, obtain private API access, or transfer browser
-credentials. See [Shopee Open Platform FAQ 56](https://open.shopee.com/faq/56)
+instead. It works through an authenticated provider tab in the user's browser;
+when optional unattended recovery is enabled, it may open one provider page to
+let the user sign in, but it never bypasses login, obtains private API access,
+or transfers browser credentials. See [Shopee Open Platform FAQ 56](https://open.shopee.com/faq/56)
 for the referenced notice.
 
 ## How it works

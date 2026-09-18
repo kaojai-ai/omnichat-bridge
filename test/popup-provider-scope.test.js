@@ -118,9 +118,13 @@ test("keeps unattended provider recovery opt-in and runs through one health alar
   assert.match(popupSource, /writeStorage\(\{ \[STORAGE\.language\]: language \}\)/);
   assert.match(backgroundSource, /const PROVIDER_HEALTH_ALARM = "omnichat-provider-health"/);
   assert.match(backgroundSource, /async function runProviderHealthWatchdog\(\)/);
-  assert.match(backgroundSource, /adapter\.chatUrlForAccount\(context\?\.account\)/);
+  assert.match(backgroundSource, /function providerRecoveryUrl\(adapter, account\)/);
+  assert.match(backgroundSource, /adapter\.chatUrlForAccount\(account\)/);
   assert.match(backgroundSource, /chrome\.tabs\.create\(\{ url: chatUrl, active: false \}\)/);
-  assert.match(backgroundSource, /chrome\.tabs\.reload\(tab\.id\)/);
+  assert.match(backgroundSource, /STORAGE\.providerRecoveryTabs/);
+  assert.match(backgroundSource, /providerRecoveryTabLocks/);
+  assert.match(backgroundSource, /async function resetProviderRecoveryTabs\(\)/);
+  assert.match(backgroundSource, /markClosedProviderRecoveryTab\(tabId\)/);
   assert.match(backgroundSource, /providerTabHealthy\(status, adapter\)/);
   assert.match(backgroundSource, /last_provider_check_at/);
   assert.match(backgroundSource, /startUnattendedProviderSync\(tab, context\)/);
