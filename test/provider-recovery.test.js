@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  PROVIDER_RECOVERY_OPENING_TIMEOUT_MS,
+  PROVIDER_RECOVERY_RETRY_BASE_MS,
+  PROVIDER_RECOVERY_RETRY_MAX_MS,
   PROVIDER_RECOVERY_STATES,
   normalizeProviderRecoveryTabs,
   providerRecoveryRecord,
-  recoveryOpeningExpired,
+  recoveryRetryDelay,
+  recoveryRetryDue,
   updateProviderRecoveryRecord,
 } from "../extension/lib/provider-recovery.js";
 
@@ -28,8 +30,31 @@ test("normalizes persisted provider recovery records without accepting invalid t
       invalid: null,
     }),
     {
-      line_oa: { state: "opening", tab_id: 42, opened_at: 100, reason: "waiting" },
-      shopee: { state: "needs_attention", tab_id: null, opened_at: null, reason: "x".repeat(240) },
+      version: 1,
+      providers: {
+        line_oa: {
+          state: "opening",
+          tab_id: 42,
+          opened_by_extension: false,
+          opened_at: 100,
+          failure_count: 0,
+          last_failure_at: null,
+          next_retry_at: null,
+          last_reload_at: null,
+          reason: "waiting",
+        },
+        shopee: {
+          state: "needs_attention",
+          tab_id: null,
+          opened_by_extension: false,
+          opened_at: null,
+          failure_count: 0,
+          last_failure_at: null,
+          next_retry_at: null,
+          last_reload_at: null,
+          reason: "x".repeat(240),
+        },
+      },
     },
   );
 });
@@ -46,19 +71,26 @@ test("updates one provider without discarding another provider's recovery tab", 
   assert.deepEqual(providerRecoveryRecord(next, "shopee"), {
     state: "opening",
     tab_id: 8,
+    opened_by_extension: false,
     opened_at: 200,
+    failure_count: 0,
+    last_failure_at: null,
+    next_retry_at: null,
+    last_reload_at: null,
     reason: null,
   });
 });
 
-test("does not allow an unfinished opening record to create forever", () => {
+test("normalizes legacy records and keeps retry state bounded", () => {
   const record = {
-    state: "opening",
-    tab_id: null,
-    opened_at: 1_000,
+    state: "needs_attention",
+    tab_id: 12,
+    failure_count: 4,
+    next_retry_at: 2_000,
     reason: null,
   };
-  assert.equal(recoveryOpeningExpired(record, 1_000 + PROVIDER_RECOVERY_OPENING_TIMEOUT_MS - 1), false);
-  assert.equal(recoveryOpeningExpired(record, 1_000 + PROVIDER_RECOVERY_OPENING_TIMEOUT_MS), true);
-  assert.equal(recoveryOpeningExpired({ ...record, opened_at: null }), true);
+  assert.equal(recoveryRetryDue(record, 1_999), false);
+  assert.equal(recoveryRetryDue(record, 2_000), true);
+  assert.equal(recoveryRetryDelay(2), PROVIDER_RECOVERY_RETRY_BASE_MS);
+  assert.equal(recoveryRetryDelay(100), PROVIDER_RECOVERY_RETRY_MAX_MS);
 });

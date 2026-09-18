@@ -62,9 +62,11 @@ already-open chat or cancel a sync that is already running.
 
 The shared **Recover provider tabs automatically** preference is also off by
 default. When enabled, recovery can create at most one tracked Shopee tab. A
-redirect, sign-in page, failed bridge, or closed tracked tab moves recovery to
-an actionable state instead of creating or reloading more tabs. Toggling the
-preference off and on starts a new recovery attempt.
+redirect, sign-in page, failed bridge, or closed tracked tab stays associated
+with that provider record. Recovery reinjects the bridge first, then retries
+the same tab with capped backoff; it never creates a replacement while the
+tracked tab still exists. Closing the tracked tab allows one replacement on a
+later retry.
 
 Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.

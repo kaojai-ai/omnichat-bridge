@@ -42,6 +42,14 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
   }
   assert.deepEqual(plain(adapter.surfacePriority), ["seller-centre", "legacy"]);
   assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/portal/chat-management");
+  assert.equal(adapter.providerStatusReady({ surface_ready: true, capabilities: {
+    account_detection: true,
+    message_observation: true,
+    message_recovery: true,
+    send_text: true,
+    send_image: true,
+    send_product: true,
+  } }), true);
   assert.equal(registry.forUrl("https://manager.line.biz/"), null);
 });
 
@@ -72,6 +80,7 @@ test("normalizes LINE OA Basic IDs without exposing secrets", () => {
 
   assert.equal(adapter.chatUrlForAccount({ provider_account_id: "@exampleoa" }), "https://chat.line.biz/account/@exampleoa");
   assert.equal(adapter.chatUrlForAccount({ provider_account_id: "exampleoa" }), "https://chat.line.biz/account/@exampleoa");
+  assert.equal(adapter.providerStatusReady({ ok: true }), true);
 
   assert.deepEqual(plain(adapter.normalizeAccount({ provider_account_id: " exampleoa ", bot_id: "ignored", display_name: " Example Store " }, "2026-08-30T00:00:00.000Z")), {
     provider: "line_oa",

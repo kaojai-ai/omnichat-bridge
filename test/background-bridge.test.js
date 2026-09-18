@@ -27,13 +27,26 @@ test("reopening LINE refreshes account readiness before publishing live status w
   assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
 });
 
-test("marks an unhealthy provider tab for attention without automatic reloads", () => {
-  assert.doesNotMatch(source, /chrome\.tabs\.reload\s*\(tab\.id\)/);
+test("retries an unhealthy provider tab without creating a replacement", () => {
+  assert.match(source, /chrome\.tabs\.reload\(tab\.id\)/);
+  assert.match(source, /PROVIDER_RECOVERY_FAILURE_THRESHOLD/);
+  assert.match(source, /recoveryRetryDelay\(failureCount\)/);
   assert.doesNotMatch(source, /allowTabRecovery && attempts >= 2/);
   assert.match(source, /PROVIDER_RECOVERY_STATES\.needsAttention/);
   assert.match(source, /providerRecoveryFailureReason\(/);
   assert.match(source, /content_unready/);
   assert.match(source, /Refresh the tab manually and try again/);
+});
+
+test("keeps provider recovery one-tab and toggle-gated across retries", () => {
+  assert.match(source, /const providerRecoveryTabLocks = new Map\(\)/);
+  assert.match(source, /if \(existing\) return existing;/);
+  assert.match(source, /providerHealthWatchdogPromise/);
+  assert.match(source, /stored\[STORAGE\.unattendedRecovery\] === true/);
+  assert.match(source, /tab_id: null/);
+  assert.match(source, /opened_by_extension: true/);
+  assert.match(source, /opened_by_extension: false/);
+  assert.match(source, /Recovery will create one replacement on its next retry/);
 });
 
 test("reattaches an invalidated content bridge without refreshing the provider page", () => {
