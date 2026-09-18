@@ -60,6 +60,14 @@ each new Seller Centre page load opens the mini-chat once, detects the current
 shop, and starts the normal automatic sync. Turning it off does not close an
 already-open chat or cancel a sync that is already running.
 
+The shared **Recover provider tabs automatically** preference is also off by
+default. When enabled, recovery can create at most one tracked Shopee tab. A
+redirect, sign-in page, failed bridge, or closed tracked tab stays associated
+with that provider record. Recovery reinjects the bridge first, then retries
+the same tab with capped backoff; it never creates a replacement while the
+tracked tab still exists. Closing the tracked tab allows one replacement on a
+later retry.
+
 Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.
 Recovery may fetch missed messages after the seller returns. The bridge keeps

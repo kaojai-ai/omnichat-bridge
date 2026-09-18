@@ -100,6 +100,20 @@
     } : null;
   }
 
+  function providerStatusReady(status) {
+    return Boolean(status?.ok);
+  }
+
+  function providerStatusHealthy(status, { staleMs = 60_000 } = {}) {
+    if (!providerStatusReady(status) || status.realtime_connected !== true) return false;
+    const checkedAtValue = typeof status.last_provider_check_at === "string"
+      ? status.last_provider_check_at.trim()
+      : "";
+    if (!checkedAtValue) return true;
+    const checkedAt = Date.parse(checkedAtValue);
+    return Number.isFinite(checkedAt) && Date.now() - checkedAt <= staleMs;
+  }
+
   globalThis.OmnichatLineOA = { chatItems, normalizeMessages, normalizeAccount, basicIdFromHtml };
   globalThis.OmnichatProviderAdapters?.register({
     id: "line_oa",
@@ -114,6 +128,8 @@
         : "https://chat.line.biz/";
     },
     tabQueryPattern: "https://chat.line.biz/*",
+    providerStatusReady,
+    providerStatusHealthy,
     capabilities: ["account_detection", "message_observation", "message_recovery"],
     sendCommands: ["send_text", "send_image", "send_sticker"],
     matchesUrl: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),

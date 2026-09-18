@@ -31,6 +31,15 @@ import {
   writeAccountState,
   writeStorage,
 } from "./lib/storage.js";
+import {
+  PROVIDER_RECOVERY_FAILURE_THRESHOLD,
+  PROVIDER_RECOVERY_STATES,
+  normalizeProviderRecoveryTabs,
+  providerRecoveryRecord,
+  recoveryRetryDelay,
+  recoveryRetryDue,
+  updateProviderRecoveryRecord,
+} from "./lib/provider-recovery.js";
 import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
@@ -112,10 +121,11 @@ const liveConnections = new Map();
 const apiPingAttempts = new Map();
 const providerBridgeReinjections = new Map();
 const sellerCentreLandingStarts = new Map();
-const providerRecoveryAttempts = new Map();
 const providerAutomaticRecoveries = new Map();
 const providerAutomaticRetryAttempts = new Map();
 const providerAutomaticRetryAt = new Map();
+const providerRecoveryTabLocks = new Map();
+let providerHealthWatchdogPromise = null;
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -911,13 +921,18 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
-  const stored = await readStorage([STORAGE.commandTab]);
+  const stored = await readStorage([STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
   const tabs = await providerChatTabs(adapter);
-  const selectedTab = Number.isInteger(tabId)
-    ? tabs.find((tab) => tab.id === tabId) ?? null
-    : null;
-  const orderedTabs = orderProviderTabs(adapter, tabs, tabId);
+  const recoveryTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
+  const trackedTab = await getTab(recoveryTabId);
+  const selectedTab = trackedTab
+    || (Number.isInteger(tabId) ? tabs.find((tab) => tab.id === tabId) ?? null : null);
+  const orderedTabs = orderProviderTabs(
+    adapter,
+    trackedTab && !tabs.some((tab) => tab.id === trackedTab.id) ? [trackedTab, ...tabs] : tabs,
+    trackedTab?.id ?? tabId,
+  );
   if (prepareForSend && adapter.id === "shopee") {
     for (const candidate of orderedTabs.filter((tab) => adapter.surfaceForUrl?.(tab.url) === "seller-centre")) {
       if (await isReadyProviderTab(candidate, adapter)) continue;
@@ -944,7 +959,8 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
     ? adapter.chatUrlForAccount(context.account)
     : adapter.chatUrl;
   if (!tab && createIfMissing && typeof chatUrl === "string" && chatUrl.trim()) {
-    tab = await chrome.tabs.create({ url: chatUrl, active: false });
+    const recovery = await ensureProviderRecoveryTab(adapter, context, true);
+    tab = recovery.tab;
   }
   if (!tab?.id) {
     await recordLog("warn", "provider", "tab_missing", `${label} chat tab is unavailable for an outbound reply.`, {
@@ -1181,6 +1197,319 @@ async function ensureProviderHealthAlarm(shouldRun) {
   });
 }
 
+function providerRecoveryUrl(adapter, account) {
+  if (typeof adapter?.recoveryUrlForAccount === "function") {
+    return adapter.recoveryUrlForAccount(account);
+  }
+  if (typeof adapter?.chatUrlForAccount === "function") {
+    return adapter.chatUrlForAccount(account);
+  }
+  return adapter?.chatUrl;
+}
+
+function providerRecoveryContexts(contexts, adapter) {
+  return contexts.filter((context) => context.adapter.id === adapter.id);
+}
+
+async function updateProviderRecoveryLiveState(contexts, adapter, {
+  state = null,
+  reason = null,
+  tabId = null,
+} = {}) {
+  const matchingContexts = providerRecoveryContexts(contexts, adapter);
+  if (!matchingContexts.length) return;
+  const stored = await readStorage([STORAGE.live]);
+  let nextLive = stored[STORAGE.live];
+  let changed = false;
+  const updatedAt = new Date().toISOString();
+  for (const context of matchingContexts) {
+    const current = readAccountState(nextLive, context.key, {});
+    const patch = {
+      provider_recovery_state: state,
+      provider_recovery_reason: reason,
+      provider_recovery_tab_id: Number.isInteger(tabId) ? tabId : null,
+    };
+    if (Object.entries(patch).every(([key, value]) => current[key] === value)) continue;
+    nextLive = writeAccountState(nextLive, context.key, {
+      ...current,
+      ...patch,
+      provider_recovery_updated_at: updatedAt,
+    });
+    changed = true;
+  }
+  if (changed) await writeStorage({ [STORAGE.live]: nextLive });
+}
+
+async function updateProviderRecoveryTabState(provider, patch) {
+  return exclusive(async () => {
+    const stored = await readStorage([STORAGE.providerRecoveryTabs]);
+    const next = updateProviderRecoveryRecord(stored[STORAGE.providerRecoveryTabs], provider, patch);
+    await writeStorage({ [STORAGE.providerRecoveryTabs]: next });
+    return providerRecoveryRecord(next, provider);
+  });
+}
+
+async function clearProviderRecoveryLiveState() {
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const contexts = configuredAccountContexts(stored);
+  for (const adapter of providerAdapters.list()) {
+    if (providerRecoveryContexts(contexts, adapter).length) {
+      await updateProviderRecoveryLiveState(contexts, adapter);
+    }
+  }
+}
+
+async function getTab(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  try {
+    return await chrome.tabs.get(tabId);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
+  const stored = await readStorage([STORAGE.providerRecoveryTabs]);
+  let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id);
+  const listedTabs = await providerChatTabs(adapter);
+  let trackedTab = await getTab(record?.tab_id);
+
+  if (!trackedTab && record?.tab_id !== null && record?.tab_id !== undefined) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      tab_id: null,
+      reason: "The tracked provider tab is no longer open. A replacement will be created when recovery is enabled.",
+    });
+  }
+
+  if (!trackedTab && listedTabs.length) {
+    const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
+    let selectedHealthy = null;
+    for (const candidate of orderedTabs) {
+      const status = await providerTabStatus(candidate);
+      if (providerTabHealthy(status, adapter)) {
+        selectedHealthy = candidate;
+        break;
+      }
+    }
+    trackedTab = selectedHealthy ?? orderedTabs[0] ?? null;
+    if (trackedTab && allowTabRecovery) {
+      const healthy = trackedTab === selectedHealthy;
+      record = await updateProviderRecoveryTabState(adapter.id, {
+        state: healthy ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
+        tab_id: trackedTab.id,
+        opened_by_extension: false,
+        opened_at: record?.opened_at ?? null,
+        failure_count: healthy ? 0 : record?.failure_count ?? 0,
+        last_failure_at: healthy ? null : record?.last_failure_at ?? null,
+        next_retry_at: healthy ? null : record?.next_retry_at ?? null,
+        reason: healthy ? null : "An existing provider tab needs recovery.",
+      });
+      await recordLog("info", "recovery", "provider_tab_selected", `${providerLabel(adapter)} existing tab selected for recovery.`, {
+        provider: adapter.id,
+        tab_id: trackedTab.id,
+        healthy,
+      });
+    }
+  }
+
+  if (trackedTab) return { tab: trackedTab, record };
+
+  if (!allowTabRecovery) {
+    return {
+      tab: null,
+      record,
+      reason: `Open ${providerLabel(adapter)} in Chrome to start syncing.`,
+    };
+  }
+
+  if (record && !recoveryRetryDue(record)) {
+    return {
+      tab: null,
+      record,
+      reason: record.reason || `${providerLabel(adapter)} recovery is waiting before the next retry.`,
+    };
+  }
+
+  const openingAt = Date.now();
+  record = await updateProviderRecoveryTabState(adapter.id, {
+    state: PROVIDER_RECOVERY_STATES.opening,
+    tab_id: null,
+    opened_by_extension: true,
+    opened_at: openingAt,
+    failure_count: record?.failure_count ?? 0,
+    reason: null,
+  });
+  let chatUrl;
+  try {
+    chatUrl = providerRecoveryUrl(adapter, context?.account);
+  } catch (error) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      reason: `${providerLabel(adapter)} recovery URL could not be resolved. ${String(error).slice(0, 180)}`,
+      failure_count: (record?.failure_count ?? 0) + 1,
+      last_failure_at: Date.now(),
+      next_retry_at: Date.now() + recoveryRetryDelay((record?.failure_count ?? 0) + 1),
+    });
+    return { tab: null, record, reason: record.reason, error };
+  }
+  if (typeof chatUrl !== "string" || !chatUrl.trim()) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      reason: `${providerLabel(adapter)} recovery URL is not configured.`,
+      failure_count: (record?.failure_count ?? 0) + 1,
+      last_failure_at: Date.now(),
+      next_retry_at: Date.now() + recoveryRetryDelay((record?.failure_count ?? 0) + 1),
+    });
+    return { tab: null, record, reason: record.reason };
+  }
+  try {
+    const created = await chrome.tabs.create({ url: chatUrl, active: false });
+    if (!Number.isInteger(created?.id)) throw new Error("Chrome did not return a recovery tab ID.");
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.opening,
+      tab_id: created.id,
+      opened_by_extension: true,
+      opened_at: openingAt,
+      failure_count: 0,
+      last_failure_at: null,
+      next_retry_at: null,
+      last_reload_at: null,
+      reason: null,
+    });
+    await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
+      provider: adapter.id,
+      tab_id: created.id,
+    });
+    return { tab: created, record };
+  } catch (error) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      reason: `${providerLabel(adapter)} tab could not be opened. ${String(error).slice(0, 180)}`,
+      failure_count: (record?.failure_count ?? 0) + 1,
+      last_failure_at: Date.now(),
+      next_retry_at: Date.now() + recoveryRetryDelay((record?.failure_count ?? 0) + 1),
+    });
+    return { tab: null, record, reason: record.reason, error };
+  }
+}
+
+function ensureProviderRecoveryTab(adapter, context, allowTabRecovery) {
+  const existing = providerRecoveryTabLocks.get(adapter.id);
+  if (existing) return existing;
+  const operation = resolveProviderRecoveryTab(adapter, context, allowTabRecovery);
+  providerRecoveryTabLocks.set(adapter.id, operation);
+  void operation.then(() => {
+    if (providerRecoveryTabLocks.get(adapter.id) === operation) providerRecoveryTabLocks.delete(adapter.id);
+  }, () => {
+    if (providerRecoveryTabLocks.get(adapter.id) === operation) providerRecoveryTabLocks.delete(adapter.id);
+  });
+  return operation;
+}
+
+function providerRecoveryFailureReason(adapter, tab, status, error) {
+  if (tab?.status === "loading") return `${providerLabel(adapter)} is still loading.`;
+  if (!adapter.matchesUrl(tab?.url)) {
+    return `${providerLabel(adapter)} tab is on a redirect or sign-in page.`;
+  }
+  if (error) return `${providerLabel(adapter)} bridge is unavailable. ${String(error).slice(0, 180)}`;
+  if (!status) return `${providerLabel(adapter)} bridge did not respond to a health check.`;
+  if (status.realtime_connected !== true) return `${providerLabel(adapter)} is connected to the extension but not ready to sync.`;
+  return `${providerLabel(adapter)} is not ready to sync.`;
+}
+
+async function markClosedProviderRecoveryTab(tabId) {
+  const changedProviders = await exclusive(async () => {
+    const stored = await readStorage([STORAGE.providerRecoveryTabs]);
+    const states = normalizeProviderRecoveryTabs(stored[STORAGE.providerRecoveryTabs]);
+    const changed = [];
+    let next = states;
+    for (const [provider, record] of Object.entries(states.providers)) {
+      if (record.tab_id !== tabId) continue;
+      next = updateProviderRecoveryRecord(next, provider, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention,
+        tab_id: null,
+        last_failure_at: Date.now(),
+        next_retry_at: null,
+        reason: "The tracked provider tab was closed. Recovery will create one replacement on its next retry.",
+      });
+      changed.push(provider);
+    }
+    if (changed.length) await writeStorage({ [STORAGE.providerRecoveryTabs]: next });
+    return changed;
+  });
+  if (!changedProviders.length) return;
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const contexts = configuredAccountContexts(stored);
+  for (const provider of changedProviders) {
+    const adapter = providerAdapters.get(provider);
+    if (!adapter) continue;
+    const record = providerRecoveryRecord((await readStorage([STORAGE.providerRecoveryTabs]))[STORAGE.providerRecoveryTabs], provider);
+    await updateProviderRecoveryLiveState(contexts, adapter, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      reason: record?.reason,
+      tabId: null,
+    });
+    await recordLog("info", "recovery", "provider_tab_closed", `${providerLabel(adapter)} tracked recovery tab was closed.`, {
+      provider,
+      tab_id: tabId,
+    });
+  }
+}
+
+async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts) {
+  const previousCount = recovery.record?.failure_count ?? 0;
+  const failureCount = previousCount + 1;
+  const now = Date.now();
+  const reason = providerRecoveryFailureReason(adapter, tab, status, error);
+  const shouldReload = failureCount >= PROVIDER_RECOVERY_FAILURE_THRESHOLD
+    && recoveryRetryDue(recovery.record, now)
+    && tab?.status !== "loading";
+  let nextRetryAt = recovery.record?.next_retry_at ?? null;
+  let lastReloadAt = recovery.record?.last_reload_at ?? null;
+  if (shouldReload) {
+    try {
+      await chrome.tabs.reload(tab.id);
+      lastReloadAt = now;
+      nextRetryAt = now + recoveryRetryDelay(failureCount);
+      await recordLog("warn", "recovery", "provider_tab_reloaded", `${providerLabel(adapter)} tab reloaded after repeated health failures.`, {
+        provider: adapter.id,
+        tab_id: tab.id,
+        failure_count: failureCount,
+        next_retry_at: new Date(nextRetryAt).toISOString(),
+      });
+    } catch (reloadError) {
+      await recordUnexpected("provider_tab_reload", reloadError, {
+        provider: adapter.id,
+        tab_id: tab.id,
+        failure_count: failureCount,
+      });
+      nextRetryAt = now + recoveryRetryDelay(failureCount);
+    }
+  } else if (recovery.record?.next_retry_at && !recoveryRetryDue(recovery.record, now)) {
+    await recordLog("debug", "recovery", "provider_tab_backoff", `${providerLabel(adapter)} tab recovery is waiting for its next retry.`, {
+      provider: adapter.id,
+      tab_id: tab.id,
+      failure_count: failureCount,
+      next_retry_at: new Date(recovery.record.next_retry_at).toISOString(),
+    });
+  }
+  const record = await updateProviderRecoveryTabState(adapter.id, {
+    state: PROVIDER_RECOVERY_STATES.needsAttention,
+    tab_id: tab?.id ?? recovery.record?.tab_id ?? null,
+    failure_count: failureCount,
+    last_failure_at: now,
+    next_retry_at: nextRetryAt,
+    last_reload_at: lastReloadAt,
+    reason,
+  });
+  await updateProviderRecoveryLiveState(
+    contexts,
+    adapter,
+    { state: PROVIDER_RECOVERY_STATES.needsAttention, reason, tabId: record.tab_id },
+  );
+}
+
 function startUnattendedProviderSync(tab, context) {
   const tabId = tab?.id;
   const recoveryKey = context?.key;
@@ -1223,7 +1552,7 @@ function startUnattendedProviderSync(tab, context) {
   });
 }
 
-async function runProviderHealthWatchdog() {
+async function runProviderHealthWatchdogOnce() {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -1236,66 +1565,106 @@ async function runProviderHealthWatchdog() {
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
   if (!enabled) {
+    await clearProviderRecoveryLiveState();
     await ensureProviderHealthAlarm(false);
     return;
   }
   const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
+  if (!allowTabRecovery) {
+    await clearProviderRecoveryLiveState();
+    await ensureProviderHealthAlarm(false);
+    return;
+  }
   for (const adapter of providerAdapters.list()) {
-    if (!contexts.some((context) => context.adapter.id === adapter.id)) continue;
-    let tabs;
+    const matchingContexts = providerRecoveryContexts(contexts, adapter);
+    if (!matchingContexts.length) continue;
+    const context = matchingContexts[0];
+    let recovery;
     try {
-      tabs = await providerChatTabs(adapter);
+      recovery = await ensureProviderRecoveryTab(adapter, context, allowTabRecovery);
     } catch (error) {
       await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
+      await updateProviderRecoveryLiveState(contexts, adapter, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention,
+        reason: `${providerLabel(adapter)} recovery check failed. ${String(error).slice(0, 180)}`,
+      });
       continue;
     }
-    if (!tabs.length && allowTabRecovery) {
-      try {
-        const context = contexts.find((candidate) => candidate.adapter.id === adapter.id);
-        const chatUrl = typeof adapter.chatUrlForAccount === "function"
-          ? adapter.chatUrlForAccount(context?.account)
-          : adapter.chatUrl;
-        await chrome.tabs.create({ url: chatUrl, active: false });
-        await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
-          provider: adapter.id,
-        });
-      } catch (error) {
-        await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
-      }
+    if (recovery.error) {
+      await recordUnexpected("provider_watchdog", recovery.error, { provider: adapter.id });
+    }
+    if (!recovery.tab) {
+      await updateProviderRecoveryLiveState(contexts, adapter, {
+        state: recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention,
+        reason: recovery.reason,
+        tabId: recovery.record?.tab_id,
+      });
       continue;
     }
-    for (const tab of tabs) {
-      try {
-        await reconnectProviderTab(tab);
-        const status = await providerTabStatus(tab);
-        if (!providerTabHealthy(status, adapter)) {
-          throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
-        }
-        if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
-          const context = contexts.find((candidate) => candidate.adapter.id === adapter.id);
-          startUnattendedProviderSync(tab, context);
-        }
-        providerRecoveryAttempts.delete(tab.id);
-      } catch (error) {
-        const attempts = (providerRecoveryAttempts.get(tab.id) ?? 0) + 1;
-        providerRecoveryAttempts.set(tab.id, attempts);
-        await recordUnexpected("provider_watchdog", error, {
+    const tab = recovery.tab;
+    if (recovery.record?.state === PROVIDER_RECOVERY_STATES.needsAttention
+      && !recoveryRetryDue(recovery.record)) {
+      await updateProviderRecoveryLiveState(contexts, adapter, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention,
+        reason: recovery.record.reason || `${providerLabel(adapter)} recovery is waiting before the next retry.`,
+        tabId: tab.id,
+      });
+      continue;
+    }
+    try {
+      if (!adapter.matchesUrl(tab.url)) {
+        await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
           provider: adapter.id,
           tab_id: tab.id,
-          recovery_attempt: attempts,
+          url: typeof tab.url === "string" ? tab.url.slice(0, 240) : null,
         });
-        if (allowTabRecovery && attempts >= 2 && tab.status !== "loading") {
-          await chrome.tabs.reload(tab.id);
-          providerRecoveryAttempts.set(tab.id, 0);
-          await recordLog("warn", "recovery", "provider_tab_reloaded", `${providerLabel(adapter)} tab reloaded after automatic bridge recovery failed.`, {
-            provider: adapter.id,
-          });
-        }
+        throw new Error(`${providerLabel(adapter)} tab is on a redirect or sign-in page.`);
       }
+      await reconnectProviderTab(tab);
+      const status = await providerTabStatus(tab);
+      if (!providerTabHealthy(status, adapter)) {
+        throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+      }
+      if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
+        startUnattendedProviderSync(tab, context);
+      }
+      const record = recovery.record?.tab_id === tab.id
+        ? await updateProviderRecoveryTabState(adapter.id, {
+          state: PROVIDER_RECOVERY_STATES.ready,
+          reason: null,
+          failure_count: 0,
+          last_failure_at: null,
+          next_retry_at: null,
+          last_reload_at: recovery.record?.last_reload_at ?? null,
+        })
+        : recovery.record;
+      await updateProviderRecoveryLiveState(contexts, adapter, {
+        state: PROVIDER_RECOVERY_STATES.ready,
+        reason: null,
+        tabId: record?.tab_id ?? tab.id,
+      });
+    } catch (error) {
+      await recordUnexpected("provider_watchdog", error, {
+        provider: adapter.id,
+        tab_id: tab.id,
+      });
+      const status = await providerTabStatus(tab);
+      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts);
     }
   }
   await ensureLiveConnection();
   await exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+}
+
+async function runProviderHealthWatchdog() {
+  if (providerHealthWatchdogPromise) return providerHealthWatchdogPromise;
+  const operation = runProviderHealthWatchdogOnce();
+  providerHealthWatchdogPromise = operation;
+  try {
+    return await operation;
+  } finally {
+    if (providerHealthWatchdogPromise === operation) providerHealthWatchdogPromise = null;
+  }
 }
 
 async function pingConfiguredAccountApis() {
@@ -1565,6 +1934,7 @@ async function ensureLiveConnection() {
     STORAGE.consent,
     STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
+    STORAGE.unattendedRecovery,
   ]);
   const configuredContexts = configuredAccountContexts(stored);
   const pingContexts = apiPingContexts(configuredContexts);
@@ -1574,8 +1944,10 @@ async function ensureLiveConnection() {
   await ensureApiPingAlarm(canPing);
   const canWatch = configuredContexts.length > 0
     && hasServerInitialized(stored)
-    && hasLocalConsent(stored[STORAGE.consent]);
+    && hasLocalConsent(stored[STORAGE.consent])
+    && stored[STORAGE.unattendedRecovery] === true;
   await ensureProviderHealthAlarm(canWatch);
+  if (!canWatch) await clearProviderRecoveryLiveState();
   if (canPing) {
     ensureApiPings(pingContexts);
   }
@@ -1780,7 +2152,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   sellerCentreLandingStarts.delete(tabId);
-  providerRecoveryAttempts.delete(tabId);
+  void markClosedProviderRecoveryTab(tabId).catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -1937,23 +2309,17 @@ async function providerTabStatus(tab) {
 }
 
 function providerTabIsReady(status, adapter) {
-  if (adapter?.id !== "shopee") return Boolean(status?.ok);
-  return Boolean(
-    status?.surface_ready === true
-    && status?.capabilities?.account_detection === true
-    && status?.capabilities?.message_observation === true
-    && status?.capabilities?.message_recovery === true
-    && status?.capabilities?.send_text === true
-    && status?.capabilities?.send_image === true
-    && status?.capabilities?.send_product === true,
-  );
+  if (typeof adapter?.providerStatusReady === "function") {
+    return adapter.providerStatusReady(status) === true;
+  }
+  return Boolean(status?.ok);
 }
 
 function providerTabHealthy(status, adapter) {
-  if (!providerTabIsReady(status, adapter)) return false;
-  if (adapter?.id === "shopee" && status?.surface === "seller-centre" && status?.chat_open === false) {
-    return true;
+  if (typeof adapter?.providerStatusHealthy === "function") {
+    return adapter.providerStatusHealthy(status, { staleMs: PROVIDER_HEALTH_STALE_MS }) === true;
   }
+  if (!providerTabIsReady(status, adapter)) return false;
   if (status?.realtime_connected !== true) return false;
   const checkedAtValue = typeof status?.last_provider_check_at === "string"
     ? status.last_provider_check_at.trim()

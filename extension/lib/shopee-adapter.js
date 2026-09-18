@@ -135,6 +135,30 @@
     };
   }
 
+  function providerStatusReady(status) {
+    return Boolean(
+      status?.surface_ready === true
+      && status?.capabilities?.account_detection === true
+      && status?.capabilities?.message_observation === true
+      && status?.capabilities?.message_recovery === true
+      && status?.capabilities?.send_text === true
+      && status?.capabilities?.send_image === true
+      && status?.capabilities?.send_product === true
+    );
+  }
+
+  function providerStatusHealthy(status, { staleMs = 60_000 } = {}) {
+    if (!providerStatusReady(status)) return false;
+    if (status.surface === "seller-centre" && status.chat_open === false) return true;
+    if (status.realtime_connected !== true) return false;
+    const checkedAtValue = typeof status.last_provider_check_at === "string"
+      ? status.last_provider_check_at.trim()
+      : "";
+    if (!checkedAtValue) return true;
+    const checkedAt = Date.parse(checkedAtValue);
+    return Number.isFinite(checkedAt) && Date.now() - checkedAt <= staleMs;
+  }
+
   registry.register({
     id: "shopee",
     displayName: "Shopee Seller Chat",
@@ -148,6 +172,8 @@
     matchesPage: (url) => globalThis.OmnichatShopeeUrl?.isShopeePageUrl(url) === true,
     matchesUrl: (url) => globalThis.OmnichatShopeeUrl?.isShopeeChatUrl(url) === true,
     surfaceForUrl: (url) => globalThis.OmnichatShopeeUrl?.surfaceForUrl(url) ?? null,
+    providerStatusReady,
+    providerStatusHealthy,
     accountsFromPayload,
     conversationItems,
     normalizeAccount,
