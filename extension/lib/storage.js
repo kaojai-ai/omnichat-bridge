@@ -13,6 +13,7 @@ export const STORAGE = {
   live: "live_status",
   commandTab: "command_tab",
   unattendedRecovery: "unattended_recovery",
+  providerRecoveryTabs: "provider_recovery_tabs",
   language: "language",
   serverInitialized: "server_initialized",
   logs: "operational_logs",

@@ -2,8 +2,42 @@ import { sanitizeLogText } from "./logs.js";
 
 const SELLER_CENTRE_SURFACE = "seller-centre";
 
+export function providerConnectionStatus(live) {
+  if (live?.socket !== "connected") return null;
+  if (live.provider_recovery_state === "needs_attention") {
+    return {
+      label: "CONNECTED · ACTION REQUIRED",
+      state: "warning",
+      hint: live.provider_recovery_reason || "The provider tab needs attention before syncing can continue.",
+      action: "logs",
+    };
+  }
+  if (live.provider_recovery_state === "opening") {
+    return {
+      label: "CONNECTED · OPENING PROVIDER",
+      state: "warning",
+      hint: live.provider_recovery_reason || "The provider tab is opening.",
+    };
+  }
+  if (live.provider_recovery_state === "ready") {
+    return {
+      label: "CONNECTED · PROVIDER READY",
+      state: "ready",
+      hint: "Connected to your server. The provider bridge is ready.",
+    };
+  }
+  return {
+    label: "CONNECTED · CHECKING PROVIDER",
+    state: "warning",
+    hint: "Connected to your server. Provider readiness is still being checked.",
+  };
+}
+
 export function sellerCentreConnectionStatus(live) {
   if (live?.socket !== "connected" || live?.provider_surface !== SELLER_CENTRE_SURFACE) return null;
+  if (["opening", "needs_attention"].includes(live.provider_recovery_state)) {
+    return providerConnectionStatus(live);
+  }
   if (live.provider_surface_ready === true) {
     return {
       label: "CONNECTED · CHAT READY",

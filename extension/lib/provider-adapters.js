@@ -17,6 +17,15 @@
     if (adapter.configOrigins !== undefined && typeof adapter.configOrigins !== "function") {
       throw new Error(`Provider adapter ${id} has an invalid config origin resolver.`);
     }
+    if (adapter.recoveryUrlForAccount !== undefined && typeof adapter.recoveryUrlForAccount !== "function") {
+      throw new Error(`Provider adapter ${id} has an invalid recovery URL resolver.`);
+    }
+    if (adapter.providerStatusReady !== undefined && typeof adapter.providerStatusReady !== "function") {
+      throw new Error(`Provider adapter ${id} has an invalid provider readiness resolver.`);
+    }
+    if (adapter.providerStatusHealthy !== undefined && typeof adapter.providerStatusHealthy !== "function") {
+      throw new Error(`Provider adapter ${id} has an invalid provider health resolver.`);
+    }
     if (adapter.accountDetectionHints !== undefined && typeof adapter.accountDetectionHints !== "function") {
       throw new Error(`Provider adapter ${id} has an invalid account detection hint resolver.`);
     }

@@ -27,9 +27,11 @@ test("reopening LINE refreshes account readiness before publishing live status w
   assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
 });
 
-test("reloads a provider tab only after unattended recovery health checks fail repeatedly", () => {
-  assert.match(source, /chrome\.tabs\.reload\s*\(tab\.id\)/);
-  assert.match(source, /allowTabRecovery && attempts >= 2/);
+test("marks an unhealthy provider tab for attention without automatic reloads", () => {
+  assert.doesNotMatch(source, /chrome\.tabs\.reload\s*\(tab\.id\)/);
+  assert.doesNotMatch(source, /allowTabRecovery && attempts >= 2/);
+  assert.match(source, /PROVIDER_RECOVERY_STATES\.needsAttention/);
+  assert.match(source, /providerRecoveryFailureReason\(/);
   assert.match(source, /content_unready/);
   assert.match(source, /Refresh the tab manually and try again/);
 });
