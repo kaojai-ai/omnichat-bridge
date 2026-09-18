@@ -59,17 +59,43 @@ export function sellerCentreConnectionStatus(live) {
   };
 }
 
+function latestSuccessfulActivityAt(state) {
+  return [state?.last_sync_at, state?.last_capture_at, state?.last_delivery_at]
+    .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+}
+
 export function latestSyncFailure(states) {
   const failures = states.flatMap((state) => [
-    { message: state?.delivery_error, at: state?.delivery_error_at, stage: "Sending queued messages" },
-    { message: state?.sync_error, at: state?.sync_error_at, stage: "Checking provider messages" },
-  ]).filter((failure) => failure.message);
+    {
+      message: state?.delivery_error,
+      at: state?.delivery_error_at,
+      stage: "Sending queued messages",
+      accountLabel: state?.account_label,
+      successfulActivityAt: latestSuccessfulActivityAt(state),
+    },
+    {
+      message: state?.sync_error,
+      at: state?.sync_error_at,
+      stage: "Checking provider messages",
+      accountLabel: state?.account_label,
+      successfulActivityAt: latestSuccessfulActivityAt(state),
+    },
+  ]).filter((failure) => {
+    if (!failure.message) return false;
+    const errorAt = Date.parse(failure.at ?? "");
+    const successfulAt = Date.parse(failure.successfulActivityAt ?? "");
+    return !Number.isFinite(errorAt)
+      || !Number.isFinite(successfulAt)
+      || successfulAt <= errorAt;
+  });
   failures.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
   const failure = failures[0];
   if (!failure) return "";
   const detail = sanitizeLogText(failure.message);
+  const accountLabel = failure.accountLabel ? ` (${sanitizeLogText(failure.accountLabel)})` : "";
   if (/failed to fetch|networkerror|network request failed/i.test(detail)) {
-    return `${failure.stage} failed: ${detail}. No HTTP response was available. Check your connection and server availability, then retry.`;
+    return `${failure.stage}${accountLabel} failed: ${detail}. No HTTP response was available. Check your connection and server availability, then retry.`;
   }
-  return `${failure.stage} failed: ${detail}`;
+  return `${failure.stage}${accountLabel} failed: ${detail}`;
 }

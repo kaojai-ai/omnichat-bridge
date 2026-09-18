@@ -49,6 +49,24 @@ test("keeps provider recovery one-tab and toggle-gated across retries", () => {
   assert.match(source, /Recovery will create one replacement on its next retry/);
 });
 
+test("keeps provider recovery state scoped to the matching provider accounts", () => {
+  const start = source.indexOf("function providerRecoveryContexts(");
+  const end = source.indexOf("\n}\n\nasync function updateProviderRecoveryLiveState", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const providerRecoveryContexts = vm.runInNewContext(`(${source.slice(start, end + 2)})`);
+  const contexts = [
+    { key: "line_oa:@line", adapter: { id: "line_oa" } },
+    { key: "shopee:shop-1", adapter: { id: "shopee" } },
+  ];
+  assert.deepEqual(
+    providerRecoveryContexts(contexts, { id: "shopee" }).map((context) => context.key),
+    ["shopee:shop-1"],
+  );
+  assert.match(source, /import \{ accountConfigKey, accountKey, findAccountConfig \}/);
+  assert.match(source, /const key = accountConfigKey\(configuredAccount\)/);
+});
+
 test("reattaches an invalidated content bridge without refreshing the provider page", () => {
   assert.match(source, /async function reinjectProviderBridge\(/);
   assert.match(source, /async function reattachOpenProviderBridges\(/);
@@ -206,6 +224,19 @@ test("resumes an interrupted sync after the service worker restarts", () => {
 
 test("starts provider recovery with visible conversation progress", () => {
   assert.match(source, /state: "syncing",\n      phase: "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);
+});
+
+test("records unattended provider recovery through account sync bookkeeping", () => {
+  const start = source.indexOf("function startUnattendedProviderSync(");
+  const end = source.indexOf("\n}\n\nasync function runProviderHealthWatchdogOnce", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const automaticSource = source.slice(start, end);
+  assert.match(automaticSource, /runAccountSync\("automatic", control, context\)/);
+  assert.match(automaticSource, /preferredTabId: tabId/);
+  assert.match(source, /const trackedTabId = providerRecoveryRecord\(/);
+  assert.match(source, /const preferredTabId = control\.preferredTabId \?\? trackedTabId/);
+  assert.match(source, /if \(result\?\.error\) throw new Error\(result\.error\);/);
 });
 
 test("cooldown also covers a successful manual sync before lifecycle resume", () => {

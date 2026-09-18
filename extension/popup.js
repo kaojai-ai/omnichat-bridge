@@ -670,7 +670,10 @@ function renderDashboard(message = "", isError = false) {
     || item.scanState?.in_progress === true
   ));
   const anyPending = configuredStates.some((item) => item.pending.length > 0 || item.scanState?.in_progress);
-  const statusFailure = latestSyncFailure(configuredStates.map((item) => item.syncState));
+  const statusFailure = latestSyncFailure(configuredStates.map((item) => ({
+    ...item.syncState,
+    account_label: accountDisplayLabel(item.account, adapterForAccount(item.account)),
+  })));
   const latestFailure = statusFailure
     || (pendingTotal ? latestLoggedDeliveryFailure?.details.error_message : "")
     || latestLoggedProviderFailure?.details.error_message

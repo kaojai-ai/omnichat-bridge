@@ -53,5 +53,5 @@ test("acknowledges successful provider replies before releasing the restart queu
   const handler = backgroundSource.slice(start, end);
   assert.match(handler, /await exclusive\(async \(\) => \{/);
   assert.match(handler, /socket\.send\(JSON\.stringify\(\{[\s\S]*ok: true/);
-  assert.match(manifest, /"version": "0\.6\.32"/);
+  assert.match(manifest, /"version": "0\.6\.33"/);
 });

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { providerConnectionStatus, sellerCentreConnectionStatus } from "../extension/lib/popup-status.js";
+import {
+  latestSyncFailure,
+  providerConnectionStatus,
+  sellerCentreConnectionStatus,
+} from "../extension/lib/popup-status.js";
 
 const connected = {
   socket: "connected",
@@ -79,4 +83,26 @@ test("shows a ready Seller Centre chat after its request templates are captured"
 
 test("does not change the legacy connected label", () => {
   assert.equal(sellerCentreConnectionStatus({ socket: "connected", provider_surface: "legacy" }), null);
+});
+
+test("hides a sync error after a later successful activity", () => {
+  assert.equal(
+    latestSyncFailure([{
+      sync_error: "Open LINE Official Account to sync messages.",
+      sync_error_at: "2026-09-18T05:00:00.000Z",
+      last_sync_at: "2026-09-18T05:10:00.000Z",
+    }]),
+    "",
+  );
+});
+
+test("scopes the latest sync error to its provider account", () => {
+  assert.equal(
+    latestSyncFailure([{
+      account_label: "LINE OA: Support",
+      sync_error: "Open LINE Official Account to sync messages.",
+      sync_error_at: "2026-09-18T05:00:00.000Z",
+    }]),
+    "Checking provider messages (LINE OA: Support) failed: Open LINE Official Account to sync messages.",
+  );
 });

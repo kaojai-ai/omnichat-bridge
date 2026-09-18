@@ -1513,22 +1513,22 @@ async function handleProviderRecoveryFailure(adapter, tab, status, recovery, err
 function startUnattendedProviderSync(tab, context) {
   const tabId = tab?.id;
   const recoveryKey = context?.key;
-  if (!Number.isInteger(tabId) || !recoveryKey || providerAutomaticRecoveries.has(recoveryKey)) return;
+  if (
+    !Number.isInteger(tabId)
+    || !recoveryKey
+    || activeSync
+    || providerAutomaticRecoveries.has(recoveryKey)
+  ) return;
   if ((providerAutomaticRetryAt.get(recoveryKey) ?? 0) > Date.now()) return;
   const adapter = context.adapter;
-  const request = sendProviderMessage(tabId, {
-    type: "sync_now_v3",
-    provider: adapter.id,
-    provider_account_id: context.account.provider_account_id,
-    ...(context.config.bot_id || context.account.bot_id
-      ? { bot_id: context.config.bot_id || context.account.bot_id }
-      : {}),
-  }, {
-    label: providerLabel(adapter),
-    operation: "unattended recovery sync",
-    timeoutMs: PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
-  }).then((result) => {
-    if (!result?.ok) throw new Error(result?.error ?? `${providerLabel(adapter)} unattended sync failed.`);
+  const control = {
+    controller: new AbortController(),
+    tabId,
+    adapter,
+    preferredTabId: tabId,
+  };
+  const request = runAccountSync("automatic", control, context).then((result) => {
+    if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
     providerAutomaticRetryAt.delete(recoveryKey);
     return result;
@@ -2783,7 +2783,14 @@ async function syncOpenProvider(control, context) {
   }
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
-  const tab = await findReadyProviderChatTab(adapter) ?? await findProviderChatTab(adapter);
+  const stored = await readStorage([STORAGE.providerRecoveryTabs]);
+  const trackedTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
+  const preferredTabId = control.preferredTabId ?? trackedTabId;
+  const preferredTab = await providerChatTabById(adapter, preferredTabId);
+  let tab = null;
+  if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
+  if (!tab) tab = await findReadyProviderChatTab(adapter);
+  if (!tab) tab = preferredTab ?? await findProviderChatTab(adapter);
   if (!tab) throw new Error(`Open ${label} to sync messages.`);
   control.tabId = tab.id;
   control.adapter = adapter;
