@@ -102,7 +102,12 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
 Optional conversation fields: `open_url`, `participants`.
 
 Optional message fields: `sender_account_id`, `recipient_account_id`,
-`text`, `media_url`, `provider_type`, `command_id`, `client_message_id`.
+`text`, `media_url`, `provider_type`, `provider_content`, `command_id`,
+`client_message_id`.
+
+`provider_content` is the original provider message body for
+`type: "unsupported"`. The receiver stores it for later display and omits a
+body larger than 64 KiB.
 
 `capture_method` is one of `network_observer`, `poll`, `realtime_socket`, or
 `history_recovery`.

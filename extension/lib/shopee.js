@@ -248,6 +248,7 @@ function parseShopeeMessages(payload, captureMethod) {
         }
         : {}),
       ...(parsedType.provider_type ? { provider_type: parsedType.provider_type } : {}),
+      ...(parsedType.type === "unsupported" && content ? { provider_content: content } : {}),
       capture_method: captureMethod
     });
   }

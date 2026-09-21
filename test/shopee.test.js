@@ -213,3 +213,61 @@ test("prefers Shopee's player URL over a legacy video CDN URL", () => {
 
   assert.equal(messages[0].media_url, playerUrl);
 });
+
+test("keeps unsupported Shopee card content for later display", () => {
+  const content = {
+    questions: [
+      { text: "สินค้าของฉันจะจัดส่งเมื่อไหร่" },
+    ],
+  };
+  const [message] = context.OmnichatShopee.parseShopeeMessages({
+    id: "faq-1",
+    conversation_id: "conversation-1",
+    from_id: "shop-user-1",
+    from_shop_id: "shop-1",
+    to_id: "buyer-1",
+    type: "new_faq",
+    created_timestamp: 1_753_225_200,
+    content,
+  }, "poll");
+
+  assert.equal(message.type, "unsupported");
+  assert.equal(message.provider_type, "new_faq");
+  assert.equal(message.text, undefined);
+  assert.deepEqual(message.provider_content, content);
+});
+
+test("parses unsupported Shopee content when it arrives as a JSON string", () => {
+  const content = { order_id: "order-1", status: "paid" };
+  const [message] = context.OmnichatShopee.parseShopeeMessages({
+    id: "order-1",
+    conversation_id: "conversation-1",
+    from_id: "shop-user-1",
+    from_shop_id: "shop-1",
+    to_id: "buyer-1",
+    type: "order",
+    created_timestamp: 1_753_225_200,
+    content: JSON.stringify(content),
+  }, "history_recovery");
+
+  assert.equal(message.type, "unsupported");
+  assert.equal(message.provider_type, "order");
+  assert.deepEqual(JSON.parse(JSON.stringify(message.provider_content)), content);
+});
+
+test("does not attach provider content to text messages", () => {
+  const [message] = context.OmnichatShopee.parseShopeeMessages({
+    id: "text-content-1",
+    conversation_id: "conversation-1",
+    from_id: "buyer-1",
+    to_id: "shop-user-1",
+    to_shop_id: "shop-1",
+    type: "text",
+    created_timestamp: 1_753_225_200,
+    content: { text: "Hello" },
+  }, "poll");
+
+  assert.equal(message.type, "text");
+  assert.equal(message.text, "Hello");
+  assert.equal(message.provider_content, undefined);
+});
