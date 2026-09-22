@@ -64,6 +64,7 @@ const API_PING_INTERVAL_MINUTES = 5;
 const PROVIDER_HEALTH_ALARM = "omnichat-provider-health";
 const PROVIDER_HEALTH_INTERVAL_MINUTES = 1;
 const PROVIDER_HEALTH_STALE_MS = 60_000;
+const LIVE_STATUS_HEARTBEAT_INTERVAL_MS = 60_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -2018,7 +2019,7 @@ async function ensureAccountLiveConnection(context) {
               provider_account_id: context.account.provider_account_id,
             }));
         }
-      }, 20_000);
+      }, LIVE_STATUS_HEARTBEAT_INTERVAL_MS);
       void sendConnectionStatus(socket, context)
         .then(() => scheduleLeaderStatusRefresh(context, socket))
         .catch((error) => recordUnexpected("connection_status", error, {
