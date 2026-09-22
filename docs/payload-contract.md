@@ -208,8 +208,9 @@ sync, and queue timestamps. Shopee currently reports `provider_tab`,
 ```
 
 The server records its own `last_seen_at` and does not trust the client
-timestamp for liveness. A connection is stale after 90 seconds without a
-heartbeat. Seller Centre surface and capability details remain local to the
+timestamp for liveness. The extension sends a live status heartbeat every 60
+seconds, and a connection is stale after 180 seconds without one. Seller
+Centre surface and capability details remain local to the
 extension; the server's strict version 1 envelope receives their result through
 the common health checks. Connected and disconnected installation records
 expire after seven days. No IP address, browser user agent, cookies, login

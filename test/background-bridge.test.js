@@ -132,6 +132,27 @@ test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /attemptsRemaining - 1/);
 });
 
+test("uses a 60-second live status heartbeat and preserves immediate status sends", () => {
+  assert.match(source, /const LIVE_STATUS_HEARTBEAT_INTERVAL_MS = 60_000/);
+  const start = source.indexOf("async function ensureAccountLiveConnection(context)");
+  const end = source.indexOf("\n}\n\nfunction scheduleLeaderStatusRefresh", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const connectionSource = source.slice(start, end);
+  assert.match(connectionSource, /sendConnectionStatus\(socket, context\)/);
+  assert.match(connectionSource, /\}, LIVE_STATUS_HEARTBEAT_INTERVAL_MS\);/);
+  assert.doesNotMatch(connectionSource, /20_000/);
+});
+
+test("refreshes live status before a manual sync starts", () => {
+  const start = source.indexOf("async function initializeAndStartSync(trigger)");
+  const end = source.indexOf("\n}\n\nasync function startUnattendedSellerCentreSync", start);
+  assert.ok(start >= 0);
+  assert.ok(end > start);
+  const syncStartSource = source.slice(start, end);
+  assert.match(syncStartSource, /await ensureLiveConnection\(\);\s*return startSync\(trigger\);/);
+});
+
 test("scopes leader changes to the provider shown in the popup", () => {
   assert.match(source, /function providerLiveCommandContexts\(contexts, provider\)/);
   assert.match(source, /context\.adapter\.id === providerId/);
