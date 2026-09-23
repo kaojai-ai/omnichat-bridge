@@ -1041,7 +1041,7 @@
       }
     }
     if (!routing?.shop_id || !routing.to_id) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation was not found in Shopee Seller Chat's conversation list, or its routing is incomplete." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation was not found in the list. It may be closed or more than 7 days since the customer's last message." });
       return;
     }
     try {
