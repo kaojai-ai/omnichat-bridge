@@ -535,7 +535,7 @@ async function saveBootstrapSelection(providerAccountId, conversations, provider
   }, stored[STORAGE.scanState]);
 }
 
-async function advanceScanCursor(providerAccountId, conversationId, cursor, summaryToken, provider = "") {
+async function advanceScanCursor(providerAccountId, conversationId, cursor, provider = "") {
   const id = String(conversationId ?? "").trim();
   if (!id) return;
   const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
@@ -546,9 +546,7 @@ async function advanceScanCursor(providerAccountId, conversationId, cursor, summ
       message_id: cursor.message_id,
     }
     : { ...(previous ?? {}) };
-  if (typeof summaryToken === "string" && summaryToken) {
-    next.summary_token = summaryToken;
-  }
+  delete next.summary_token;
   if (!next.event_timestamp) return;
   await writeAccountScanState(context, {
     ...state,
@@ -817,7 +815,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       message.provider_account_id,
       message.conversation_id,
       message.cursor,
-      message.summary_token,
       message.provider,
     )).then(
       () => respond({ ok: true }),
