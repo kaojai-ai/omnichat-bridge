@@ -1031,15 +1031,16 @@
     if (!routing) {
       try {
         await waitForTemplate();
-        await fetchConversations();
+        await fetchConversationPages({ requiredIds: [conversationId] });
         routing = state.conversationsById.get(conversationId);
       } catch (error) {
         logAsyncError("send_routing", error, { conversation_id: conversationId });
-        // The routing error below gives the user the actionable next step.
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: `Shopee conversation lookup failed: ${error instanceof Error ? error.message : String(error)}` });
+        return;
       }
     }
     if (!routing?.shop_id || !routing.to_id) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Refresh Shopee Seller Chat." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation was not found in Shopee Seller Chat's conversation list, or its routing is incomplete." });
       return;
     }
     try {
