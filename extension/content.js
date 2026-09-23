@@ -553,7 +553,6 @@
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
         cursor: message.cursor,
-        summary_token: message.summary_token,
       });
       post({
         type: "recovery_ack_v3",

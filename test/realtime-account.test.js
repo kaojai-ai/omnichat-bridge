@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { latestMessageCursor } from "../extension/lib/sync-state.js";
 
 const source = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
+const shopeeParserSource = await readFile(new URL("../extension/lib/shopee.js", import.meta.url), "utf8");
 const origin = "https://seller.shopee.co.th";
+const parserContext = vm.createContext({ location: { origin }, URL });
+vm.runInContext(shopeeParserSource, parserContext);
 
 test("keeps the recovery account identity available to reconnect cleanup", () => {
   const recoverStart = source.indexOf("async function recover(");
@@ -27,6 +31,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
+  const acknowledged = new Set();
   const responses = new Map(Object.entries(initialResponses));
   const requests = [];
   const intervals = [];
@@ -195,7 +200,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     return null;
   }
 
-  async function sync(providerAccountId, requestId = "sync-1", checkpoint = { watermark: "2026-08-01T00:00:00.000Z" }) {
+  async function sync(providerAccountId, requestId = "sync-1", checkpoint = { watermark: "2026-08-01T00:00:00.000Z" }, recoveryStore = null) {
     for (const listener of listeners) {
       listener({
         source: window,
@@ -209,8 +214,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
         },
       });
     }
-    const acknowledged = new Set();
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
       for (const post of posts) {
         if (![
           "recovery_batch",
@@ -218,6 +222,15 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
           "recovery_cursor",
         ].includes(post.type) || acknowledged.has(post.request_id)) continue;
         acknowledged.add(post.request_id);
+        const parsed = post.type === "recovery_batch" && recoveryStore
+          ? parserContext.OmnichatShopee.parseShopeeMessages(post.body, "history_recovery")
+          : [];
+        const failed = post.type === "recovery_batch" && recoveryStore?.failNextBatch === true;
+        if (failed) recoveryStore.failNextBatch = false;
+        if (recoveryStore && !failed) {
+          if (post.type === "recovery_batch") recoveryStore.messages.push(...parsed);
+          if (post.type === "recovery_cursor") recoveryStore.conversations[post.conversation_id] = post.cursor;
+        }
         for (const listener of listeners) {
           listener({
             source: window,
@@ -226,14 +239,20 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
               source: "omnichat-realtime-bridge-v3",
               type: "recovery_ack_v3",
               request_id: post.request_id,
-              ok: true,
-              latest_cursor: null,
+              ok: !failed,
+              parsed: parsed.length,
+              queued: failed ? 0 : parsed.length,
+              latest_cursor: failed ? null : latestMessageCursor(parsed),
             },
           });
         }
       }
       const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === requestId);
-      if (complete) return complete;
+      if (complete) {
+        if (complete.ok && recoveryStore) recoveryStore.watermark = complete.watermark;
+        await new Promise((resolve) => setImmediate(resolve));
+        return complete;
+      }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error("Recovery did not complete in the test harness.");
@@ -480,27 +499,75 @@ test("limits recovery to the requested Shop ID", async () => {
   );
 });
 
-test("repeat Shopee sync skips a summary whose message ID matches the saved cursor", async () => {
-  const bridge = createBridge();
+test("Shopee recovery persists a cursor, skips unchanged history, and catches a same-time message", async () => {
   const timestamp = "2026-08-20T10:00:00.000Z";
-  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+  const listPath = "/webchat/api/v1.2/conversations";
+  const historyPath = "/webchat/api/v1.2/conversations/unchanged/messages";
+  const conversation = (messageId) => ({
     id: "unchanged", shop_id: 100000001, last_message_time: timestamp,
-    latest_message_id: "message-1",
-  }]);
+    latest_message_id: messageId,
+  });
+  const message = (id) => ({
+    id, conversation_id: "unchanged", shop_id: 100000001,
+    from_id: "buyer-1", to_id: "shop-1", to_shop_id: 100000001,
+    type: "text", content: { text: id }, created_timestamp: Date.parse(timestamp) / 1000,
+  });
+  const store = { messages: [], conversations: {}, watermark: null };
+  const firstBridge = createBridge();
+  await firstBridge.fetch(listPath, [conversation("message-1")]);
+  firstBridge.setResponse(historyPath, [message("message-1")]);
   const checkpoint = {
     watermark: "2026-08-01T00:00:00.000Z",
-    conversations: { unchanged: { event_timestamp: timestamp, message_id: "message-1" } },
+    conversations: store.conversations,
   };
-
-  const first = await bridge.sync("100000001", "first", checkpoint);
-  const second = await bridge.sync("100000001", "second", {
-    ...checkpoint, watermark: first.watermark,
+  const first = await firstBridge.sync("100000001", "first", checkpoint, store);
+  assert.equal(first.ok, true);
+  assert.equal(store.messages.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(store.conversations.unchanged)), {
+    event_timestamp: timestamp, message_id: "message-1",
   });
 
-  assert.equal(first.ok, true);
+  const repeatBridge = createBridge();
+  await repeatBridge.fetch(listPath, [conversation("message-1")]);
+  const second = await repeatBridge.sync("100000001", "second", store, store);
   assert.equal(second.ok, true);
-  assert.equal(bridge.requests.some((path) => path.endsWith("/messages")), false);
-  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_cursor_message");
+  assert.equal(repeatBridge.requests.includes(historyPath), false);
+  assert.equal(store.messages.length, 1);
+
+  const changedBridge = createBridge();
+  await changedBridge.fetch(listPath, [conversation("message-2")]);
+  changedBridge.setResponse(historyPath, [message("message-2"), message("message-1")]);
+  const changed = await changedBridge.sync("100000001", "changed", store, store);
+  assert.equal(changed.ok, true);
+  assert.equal(changedBridge.requests.includes(historyPath), true);
+  assert.equal(store.messages.some((item) => item.id === "message-2"), true);
+  assert.equal(store.conversations.unchanged.message_id, "message-2");
+});
+
+test("Shopee recovery retries when message persistence fails", async () => {
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "retry", shop_id: 100000001, last_message_time: timestamp,
+    latest_message_id: "message-1",
+  }]);
+  bridge.setResponse("/webchat/api/v1.2/conversations/retry/messages", [{
+    id: "message-1", conversation_id: "retry", shop_id: 100000001,
+    from_id: "buyer-1", to_id: "shop-1", to_shop_id: 100000001,
+    type: "text", content: { text: "Hello" }, created_timestamp: Date.parse(timestamp) / 1000,
+  }]);
+  const store = { messages: [], conversations: {}, watermark: null, failNextBatch: true };
+  const checkpoint = { watermark: "2026-08-01T00:00:00.000Z", conversations: store.conversations };
+  const failed = await bridge.sync("100000001", "failed", checkpoint, store);
+  assert.equal(failed.ok, false);
+  assert.equal(store.messages.length, 0);
+  assert.equal(store.conversations.retry, undefined);
+  assert.equal(store.watermark, null);
+
+  const retried = await bridge.sync("100000001", "retried", checkpoint, store);
+  assert.equal(retried.ok, true);
+  assert.equal(store.messages.length, 1);
+  assert.equal(store.conversations.retry.message_id, "message-1");
 });
 
 test("Shopee sync checks a different message ID at the same timestamp", async () => {
@@ -520,6 +587,24 @@ test("Shopee sync checks a different message ID at the same timestamp", async ()
   assert.equal(result.ok, true);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/changed/messages"), true);
   assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_timestamp_new_message");
+});
+
+test("Shopee sync keeps the legacy nested last-message ID as a skip signal", async () => {
+  const bridge = createBridge();
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "nested", shop_id: 100000001, last_message_time: timestamp,
+    last_message: { id: "message-1" },
+  }]);
+
+  const result = await bridge.sync("100000001", "nested-sync", {
+    watermark: "2026-08-01T00:00:00.000Z",
+    conversations: { nested: { event_timestamp: timestamp, message_id: "message-1" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/nested/messages"), false);
+  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_cursor_message");
 });
 
 test("Shopee sync probes a summary with no reliable message ID", async () => {

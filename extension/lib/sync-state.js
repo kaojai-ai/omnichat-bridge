@@ -55,10 +55,6 @@ export function latestMessageCursor(messages) {
   return latest;
 }
 
-export function confirmedSummaryToken(cursor, token) {
-  return cursor?.message_id && token === `message:${cursor.message_id}` ? token : null;
-}
-
 export function deliveryRetryDelay(attempt) {
   const index = Math.max(
     0,

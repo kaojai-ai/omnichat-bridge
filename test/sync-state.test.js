@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   advanceConversationCursors,
-  confirmedSummaryToken,
   deliveryRetryDelay,
   hasScanBacklog,
   isAfterMessageCursor,
@@ -33,12 +32,6 @@ test("advancing cursors keeps the newest message per conversation", () => {
   ]);
   assert.equal(conversations.a.message_id, "11");
   assert.equal(conversations.b.message_id, "2");
-});
-
-test("only a durably recorded message cursor confirms a conversation summary", () => {
-  assert.equal(confirmedSummaryToken({ message_id: "message-2" }, "message:message-2"), "message:message-2");
-  assert.equal(confirmedSummaryToken({ message_id: "message-1" }, "message:message-2"), null);
-  assert.equal(confirmedSummaryToken({ message_id: "" }, "message:message-2"), null);
 });
 
 test("migration includes legacy acknowledgement and pending messages", () => {

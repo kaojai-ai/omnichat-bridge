@@ -641,7 +641,8 @@
     "latest_message_id",
     "last_message_id",
     "message_id",
-  ]) ?? firstValue(conversation?.latest_message ?? {}, ["id", "message_id"]);
+  ]) ?? firstValue(conversation?.latest_message ?? {}, ["id", "message_id"])
+    ?? firstValue(conversation?.last_message ?? {}, ["id", "message_id"]);
   const authQueryKeys = ["_uid", "_v", "csrf_token", "SPC_CDS_CHAT", "x-shop-region", "_api_source"];
 
   const emitRealtimeMessages = (messages, captureMethod = "poll") => {
@@ -1134,11 +1135,6 @@
     conversation?.last_message_time ?? conversation?.created_timestamp,
   );
 
-  const conversationToken = (conversation) => {
-    const id = latestMessageIdOf(conversation);
-    return id ? `message:${id}` : null;
-  };
-
   const nextConversationUrl = (currentUrl, body, items) => {
     const url = new URL(currentUrl);
     const nextCursor = firstValue(body ?? {}, ["next_cursor", "nextCursor"])
@@ -1375,22 +1371,22 @@
         const cursor = cursors[String(conversation.id)];
         const cursorMs = timeMs(cursor?.event_timestamp);
         const summaryMs = conversationTime(conversation);
-        const token = conversationToken(conversation);
-        if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor, token };
-        if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor, token };
+        const latestId = latestMessageIdOf(conversation);
+        if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
+        if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
         if (!cursorMs) {
           return summaryMs >= watermarkMs
-            ? { decision: "history_job", reason: "new_conversation", cursor, token }
-            : { decision: "skip", reason: "summary_older_than_checkpoint", cursor, token };
+            ? { decision: "history_job", reason: "new_conversation", cursor }
+            : { decision: "skip", reason: "summary_older_than_checkpoint", cursor };
         }
-        if (summaryMs > cursorMs) return { decision: "history_job", reason: "summary_newer", cursor, token };
-        if (summaryMs < cursorMs) return { decision: "skip", reason: "summary_older_than_cursor", cursor, token };
-        if (token && cursor.message_id && token === `message:${cursor.message_id}`) {
-          return { decision: "skip", reason: "same_cursor_message", cursor, token };
+        if (summaryMs > cursorMs) return { decision: "history_job", reason: "summary_newer", cursor };
+        if (summaryMs < cursorMs) return { decision: "skip", reason: "summary_older_than_cursor", cursor };
+        if (latestId && cursor.message_id && latestId === String(cursor.message_id)) {
+          return { decision: "skip", reason: "same_cursor_message", cursor };
         }
-        return token && cursor.message_id
-          ? { decision: "history_job", reason: "same_timestamp_new_message", cursor, token }
-          : { decision: "probe", reason: "same_timestamp_unknown_message", cursor, token };
+        return latestId && cursor.message_id
+          ? { decision: "history_job", reason: "same_timestamp_new_message", cursor }
+          : { decision: "probe", reason: "same_timestamp_unknown_message", cursor };
       };
       const classified = recoveryConversations.map((conversation) => ({
         conversation,
@@ -1435,7 +1431,7 @@
         post({ type: "recovery_progress", request_id: requestId, provider_account_id: accountId, completed_conversations: completedConversations, total_conversations: totalConversations });
       }
       for (const item of [...probes, ...recoveryJobs]) {
-        const { conversation, cursor, token, decision } = item;
+        const { conversation, cursor, decision } = item;
         checked += 1;
         postLog("debug", "conversation_started", "Checking one conversation for missed messages.", {
           position: checked,
@@ -1473,7 +1469,6 @@
             provider_account_id: accountId,
             conversation_id: String(conversation.id),
             cursor: completedCursor,
-            summary_token: token,
           });
           const acknowledgement = await waitForAcknowledgement(cursorRequestId);
           if (!acknowledgement.ok) {

@@ -2,9 +2,40 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { compareMessageCursor } from "../extension/lib/sync-state.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
+
+test("persists the acknowledged recovery cursor and clears unused summary state", async () => {
+  const start = source.indexOf("async function advanceScanCursor(");
+  const end = source.indexOf("\nfunction exclusive(", start);
+  assert.ok(start >= 0 && end > start);
+  let state = {
+    version: 1,
+    conversations: { "conversation-1": {
+      event_timestamp: "2026-08-20T10:00:00.000Z",
+      message_id: "message-1",
+      summary_token: "message:message-1",
+    } },
+  };
+  const advanceScanCursor = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    compareMessageCursor,
+    STORAGE: { scanState: "scanState" },
+    getAccountScanState: async () => ({ context: {}, state, stored: { scanState: {} } }),
+    writeAccountScanState: async (_context, next) => { state = next; },
+  });
+
+  await advanceScanCursor("shop-1", "conversation-1", {
+    event_timestamp: "2026-08-20T10:01:00.000Z",
+    message_id: "message-2",
+  }, "shopee");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(state.conversations["conversation-1"])), {
+    event_timestamp: "2026-08-20T10:01:00.000Z",
+    message_id: "message-2",
+  });
+});
 
 test("reopening LINE refreshes account readiness before publishing live status without a popup", async () => {
   const calls = [];
