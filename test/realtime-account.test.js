@@ -540,6 +540,23 @@ test("Shopee sync probes a summary with no reliable message ID", async () => {
   assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_timestamp_unknown_message");
 });
 
+test("Shopee sync probes a summary with no usable timestamp", async () => {
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "no-time", shop_id: 100000001, latest_message_id: "message-1",
+  }]);
+  bridge.setResponse("/webchat/api/v1.2/conversations/no-time/messages", []);
+
+  const result = await bridge.sync("100000001", "no-time-sync", {
+    watermark: "2026-08-01T00:00:00.000Z",
+    conversations: { "no-time": { event_timestamp: "2026-08-20T10:00:00.000Z", message_id: "message-1" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/no-time/messages"), true);
+  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "missing_summary_time");
+});
+
 test("discovers a Seller Centre shop and polls its mini history without legacy endpoints", async () => {
   const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   const conversation = {
