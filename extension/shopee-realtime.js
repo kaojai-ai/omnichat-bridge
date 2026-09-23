@@ -1419,7 +1419,8 @@
       const recoveryJobs = classified.filter(({ decision }) => decision === "history_job");
       const totalConversations = probes.length + recoveryJobs.length;
       const reasons = classified.reduce((counts, { reason }) => {
-        counts[reason] = (counts[reason] ?? 0) + 1;
+        const key = `reason_${reason}`;
+        counts[key] = (counts[key] ?? 0) + 1;
         return counts;
       }, {});
       postLog("info", "recovery_plan", "Shopee recovery plan prepared.", {
@@ -1427,7 +1428,7 @@
         history_jobs: recoveryJobs.length,
         probes: probes.length,
         skipped: classified.filter(({ decision }) => decision === "skip").length,
-        reasons,
+        ...reasons,
       });
       let completedConversations = 0;
       if (totalConversations) {
