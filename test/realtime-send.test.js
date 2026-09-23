@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -55,6 +55,11 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         const path = new URL(request.url, origin).pathname;
         nativeRequests.push(path);
         nativeRequestHeaders.push(Object.fromEntries(request.headers.entries()));
+        if (path === "/webchat/api/v1.2/mini/conversations" && conversationPages) {
+          if (listFailure) return { ok: false, status: 503 };
+          const page = Number(new URL(request.url).searchParams.get("page") ?? "0");
+          return jsonResponse(conversationPages[page] ?? { conversations: [] });
+        }
         if (path === "/webchat/api/v1.2/mini/messages") {
           nativePayloads.push(await request.clone().json());
           return jsonResponse({ id: "provider-native-message-1" });
@@ -66,7 +71,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
       },
       surface: sellerCentre ? "seller-centre" : "legacy",
       listTemplate: sellerCentre && ready ? {
-        url: `${origin}/webchat/api/v1.2/mini/conversations?csrf_token=test`,
+        url: `${origin}/webchat/api/v1.2/mini/conversations?csrf_token=test${conversationPages ? "&page=0&limit=1" : ""}`,
         init: { method: "POST", headers: { "content-type": "application/json" } },
         body: new TextEncoder().encode("{}").buffer,
       } : null,
@@ -80,7 +85,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         },
         body: null,
       } : null,
-      conversationsById: new Map([
+      conversationsById: new Map(conversationPages ? [] : [
         ["conversation-1", { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0" }],
       ]),
       sendTemplate: sellerCentre ? null : {
@@ -105,7 +110,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     structuredClone,
     setInterval: () => 0,
     clearInterval,
-    setTimeout,
+    setTimeout: (callback) => { queueMicrotask(callback); return 0; },
     clearTimeout,
   });
   vm.runInContext(urlSource, context);
@@ -122,7 +127,10 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         data: { source: "omnichat-realtime-bridge-v3", type: "send_api_v3", ...message },
       });
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (posts.some((post) => post.type === "api_send_result" && post.request_id === message.request_id)) break;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     return {
       payload: sent[before],
       result: posts.findLast((post) => post.type === "api_send_result" && post.request_id === message.request_id),
@@ -163,6 +171,38 @@ test("maps a quoted text command to Shopee content.quoted_msg_id", async () => {
     uid: "client-1",
     quoted_msg_id: "quoted-message-1",
   });
+});
+
+test("finds a send route on Shopee conversation page two", async () => {
+  const bridge = createBridge({ sellerCentre: true, conversationPages: [
+    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "other-buyer", biz_id: "0" }] },
+    { conversations: [{ id: "conversation-1", shop_id: "shop-2", to_id: "buyer-2", to_shop_id: "buyer-shop", biz_id: "3" }] },
+  ] });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(result.ok, true);
+  assert.equal(bridge.nativeRequests.filter((path) => path.endsWith("/mini/conversations")).length, 2);
+  assert.equal(bridge.nativePayloads.length, 1);
+  assert.equal(bridge.nativePayloads[0].shop_id, "shop-2");
+  assert.equal(bridge.nativePayloads[0].to_id, "buyer-2");
+  assert.equal(bridge.nativePayloads[0].to_shop_id, "buyer-shop");
+  assert.equal(bridge.nativePayloads[0].biz_id, 3);
+});
+
+test("does not send when Shopee's conversation list is exhausted", async () => {
+  const bridge = createBridge({ sellerCentre: true, conversationPages: [
+    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "other-buyer" }] },
+    { conversations: [] },
+  ] });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.match(result.error, /was not found/);
+  assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("reports a Shopee list request failure without sending", async () => {
+  const bridge = createBridge({ sellerCentre: true, conversationPages: [{}], listFailure: true });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.match(result.error, /lookup failed.*503/);
+  assert.equal(bridge.nativePayloads.length, 0);
 });
 
 test("maps a quoted image command without losing uploaded image content", async () => {
