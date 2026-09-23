@@ -1135,11 +1135,7 @@
   );
 
   const conversationToken = (conversation) => {
-    const id = firstValue(conversation ?? {}, [
-      "last_message_id",
-      "latest_message_id",
-      "message_id",
-    ]) ?? firstValue(conversation?.last_message ?? {}, ["id", "message_id"]);
+    const id = latestMessageIdOf(conversation);
     return id ? `message:${id}` : null;
   };
 
@@ -1389,10 +1385,12 @@
         }
         if (summaryMs > cursorMs) return { decision: "history_job", reason: "summary_newer", cursor, token };
         if (summaryMs < cursorMs) return { decision: "skip", reason: "summary_older_than_cursor", cursor, token };
-        if (token && token === cursor.summary_token) {
-          return { decision: "skip", reason: "same_summary_token", cursor, token };
+        if (token && cursor.message_id && token === `message:${cursor.message_id}`) {
+          return { decision: "skip", reason: "same_cursor_message", cursor, token };
         }
-        return { decision: "probe", reason: "same_timestamp", cursor, token };
+        return token && cursor.message_id
+          ? { decision: "history_job", reason: "same_timestamp_new_message", cursor, token }
+          : { decision: "probe", reason: "same_timestamp_unknown_message", cursor, token };
       };
       const classified = recoveryConversations.map((conversation) => ({
         conversation,
@@ -1420,11 +1418,16 @@
       const probes = classified.filter(({ decision }) => decision === "probe");
       const recoveryJobs = classified.filter(({ decision }) => decision === "history_job");
       const totalConversations = probes.length + recoveryJobs.length;
+      const reasons = classified.reduce((counts, { reason }) => {
+        counts[reason] = (counts[reason] ?? 0) + 1;
+        return counts;
+      }, {});
       postLog("info", "recovery_plan", "Shopee recovery plan prepared.", {
         candidates: classified.length,
         history_jobs: recoveryJobs.length,
         probes: probes.length,
         skipped: classified.filter(({ decision }) => decision === "skip").length,
+        reasons,
       });
       let completedConversations = 0;
       if (totalConversations) {

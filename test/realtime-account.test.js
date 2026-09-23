@@ -195,7 +195,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     return null;
   }
 
-  async function sync(providerAccountId, requestId = "sync-1") {
+  async function sync(providerAccountId, requestId = "sync-1", checkpoint = { watermark: "2026-08-01T00:00:00.000Z" }) {
     for (const listener of listeners) {
       listener({
         source: window,
@@ -204,7 +204,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
           source: "omnichat-realtime-bridge-v3",
           type: "sync_v3",
           request_id: requestId,
-          checkpoint: { watermark: "2026-08-01T00:00:00.000Z" },
+          checkpoint,
           provider_account_id: providerAccountId,
         },
       });
@@ -478,6 +478,66 @@ test("limits recovery to the requested Shop ID", async () => {
     JSON.parse(JSON.stringify(plan.conversations.map((conversation) => conversation.conversation_id))),
     ["conversation-th"],
   );
+});
+
+test("repeat Shopee sync skips a summary whose message ID matches the saved cursor", async () => {
+  const bridge = createBridge();
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "unchanged", shop_id: 100000001, last_message_time: timestamp,
+    latest_message_id: "message-1",
+  }]);
+  const checkpoint = {
+    watermark: "2026-08-01T00:00:00.000Z",
+    conversations: { unchanged: { event_timestamp: timestamp, message_id: "message-1" } },
+  };
+
+  const first = await bridge.sync("100000001", "first", checkpoint);
+  const second = await bridge.sync("100000001", "second", {
+    ...checkpoint, watermark: first.watermark,
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(bridge.requests.some((path) => path.endsWith("/messages")), false);
+  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_cursor_message");
+});
+
+test("Shopee sync checks a different message ID at the same timestamp", async () => {
+  const bridge = createBridge();
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "changed", shop_id: 100000001, last_message_time: timestamp,
+    latest_message_id: "message-2",
+  }]);
+  bridge.setResponse("/webchat/api/v1.2/conversations/changed/messages", []);
+
+  const result = await bridge.sync("100000001", "changed-sync", {
+    watermark: "2026-08-01T00:00:00.000Z",
+    conversations: { changed: { event_timestamp: timestamp, message_id: "message-1" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/changed/messages"), true);
+  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_timestamp_new_message");
+});
+
+test("Shopee sync probes a summary with no reliable message ID", async () => {
+  const bridge = createBridge();
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: "ambiguous", shop_id: 100000001, last_message_time: timestamp,
+  }]);
+  bridge.setResponse("/webchat/api/v1.2/conversations/ambiguous/messages", []);
+
+  const result = await bridge.sync("100000001", "ambiguous-sync", {
+    watermark: "2026-08-01T00:00:00.000Z",
+    conversations: { ambiguous: { event_timestamp: timestamp, message_id: "message-1" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/ambiguous/messages"), true);
+  assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_timestamp_unknown_message");
 });
 
 test("discovers a Seller Centre shop and polls its mini history without legacy endpoints", async () => {

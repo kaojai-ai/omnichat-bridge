@@ -4,6 +4,7 @@ import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   advanceConversationCursors,
   compareMessageCursor,
+  confirmedSummaryToken,
   deliveryRetryDelay,
   hasScanBacklog,
   isAfterMessageCursor,
@@ -546,8 +547,11 @@ async function advanceScanCursor(providerAccountId, conversationId, cursor, summ
       message_id: cursor.message_id,
     }
     : { ...(previous ?? {}) };
-  if (typeof summaryToken === "string" && summaryToken) {
-    next.summary_token = summaryToken;
+  const confirmedToken = confirmedSummaryToken(next, summaryToken);
+  if (confirmedToken) {
+    next.summary_token = confirmedToken;
+  } else {
+    delete next.summary_token;
   }
   if (!next.event_timestamp) return;
   await writeAccountScanState(context, {
