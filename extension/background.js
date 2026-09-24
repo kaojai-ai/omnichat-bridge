@@ -947,7 +947,7 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
   }
   let tab = null;
   for (const candidate of orderedTabs) {
-    if (await isReadyProviderTab(candidate, adapter)) {
+    if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
       tab = candidate;
       break;
     }
@@ -965,13 +965,14 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
       provider: adapter.id,
       provider_account_id: context.account.provider_account_id,
     });
-    throw new Error(`Open ${label} in Chrome before sending a reply.`);
+    throw new Error(`The browser selected to send this reply has no ${label} tab open. Open the matching chat on that browser or use a ready browser as leader.`);
   }
-  if (!(await isReadyProviderTab(tab, adapter))) {
+  if (!providerTabCanSend(await providerTabStatus(tab), context)) {
     await recordLog("warn", "provider", "surface_unready", `${label} chat surface is not ready for commands.`, {
       provider: adapter.id,
       surface: adapter.surfaceForUrl?.(tab.url) ?? null,
     });
+    throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
   }
   await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
   return tab;
@@ -1737,6 +1738,7 @@ async function getLiveState(providerAccountId, provider = "") {
       await updateLiveState(context, {
         socket: connection?.socket?.readyState === WebSocket.OPEN ? "connected" : "reconnecting",
         leader: false,
+        leader_installation_id: null,
       });
       if (providerAccountId) throw error;
       results.push({
@@ -1871,7 +1873,7 @@ async function connectionStatusSnapshot(context) {
       providerStatus = result;
       providerStatusTab = tab;
     }
-    if (providerTabIsReady(result, adapter)) {
+    if (providerTabCanSend(result, context)) {
       providerStatus = result;
       providerStatusTab = tab;
       break;
@@ -1883,14 +1885,16 @@ async function connectionStatusSnapshot(context) {
     (account) => account.provider === context.account.provider
       && account.provider_account_id === context.account.provider_account_id,
   );
-  const accountMatches = accountDetected;
+  const accountMatches = adapter?.id === "shopee"
+    ? providerStatus?.provider_account_ids?.includes(context.account.provider_account_id) === true
+    : accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
   const health = buildConnectionHealth({
     provider: context.account.provider,
     tabCount: tabs.length,
-    contentReady: Boolean(providerStatus),
+    contentReady: providerTabIsReady(providerStatus, adapter),
     accountDetected,
     accountMatches,
     realtimeConnected: providerStatus?.realtime_connected === true,
@@ -1900,7 +1904,7 @@ async function connectionStatusSnapshot(context) {
   });
   const commandCapabilities = adapter?.id === "line_oa"
     ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
-    : adapter?.sendCommands;
+    : providerTabCanSend(providerStatus, context) ? adapter?.sendCommands : [];
 
   return {
     type: "connection_status",
@@ -1923,7 +1927,10 @@ async function connectionStatusSnapshot(context) {
 
 async function sendConnectionStatus(socket, context) {
   const status = await connectionStatusSnapshot(context);
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(status));
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(status));
+    scheduleLeaderStatusRefresh(context, socket);
+  }
 }
 
 async function ensureLiveConnection() {
@@ -2018,7 +2025,6 @@ async function ensureAccountLiveConnection(context) {
         }
       }, LIVE_STATUS_HEARTBEAT_INTERVAL_MS);
       void sendConnectionStatus(socket, context)
-        .then(() => scheduleLeaderStatusRefresh(context, socket))
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
         }));
@@ -2031,7 +2037,7 @@ async function ensureAccountLiveConnection(context) {
         existing.heartbeatTimer = null;
         clearTimeout(existing.leaderStatusTimer);
         existing.leaderStatusTimer = null;
-        void updateLiveState(context, { socket: "reconnecting", leader: false });
+        void updateLiveState(context, { socket: "reconnecting", leader: false, leader_installation_id: null });
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
           provider_account_id: context.account.provider_account_id,
           reconnect_attempt: existing.reconnectAttempt + 1,
@@ -2055,7 +2061,7 @@ function scheduleLeaderStatusRefresh(context, socket, attemptsRemaining = 2) {
   clearTimeout(connection.leaderStatusTimer);
   connection.leaderStatusTimer = setTimeout(() => {
     void getLiveState(context.account.provider_account_id, context.account.provider).then((result) => {
-      if (result?.leader || attemptsRemaining <= 0 || socket.readyState !== WebSocket.OPEN) return;
+      if (result?.leader_installation_id || attemptsRemaining <= 0 || socket.readyState !== WebSocket.OPEN) return;
       scheduleLeaderStatusRefresh(context, socket, attemptsRemaining - 1);
     }).catch((error) => recordUnexpected("leader_status", error, {
       provider: context.account.provider,
@@ -2087,9 +2093,14 @@ async function handleLiveCommand(raw, context, socket) {
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  if (!result?.ok) await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
-    provider_account_id: context.account.provider_account_id,
-  });
+  if (!result?.ok) {
+    await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
+      provider_account_id: context.account.provider_account_id,
+      request_id: command.request_id,
+      installation_id: await installationId(),
+    });
+    void sendConnectionStatus(socket, context).catch((error) => recordUnexpected("connection_status", error));
+  }
   if (!result?.ok && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({
       type: "send_result",
@@ -2141,6 +2152,9 @@ async function reconnectProviderTab(tab) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
+  }
   if (changeInfo.status !== "complete") return;
   void reconnectProviderTab({ ...tab, id: tabId }).catch((error) => {
     const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
@@ -2150,7 +2164,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   sellerCentreLandingStarts.delete(tabId);
-  void markClosedProviderRecoveryTab(tabId).catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
+  void markClosedProviderRecoveryTab(tabId)
+    .then(() => ensureLiveConnection())
+    .catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -2311,6 +2327,13 @@ function providerTabIsReady(status, adapter) {
     return adapter.providerStatusReady(status) === true;
   }
   return Boolean(status?.ok);
+}
+
+function providerTabCanSend(status, context) {
+  const adapter = context.adapter ?? providerAdapterForAccount(context.account);
+  return providerTabIsReady(status, adapter)
+    && (adapter?.id !== "shopee"
+      || status?.provider_account_ids?.includes(context.account.provider_account_id) === true);
 }
 
 function providerTabHealthy(status, adapter) {
