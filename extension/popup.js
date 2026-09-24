@@ -1398,8 +1398,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-void load().then(async () => {
-  if (consented()) await chrome.runtime.sendMessage({ type: "get_live_state" });
+void load().then(() => {
+  if (consented()) void chrome.runtime.sendMessage({ type: "get_live_state" })
+    .catch((error) => reportPopupError("leader_status", error));
 }).catch((error) => {
   reportPopupError("load", error);
   storedConsent = null;

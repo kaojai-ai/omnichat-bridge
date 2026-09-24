@@ -972,7 +972,9 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
       provider: adapter.id,
       surface: adapter.surfaceForUrl?.(tab.url) ?? null,
     });
-    throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
+    if (prepareForSend && adapter.id === "shopee") {
+      throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
+    }
   }
   await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
   return tab;
@@ -1894,7 +1896,7 @@ async function connectionStatusSnapshot(context) {
   const health = buildConnectionHealth({
     provider: context.account.provider,
     tabCount: tabs.length,
-    contentReady: providerTabIsReady(providerStatus, adapter),
+    contentReady: adapter?.id === "shopee" ? providerTabIsReady(providerStatus, adapter) : Boolean(providerStatus),
     accountDetected,
     accountMatches,
     realtimeConnected: providerStatus?.realtime_connected === true,
@@ -2140,11 +2142,11 @@ async function reconnectProviderTab(tab) {
   const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
   if (!adapter) return;
   await ensureProviderBridge(tabId, adapter);
-  if (adapter.id === "line_oa") {
+  if (adapter.id === "line_oa" || adapter.id === "shopee") {
     const stored = await readStorage([STORAGE.consent]);
     if (hasLocalConsent(stored[STORAGE.consent])) {
       const result = await detectOpenProviderAccount(adapter.id, tabId);
-      if (!result?.ok) throw new Error(result?.error ?? "LINE account detection failed.");
+      if (!result?.ok) throw new Error(result?.error ?? `${providerLabel(adapter)} account detection failed.`);
     }
   }
   await autoStartSellerCentreTab(tab);

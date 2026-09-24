@@ -10,7 +10,9 @@ function fn(name, next, globals) {
 const context = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" },
   adapter: { id: "shopee", tabQueryPattern: "https://seller.shopee.co.th/*", matchesUrl: () => true, sendCommands: ["send_text"] } };
 const ready = { ok: true, provider_account_ids: ["shop"], realtime_connected: true };
-const canSend = (status) => status?.ok === true && status?.provider_account_ids?.includes("shop");
+const canSend = vm.runInNewContext(`(${source.slice(source.indexOf("function providerTabCanSend("), source.indexOf("\nfunction providerTabHealthy(")).trim()})`, {
+  providerTabIsReady: (status) => status?.ok === true,
+});
 
 test("live presence advertises sends only for a responding tab belonging to this shop", async () => {
   let status = ready;
@@ -54,5 +56,5 @@ test("an outbound command cannot use a tab for another shop", async () => {
     providerTabCanSend: canSend, providerTabStatus: async () => ({ ...ready, provider_account_ids: ["another-shop"] }),
     recordLog: async () => {}, writeStorage: async () => assert.fail("must not select a mismatched tab"),
   });
-  await assert.rejects(() => commandTab(context), /not ready for this account/);
+  await assert.rejects(() => commandTab(context, { prepareForSend: true }), /not ready for this account/);
 });
