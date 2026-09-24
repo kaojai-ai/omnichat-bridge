@@ -37,26 +37,27 @@ test("persists the acknowledged recovery cursor and clears unused summary state"
   });
 });
 
-test("reopening LINE refreshes account readiness before publishing live status without a popup", async () => {
-  const calls = [];
-  const start = source.indexOf("async function reconnectProviderTab(tab)");
-  const end = source.indexOf("\nchrome.tabs.onUpdated", start);
-  const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    providerAdapters: { list: () => [{ id: "line_oa", matchesUrl: (url) => url.startsWith("https://chat.line.biz/") }] },
-    STORAGE: { consent: "consent" },
-    readStorage: async () => ({ consent: true }),
-    hasLocalConsent: (consent) => consent,
-    ensureProviderBridge: async () => calls.push("bridge"),
-    detectOpenProviderAccount: async (provider, tabId) => {
-      calls.push(`${provider}:${tabId}`);
-      return { ok: true };
-    },
-    autoStartSellerCentreTab: async () => {},
-    ensureLiveConnection: async () => calls.push("live"),
+for (const provider of ["line_oa", "shopee"]) {
+  test(`reopening ${provider} refreshes account readiness before publishing live status without a popup`, async () => {
+    const calls = [];
+    const start = source.indexOf("async function reconnectProviderTab(tab)");
+    const end = source.indexOf("\nchrome.tabs.onUpdated", start);
+    const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+      providerAdapters: { list: () => [{ id: provider, matchesUrl: () => true }] },
+      STORAGE: { consent: "consent" }, readStorage: async () => ({ consent: true }),
+      hasLocalConsent: (consent) => consent,
+      ensureProviderBridge: async () => calls.push("bridge"),
+      detectOpenProviderAccount: async (id, tabId) => {
+        calls.push(`${id}:${tabId}`);
+        return { ok: true };
+      },
+      autoStartSellerCentreTab: async () => {},
+      ensureLiveConnection: async () => calls.push("live"),
+    });
+    await reconnect({ id: 42, url: "https://provider.example/chat" });
+    assert.deepEqual(calls, ["bridge", `${provider}:42`, "live"]);
   });
-  await reconnect({ id: 42, url: "https://chat.line.biz/account/chat" });
-  assert.deepEqual(calls, ["bridge", "line_oa:42", "live"]);
-});
+}
 
 test("retries an unhealthy provider tab without creating a replacement", () => {
   assert.match(source, /chrome\.tabs\.reload\(tab\.id\)/);
@@ -158,7 +159,7 @@ test("only opens live command channels for adapters that declare send commands",
 
 test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /function scheduleLeaderStatusRefresh\(context, socket, attemptsRemaining = 2\)/);
-  assert.match(source, /sendConnectionStatus\(socket, context\)\n        \.then\(\(\) => scheduleLeaderStatusRefresh\(context, socket\)\)/);
+  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);\n    scheduleLeaderStatusRefresh\(context, socket\);/);
   assert.match(source, /getLiveState\(context\.account\.provider_account_id, context\.account\.provider\)/);
   assert.match(source, /attemptsRemaining - 1/);
 });
@@ -357,7 +358,7 @@ test("requires an already-open Shopee tab for outbound replies", () => {
   const sendSource = source.slice(sendStart, sendEnd);
   assert.match(sendSource, /commandTab\(context, \{ createIfMissing: false, prepareForSend: true \}\)/);
   assert.doesNotMatch(sendSource, /chrome\.tabs\.create\s*\(/);
-  assert.match(source, /Open \$\{label\} in Chrome before sending a reply\./);
+  assert.match(source, /The browser selected to send this reply has no/);
 });
 
 test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {

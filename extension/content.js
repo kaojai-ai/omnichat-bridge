@@ -29,6 +29,7 @@
   let providerSurfaceReady = false;
   let providerCapabilities = {};
   let providerCommandCapabilitiesByAccount = {};
+  let providerAccountIds = [];
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
   let providerPollingActive = false;
@@ -415,6 +416,7 @@
       .map(normalizedAccount)
       .filter(Boolean);
     if (!accounts.length) return;
+    providerAccountIds = accounts.map((account) => account.provider_account_id);
     const stored = await chrome.storage.local.get(["local_consent"]);
     if (!stored.local_consent?.accepted_at) return;
     const persisted = await sendRuntimeMessage({
@@ -964,6 +966,7 @@
       respond({
         ok: true,
         surface: providerSurface,
+        provider_account_ids: providerAccountIds,
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
         command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },

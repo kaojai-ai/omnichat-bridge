@@ -145,14 +145,14 @@ const TRANSLATIONS = {
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
     supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", provider: "Provider", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Latest 100 safe operational logs · kept up to 2 days", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
-    ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
+    ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NO READY LEADER", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", noNew: "No new messages.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", provider: "ผู้ให้บริการ", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "Logs การทำงานล่าสุด 100 รายการ · เก็บไว้สูงสุด 2 วัน", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
-    ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
+    ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ไม่มีตัวหลักที่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
   },
 };
 
@@ -386,7 +386,7 @@ function setLeaderStatus(label, state, action, isLeader = false) {
   leaderStatus.title = action === "config"
     ? "Open settings"
     : isLeader
-      ? "Unset this installation as leader"
+      ? "Hand over to another ready browser; keep this browser if it is the only one ready"
       : "Set this tab as leader";
 }
 
@@ -692,6 +692,7 @@ function renderDashboard(message = "", isError = false) {
     .filter(Boolean)
     .at(-1);
   const anyLeader = configuredStates.some((item) => item.live?.leader);
+  const hasLeader = configuredStates.some((item) => item.live?.leader_installation_id);
   const surfaceHint = configuredStates
     .map((item) => sellerCentreConnectionStatus(item.live))
     .find((item) => item?.state === "warning" && item?.hint);
@@ -734,7 +735,7 @@ function renderDashboard(message = "", isError = false) {
   }
 
   status.classList.toggle("error", isError);
-  setLeaderStatus(anyLeader ? t("leader") : t("standby"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
+  setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : hasLeader ? "neutral" : "warning", "leader", anyLeader);
   syncButton.disabled = sellerCentreChatClosed ? false : anySyncing;
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
@@ -1397,7 +1398,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-void load().catch((error) => {
+void load().then(() => {
+  if (consented()) void chrome.runtime.sendMessage({ type: "get_live_state" })
+    .catch((error) => reportPopupError("leader_status", error));
+}).catch((error) => {
   reportPopupError("load", error);
   storedConsent = null;
   routeTo("consent");
