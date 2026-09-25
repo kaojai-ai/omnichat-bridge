@@ -164,6 +164,15 @@ function stickerCdnUrl(content) {
   return `https://deo.shopeemobile.com/shopee/shopee-sticker-live-th/packs/${encodeURIComponent(packageId)}/${encodeURIComponent(stickerId)}@1x.${format}`;
 }
 
+function providerOrderId(content) {
+  if (!content || typeof content !== "object") return null;
+  for (const key of ["provider_order_id", "order_id", "orderId", "order_sn", "ordersn", "trade_order_id"]) {
+    const value = string(content[key]) ?? (typeof content[key] === "number" && Number.isFinite(content[key]) ? String(content[key]) : null);
+    if (value) return value;
+  }
+  return null;
+}
+
 function messageType(value) {
   const raw = string(value)?.toLowerCase() ?? "unknown";
   if (raw === "text" || raw === "image" || raw === "video" || raw === "sticker" || raw === "product") return { type: raw };
@@ -204,6 +213,7 @@ function parseShopeeMessages(payload, captureMethod) {
       ? string(content?.product_name) ?? ""
       : textContent(message.content);
     const clientMessageId = string(content?.uid);
+    const orderId = providerOrderId(content);
     const contentUrl = mediaUrl(message.content, parsedType.type);
     const messageUrl = mediaUrl(message, parsedType.type);
     const url = parsedType.type === "video"
@@ -246,6 +256,9 @@ function parseShopeeMessages(payload, captureMethod) {
             ...(string(content.shop_id) ? { provider_account_id: string(content.shop_id) } : {}),
           },
         }
+        : {}),
+      ...(orderId && (parsedType.provider_type === "order" || parsedType.provider_type === "order_card")
+        ? { order: { provider_order_id: orderId } }
         : {}),
       ...(parsedType.provider_type ? { provider_type: parsedType.provider_type } : {}),
       ...(parsedType.type === "unsupported" && content ? { provider_content: content } : {}),
