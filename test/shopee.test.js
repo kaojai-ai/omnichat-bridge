@@ -253,6 +253,7 @@ test("parses unsupported Shopee content when it arrives as a JSON string", () =>
   assert.equal(message.type, "unsupported");
   assert.equal(message.provider_type, "order");
   assert.deepEqual(JSON.parse(JSON.stringify(message.provider_content)), content);
+  assert.deepEqual(JSON.parse(JSON.stringify(message.order)), { provider_order_id: "order-1" });
 });
 
 test("does not attach provider content to text messages", () => {
