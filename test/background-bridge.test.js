@@ -120,7 +120,9 @@ test("keeps connection status compatible with the server's strict version 1 enve
   const statusSource = source.slice(statusStart, statusEnd);
   assert.match(statusSource, /schema: "omnichat\.connection_status"/);
   assert.match(statusSource, /version: 1/);
-  assert.match(statusSource, /health,/);
+  assert.match(statusSource, /ready,/);
+  assert.match(statusSource, /reason_code: health\.reason_code/);
+  assert.doesNotMatch(statusSource, /health,/);
   assert.doesNotMatch(statusSource, /provider_surface:/);
   assert.doesNotMatch(statusSource, /provider_capabilities:/);
   assert.doesNotMatch(statusSource, /provider_realtime_transport:/);
@@ -159,21 +161,22 @@ test("only opens live command channels for adapters that declare send commands",
 
 test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /function scheduleLeaderStatusRefresh\(context, socket, attemptsRemaining = 2\)/);
-  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);\n    scheduleLeaderStatusRefresh\(context, socket\);/);
+  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);\n  if \(connection\) connection\.lastStatusKey = key;\n  scheduleLeaderStatusRefresh\(context, socket\);/);
   assert.match(source, /getLiveState\(context\.account\.provider_account_id, context\.account\.provider\)/);
   assert.match(source, /attemptsRemaining - 1/);
 });
 
-test("uses a 60-second live status heartbeat and preserves immediate status sends", () => {
-  assert.match(source, /const LIVE_STATUS_HEARTBEAT_INTERVAL_MS = 60_000/);
+test("uses an 8-minute keepalive and preserves immediate status sends", () => {
+  assert.match(source, /const KEEPALIVE_INTERVAL_MS = 8 \* 60_000/);
   const start = source.indexOf("async function ensureAccountLiveConnection(context)");
   const end = source.indexOf("\n}\n\nfunction scheduleLeaderStatusRefresh", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const connectionSource = source.slice(start, end);
   assert.match(connectionSource, /sendConnectionStatus\(socket, context\)/);
-  assert.match(connectionSource, /\}, LIVE_STATUS_HEARTBEAT_INTERVAL_MS\);/);
-  assert.doesNotMatch(connectionSource, /20_000/);
+  assert.match(connectionSource, /sendKeepalive\(socket\)/);
+  assert.match(connectionSource, /\}, KEEPALIVE_INTERVAL_MS\);/);
+  assert.doesNotMatch(connectionSource, /60_000/);
 });
 
 test("refreshes live status before a manual sync starts", () => {
