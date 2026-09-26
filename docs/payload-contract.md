@@ -165,12 +165,11 @@ matches and accepted, duplicate, and skipped messages cover the number sent.
 
 ## Connection status
 
-While its authenticated realtime transport is active, the extension sends
-`omnichat.connection_status` every 20 seconds. Seller Centre uses authenticated
-polling; legacy Seller Chat uses its WebSocket. The envelope is provider-neutral:
-each provider adapter reports named checks and the common capture, delivery,
-sync, and queue timestamps. Shopee currently reports `provider_tab`,
-`content_bridge`, `provider_account`, and `provider_realtime`.
+The extension publishes `omnichat.connection_status` when readiness, the reason,
+or the device name changes. It evaluates the shop tab, page bridge, logged-in
+account, and incoming capture locally and sends one `ready` flag. An open
+socket sends `{ "type": "keepalive" }` every 8 minutes so the connection is not
+idle-closed. That frame is not stored.
 
 ```json
 {
@@ -183,38 +182,15 @@ sync, and queue timestamps. Shopee currently reports `provider_tab`,
   "device_name": "Front desk MacBook",
   "extension_version": "0.6.0",
   "reported_at": "2026-07-31T00:00:00.000Z",
-  "client": {
-    "platform": "MacIntel",
-    "language": "th"
-  },
-  "health": {
-    "reason_code": "healthy",
-    "checks": [
-      { "key": "provider_tab", "status": "pass" },
-      { "key": "content_bridge", "status": "pass" },
-      { "key": "provider_account", "status": "pass" },
-      { "key": "provider_realtime", "status": "pass" }
-    ],
-    "metrics": {
-      "provider_tabs": 1,
-      "pending_messages": 0
-    },
-    "last_capture_at": "2026-07-31T00:00:00.000Z",
-    "last_delivery_at": "2026-07-31T00:00:01.000Z",
-    "last_sync_at": "2026-07-31T00:00:01.000Z",
-    "last_error": null
-  }
+  "ready": true,
+  "reason_code": "healthy"
 }
 ```
 
-The server records its own `last_seen_at` and does not trust the client
-timestamp for liveness. The extension sends a live status heartbeat every 60
-seconds, and a connection is stale after 180 seconds without one. Seller
-Centre surface and capability details remain local to the
-extension; the server's strict version 1 envelope receives their result through
-the common health checks. Connected and disconnected installation records
-expire after seven days. No IP address, browser user agent, cookies, login
-tokens, or passwords are included.
+The socket being open is liveness. `reported_at` is not used as a heartbeat.
+Older extensions may still send `health.checks`; the server maps those four
+results onto `ready` and does not store the checks. No IP address, browser
+user agent, cookies, login tokens, or passwords are included.
 
 ## Operational log batch
 

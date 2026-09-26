@@ -64,7 +64,7 @@ const API_PING_INTERVAL_MINUTES = 5;
 const PROVIDER_HEALTH_ALARM = "omnichat-provider-health";
 const PROVIDER_HEALTH_INTERVAL_MINUTES = 1;
 const PROVIDER_HEALTH_STALE_MS = 60_000;
-const LIVE_STATUS_HEARTBEAT_INTERVAL_MS = 60_000;
+const KEEPALIVE_INTERVAL_MS = 8 * 60_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -1907,6 +1907,9 @@ async function connectionStatusSnapshot(context) {
   const commandCapabilities = adapter?.id === "line_oa"
     ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
     : providerTabCanSend(providerStatus, context) ? adapter?.sendCommands : [];
+  const ready = ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
+    health.checks.some((check) => check.key === key && check.status === "pass")
+  ));
 
   return {
     type: "connection_status",
@@ -1918,21 +1921,33 @@ async function connectionStatusSnapshot(context) {
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
-    client: {
-      platform: String(navigator.platform ?? "").slice(0, 120),
-      language: String(navigator.language ?? "").slice(0, 32),
-    },
-    health,
+    ready,
+    reason_code: health.reason_code,
     ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
   };
 }
 
+function statusPublishKey(status) {
+  return JSON.stringify({
+    ready: status.ready,
+    reason_code: status.reason_code,
+    device_name: status.device_name,
+    command_capabilities: status.command_capabilities ?? null,
+  });
+}
+
 async function sendConnectionStatus(socket, context) {
   const status = await connectionStatusSnapshot(context);
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(status));
-    scheduleLeaderStatusRefresh(context, socket);
-  }
+  const connection = liveConnections.get(context.key);
+  const key = statusPublishKey(status);
+  if (socket.readyState !== WebSocket.OPEN || connection?.lastStatusKey === key) return;
+  socket.send(JSON.stringify(status));
+  if (connection) connection.lastStatusKey = key;
+  scheduleLeaderStatusRefresh(context, socket);
+}
+
+function sendKeepalive(socket) {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "keepalive" }));
 }
 
 async function ensureLiveConnection() {
@@ -1990,6 +2005,7 @@ async function ensureAccountLiveConnection(context) {
     reconnectTimer: null,
     heartbeatTimer: null,
     leaderStatusTimer: null,
+    lastStatusKey: null,
     reconnectAttempt: 0,
   };
   liveConnections.set(context.key, existing);
@@ -2017,15 +2033,11 @@ async function ensureAccountLiveConnection(context) {
       void recordLog("info", "live", "connected", "Live command channel connected.", {
         provider_account_id: context.account.provider_account_id,
       });
+      existing.lastStatusKey = null;
       clearInterval(existing.heartbeatTimer);
       existing.heartbeatTimer = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) {
-          void sendConnectionStatus(socket, context)
-            .catch((error) => recordUnexpected("connection_status", error, {
-              provider_account_id: context.account.provider_account_id,
-            }));
-        }
-      }, LIVE_STATUS_HEARTBEAT_INTERVAL_MS);
+        sendKeepalive(socket);
+      }, KEEPALIVE_INTERVAL_MS);
       void sendConnectionStatus(socket, context)
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
