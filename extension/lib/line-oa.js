@@ -104,7 +104,7 @@
     return Boolean(status?.ok);
   }
 
-  function providerStatusHealthy(status, { staleMs = 60_000 } = {}) {
+  function providerStatusHealthy(status, { staleMs = 180_000 } = {}) {
     if (!providerStatusReady(status) || status.realtime_connected !== true) return false;
     const checkedAtValue = typeof status.last_provider_check_at === "string"
       ? status.last_provider_check_at.trim()

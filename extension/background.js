@@ -63,7 +63,7 @@ const API_PING_ALARM = "omnichat-api-ping";
 const API_PING_INTERVAL_MINUTES = 5;
 const PROVIDER_HEALTH_ALARM = "omnichat-provider-health";
 const PROVIDER_HEALTH_INTERVAL_MINUTES = 1;
-const PROVIDER_HEALTH_STALE_MS = 60_000;
+const PROVIDER_HEALTH_STALE_MS = 180_000;
 const KEEPALIVE_INTERVAL_MS = 8 * 60_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
@@ -1314,7 +1314,27 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     }
   }
 
-  if (trackedTab) return { tab: trackedTab, record };
+  if (trackedTab) {
+    const healthyTab = await firstHealthyProviderTab(adapter, listedTabs, trackedTab.id);
+    if (healthyTab && healthyTab.id !== trackedTab.id) {
+      trackedTab = healthyTab;
+      record = await updateProviderRecoveryTabState(adapter.id, {
+        state: PROVIDER_RECOVERY_STATES.ready,
+        tab_id: trackedTab.id,
+        opened_by_extension: false,
+        reason: null,
+        failure_count: 0,
+        last_failure_at: null,
+        next_retry_at: null,
+      });
+      await recordLog("info", "recovery", "provider_tab_selected", `${providerLabel(adapter)} switched to a healthy tab.`, {
+        provider: adapter.id,
+        tab_id: trackedTab.id,
+        healthy: true,
+      });
+    }
+    return { tab: trackedTab, record };
+  }
 
   if (!allowTabRecovery) {
     return {
@@ -1413,10 +1433,41 @@ function providerRecoveryFailureReason(adapter, tab, status, error) {
   if (!adapter.matchesUrl(tab?.url)) {
     return `${providerLabel(adapter)} tab is on a redirect or sign-in page.`;
   }
-  if (error) return `${providerLabel(adapter)} bridge is unavailable. ${String(error).slice(0, 180)}`;
+  if (error) {
+    const detail = error instanceof Error && error.message ? error.message : String(error);
+    return `${providerLabel(adapter)} bridge is unavailable. ${detail.slice(0, 180)}`;
+  }
   if (!status) return `${providerLabel(adapter)} bridge did not respond to a health check.`;
   if (status.realtime_connected !== true) return `${providerLabel(adapter)} is connected to the extension but not ready to sync.`;
   return `${providerLabel(adapter)} is not ready to sync.`;
+}
+
+async function firstHealthyProviderTab(adapter, tabs, preferredTabId = null) {
+  for (const candidate of orderProviderTabs(adapter, tabs, preferredTabId)) {
+    if (providerTabHealthy(await providerTabStatus(candidate), adapter)) return candidate;
+  }
+  return null;
+}
+
+async function markProviderRecoveryReady(adapter, tabId) {
+  if (!adapter || !Number.isInteger(tabId)) return;
+  const tab = await getTab(tabId);
+  if (!tab?.id || !adapter.matchesUrl(tab.url)) return;
+  if (!providerTabHealthy(await providerTabStatus(tab), adapter)) return;
+  await updateProviderRecoveryTabState(adapter.id, {
+    state: PROVIDER_RECOVERY_STATES.ready,
+    tab_id: tab.id,
+    reason: null,
+    failure_count: 0,
+    last_failure_at: null,
+    next_retry_at: null,
+  });
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  await updateProviderRecoveryLiveState(configuredAccountContexts(stored), adapter, {
+    state: PROVIDER_RECOVERY_STATES.ready,
+    reason: null,
+    tabId: tab.id,
+  });
 }
 
 async function markClosedProviderRecoveryTab(tabId) {
@@ -1624,7 +1675,9 @@ async function runProviderHealthWatchdogOnce() {
       await reconnectProviderTab(tab);
       const status = await providerTabStatus(tab);
       if (!providerTabHealthy(status, adapter)) {
-        throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+        throw new Error(status
+          ? providerRecoveryFailureReason(adapter, tab, status, null)
+          : `${providerLabel(adapter)} bridge is not responding to health checks.`);
       }
       if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
         startUnattendedProviderSync(tab, context);
@@ -3068,6 +3121,7 @@ async function runAccountSync(trigger, control, context) {
       last_result: result,
     });
     await recordLog("info", "sync", "completed", "Sync completed.", result);
+    await markProviderRecoveryReady(context.adapter, control.tabId);
     const live = liveConnections.get(context.key);
     if (live?.socket) {
       void sendConnectionStatus(live.socket, context)

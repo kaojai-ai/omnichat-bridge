@@ -33,6 +33,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   const posts = [];
   const acknowledged = new Set();
   const responses = new Map(Object.entries(initialResponses));
+  const statuses = new Map();
   const requests = [];
   const intervals = [];
   let miniChatClicks = 0;
@@ -70,7 +71,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
       requests.push(path);
       const body = responses.get(path) ?? {};
       return new Response(JSON.stringify(body), {
-        status: 200,
+        status: statuses.get(path) ?? 200,
         headers: { "content-type": "application/json" },
       });
     },
@@ -130,8 +131,15 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  function setResponse(path, body) {
+  function setResponse(path, body, status = 200) {
     responses.set(path, body);
+    statuses.set(path, status);
+  }
+
+  async function send(path, body = {}, status = 200) {
+    setResponse(path, body, status);
+    await window.fetch(new Request(`${origin}${path}`, { method: "POST", body: "{}" }));
+    await new Promise((resolve) => setImmediate(resolve));
   }
 
   function seedRecoveryState() {
@@ -261,6 +269,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   return {
     fetch,
     setResponse,
+    send,
     seedRecoveryState,
     resetRecovery,
     detect,
@@ -721,4 +730,23 @@ test("recovers Seller Centre history through the mini conversation route", async
   assert.equal(bridge.miniChatIsOpen, true);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages"), true);
   assert.equal(bridge.requests.some((path) => path.includes("/webchat/api/v1.2/conversations/")), false);
+  assert.equal(bridge.posts.findLast((post) => post.type === "provider_status")?.realtime_connected, true);
+});
+
+test("a failed Seller Centre sync post keeps a healthy conversation poll connected", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true, miniChatOpen: true });
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations", [{
+    id: "seller-centre-conversation",
+    shop_id: 100000001,
+    to_id: 987654321,
+    latest_message_id: "seller-message-1",
+    last_message_time: "2026-08-20T10:00:00.000Z",
+    biz_id: 0,
+  }]);
+  await bridge.runIntervals();
+  assert.equal(bridge.posts.findLast((post) => post.type === "provider_status")?.realtime_connected, true);
+
+  await bridge.send("/webchat/api/v1.2/mini/user/sync", { have_new_msg: false }, 500);
+
+  assert.equal(bridge.posts.findLast((post) => post.type === "provider_status")?.realtime_connected, true);
 });

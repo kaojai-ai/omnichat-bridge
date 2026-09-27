@@ -42,6 +42,28 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
   }
   assert.deepEqual(plain(adapter.surfacePriority), ["seller-centre", "legacy"]);
   assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/portal/chat-management");
+  const readyStatus = {
+    surface: "seller-centre",
+    surface_ready: true,
+    chat_open: true,
+    realtime_connected: true,
+    capabilities: {
+      account_detection: true,
+      message_observation: true,
+      message_recovery: true,
+      send_text: true,
+      send_image: true,
+      send_product: true,
+    },
+  };
+  assert.equal(adapter.providerStatusHealthy({
+    ...readyStatus,
+    last_provider_check_at: new Date(Date.now() - 90_000).toISOString(),
+  }), true);
+  assert.equal(adapter.providerStatusHealthy({
+    ...readyStatus,
+    last_provider_check_at: new Date(Date.now() - 181_000).toISOString(),
+  }), false);
   assert.equal(adapter.providerStatusReady({ surface_ready: true, capabilities: {
     account_detection: true,
     message_observation: true,

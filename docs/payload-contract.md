@@ -169,7 +169,8 @@ The extension publishes `omnichat.connection_status` when readiness, the reason,
 the device name, extension version, OS, or last sync time changes. It evaluates
 the shop tab, page bridge, logged-in account, and incoming capture locally and
 sends one `ready` flag. An open socket sends `{ "type": "keepalive" }` every 8
-minutes so the connection is not idle-closed. That frame is not stored.
+minutes so the connection is not idle-closed. The server does not store that
+frame. It uses the frame to extend the live presence lease.
 
 ```json
 {

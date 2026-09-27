@@ -245,6 +245,14 @@
     });
   };
 
+  const markSellerCentreLive = () => {
+    if (!isSellerCentreSurface()) return;
+    state.pollingConnected = true;
+    state.pollingConnectedAt ??= new Date().toISOString();
+    state.lastProviderCheckAt = new Date().toISOString();
+    publishSurfaceStatus();
+  };
+
   function errorDetails(error) {
     return {
       error_type: typeof error?.name === "string" && error.name.trim() ? error.name : "Error",
@@ -778,7 +786,7 @@
       }));
       if (!response.ok) throw new Error(`Shopee Seller Centre conversation refresh returned ${response.status}.`);
       await captureSellerCentreConversationList(response);
-      state.lastProviderCheckAt = new Date().toISOString();
+      markSellerCentreLive();
     } finally {
       state.pollingRefreshInFlight = false;
     }
@@ -1484,6 +1492,7 @@
           decision,
         });
       }
+      markSellerCentreLive();
       post({
         type: "recovery_complete",
         request_id: requestId,
@@ -1581,12 +1590,7 @@
       } else if (isSellerCentreSurface() && path === "/webchat/api/workbenchapi/v1.2/mini/shop/setting") {
         captureAccount(response);
       } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
-        state.pollingConnected = response.ok;
-        if (state.pollingConnected) {
-          state.pollingConnectedAt ??= new Date().toISOString();
-          state.lastProviderCheckAt = new Date().toISOString();
-        }
-        publishSurfaceStatus();
+        if (response.ok) markSellerCentreLive();
         void observeAsync("seller_centre_sync_response", async () => {
           const body = await response.clone().json();
           if (body?.have_new_msg) await refreshSellerCentreConversations();

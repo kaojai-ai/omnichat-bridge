@@ -175,6 +175,8 @@ test("refreshes leader status after live presence is sent", () => {
 
 test("uses an 8-minute keepalive and preserves immediate status sends", () => {
   assert.match(source, /const KEEPALIVE_INTERVAL_MS = 8 \* 60_000/);
+  assert.match(source, /const PROVIDER_HEALTH_STALE_MS = 180_000/);
+  assert.match(source, /await markProviderRecoveryReady\(context\.adapter, control\.tabId\);/);
   const start = source.indexOf("async function ensureAccountLiveConnection(context)");
   const end = source.indexOf("\n}\n\nfunction scheduleLeaderStatusRefresh", start);
   assert.ok(start >= 0);

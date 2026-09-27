@@ -147,7 +147,7 @@
     );
   }
 
-  function providerStatusHealthy(status, { staleMs = 60_000 } = {}) {
+  function providerStatusHealthy(status, { staleMs = 180_000 } = {}) {
     if (!providerStatusReady(status)) return false;
     if (status.surface === "seller-centre" && status.chat_open === false) return true;
     if (status.realtime_connected !== true) return false;
