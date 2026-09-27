@@ -166,10 +166,10 @@ matches and accepted, duplicate, and skipped messages cover the number sent.
 ## Connection status
 
 The extension publishes `omnichat.connection_status` when readiness, the reason,
-or the device name changes. It evaluates the shop tab, page bridge, logged-in
-account, and incoming capture locally and sends one `ready` flag. An open
-socket sends `{ "type": "keepalive" }` every 8 minutes so the connection is not
-idle-closed. That frame is not stored.
+the device name, extension version, OS, or last sync time changes. It evaluates
+the shop tab, page bridge, logged-in account, and incoming capture locally and
+sends one `ready` flag. An open socket sends `{ "type": "keepalive" }` every 8
+minutes so the connection is not idle-closed. That frame is not stored.
 
 ```json
 {
@@ -183,14 +183,19 @@ idle-closed. That frame is not stored.
   "extension_version": "0.6.0",
   "reported_at": "2026-07-31T00:00:00.000Z",
   "ready": true,
-  "reason_code": "healthy"
+  "reason_code": "healthy",
+  "client": { "platform": "mac" },
+  "last_sync_at": "2026-07-31T00:00:01.000Z"
 }
 ```
 
 The socket being open is liveness. `reported_at` is not used as a heartbeat.
-Older extensions may still send `health.checks`; the server maps those four
-results onto `ready` and does not store the checks. No IP address, browser
-user agent, cookies, login tokens, or passwords are included.
+The server stores `extension_version`, `client.platform`, and `last_sync_at`.
+`client.platform` is the Chrome OS name (`mac`, `win`, `linux`, `cros`,
+`android`), not a user agent. Older extensions may still send `health.checks`;
+the server maps those four results onto `ready` and does not store the checks.
+A legacy `health.last_sync_at` is stored as `last_sync_at`. No IP address,
+browser user agent, cookies, login tokens, or passwords are included.
 
 ## Operational log batch
 

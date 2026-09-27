@@ -1910,6 +1910,7 @@ async function connectionStatusSnapshot(context) {
   const ready = ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
     health.checks.some((check) => check.key === key && check.status === "pass")
   ));
+  const platform = await chrome.runtime.getPlatformInfo();
 
   return {
     type: "connection_status",
@@ -1923,6 +1924,8 @@ async function connectionStatusSnapshot(context) {
     reported_at: new Date().toISOString(),
     ready,
     reason_code: health.reason_code,
+    client: { platform: platform.os },
+    last_sync_at: health.last_sync_at,
     ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
   };
 }
@@ -1933,6 +1936,9 @@ function statusPublishKey(status) {
     reason_code: status.reason_code,
     device_name: status.device_name,
     command_capabilities: status.command_capabilities ?? null,
+    extension_version: status.extension_version ?? null,
+    os: status.client?.platform ?? null,
+    last_sync_at: status.last_sync_at ?? null,
   });
 }
 
@@ -3062,6 +3068,11 @@ async function runAccountSync(trigger, control, context) {
       last_result: result,
     });
     await recordLog("info", "sync", "completed", "Sync completed.", result);
+    const live = liveConnections.get(context.key);
+    if (live?.socket) {
+      void sendConnectionStatus(live.socket, context)
+        .catch((error) => recordUnexpected("connection_status", error));
+    }
     return result;
   } catch (error) {
     const cancelled = signal.aborted || error?.name === "AbortError";
