@@ -122,6 +122,13 @@ test("keeps connection status compatible with the server's strict version 1 enve
   assert.match(statusSource, /version: 1/);
   assert.match(statusSource, /ready,/);
   assert.match(statusSource, /reason_code: health\.reason_code/);
+  assert.match(statusSource, /chrome\.runtime\.getPlatformInfo/);
+  assert.match(statusSource, /client: \{ platform: platform\.os \}/);
+  assert.match(statusSource, /last_sync_at: health\.last_sync_at/);
+  assert.match(source, /extension_version: status\.extension_version/);
+  assert.match(source, /os: status\.client\?\.platform/);
+  assert.match(source, /last_sync_at: status\.last_sync_at/);
+  assert.match(source, /sendConnectionStatus\(live\.socket, context\)/);
   assert.doesNotMatch(statusSource, /health,/);
   assert.doesNotMatch(statusSource, /provider_surface:/);
   assert.doesNotMatch(statusSource, /provider_capabilities:/);
