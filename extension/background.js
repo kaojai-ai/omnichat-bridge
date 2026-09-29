@@ -1531,15 +1531,15 @@ async function markClosedProviderRecoveryTab(tabId) {
   }
 }
 
-async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts) {
+async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts, allowTabRecovery) {
   const previousCount = recovery.record?.failure_count ?? 0;
   const failureCount = previousCount + 1;
   const now = Date.now();
   const reason = providerRecoveryFailureReason(adapter, tab, status, error);
-  const shouldReload = failureCount >= PROVIDER_RECOVERY_FAILURE_THRESHOLD
+  const shouldReload = allowTabRecovery && failureCount >= PROVIDER_RECOVERY_FAILURE_THRESHOLD
     && recoveryRetryDue(recovery.record, now)
     && tab?.status !== "loading";
-  let nextRetryAt = recovery.record?.next_retry_at ?? null;
+  let nextRetryAt = allowTabRecovery ? recovery.record?.next_retry_at ?? null : null;
   let lastReloadAt = recovery.record?.last_reload_at ?? null;
   if (shouldReload) {
     try {
@@ -1560,7 +1560,7 @@ async function handleProviderRecoveryFailure(adapter, tab, status, recovery, err
       });
       nextRetryAt = now + recoveryRetryDelay(failureCount);
     }
-  } else if (recovery.record?.next_retry_at && !recoveryRetryDue(recovery.record, now)) {
+  } else if (allowTabRecovery && recovery.record?.next_retry_at && !recoveryRetryDue(recovery.record, now)) {
     await recordLog("debug", "recovery", "provider_tab_backoff", `${providerLabel(adapter)} tab recovery is waiting for its next retry.`, {
       provider: adapter.id,
       tab_id: tab.id,
@@ -1644,11 +1644,6 @@ async function runProviderHealthWatchdogOnce() {
     return;
   }
   const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
-  if (!allowTabRecovery) {
-    await clearProviderRecoveryLiveState();
-    await ensureProviderHealthAlarm(false);
-    return;
-  }
   for (const adapter of providerAdapters.list()) {
     const matchingContexts = providerRecoveryContexts(contexts, adapter);
     if (!matchingContexts.length) continue;
@@ -1669,14 +1664,16 @@ async function runProviderHealthWatchdogOnce() {
     }
     if (!recovery.tab) {
       await updateProviderRecoveryLiveState(contexts, adapter, {
-        state: recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention,
+        state: allowTabRecovery
+          ? recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention
+          : PROVIDER_RECOVERY_STATES.needsAttention,
         reason: recovery.reason,
         tabId: recovery.record?.tab_id,
       });
       continue;
     }
     const tab = recovery.tab;
-    if (recovery.record?.state === PROVIDER_RECOVERY_STATES.needsAttention
+    if (allowTabRecovery && recovery.record?.state === PROVIDER_RECOVERY_STATES.needsAttention
       && !recoveryRetryDue(recovery.record)) {
       await updateProviderRecoveryLiveState(contexts, adapter, {
         state: PROVIDER_RECOVERY_STATES.needsAttention,
@@ -1723,7 +1720,7 @@ async function runProviderHealthWatchdogOnce() {
         tab_id: tab.id,
       });
       const status = await providerTabStatus(tab);
-      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts);
+      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts, allowTabRecovery);
     }
   }
   await ensureLiveConnection();
@@ -2045,8 +2042,7 @@ async function ensureLiveConnection() {
   await ensureApiPingAlarm(canPing);
   const canWatch = configuredContexts.length > 0
     && hasServerInitialized(stored)
-    && hasLocalConsent(stored[STORAGE.consent])
-    && stored[STORAGE.unattendedRecovery] === true;
+    && hasLocalConsent(stored[STORAGE.consent]);
   await ensureProviderHealthAlarm(canWatch);
   if (!canWatch) await clearProviderRecoveryLiveState();
   if (canPing) {
