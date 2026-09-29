@@ -352,6 +352,13 @@
       provider: providerAdapter.id,
       provider_account_id: accountId,
       ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
+      ...(Number.isInteger(syncState.history_days) ? {
+        history_days: syncState.history_days,
+        history_since_ms: syncState.history_since_ms,
+        ...(Array.isArray(syncState.history_conversation_ids)
+          ? { history_conversation_ids: syncState.history_conversation_ids }
+          : {}),
+      } : {}),
     });
     log("info", "recovery_requested", "Provider recovery request sent.", {
       provider_account_id: accountId,
@@ -541,6 +548,38 @@
       log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error), {
         provider_account_id: message.provider_account_id,
         ...errorDetails(error),
+      });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
+  async function handleHistoryBackfill(message) {
+    touchRecovery(message.request_id);
+    try {
+      const result = await sendRuntimeMessage({
+        type: "record_history_backfill",
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
+        conversation_id: message.conversation_id,
+        history_days: message.history_days,
+      });
+      post({
+        type: "recovery_ack_v3",
+        request_id: message.request_id,
+        ok: Boolean(result?.ok),
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not save history backfill." }),
+      });
+      if (result?.ok) {
+        log("info", "history_backfill_completed", "Configured conversation history was loaded.", {
+          provider_account_id: message.provider_account_id,
+          conversation_id: message.conversation_id,
+          history_days: message.history_days,
+        });
+      }
+    } catch (error) {
+      logAsyncError("history_backfill", error, {
+        provider_account_id: message.provider_account_id,
+        conversation_id: message.conversation_id,
       });
       post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
@@ -919,6 +958,8 @@
       touchRecovery(event.data.request_id);
     } else if (event.data.type === "recovery_batch") {
       void observeAsync("recovery_batch", () => handleRecoveryBatch(event.data));
+    } else if (event.data.type === "history_backfill") {
+      void observeAsync("history_backfill", () => handleHistoryBackfill(event.data));
     } else if (event.data.type === "recovery_cursor") {
       void observeAsync("recovery_cursor", () => handleRecoveryCursor(event.data));
     } else if (event.data.type === "recovery_bootstrap") {

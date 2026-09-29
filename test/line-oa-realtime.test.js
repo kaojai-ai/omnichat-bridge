@@ -132,7 +132,7 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
     },
     postMessage(message) {
       posts.push(message);
-      if (!["recovery_batch", "recovery_cursor"].includes(message.type)) return;
+      if (!["recovery_batch", "recovery_cursor", "history_backfill"].includes(message.type)) return;
       queueMicrotask(() => {
         const response = {
           source: "omnichat-realtime-bridge-v3",
@@ -244,7 +244,15 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
       }
       throw new Error("LINE OA account detection did not complete.");
     },
-    async sync({ requestId = "sync-1", providerAccountId = "line-oa-account-1", botId = "bot-1", checkpoint = null } = {}) {
+    async sync({
+      requestId = "sync-1",
+      providerAccountId = "line-oa-account-1",
+      botId = "bot-1",
+      checkpoint = null,
+      history_days = null,
+      history_since_ms = null,
+      history_conversation_ids = null,
+    } = {}) {
       for (const listener of listeners) {
         listener({
           source: window,
@@ -256,6 +264,11 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
             checkpoint,
             provider_account_id: providerAccountId,
             ...(botId ? { bot_id: botId } : {}),
+            ...(history_days != null ? {
+              history_days,
+              history_since_ms,
+              history_conversation_ids,
+            } : {}),
           },
         });
       }
@@ -450,6 +463,73 @@ test("LINE OA first setup caps messages per conversation", async () => {
     bridge.requests.filter((url) => url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages").length,
     1,
   );
+});
+
+test("LINE OA history_days reloads a configured conversation behind the checkpoint", async () => {
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1_000, "chat-2": 1_000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+    history_days: 35,
+    history_since_ms: 900,
+    history_conversation_ids: ["chat-1"],
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 2);
+  const messagePaths = bridge.requests
+    .filter((url) => url.pathname.includes("/messages"))
+    .map((url) => url.pathname);
+  assert.ok(messagePaths.includes("/api/v3/bots/bot-1/chats/chat-1/messages"));
+  assert.equal(messagePaths.includes("/api/v3/bots/bot-1/chats/chat-2/messages"), false);
+  assert.equal(
+    bridge.posts.some((post) => post.type === "history_backfill"
+      && post.conversation_id === "chat-1"
+      && post.history_days === 35),
+    true,
+  );
+});
+
+test("LINE OA history_days requests a conversation that is not on the first chat page", async () => {
+  const conversationId = "580433e9-90f9-49cb-a68d-e9f16f7e0a88";
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1_000, "chat-2": 1_000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
+    history_days: 35,
+    history_since_ms: 900,
+    history_conversation_ids: [conversationId],
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(
+    bridge.requests.some((url) => url.pathname === `/api/v3/bots/bot-1/chats/${conversationId}/messages`),
+    true,
+  );
+});
+
+test("LINE OA does not repeat a configured history backfill already saved", async () => {
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1_000, "chat-2": 1_000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: {
+      watermark: "1970-01-01T00:00:02.000Z",
+      history_backfill: { "chat-1": 35 },
+    },
+    history_days: 35,
+    history_since_ms: 900,
+    history_conversation_ids: ["chat-1"],
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 0);
+  assert.equal(bridge.requests.some((url) => url.pathname.includes("/messages")), false);
 });
 
 test("LINE OA incremental recovery stops at the saved watermark", async () => {
