@@ -553,6 +553,35 @@
     }
   }
 
+  async function handleHistoryWindow(message) {
+    touchRecovery(message.request_id);
+    try {
+      const result = await sendRuntimeMessage({
+        type: "record_history_window",
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
+        history_days: message.history_days,
+      });
+      post({
+        type: "recovery_ack_v3",
+        request_id: message.request_id,
+        ok: Boolean(result?.ok),
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not save history window." }),
+      });
+      if (result?.ok) {
+        log("info", "history_window_completed", "Configured history window was loaded.", {
+          provider_account_id: message.provider_account_id,
+          history_days: message.history_days,
+        });
+      }
+    } catch (error) {
+      logAsyncError("history_window", error, {
+        provider_account_id: message.provider_account_id,
+      });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
   async function handleHistoryBackfill(message) {
     touchRecovery(message.request_id);
     try {
@@ -958,6 +987,8 @@
       touchRecovery(event.data.request_id);
     } else if (event.data.type === "recovery_batch") {
       void observeAsync("recovery_batch", () => handleRecoveryBatch(event.data));
+    } else if (event.data.type === "history_window") {
+      void observeAsync("history_window", () => handleHistoryWindow(event.data));
     } else if (event.data.type === "history_backfill") {
       void observeAsync("history_backfill", () => handleHistoryBackfill(event.data));
     } else if (event.data.type === "recovery_cursor") {

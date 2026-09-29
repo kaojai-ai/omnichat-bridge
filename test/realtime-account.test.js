@@ -13,6 +13,14 @@ const origin = "https://seller.shopee.co.th";
 const parserContext = vm.createContext({ location: { origin }, URL });
 vm.runInContext(shopeeParserSource, parserContext);
 
+test("Shopee history window is not capped at the bootstrap conversation limit", () => {
+  assert.match(
+    source,
+    /maxItems: !historyWindow && bootstrap && !pageRequired\.length \? MANUAL_SYNC_MAX_CONVERSATIONS : null/,
+  );
+  assert.match(source, /\} else if \(!historyWindow && bootstrap\) \{/);
+});
+
 test("keeps the recovery account identity available to reconnect cleanup", () => {
   const recoverStart = source.indexOf("async function recover(");
   const recoveryTry = source.indexOf("    try {", recoverStart);
@@ -221,6 +229,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
           "recovery_bootstrap",
           "recovery_cursor",
           "history_backfill",
+          "history_window",
         ].includes(post.type) || acknowledged.has(post.request_id)) continue;
         acknowledged.add(post.request_id);
         const parsed = post.type === "recovery_batch" && recoveryStore
@@ -548,6 +557,69 @@ test("Shopee history_days loads a configured conversation older than the checkpo
     bridge.posts.some((post) => post.type === "history_backfill"
       && post.conversation_id === conversationId
       && post.history_days === 35),
+    true,
+  );
+});
+
+test("Shopee history_days without conversation ids loads every conversation in the window", async () => {
+  const sinceMs = Date.parse("2026-08-25T00:00:00.000Z");
+  const insideId = "inside-window";
+  const outsideId = "outside-window";
+  const message = (id, conversationId, timestamp) => ({
+    id,
+    conversation_id: conversationId,
+    shop_id: 100000001,
+    from_id: "buyer-1",
+    to_id: "shop-1",
+    to_shop_id: 100000001,
+    type: "text",
+    content: { text: id },
+    created_timestamp: Date.parse(timestamp) / 1000,
+  });
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", [
+    {
+      id: insideId,
+      shop_id: 100000001,
+      last_message_time: "2026-08-28T00:00:00.000Z",
+      latest_message_id: "inside-message",
+    },
+    {
+      id: "inside-older",
+      shop_id: 100000001,
+      last_message_time: "2026-08-26T00:00:00.000Z",
+      latest_message_id: "inside-older-message",
+    },
+    {
+      id: outsideId,
+      shop_id: 100000001,
+      last_message_time: "2026-08-01T00:00:00.000Z",
+      latest_message_id: "outside-message",
+    },
+  ]);
+  bridge.setResponse(`/webchat/api/v1.2/conversations/${insideId}/messages`, [
+    message("inside-message", insideId, "2026-08-26T00:00:00.000Z"),
+    message("inside-too-old", insideId, "2026-08-20T00:00:00.000Z"),
+  ]);
+  const store = { messages: [], conversations: {}, watermark: null };
+  const complete = await bridge.sync("100000001", "history-window", {
+    watermark: "2026-09-20T00:00:00.000Z",
+    history_days: 35,
+    history_since_ms: sinceMs,
+  }, store);
+
+  assert.equal(complete.ok, true);
+  assert.deepEqual(store.messages.map((item) => item.id), ["inside-message"]);
+  assert.equal(
+    bridge.requests.includes("/webchat/api/v1.2/conversations/inside-older/messages"),
+    true,
+  );
+  assert.equal(
+    bridge.requests.includes(`/webchat/api/v1.2/conversations/${outsideId}/messages`),
+    false,
+  );
+  assert.equal(
+    bridge.posts.some((post) => post.type === "history_window" && post.history_days === 35),
     true,
   );
 });

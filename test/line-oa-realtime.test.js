@@ -15,7 +15,8 @@ test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /const nextCursor = cursor\(body\?\.next\)/);
   assert.match(source, /const nextBackward = cursor\(body\?\.backward\)/);
   assert.match(source, /const bootstrap = checkpointMs <= 0/);
-  assert.match(source, /const lowerBoundMs = bootstrap/);
+  assert.match(source, /const lowerBoundMs = historyWindow/);
+  assert.match(source, /Date\.now\(\) - INITIAL_SYNC_LOOKBACK_MS/);
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
@@ -132,7 +133,7 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
     },
     postMessage(message) {
       posts.push(message);
-      if (!["recovery_batch", "recovery_cursor", "history_backfill"].includes(message.type)) return;
+      if (!["recovery_batch", "recovery_cursor", "history_backfill", "history_window"].includes(message.type)) return;
       queueMicrotask(() => {
         const response = {
           source: "omnichat-realtime-bridge-v3",
@@ -510,6 +511,61 @@ test("LINE OA history_days requests a conversation that is not on the first chat
     bridge.requests.some((url) => url.pathname === `/api/v3/bots/bot-1/chats/${conversationId}/messages`),
     true,
   );
+});
+
+test("LINE OA history_days without conversation ids uses that day as the lower bound", async () => {
+  const bridge = createBridge({
+    chatCount: 12,
+    chat1MessageCount: 30,
+    chatLatestEventTimestamps: {
+      "chat-11": 2_000,
+      "chat-12": 500,
+    },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:03.000Z" },
+    history_days: 35,
+    history_since_ms: 1_001,
+  });
+
+  assert.equal(complete.ok, true);
+  const messagePaths = bridge.requests
+    .filter((url) => url.pathname.includes("/messages"))
+    .map((url) => url.pathname);
+  assert.equal(messagePaths.includes("/api/v3/bots/bot-1/chats/chat-11/messages"), true);
+  assert.equal(messagePaths.includes("/api/v3/bots/bot-1/chats/chat-12/messages"), false);
+  const chat1Batch = bridge.posts.find(
+    (post) => post.type === "recovery_batch" && post.request_id.startsWith("sync-1:chat-1:"),
+  );
+  assert.equal(chat1Batch.body.conversations[0].messages.length, 29);
+  assert.ok(chat1Batch.body.conversations[0].messages.every((message) => message.timestamp >= 1_001));
+  assert.equal(
+    bridge.posts.some((post) => post.type === "history_window" && post.history_days === 35),
+    true,
+  );
+});
+
+test("LINE OA does not repeat a history window already saved", async () => {
+  const bridge = createBridge({
+    chatLatestEventTimestamps: { "chat-1": 1_000, "chat-2": 1_000 },
+  });
+
+  const complete = await bridge.sync({
+    checkpoint: {
+      watermark: "1970-01-01T00:00:03.000Z",
+      history_window_days: 35,
+    },
+    history_days: 35,
+    history_since_ms: 900,
+  });
+
+  assert.equal(complete.ok, true);
+  assert.equal(
+    bridge.requests.some((url) => url.pathname.includes("/messages")),
+    false,
+  );
+  assert.equal(bridge.posts.some((post) => post.type === "history_window"), false);
 });
 
 test("LINE OA does not repeat a configured history backfill already saved", async () => {

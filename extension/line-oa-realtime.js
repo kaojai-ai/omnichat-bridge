@@ -419,6 +419,34 @@
     return (Number(checkpoint?.history_backfill?.[conversationId]) || 0) >= days;
   }
 
+  function historyWindowActive(selection, checkpoint) {
+    return Boolean(
+      selection
+      && selection.ids.length === 0
+      && (Number(checkpoint?.history_window_days) || 0) < selection.days,
+    );
+  }
+
+  function chatBeforeHistory(chat, sinceMs) {
+    const latest = latestEventTimeMs(chat);
+    return latest > 0 && latest < sinceMs;
+  }
+
+  async function markHistoryWindow({ requestId, providerAccountId, days, checkpoint }) {
+    const windowRequestId = `${requestId}:history-window`;
+    post({
+      type: "history_window",
+      request_id: windowRequestId,
+      provider_account_id: providerAccountId,
+      history_days: days,
+    });
+    const acknowledgement = await waitForAcknowledgement(windowRequestId);
+    if (!acknowledgement?.ok) {
+      throw new Error(acknowledgement?.error ?? "LINE OA history window could not be saved.");
+    }
+    if (checkpoint && typeof checkpoint === "object") checkpoint.history_window_days = days;
+  }
+
   async function markHistoryBackfill({ requestId, providerAccountId, conversationId, days, checkpoint }) {
     const backfillRequestId = `${requestId}:${conversationId}:history`;
     post({
@@ -452,10 +480,10 @@
       if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
       const bootstrap = checkpointMs <= 0;
-      const extendBootstrap = Boolean(selection && !selection.ids.length && bootstrap);
-      const lowerBoundMs = bootstrap
-        ? (extendBootstrap ? selection.sinceMs : Date.now() - INITIAL_SYNC_LOOKBACK_MS)
-        : checkpointMs;
+      const historyWindow = historyWindowActive(selection, checkpoint);
+      const lowerBoundMs = historyWindow
+        ? selection.sinceMs
+        : (bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : checkpointMs);
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );
@@ -475,11 +503,14 @@
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
-          const visibleTotal = bootstrap && pendingIds.size === 0
+          const visibleTotal = bootstrap && !historyWindow && pendingIds.size === 0
             ? Math.min(pageTotal, INITIAL_SYNC_MAX_CONVERSATIONS)
             : pageTotal;
           totalConversations = Math.max(totalConversations ?? 0, visibleTotal);
         }
+        const pageBeforeHistory = historyWindow
+          && chats.length > 0
+          && chats.every((chat) => chatBeforeHistory(chat, selection.sinceMs));
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
@@ -489,7 +520,8 @@
           const chatId = value(chat?.chatId);
           if (chatId) seenChatIds.add(chatId);
           const targeted = Boolean(chatId && pendingIds.has(chatId));
-          if (!targeted && bootstrap && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) continue;
+          if (historyWindow && !targeted && chatBeforeHistory(chat, selection.sinceMs)) continue;
+          if (!targeted && bootstrap && !historyWindow && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) continue;
           chatsToRecover.push(chat);
           if (!targeted && bootstrap) nonTargetConversations += 1;
         }
@@ -508,7 +540,7 @@
           const chatId = value(chat?.chatId);
           if (!chatId) continue;
           const deep = pendingIds.has(chatId);
-          const result = deep || shouldRecoverChat(chat, checkpointMs)
+          const result = deep || shouldRecoverChat(chat, historyWindow ? selection.sinceMs : checkpointMs)
             ? await recoverChat({
               requestId,
               providerAccountId,
@@ -516,10 +548,10 @@
               chat,
               generation,
               knownMessageIdsByChat,
-              maxMessages: deep || extendBootstrap
+              maxMessages: deep || historyWindow
                 ? null
                 : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
-              sinceMs: deep || extendBootstrap ? selection.sinceMs : lowerBoundMs,
+              sinceMs: deep || historyWindow ? selection.sinceMs : lowerBoundMs,
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
@@ -550,7 +582,8 @@
             });
           }
         }
-        if (bootstrap && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
+        if (pageBeforeHistory) break;
+        if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
         const nextCursor = cursor(body?.next);
         if (!nextCursor || seenCursors.has(nextCursor) || (allKnown && pendingIds.size === 0)) break;
         seenCursors.add(nextCursor);
@@ -588,12 +621,21 @@
         }
       }
       if (!pollIsActive(generation)) return;
+      if (historyWindow) {
+        await markHistoryWindow({
+          requestId,
+          providerAccountId,
+          days: selection.days,
+          checkpoint,
+        });
+      }
       const watermark = new Date().toISOString();
       const state = pollingAccounts.get(providerAccountId);
       if (state) {
         state.checkpoint = {
           watermark,
           ...(checkpoint?.history_backfill ? { history_backfill: checkpoint.history_backfill } : {}),
+          ...(checkpoint?.history_window_days ? { history_window_days: checkpoint.history_window_days } : {}),
         };
       }
       postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
