@@ -1236,8 +1236,9 @@
     }
   }
 
-  async function fetchHistory(conversation, cursor, maxMessages, onPage) {
-    const sinceMs = timeMs(cursor?.event_timestamp);
+  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0) {
+    const cursorMs = timeMs(cursor?.event_timestamp);
+    const sinceMs = sinceFloorMs > 0 ? sinceFloorMs : cursorMs;
     const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
     let accepted = 0;
     let parsed = 0;
@@ -1319,16 +1320,31 @@
       await waitForTemplate();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
+      const historyDays = Number(checkpoint?.history_days);
+      const historySinceMs = Number(checkpoint?.history_since_ms);
+      const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
+        ? checkpoint.history_conversation_ids.map((id) => String(id).trim()).filter(Boolean)
+        : [];
+      const historyBackfill = checkpoint?.history_backfill && typeof checkpoint.history_backfill === "object"
+        ? checkpoint.history_backfill
+        : {};
+      const historyActive = Number.isInteger(historyDays) && historyDays >= 1
+        && Number.isFinite(historySinceMs) && historySinceMs > 0;
+      const deepIds = historyActive
+        ? historyIds.filter((id) => (Number(historyBackfill[id]) || 0) < historyDays)
+        : [];
+      const extendBootstrap = historyActive && historyIds.length === 0 && bootstrap;
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
       const requiredIds = bootstrap && frozenBootstrap.length
         ? frozenBootstrap.map((conversation) => String(conversation.id))
         : null;
+      const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
       const pages = await fetchConversationPages({
         checkpointMs: bootstrap ? 0 : watermarkMs,
-        requiredIds,
-        maxItems: bootstrap && !requiredIds ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
+        requiredIds: pageRequired.length ? pageRequired : null,
+        maxItems: bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
       });
       const sorted = [...pages.conversations]
@@ -1341,6 +1357,12 @@
         );
       } else if (bootstrap) {
         recoveryConversations = sorted.slice(0, MANUAL_SYNC_MAX_CONVERSATIONS);
+        for (const id of deepIds) {
+          const conversation = sorted.find((item) => String(item.id) === id);
+          if (conversation && !recoveryConversations.some((item) => String(item.id) === id)) {
+            recoveryConversations.push(conversation);
+          }
+        }
         const bootstrapRequestId = `${requestId}:bootstrap`;
         post({
           type: "recovery_bootstrap",
@@ -1372,6 +1394,9 @@
         const cursorMs = timeMs(cursor?.event_timestamp);
         const summaryMs = conversationTime(conversation);
         const latestId = latestMessageIdOf(conversation);
+        if (deepIds.includes(String(conversation.id))) {
+          return { decision: "history_job", reason: "configured_history", cursor, deep: true };
+        }
         if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
         if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
         if (!cursorMs) {
@@ -1438,10 +1463,11 @@
           total: probes.length + recoveryJobs.length,
           decision,
         });
+        const deep = item.deep === true;
         const history = await fetchHistory(
           conversation,
-          cursor,
-          bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined,
+          deep ? null : cursor,
+          deep || extendBootstrap ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
           async (messages, page) => {
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
@@ -1451,7 +1477,31 @@
             }
             return acknowledgement;
           },
+          deep || extendBootstrap ? historySinceMs : 0,
         );
+        if (deep) {
+          const backfillRequestId = `${requestId}:${conversation.id}:history`;
+          post({
+            type: "history_backfill",
+            request_id: backfillRequestId,
+            provider_account_id: accountId,
+            conversation_id: String(conversation.id),
+            history_days: historyDays,
+          });
+          const backfillAcknowledgement = await waitForAcknowledgement(backfillRequestId);
+          if (!backfillAcknowledgement.ok) {
+            throw new Error(backfillAcknowledgement.error ?? "Could not save history backfill.");
+          }
+          checkpoint.history_backfill = {
+            ...(checkpoint.history_backfill ?? {}),
+            [String(conversation.id)]: historyDays,
+          };
+          postLog("info", "history_backfill_completed", "Configured conversation history was loaded.", {
+            provider_account_id: accountId,
+            conversation_id: String(conversation.id),
+            history_days: historyDays,
+          });
+        }
         parsed += history.parsed;
         queued += history.queued;
         const summaryMs = conversationTime(conversation);
@@ -1482,6 +1532,19 @@
           parsed: history.parsed,
           queued: history.queued,
           decision,
+        });
+      }
+      const recoveredDeepIds = new Set(
+        (checkpoint.history_backfill && typeof checkpoint.history_backfill === "object"
+          ? Object.keys(checkpoint.history_backfill)
+          : []
+        ),
+      );
+      for (const id of deepIds) {
+        if (recoveredDeepIds.has(id) || (Number(historyBackfill[id]) || 0) >= historyDays) continue;
+        postLog("warn", "history_conversation_skipped", "Configured history conversation was not in the chat list.", {
+          provider_account_id: accountId,
+          conversation_id: id,
         });
       }
       post({
@@ -1691,6 +1754,13 @@
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
         ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
+        ...(Number.isInteger(event.data.history_days) ? {
+          history_days: event.data.history_days,
+          history_since_ms: event.data.history_since_ms,
+          ...(Array.isArray(event.data.history_conversation_ids)
+            ? { history_conversation_ids: event.data.history_conversation_ids }
+            : {}),
+        } : {}),
       }));
     } else if (event.data.type === "cancel_sync_v3") {
       if (state.recoveryRequestId === event.data.request_id) {

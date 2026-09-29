@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { accountOrigins, validateConfigFile } from "../extension/lib/config.js";
+import { accountOrigins, historySinceMs, validateConfigFile } from "../extension/lib/config.js";
 
 test("accepts legacy v2 configurations with only commands_url", () => {
   const config = validateConfigFile({
@@ -182,4 +182,49 @@ test("delegates validation and origins to a registered provider adapter", () => 
     if (previous === undefined) delete globalThis.OmnichatProviderAdapters;
     else globalThis.OmnichatProviderAdapters = previous;
   }
+});
+
+test("keeps optional history_days and conversation ids from the configuration file", () => {
+  const conversationId = "580433e9-90f9-49cb-a68d-e9f16f7e0a88";
+  const config = validateConfigFile({
+    version: 3,
+    history_days: 35,
+    history_conversation_ids: [`  ${conversationId}  `],
+    accounts: [{
+      provider: "shopee",
+      provider_account_id: "123",
+      events_url: "https://collector.example.com/omnichat/events",
+      api_url: "https://admin.example.com/api/omnichat",
+      hmac_secret: "local-secret",
+    }],
+  });
+
+  assert.equal(config.history_days, 35);
+  assert.deepEqual(config.history_conversation_ids, [conversationId]);
+  const now = new Date(2026, 8, 29, 16, 46, 0, 0).getTime();
+  const since = new Date(historySinceMs(35, now));
+  assert.equal(since.getFullYear(), 2026);
+  assert.equal(since.getMonth(), 7);
+  assert.equal(since.getDate(), 25);
+  assert.equal(since.getHours(), 0);
+});
+
+test("rejects a history window that is not a whole number of days", () => {
+  const account = {
+    provider: "shopee",
+    provider_account_id: "123",
+    events_url: "https://collector.example.com/omnichat/events",
+    api_url: "https://admin.example.com/api/omnichat",
+    hmac_secret: "local-secret",
+  };
+  assert.throws(() => validateConfigFile({
+    version: 3,
+    history_days: 35.5,
+    accounts: [account],
+  }), /history_days must be a whole number of days/);
+  assert.throws(() => validateConfigFile({
+    version: 3,
+    history_conversation_ids: ["conversation-1"],
+    accounts: [account],
+  }), /history_days is required/);
 });

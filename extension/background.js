@@ -1,5 +1,5 @@
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
-import { accountConfigKey, accountKey, findAccountConfig } from "./lib/config.js";
+import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, historySyncSettings } from "./lib/config.js";
 import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   advanceConversationCursors,
@@ -101,6 +101,8 @@ const INBOUND_LOG_MESSAGES = {
   "provider.conversation_started": "Checking one conversation for missed messages.",
   "provider.conversation_completed": "Conversation recovery check completed.",
   "provider.history_template_ready": "Provider history request template captured.",
+  "provider.history_backfill_completed": "Configured conversation history was loaded.",
+  "provider.history_conversation_skipped": "Configured history conversation was not in the chat list.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
   "provider.content_unready": "Provider content bridge is not ready. Refresh the provider tab manually before retrying.",
   "provider.seller_centre_messages_observed": "Seller Centre realtime messages observed.",
@@ -535,6 +537,22 @@ async function saveBootstrapSelection(providerAccountId, conversations, provider
   }, stored[STORAGE.scanState]);
 }
 
+async function recordHistoryBackfill(providerAccountId, conversationId, historyDays, provider = "") {
+  const id = String(conversationId ?? "").trim();
+  const days = Number(historyDays);
+  if (!id || !Number.isInteger(days) || days < 1) return;
+  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
+  const previous = Number(state.history_backfill?.[id]) || 0;
+  if (previous >= days) return;
+  await writeAccountScanState(context, {
+    ...state,
+    history_backfill: {
+      ...(state.history_backfill ?? {}),
+      [id]: days,
+    },
+  }, stored[STORAGE.scanState]);
+}
+
 async function advanceScanCursor(providerAccountId, conversationId, cursor, provider = "") {
   const id = String(conversationId ?? "").trim();
   if (!id) return;
@@ -680,8 +698,27 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "get_sync_state") {
-    void exclusive(() => getAccountScanState(message.provider_account_id, message.provider)).then(
-      ({ state }) => respond({ ok: true, checkpoint: state }),
+    void exclusive(async () => {
+      const { state } = await getAccountScanState(message.provider_account_id, message.provider);
+      const stored = await readStorage([STORAGE.config]);
+      let history = null;
+      try {
+        history = historySyncSettings(stored[STORAGE.config]);
+      } catch {
+        history = null;
+      }
+      return {
+        checkpoint: state,
+        ...(history ? {
+          history_days: history.days,
+          history_since_ms: historySinceMs(history.days),
+          ...(history.conversation_ids.length
+            ? { history_conversation_ids: history.conversation_ids }
+            : {}),
+        } : {}),
+      };
+    }).then(
+      (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
@@ -805,6 +842,18 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       provider_account_id: message.provider_account_id,
     };
     void recordLog("info", "sync", "plan_created", "Sync plan created.", details).then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "record_history_backfill") {
+    void exclusive(() => recordHistoryBackfill(
+      message.provider_account_id,
+      message.conversation_id,
+      message.history_days,
+      message.provider,
+    )).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );

@@ -22,6 +22,7 @@
   const acknowledgements = new Map();
   const knownChatIdsByAccount = new Map();
   const knownMessageIdsByAccount = new Map();
+  const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
   const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
@@ -404,7 +405,42 @@
     });
   }
 
-  async function poll(requestId, providerAccountId, botId, checkpoint, generation) {
+  function historySelection(history) {
+    const days = Number(history?.days ?? history?.history_days);
+    const sinceMs = Number(history?.sinceMs ?? history?.history_since_ms);
+    if (!Number.isInteger(days) || days < 1 || !Number.isFinite(sinceMs) || sinceMs <= 0) return null;
+    const ids = Array.isArray(history?.ids ?? history?.history_conversation_ids)
+      ? (history.ids ?? history.history_conversation_ids).map((id) => value(id)).filter(Boolean)
+      : [];
+    return { days, sinceMs, ids };
+  }
+
+  function historyCovered(checkpoint, conversationId, days) {
+    return (Number(checkpoint?.history_backfill?.[conversationId]) || 0) >= days;
+  }
+
+  async function markHistoryBackfill({ requestId, providerAccountId, conversationId, days, checkpoint }) {
+    const backfillRequestId = `${requestId}:${conversationId}:history`;
+    post({
+      type: "history_backfill",
+      request_id: backfillRequestId,
+      provider_account_id: providerAccountId,
+      conversation_id: conversationId,
+      history_days: days,
+    });
+    const acknowledgement = await waitForAcknowledgement(backfillRequestId);
+    if (!acknowledgement?.ok) {
+      throw new Error(acknowledgement?.error ?? "LINE OA history backfill could not be saved.");
+    }
+    if (checkpoint && typeof checkpoint === "object") {
+      checkpoint.history_backfill = {
+        ...(checkpoint.history_backfill ?? {}),
+        [conversationId]: days,
+      };
+    }
+  }
+
+  async function poll(requestId, providerAccountId, botId, checkpoint, generation, history) {
     try {
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
@@ -412,15 +448,23 @@
       const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
       knownChatIdsByAccount.set(providerAccountId, knownChatIds);
       knownMessageIdsByAccount.set(providerAccountId, knownMessageIdsByChat);
+      const selection = historySelection(history);
+      if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
       const bootstrap = checkpointMs <= 0;
+      const extendBootstrap = Boolean(selection && !selection.ids.length && bootstrap);
       const lowerBoundMs = bootstrap
-        ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
+        ? (extendBootstrap ? selection.sinceMs : Date.now() - INITIAL_SYNC_LOOKBACK_MS)
         : checkpointMs;
+      const pendingIds = new Set(
+        (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
+      );
+      const seenChatIds = new Set();
       let next = null;
       let parsed = 0;
       let queued = 0;
       let completedConversations = 0;
+      let nonTargetConversations = 0;
       let totalConversations = null;
       const seenCursors = new Set();
       const trackedRequest = !String(requestId).startsWith("poll:");
@@ -431,7 +475,7 @@
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
-          const visibleTotal = bootstrap
+          const visibleTotal = bootstrap && pendingIds.size === 0
             ? Math.min(pageTotal, INITIAL_SYNC_MAX_CONVERSATIONS)
             : pageTotal;
           totalConversations = Math.max(totalConversations ?? 0, visibleTotal);
@@ -440,9 +484,15 @@
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
         const allKnown = chats.length > 0 && chats.every((chat) => knownChatIds.has(value(chat?.chatId)));
-        const chatsToRecover = bootstrap
-          ? chats.slice(0, Math.max(0, INITIAL_SYNC_MAX_CONVERSATIONS - completedConversations))
-          : chats;
+        const chatsToRecover = [];
+        for (const chat of chats) {
+          const chatId = value(chat?.chatId);
+          if (chatId) seenChatIds.add(chatId);
+          const targeted = Boolean(chatId && pendingIds.has(chatId));
+          if (!targeted && bootstrap && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) continue;
+          chatsToRecover.push(chat);
+          if (!targeted && bootstrap) nonTargetConversations += 1;
+        }
         if (trackedRequest) {
           post({
             type: "recovery_phase",
@@ -457,7 +507,8 @@
           if (!pollIsActive(generation)) return;
           const chatId = value(chat?.chatId);
           if (!chatId) continue;
-          const result = shouldRecoverChat(chat, checkpointMs)
+          const deep = pendingIds.has(chatId);
+          const result = deep || shouldRecoverChat(chat, checkpointMs)
             ? await recoverChat({
               requestId,
               providerAccountId,
@@ -465,11 +516,23 @@
               chat,
               generation,
               knownMessageIdsByChat,
-              maxMessages: bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
-              sinceMs: lowerBoundMs,
+              maxMessages: deep || extendBootstrap
+                ? null
+                : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
+              sinceMs: deep || extendBootstrap ? selection.sinceMs : lowerBoundMs,
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
+          if (deep) {
+            await markHistoryBackfill({
+              requestId,
+              providerAccountId,
+              conversationId: chatId,
+              days: selection.days,
+              checkpoint,
+            });
+            pendingIds.delete(chatId);
+          }
           parsed += result.parsed;
           queued += result.queued;
           knownChatIds.add(chatId);
@@ -487,16 +550,52 @@
             });
           }
         }
-        if (bootstrap && completedConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
+        if (bootstrap && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
         const nextCursor = cursor(body?.next);
-        if (!nextCursor || allKnown || seenCursors.has(nextCursor)) break;
+        if (!nextCursor || seenCursors.has(nextCursor) || (allKnown && pendingIds.size === 0)) break;
         seenCursors.add(nextCursor);
         next = nextCursor;
+      }
+      for (const chatId of pendingIds) {
+        if (!pollIsActive(generation) || seenChatIds.has(chatId)) continue;
+        try {
+          const result = await recoverChat({
+            requestId,
+            providerAccountId,
+            botId: resolvedBotId,
+            chat: { chatId },
+            generation,
+            knownMessageIdsByChat,
+            maxMessages: null,
+            sinceMs: selection.sinceMs,
+          });
+          if (!pollIsActive(generation)) return;
+          await markHistoryBackfill({
+            requestId,
+            providerAccountId,
+            conversationId: chatId,
+            days: selection.days,
+            checkpoint,
+          });
+          parsed += result.parsed;
+          queued += result.queued;
+        } catch (error) {
+          if (String(error).includes("failed (404)")) {
+            missingHistoryIds.add(chatId);
+            continue;
+          }
+          throw error;
+        }
       }
       if (!pollIsActive(generation)) return;
       const watermark = new Date().toISOString();
       const state = pollingAccounts.get(providerAccountId);
-      if (state) state.checkpoint = { watermark };
+      if (state) {
+        state.checkpoint = {
+          watermark,
+          ...(checkpoint?.history_backfill ? { history_backfill: checkpoint.history_backfill } : {}),
+        };
+      }
       postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
         provider_account_id,
         bot_id: account.botId,
@@ -526,22 +625,23 @@
     if (next) startPoll(next);
   }
 
-  function startPoll({ requestId, providerAccountId, botId, checkpoint }) {
+  function startPoll({ requestId, providerAccountId, botId, checkpoint, history }) {
     const generation = pollGeneration;
     const current = { requestId, providerAccountId, task: null };
     activePoll = current;
-    const task = poll(requestId, providerAccountId, botId, checkpoint, generation);
+    const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
   }
 
-  function start(requestId, providerAccountId, botId, checkpoint) {
+  function start(requestId, providerAccountId, botId, checkpoint, history) {
     const accountId = value(providerAccountId);
     stopTimer();
     const previous = pollingAccounts.get(accountId);
     const account = {
       botId: value(botId) || previous?.botId || "",
       checkpoint: checkpoint ?? previous?.checkpoint ?? null,
+      history: history === undefined ? previous?.history ?? null : history,
     };
     pollingAccounts.set(accountId, account);
     const request = { requestId, providerAccountId: accountId, ...account };
@@ -707,7 +807,13 @@
         });
       });
     } else if (event.data.type === "sync_v3") {
-      start(event.data.request_id, event.data.provider_account_id, event.data.bot_id, event.data.checkpoint);
+      start(
+        event.data.request_id,
+        event.data.provider_account_id,
+        event.data.bot_id,
+        event.data.checkpoint,
+        historySelection(event.data),
+      );
     } else if (event.data.type === "cancel_sync_v3") {
       cancelPolling("LINE OA recovery was cancelled.", { notifyRequests: false });
     } else if (event.data.type === "send_api_v3") {

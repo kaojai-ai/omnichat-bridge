@@ -1,4 +1,5 @@
 export const CONFIG_VERSION = 3;
+export const MAX_HISTORY_DAYS = 366;
 const SUPPORTED_CONFIG_VERSIONS = new Set([2, CONFIG_VERSION]);
 const DEFAULT_PROVIDER = "shopee";
 
@@ -94,6 +95,42 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
   };
 }
 
+export function historySyncSettings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const hasDays = Object.hasOwn(value, "history_days")
+    && value.history_days !== null
+    && value.history_days !== "";
+  const hasIds = Object.hasOwn(value, "history_conversation_ids")
+    && value.history_conversation_ids != null;
+  if (!hasDays && !hasIds) return null;
+  if (!hasDays) throw new Error("history_days is required when history_conversation_ids is set.");
+  const days = value.history_days;
+  if (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > MAX_HISTORY_DAYS) {
+    throw new Error(`history_days must be a whole number of days from 1 to ${MAX_HISTORY_DAYS}.`);
+  }
+  if (!hasIds) return { days, conversation_ids: [] };
+  if (!Array.isArray(value.history_conversation_ids)) {
+    throw new Error("history_conversation_ids must be a list of conversation IDs.");
+  }
+  const conversation_ids = value.history_conversation_ids.map((id) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("history_conversation_ids must be a list of conversation IDs.");
+    }
+    return id.trim();
+  });
+  if (new Set(conversation_ids).size !== conversation_ids.length) {
+    throw new Error("history_conversation_ids contains duplicate conversation IDs.");
+  }
+  return { days, conversation_ids };
+}
+
+export function historySinceMs(days, now = Date.now()) {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - days);
+  return start.getTime();
+}
+
 export function validateConfigFile(value) {
   const version = value?.version;
   if (!SUPPORTED_CONFIG_VERSIONS.has(version) || !Array.isArray(value.accounts)) {
@@ -108,7 +145,15 @@ export function validateConfigFile(value) {
     .map((account) => validateAccountConfig(account, version));
   const keys = accounts.map((account) => accountKey(account.provider, account.provider_account_id));
   if (new Set(keys).size !== keys.length) throw new Error("Configuration contains duplicate accounts.");
-  return { version, accounts };
+  const history = historySyncSettings(value);
+  return {
+    version,
+    ...(history ? { history_days: history.days } : {}),
+    ...(history?.conversation_ids.length
+      ? { history_conversation_ids: history.conversation_ids }
+      : {}),
+    accounts,
+  };
 }
 
 export function findAccountConfig(config, detectedAccount) {

@@ -220,6 +220,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
           "recovery_batch",
           "recovery_bootstrap",
           "recovery_cursor",
+          "history_backfill",
         ].includes(post.type) || acknowledged.has(post.request_id)) continue;
         acknowledged.add(post.request_id);
         const parsed = post.type === "recovery_batch" && recoveryStore
@@ -496,6 +497,58 @@ test("limits recovery to the requested Shop ID", async () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(plan.conversations.map((conversation) => conversation.conversation_id))),
     ["conversation-th"],
+  );
+});
+
+test("Shopee history_days loads a configured conversation older than the checkpoint", async () => {
+  const conversationId = "580433e9-90f9-49cb-a68d-e9f16f7e0a88";
+  const sinceMs = Date.parse("2026-08-25T00:00:00.000Z");
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", [{
+    id: conversationId,
+    shop_id: 100000001,
+    last_message_time: "2026-08-28T00:00:00.000Z",
+    latest_message_id: "august-message",
+  }]);
+  bridge.setResponse(`/webchat/api/v1.2/conversations/${conversationId}/messages`, [
+    {
+      id: "august-message",
+      conversation_id: conversationId,
+      shop_id: 100000001,
+      from_id: "buyer-1",
+      to_id: "shop-1",
+      to_shop_id: 100000001,
+      type: "text",
+      content: { text: "since 25 August" },
+      created_timestamp: Date.parse("2026-08-26T00:00:00.000Z") / 1000,
+    },
+    {
+      id: "too-old",
+      conversation_id: conversationId,
+      shop_id: 100000001,
+      from_id: "buyer-1",
+      to_id: "shop-1",
+      to_shop_id: 100000001,
+      type: "text",
+      content: { text: "before the window" },
+      created_timestamp: Date.parse("2026-08-20T00:00:00.000Z") / 1000,
+    },
+  ]);
+  const store = { messages: [], conversations: {}, watermark: null };
+  const complete = await bridge.sync("100000001", "history", {
+    watermark: "2026-09-20T00:00:00.000Z",
+    history_days: 35,
+    history_since_ms: sinceMs,
+    history_conversation_ids: [conversationId],
+  }, store);
+
+  assert.equal(complete.ok, true);
+  assert.deepEqual(store.messages.map((message) => message.id), ["august-message"]);
+  assert.equal(
+    bridge.posts.some((post) => post.type === "history_backfill"
+      && post.conversation_id === conversationId
+      && post.history_days === 35),
+    true,
   );
 });
 
