@@ -102,6 +102,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.conversation_completed": "Conversation recovery check completed.",
   "provider.history_template_ready": "Provider history request template captured.",
   "provider.history_backfill_completed": "Configured conversation history was loaded.",
+  "provider.history_window_completed": "Configured history window was loaded.",
   "provider.history_conversation_skipped": "Configured history conversation was not in the chat list.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
   "provider.content_unready": "Provider content bridge is not ready. Refresh the provider tab manually before retrying.",
@@ -537,6 +538,18 @@ async function saveBootstrapSelection(providerAccountId, conversations, provider
   }, stored[STORAGE.scanState]);
 }
 
+async function recordHistoryWindow(providerAccountId, historyDays, provider = "") {
+  const days = Number(historyDays);
+  if (!Number.isInteger(days) || days < 1) return;
+  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
+  const previous = Number(state.history_window_days) || 0;
+  if (previous >= days) return;
+  await writeAccountScanState(context, {
+    ...state,
+    history_window_days: days,
+  }, stored[STORAGE.scanState]);
+}
+
 async function recordHistoryBackfill(providerAccountId, conversationId, historyDays, provider = "") {
   const id = String(conversationId ?? "").trim();
   const days = Number(historyDays);
@@ -842,6 +855,17 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       provider_account_id: message.provider_account_id,
     };
     void recordLog("info", "sync", "plan_created", "Sync plan created.", details).then(
+      () => respond({ ok: true }),
+      (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "record_history_window") {
+    void exclusive(() => recordHistoryWindow(
+      message.provider_account_id,
+      message.history_days,
+      message.provider,
+    )).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) })
     );

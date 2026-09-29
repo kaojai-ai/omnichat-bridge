@@ -1330,32 +1330,33 @@
         : {};
       const historyActive = Number.isInteger(historyDays) && historyDays >= 1
         && Number.isFinite(historySinceMs) && historySinceMs > 0;
+      const historyWindow = historyActive && historyIds.length === 0
+        && (Number(checkpoint?.history_window_days) || 0) < historyDays;
       const deepIds = historyActive
         ? historyIds.filter((id) => (Number(historyBackfill[id]) || 0) < historyDays)
         : [];
-      const extendBootstrap = historyActive && historyIds.length === 0 && bootstrap;
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
-      const requiredIds = bootstrap && frozenBootstrap.length
+      const requiredIds = !historyWindow && bootstrap && frozenBootstrap.length
         ? frozenBootstrap.map((conversation) => String(conversation.id))
         : null;
       const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
       const pages = await fetchConversationPages({
-        checkpointMs: bootstrap ? 0 : watermarkMs,
+        checkpointMs: historyWindow ? historySinceMs : (bootstrap ? 0 : watermarkMs),
         requiredIds: pageRequired.length ? pageRequired : null,
-        maxItems: bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
+        maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
       });
       const sorted = [...pages.conversations]
         .sort((left, right) => conversationTime(right) - conversationTime(left));
       let recoveryConversations;
-      if (bootstrap && frozenBootstrap.length) {
+      if (!historyWindow && bootstrap && frozenBootstrap.length) {
         const liveById = new Map(sorted.map((conversation) => [String(conversation.id), conversation]));
         recoveryConversations = frozenBootstrap.map(
           (conversation) => liveById.get(String(conversation.id)) ?? conversation,
         );
-      } else if (bootstrap) {
+      } else if (!historyWindow && bootstrap) {
         recoveryConversations = sorted.slice(0, MANUAL_SYNC_MAX_CONVERSATIONS);
         for (const id of deepIds) {
           const conversation = sorted.find((item) => String(item.id) === id);
@@ -1394,6 +1395,13 @@
         const cursorMs = timeMs(cursor?.event_timestamp);
         const summaryMs = conversationTime(conversation);
         const latestId = latestMessageIdOf(conversation);
+        if (historyWindow) {
+          const summaryMs = conversationTime(conversation);
+          if (summaryMs && summaryMs < historySinceMs) {
+            return { decision: "skip", reason: "older_than_history_window", cursor };
+          }
+          return { decision: "history_job", reason: "configured_history_window", cursor, historyWindow: true };
+        }
         if (deepIds.includes(String(conversation.id))) {
           return { decision: "history_job", reason: "configured_history", cursor, deep: true };
         }
@@ -1464,10 +1472,11 @@
           decision,
         });
         const deep = item.deep === true;
+        const windowJob = item.historyWindow === true;
         const history = await fetchHistory(
           conversation,
-          deep ? null : cursor,
-          deep || extendBootstrap ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
+          deep || windowJob ? null : cursor,
+          deep || windowJob ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
           async (messages, page) => {
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
@@ -1477,7 +1486,7 @@
             }
             return acknowledgement;
           },
-          deep || extendBootstrap ? historySinceMs : 0,
+          deep || windowJob ? historySinceMs : 0,
         );
         if (deep) {
           const backfillRequestId = `${requestId}:${conversation.id}:history`;
@@ -1540,6 +1549,24 @@
           : []
         ),
       );
+      if (historyWindow) {
+        const windowRequestId = `${requestId}:history-window`;
+        post({
+          type: "history_window",
+          request_id: windowRequestId,
+          provider_account_id: accountId,
+          history_days: historyDays,
+        });
+        const windowAcknowledgement = await waitForAcknowledgement(windowRequestId);
+        if (!windowAcknowledgement.ok) {
+          throw new Error(windowAcknowledgement.error ?? "Could not save history window.");
+        }
+        checkpoint.history_window_days = historyDays;
+        postLog("info", "history_window_completed", "Configured history window was loaded.", {
+          provider_account_id: accountId,
+          history_days: historyDays,
+        });
+      }
       for (const id of deepIds) {
         if (recoveredDeepIds.has(id) || (Number(historyBackfill[id]) || 0) >= historyDays) continue;
         postLog("warn", "history_conversation_skipped", "Configured history conversation was not in the chat list.", {
