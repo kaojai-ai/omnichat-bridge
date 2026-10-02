@@ -824,3 +824,32 @@ test("LINE OA rejects empty media, unsupported images, and unnamed files before 
     bridge.dispose();
   }
 });
+
+test("LINE OA sends native all mentions and clears learned mentions on later plain replies", async () => {
+  const bridge = createBridge();
+  await bridge.captureManualSend({ type: "textV2", text: "{old}", substitution: {
+    old: { type: "mention", mentionee: { type: "user", userId: "Uold" } },
+  } });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "@All hello", text_v2: {
+    text: "{everyone} hello", substitution: { everyone: { type: "mention", mentionee: { type: "all" } } },
+  } });
+  assert.equal(result.ok, true);
+  const payload = JSON.parse(bridge.sentPayloads.at(-1).body);
+  assert.equal(payload.type, "textV2");
+  assert.equal(payload.text, "{everyone} hello");
+  assert.deepEqual(payload.substitution, { everyone: { type: "mention", mentionee: { type: "all" } } });
+  await bridge.sendCommand({ command_type: "send_text", text: "plain reply" });
+  const plainPayload = JSON.parse(bridge.sentPayloads.at(-1).body);
+  assert.equal(plainPayload.type, "text");
+  assert.equal(plainPayload.text, "plain reply");
+  assert.equal(plainPayload.substitution, undefined);
+});
+
+test("LINE OA rejects malformed mention commands before sending", async () => {
+  const bridge = createBridge();
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "@All", text_v2: {
+    text: "{everyone}", substitution: { everyone: { type: "mention", mentionee: { type: "invalid" } } },
+  } });
+  assert.equal(result.ok, false);
+  assert.equal(bridge.sentPayloads.length, 0);
+});

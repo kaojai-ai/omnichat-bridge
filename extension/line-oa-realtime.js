@@ -67,7 +67,7 @@
   function rememberSendProfile(url, init, payload) {
     const target = messageSendPath(url);
     if (!target || !payload || typeof payload !== "object" || Array.isArray(payload)) return;
-    const type = value(payload.type);
+    const type = payload.type === "textV2" ? "text" : value(payload.type);
     if (!["text", "image", "sticker"].includes(type)) return;
     const profiles = sendProfilesByBot.get(target.botId) ?? new Map();
     profiles.set(type, { headers: safeHeaders(init?.headers), payload: clone(payload) });
@@ -754,7 +754,30 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA reply text is invalid." });
         return;
       }
+      // Learned profiles may contain mentions from a previous human reply.
+      delete payload.mention;
+      delete payload.emojis;
+      delete payload.substitution;
+      payload.type = "text";
       payload.text = textValue;
+      if (command.text_v2 !== undefined) {
+        const native = command.text_v2;
+        const entries = native?.substitution && typeof native.substitution === "object"
+          && !Array.isArray(native.substitution) ? Object.entries(native.substitution) : [];
+        const valid = typeof native?.text === "string" && native.text.length > 0
+          && native.text.length <= 5_000 && entries.length > 0 && entries.length <= 20
+          && entries.every(([key, entry]) => /^[A-Za-z0-9_]{1,20}$/.test(key)
+            && entry?.type === "mention" && (entry.mentionee?.type === "all"
+              || (entry.mentionee?.type === "user" && typeof entry.mentionee.userId === "string"
+                && entry.mentionee.userId.length > 0)));
+        if (!valid) {
+          post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA mention reply is invalid." });
+          return;
+        }
+        payload.type = "textV2";
+        payload.text = native.text;
+        payload.substitution = clone(native.substitution);
+      }
     } else if (expectedType === "sticker") {
       const packageId = value(command?.package_id);
       const stickerId = value(command?.sticker_id);
