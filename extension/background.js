@@ -65,7 +65,8 @@ const API_PING_INTERVAL_MINUTES = 5;
 const PROVIDER_HEALTH_ALARM = "omnichat-provider-health";
 const PROVIDER_HEALTH_INTERVAL_MINUTES = 1;
 const PROVIDER_HEALTH_STALE_MS = 60_000;
-const KEEPALIVE_INTERVAL_MS = 8 * 60_000;
+// WebSocket traffic must stay within Chrome's 30-second worker activity window.
+const KEEPALIVE_INTERVAL_MS = 20_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -1885,7 +1886,10 @@ function scheduleLiveReconnect(context) {
   clearTimeout(connection.reconnectTimer);
   const delay = Math.min(60_000, 1_000 * 2 ** Math.min(connection.reconnectAttempt, 6));
   connection.reconnectAttempt += 1;
-  connection.reconnectTimer = setTimeout(() => { void ensureAccountLiveConnection(context); }, delay);
+  connection.reconnectTimer = setTimeout(() => {
+    connection.reconnectTimer = null;
+    if (liveConnections.get(context.key) === connection) void ensureAccountLiveConnection(context);
+  }, delay);
 }
 
 async function signedLiveTicket(context) {
@@ -2023,6 +2027,12 @@ async function sendConnectionStatus(socket, context) {
   socket.send(JSON.stringify(status));
   if (connection) connection.lastStatusKey = key;
   scheduleLeaderStatusRefresh(context, socket);
+  void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
+    provider: context.account.provider,
+    provider_account_id: context.account.provider_account_id,
+    ready: status.ready,
+    reason_code: status.reason_code,
+  });
 }
 
 function sendKeepalive(socket) {
@@ -2085,6 +2095,7 @@ async function ensureAccountLiveConnection(context) {
     leaderStatusTimer: null,
     lastStatusKey: null,
     reconnectAttempt: 0,
+    connecting: false,
   };
   liveConnections.set(context.key, existing);
   if (existing.socket?.readyState === WebSocket.OPEN) {
@@ -2093,23 +2104,33 @@ async function ensureAccountLiveConnection(context) {
     }));
     return;
   }
-  if (existing.socket?.readyState === WebSocket.CONNECTING) return;
-  clearTimeout(existing.reconnectTimer);
-  existing.reconnectTimer = null;
-  await updateLiveState(context, { socket: "connecting" });
-  await recordLog("info", "live", "connecting", "Connecting live command channel.", {
-    provider_account_id: context.account.provider_account_id,
-  });
+  if (existing.connecting || existing.reconnectTimer || existing.socket?.readyState === WebSocket.CONNECTING) return;
+  // Claim the attempt before storage or ticket requests can yield to another event.
+  existing.connecting = true;
+  const attemptStartedAt = Date.now();
   try {
+    await updateLiveState(context, { socket: "connecting" });
+    await recordLog("info", "live", "connecting", "Connecting live command channel.", {
+      provider_account_id: context.account.provider_account_id,
+      reconnect_attempt: existing.reconnectAttempt,
+    });
     const { ticket, socketUrl } = await signedLiveTicket(context);
+    if (liveConnections.get(context.key) !== existing) return;
     socketUrl.searchParams.set("ticket", ticket);
     const socket = new WebSocket(socketUrl);
     existing.socket = socket;
+    let openedAt = null;
     socket.addEventListener("open", () => {
+      if (liveConnections.get(context.key)?.socket !== socket) {
+        socket.close();
+        return;
+      }
+      openedAt = Date.now();
       existing.reconnectAttempt = 0;
       void updateLiveState(context, { socket: "connected" });
       void recordLog("info", "live", "connected", "Live command channel connected.", {
         provider_account_id: context.account.provider_account_id,
+        connect_duration_ms: openedAt - attemptStartedAt,
       });
       existing.lastStatusKey = null;
       clearInterval(existing.heartbeatTimer);
@@ -2122,7 +2143,7 @@ async function ensureAccountLiveConnection(context) {
         }));
     });
     socket.addEventListener("message", (event) => { void handleLiveCommand(event.data, context, socket); });
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       if (liveConnections.get(context.key)?.socket === socket) {
         existing.socket = null;
         clearInterval(existing.heartbeatTimer);
@@ -2133,17 +2154,23 @@ async function ensureAccountLiveConnection(context) {
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
           provider_account_id: context.account.provider_account_id,
           reconnect_attempt: existing.reconnectAttempt + 1,
+          close_code: event.code,
+          was_clean: event.wasClean,
+          open_duration_ms: openedAt === null ? null : Date.now() - openedAt,
         });
         scheduleLiveReconnect(context);
       }
     });
     socket.addEventListener("error", () => socket.close());
   } catch (error) {
+    if (liveConnections.get(context.key) !== existing) return;
     await updateLiveState(context, { socket: "reconnecting" });
     await recordUnexpected("live_connection", error, {
       provider_account_id: context.account.provider_account_id,
     });
     scheduleLiveReconnect(context);
+  } finally {
+    existing.connecting = false;
   }
 }
 

@@ -168,8 +168,13 @@ matches and accepted, duplicate, and skipped messages cover the number sent.
 The extension publishes `omnichat.connection_status` when readiness, the reason,
 the device name, extension version, OS, or last sync time changes. It evaluates
 the shop tab, page bridge, logged-in account, and incoming capture locally and
-sends one `ready` flag. An open socket sends `{ "type": "keepalive" }` every 8
-minutes so the connection is not idle-closed. That frame is not stored.
+sends one `ready` flag. An open socket sends `{ "type": "keepalive" }` every 20
+seconds to keep the extension worker inside Chrome's 30-second activity window.
+That frame is not stored and does not rewrite presence. Connection attempts are
+limited to one per account, and status refreshes respect reconnect backoff.
+Operational connection logs include the close code, clean-close flag, connection
+setup duration, and open duration; raw close reasons and ticket URLs are omitted.
+Readiness logs record the account, ready flag, and reason when status is published.
 
 ```json
 {
