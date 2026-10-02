@@ -238,3 +238,16 @@ test("LINE OA retains sticker identity, a display URL, and its send correlation 
   assert.equal(messages[0].client_message_id, "admin-client-message-1");
   assert.match(messages[0].media_url, /10445608\/ANDROID\/sticker.png$/);
 });
+
+test("LINE OA preserves file replies and their correlation IDs when history is ingested", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+  const messages = adapter.normalizeMessages({ provider_account_id: "@test", messages: [{
+    type: "messageSent", timestamp: 1000, sendId: "file-send", source: { chatId: "chat-1", userId: "user-1" },
+    message: { id: "file-1", type: "file", fileName: "report.pdf" },
+  }] }, "history_recovery");
+  assert.equal(messages[0].type, "file");
+  assert.equal(messages[0].text, "report.pdf");
+  assert.equal(messages[0].client_message_id, "file-send");
+  assert.equal(adapter.supportsSend("send_file"), true);
+  assert.equal(adapter.supportsSend("send_video"), true);
+});
