@@ -10,6 +10,16 @@ const sources = await Promise.all([
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 
+test("LINE background readiness accepts the bundled page bridge version", async () => {
+  const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+  const pageBridge = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
+  const expected = background.match(/const LINE_MAIN_BRIDGE_VERSION = "([^"]+)"/);
+  const actual = pageBridge.match(/const BRIDGE_VERSION = "([^"]+)"/);
+  assert.ok(expected);
+  assert.ok(actual);
+  assert.equal(expected[1], actual[1]);
+});
+
 function createRegistry({ includeLineOA = false } = {}) {
   const context = vm.createContext({
     URL,
