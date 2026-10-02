@@ -14,6 +14,8 @@ The worker waits up to 25 seconds for attachment results, bounded by the caller'
 
 Rollout requires server support before extension version 0.6.44 is distributed. Existing configurations must include the media origin in `image_server_url`; accounts with missing or mismatched media origins reject attachments. Changing code does not update installed extensions or deploy the server.
 
+LINE page bridge readiness uses `compatibility_version`, currently 1. Older scripts without this field default to compatibility version 1. The diagnostic `bridge_version` can change without invalidating readiness; bump compatibility only for a breaking page bridge interface change, updating both the background expectation and page script. Bridge identity and required lifecycle methods remain checked, and command capabilities still determine which sends are available. Refresh LINE tabs after an extension update to load new behavior even when older scripts remain compatible.
+
 Validation uses mocked provider requests, decoded-byte transport tests, capability/tenant gating tests, and worker type checks. Live delivery from Admin, large-file behavior, LINE processing time, and store publication require separate verification. Do not use customer conversations for test sends without explicit authorization.
 
 Durable wiki destination after the owning changes reach remote main: `kj-wiki/content/areas/build/feature-spec/chat/admin-chat-v2-unified-inbox/chat-delivery-and-provider-health.md`. Record both source PRs/merged commits, actual release status, limits, and verified delivery evidence.

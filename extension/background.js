@@ -50,7 +50,8 @@ const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
-const LINE_MAIN_BRIDGE_VERSION = "line-oa-poll-8";
+// Bump only when the LINE page bridge interface becomes incompatible.
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 1;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -2597,13 +2598,14 @@ async function providerMainBridgeStatus(tabId, adapter) {
   const mainBridge = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_VERSION],
-    func: (bridgeSource, providerId, lineBridgeVersion) => ({
+    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION],
+    func: (bridgeSource, providerId, lineCompatibilityVersion) => ({
       ready: Boolean(
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
-            && window.__omnichatLineOABridgeControl?.bridge_version === lineBridgeVersion
+            // Existing page scripts predate this field and use compatibility v1.
+            && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
           : globalThis.OmnichatShopeeUrl
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")

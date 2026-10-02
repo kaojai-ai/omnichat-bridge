@@ -10,14 +10,41 @@ const sources = await Promise.all([
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 
-test("LINE background readiness accepts the bundled page bridge version", async () => {
+test("LINE readiness accepts compatible revisions and rejects breaking interfaces", async () => {
   const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
   const pageBridge = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
-  const expected = background.match(/const LINE_MAIN_BRIDGE_VERSION = "([^"]+)"/);
-  const actual = pageBridge.match(/const BRIDGE_VERSION = "([^"]+)"/);
+  const expected = background.match(/const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = (\d+)/);
+  const actual = pageBridge.match(/const COMPATIBILITY_VERSION = (\d+)/);
   assert.ok(expected);
   assert.ok(actual);
   assert.equal(expected[1], actual[1]);
+  const source = background.slice(
+    background.indexOf("async function providerMainBridgeStatus("),
+    background.indexOf("async function retireProviderMainBridge("),
+  );
+  const bridgeSource = "omnichat-realtime-bridge-v3";
+  const control = { source: bridgeSource, bridge_version: "line-oa-poll-7", dispose() {} };
+  const context = vm.createContext({
+    BRIDGE_SOURCE: bridgeSource,
+    LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION: Number(expected[1]),
+    window: { __omnichatLineOABridgeControl: control },
+    OmnichatProviderAdapters: { get: () => ({ id: "line_oa" }) },
+    chrome: { scripting: { executeScript: async ({ func, args }) => [{ result: func(...args) }] } },
+  });
+  vm.runInContext(source, context);
+  const status = () => context.providerMainBridgeStatus(1, { id: "line_oa" });
+  assert.equal((await status()).ready, true, "legacy scripts default to compatibility v1");
+  control.compatibility_version = Number(actual[1]);
+  control.bridge_version = "line-oa-poll-999";
+  assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
+  control.compatibility_version += 1;
+  assert.equal((await status()).ready, false, "breaking interfaces require reattachment");
+  control.compatibility_version = Number(actual[1]);
+  control.source = "unrelated-bridge";
+  assert.equal((await status()).ready, false, "bridge identity is still required");
+  control.source = bridgeSource;
+  control.dispose = undefined;
+  assert.equal((await status()).ready, false, "required lifecycle methods are still checked");
 });
 
 function createRegistry({ includeLineOA = false } = {}) {

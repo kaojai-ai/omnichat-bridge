@@ -1,6 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_VERSION = "line-oa-poll-8";
+  // Script revisions remain compatible unless the page bridge interface breaks.
+  const COMPATIBILITY_VERSION = 1;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -892,6 +894,7 @@
   window.__omnichatLineOABridgeControl = {
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
+    compatibility_version: COMPATIBILITY_VERSION,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");
