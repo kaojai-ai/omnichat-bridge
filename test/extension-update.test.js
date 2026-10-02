@@ -51,6 +51,6 @@ test("acknowledges successful provider replies before releasing the restart queu
   const start = backgroundSource.indexOf("async function handleLiveCommand(raw, context, socket)");
   const end = backgroundSource.indexOf("\n}\n\nchrome.storage.onChanged", start);
   const handler = backgroundSource.slice(start, end);
-  assert.match(handler, /await exclusive\(async \(\) => \{/);
-  assert.match(handler, /socket\.send\(JSON\.stringify\(\{[\s\S]*ok: true/);
+  assert.match(handler, /exclusive\(async \(\) => \{/);
+  assert.match(handler, /acknowledge\(\{[\s\S]*ok: true/);
 });

@@ -22,7 +22,7 @@ import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 import { hydrateDetectedAccounts } from "./lib/popup-accounts.js";
 import { syncProgressPresentation } from "./lib/popup-sync-progress.js";
-import { latestSyncFailure, providerConnectionStatus, sellerCentreConnectionStatus } from "./lib/popup-status.js";
+import { latestSyncFailure, providerConnectionStatus, transportConnectionStatus, sellerCentreConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -468,6 +468,8 @@ function accountRowStatus(account) {
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "ready" };
+  const transportStatus = transportConnectionStatus(live);
+  if (transportStatus) return transportStatus;
   const sellerCentreStatus = sellerCentreConnectionStatus(live);
   if (sellerCentreStatus) return sellerCentreStatus;
   const providerStatus = providerConnectionStatus(live);

@@ -207,6 +207,7 @@
     clearTimeout(pending.timeout);
     pending.resolve({
       ok: false,
+      ...(pending.result.uncertain === true ? { uncertain: true } : {}),
       error: pending.result.error
         ? `${providerLabel} API error: ${pending.result.error}`
         : `${providerLabel} API reply failed.`
@@ -880,6 +881,9 @@
     if (!providerAdapter.supportsSend(commandType)) {
       return { ok: false, error: `Unsupported ${providerLabel} reply command.` };
     }
+    if (Number.isFinite(message.deadline_at_ms) && message.deadline_at_ms <= Date.now()) {
+      return Promise.resolve({ ok: false, error: "Reply deadline expired before sending." });
+    }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         const pending = pendingApiSends.get(requestId);
@@ -890,7 +894,7 @@
           return;
         }
         resolve({ ok: false, uncertain: true, error: `${providerLabel} API reply timed out.` });
-      }, 30_000);
+      }, Math.max(1, Math.min(30_000, (message.deadline_at_ms ?? Date.now() + 30_000) - Date.now())));
       pendingApiSends.set(requestId, {
         resolve,
         timeout,

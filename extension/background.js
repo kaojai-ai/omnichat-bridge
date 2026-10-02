@@ -124,6 +124,7 @@ let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
 const liveConnections = new Map();
+const liveCommandResults = new Map();
 const apiPingAttempts = new Map();
 const providerBridgeReinjections = new Map();
 const sellerCentreLandingStarts = new Map();
@@ -1069,6 +1070,7 @@ async function sendViaProvider(message) {
   if (!requestId || !conversationId || !adapter.supportsSend(commandType)) {
     return { ok: false, error: "Reply command is invalid." };
   }
+  if (Number.isFinite(message.deadline_at_ms) && message.deadline_at_ms <= Date.now()) return { ok: false, error: "Reply deadline expired before sending." };
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
@@ -1088,7 +1090,7 @@ async function sendViaProvider(message) {
     if (parsedUrl.origin !== new URL(context.config.image_server_url).origin) {
       return { ok: false, error: "Reply image URL is not from the configured image server." };
     }
-    const response = await fetch(parsedUrl, adapter.id === "line_oa" ? { redirect: "error", signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) } : undefined);
+    const response = await fetch(parsedUrl, { ...(adapter.id === "line_oa" ? { redirect: "error" } : {}), signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) });
     const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
     if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/"))) {
       return { ok: false, error: "Could not load reply image." };
@@ -1870,21 +1872,28 @@ async function openCommandTab() {
   return { ok: true };
 }
 
+function stopAccountLiveConnection(key, connection) {
+  liveConnections.delete(key);
+  connection.ticketController?.abort();
+  clearTimeout(connection.ticketTimer);
+  clearTimeout(connection.stableTimer);
+  clearTimeout(connection.handshakeTimer);
+  clearTimeout(connection.reconnectTimer);
+  clearInterval(connection.heartbeatTimer);
+  clearTimeout(connection.leaderStatusTimer);
+  connection.socket?.close();
+}
+
 function stopLiveConnection() {
-  for (const connection of liveConnections.values()) {
-    clearTimeout(connection.reconnectTimer);
-    clearInterval(connection.heartbeatTimer);
-    clearTimeout(connection.leaderStatusTimer);
-    connection.socket?.close();
-  }
-  liveConnections.clear();
+  for (const [key, connection] of liveConnections) stopAccountLiveConnection(key, connection);
 }
 
 function scheduleLiveReconnect(context) {
   const connection = liveConnections.get(context.key);
   if (!connection) return;
   clearTimeout(connection.reconnectTimer);
-  const delay = Math.min(60_000, 1_000 * 2 ** Math.min(connection.reconnectAttempt, 6));
+  const cap = Math.min(60_000, 1_000 * 2 ** Math.min(connection.reconnectAttempt, 6));
+  const delay = Math.round(cap * (0.5 + Math.random() * 0.5));
   connection.reconnectAttempt += 1;
   connection.reconnectTimer = setTimeout(() => {
     connection.reconnectTimer = null;
@@ -1892,7 +1901,7 @@ function scheduleLiveReconnect(context) {
   }, delay);
 }
 
-async function signedLiveTicket(context) {
+async function signedLiveTicket(context, signal) {
   const { config, account } = context;
   const url = liveEndpoint(config);
   if (!url) throw new Error("Live reply endpoint is not configured.");
@@ -1916,6 +1925,7 @@ async function signedLiveTicket(context) {
       "x-omnichat-signature": signature,
     },
     body,
+    signal,
   });
   if (!response.ok) throw new Error(`Live reply endpoint returned ${response.status}.`);
   const ticket = await response.json();
@@ -2024,7 +2034,10 @@ async function sendConnectionStatus(socket, context) {
   const connection = liveConnections.get(context.key);
   const key = statusPublishKey(status);
   if (socket.readyState !== WebSocket.OPEN || connection?.lastStatusKey === key) return;
+  if (connection?.socket !== socket) return;
   socket.send(JSON.stringify(status));
+  connection.lastActivityAt = Date.now();
+  scheduleKeepalive(context, socket);
   if (connection) connection.lastStatusKey = key;
   scheduleLeaderStatusRefresh(context, socket);
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
@@ -2035,8 +2048,24 @@ async function sendConnectionStatus(socket, context) {
   });
 }
 
+function scheduleKeepalive(context, socket) {
+  const connection = liveConnections.get(context.key);
+  if (connection?.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+  clearTimeout(connection.heartbeatTimer);
+  const remaining = Math.max(1, KEEPALIVE_INTERVAL_MS - (Date.now() - connection.lastActivityAt));
+  connection.heartbeatTimer = setTimeout(() => {
+    if (liveConnections.get(context.key)?.socket !== socket) return;
+    sendKeepalive(socket);
+    scheduleKeepalive(context, socket);
+  }, remaining);
+}
+
 function sendKeepalive(socket) {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "keepalive" }));
+  const connection = [...liveConnections.values()].find((item) => item.socket === socket);
+  if (!connection || socket.readyState !== WebSocket.OPEN) return;
+  if (Date.now() - (connection.lastActivityAt ?? 0) < KEEPALIVE_INTERVAL_MS) return;
+  socket.send(JSON.stringify({ type: "keepalive" }));
+  connection.lastActivityAt = Date.now();
 }
 
 async function ensureLiveConnection() {
@@ -2076,11 +2105,7 @@ async function ensureLiveConnection() {
   const contextKeys = new Set(contexts.map((context) => context.key));
   for (const [key, connection] of liveConnections) {
     if (contextKeys.has(key)) continue;
-    clearTimeout(connection.reconnectTimer);
-    clearInterval(connection.heartbeatTimer);
-    clearTimeout(connection.leaderStatusTimer);
-    connection.socket?.close();
-    liveConnections.delete(key);
+    stopAccountLiveConnection(key, connection);
   }
   for (const context of contexts) await ensureAccountLiveConnection(context);
 }
@@ -2097,6 +2122,12 @@ async function ensureAccountLiveConnection(context) {
     reconnectAttempt: 0,
     connecting: false,
   };
+  if (existing.config && JSON.stringify(existing.config) !== JSON.stringify(context.config)) {
+    stopAccountLiveConnection(context.key, existing);
+    return ensureAccountLiveConnection(context);
+  }
+  existing.config = context.config;
+  existing.context = context;
   liveConnections.set(context.key, existing);
   if (existing.socket?.readyState === WebSocket.OPEN) {
     void sendConnectionStatus(existing.socket, context).catch((error) => recordUnexpected("connection_status", error, {
@@ -2114,37 +2145,56 @@ async function ensureAccountLiveConnection(context) {
       provider_account_id: context.account.provider_account_id,
       reconnect_attempt: existing.reconnectAttempt,
     });
-    const { ticket, socketUrl } = await signedLiveTicket(context);
+    existing.ticketController = new AbortController();
+    const ticketTimeout = new Promise((_, reject) => {
+      existing.ticketTimer = setTimeout(() => {
+        existing.ticketController.abort();
+        reject(new Error("Live reply ticket request timed out."));
+      }, 10_000);
+    });
+    const { ticket, socketUrl } = await Promise.race([signedLiveTicket(context, existing.ticketController.signal), ticketTimeout]);
+    clearTimeout(existing.ticketTimer);
     if (liveConnections.get(context.key) !== existing) return;
     socketUrl.searchParams.set("ticket", ticket);
     const socket = new WebSocket(socketUrl);
     existing.socket = socket;
+    existing.handshakeTimer = setTimeout(() => {
+      if (liveConnections.get(context.key)?.socket === socket && socket.readyState === WebSocket.CONNECTING) socket.close();
+    }, 10_000);
     let openedAt = null;
     socket.addEventListener("open", () => {
       if (liveConnections.get(context.key)?.socket !== socket) {
         socket.close();
         return;
       }
+      clearTimeout(existing.handshakeTimer);
       openedAt = Date.now();
-      existing.reconnectAttempt = 0;
+      existing.lastActivityAt = openedAt;
+      existing.stableTimer = setTimeout(() => {
+        if (liveConnections.get(context.key)?.socket === socket) existing.reconnectAttempt = 0;
+      }, 30_000);
       void updateLiveState(context, { socket: "connected" });
       void recordLog("info", "live", "connected", "Live command channel connected.", {
         provider_account_id: context.account.provider_account_id,
         connect_duration_ms: openedAt - attemptStartedAt,
       });
       existing.lastStatusKey = null;
-      clearInterval(existing.heartbeatTimer);
-      existing.heartbeatTimer = setInterval(() => {
-        sendKeepalive(socket);
-      }, KEEPALIVE_INTERVAL_MS);
+      scheduleKeepalive(context, socket);
       void sendConnectionStatus(socket, context)
         .catch((error) => recordUnexpected("connection_status", error, {
           provider_account_id: context.account.provider_account_id,
         }));
     });
-    socket.addEventListener("message", (event) => { void handleLiveCommand(event.data, context, socket); });
+    socket.addEventListener("message", (event) => {
+      if (liveConnections.get(context.key)?.socket !== socket) return;
+      existing.lastActivityAt = Date.now();
+      scheduleKeepalive(context, socket);
+      void handleLiveCommand(event.data, context, socket);
+    });
     socket.addEventListener("close", (event) => {
       if (liveConnections.get(context.key)?.socket === socket) {
+        clearTimeout(existing.handshakeTimer);
+        clearTimeout(existing.stableTimer);
         existing.socket = null;
         clearInterval(existing.heartbeatTimer);
         existing.heartbeatTimer = null;
@@ -2170,6 +2220,8 @@ async function ensureAccountLiveConnection(context) {
     });
     scheduleLiveReconnect(context);
   } finally {
+    clearTimeout(existing.ticketTimer);
+    existing.ticketController = null;
     existing.connecting = false;
   }
 }
@@ -2195,22 +2247,52 @@ async function handleLiveCommand(raw, context, socket) {
   const adapter = providerAdapterForCommand(command);
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
-  let result;
-  try {
-    result = await exclusive(async () => {
-      const sent = await sendViaProvider(command);
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-          type: "send_result",
-          request_id: command.request_id,
-          ok: true,
-          provider_message_id: sent.provider_message_id,
-        }));
-      }
-      return sent;
+  if (typeof command.request_id !== "string" || !command.request_id) return;
+  const acknowledge = (result) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(result));
+    const connection = liveConnections.get(context.key);
+    if (connection?.socket === socket) {
+      connection.lastActivityAt = Date.now();
+      scheduleKeepalive(context, socket);
+    }
+  };
+  const key = `${context.key}:${command.request_id}`;
+  const now = Date.now();
+  for (const [cachedKey, cached] of liveCommandResults) {
+    if (cached.expiresAt <= now) liveCommandResults.delete(cachedKey);
+  }
+  let cached = liveCommandResults.get(key);
+  const duplicate = Boolean(cached);
+  if (!cached) {
+    if (liveCommandResults.size >= 200) {
+      acknowledge({ type: "send_result", request_id: command.request_id, ok: false, error: "Command channel is busy. Retry after current commands finish." });
+      return;
+    }
+    cached = {
+      expiresAt: Infinity,
+      result: exclusive(async () => {
+        const sent = await sendViaProvider(command);
+        // A pending extension restart may run as soon as the exclusive operation exits.
+        if (sent?.ok && socket.readyState === WebSocket.OPEN) {
+          acknowledge({ type: "send_result", request_id: command.request_id,
+            ok: true, provider_message_id: sent.provider_message_id });
+        }
+        return sent;
+      }).catch((error) => ({
+        ok: false, error: error instanceof Error ? error.message : String(error),
+      })),
+    };
+    cached.result = cached.result.then((result) => {
+      cached.expiresAt = Date.now() + 120_000;
+      return result;
     });
-  } catch (error) {
-    result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    liveCommandResults.set(key, cached);
+  }
+  const result = await cached.result;
+  if (duplicate && result?.ok && socket.readyState === WebSocket.OPEN) {
+    acknowledge({ type: "send_result", request_id: command.request_id,
+      ok: true, provider_message_id: result.provider_message_id });
   }
   if (!result?.ok) {
     await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
@@ -2220,36 +2302,22 @@ async function handleLiveCommand(raw, context, socket) {
     });
     void sendConnectionStatus(socket, context).catch((error) => recordUnexpected("connection_status", error));
   }
-  if (!result?.ok && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: "send_result",
-      request_id: command.request_id,
-      ok: Boolean(result?.ok),
-      ...(result?.ok
-        ? { provider_message_id: result.provider_message_id }
-        : {
-          error: result?.error ?? "Reply failed.",
-          ...(result?.uncertain === true ? { uncertain: true } : {}),
-        }),
-    }));
-  }
+  if (!result?.ok) acknowledge({
+    type: "send_result", request_id: command.request_id, ok: false,
+    error: result?.error ?? "Reply failed.",
+    ...(result?.uncertain === true ? { uncertain: true } : {}),
+  });
 }
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.detectedAccounts] || changes[STORAGE.unattendedRecovery]) void ensureLiveConnection();
   if (changes[STORAGE.unattendedRecovery]) {
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   }
-  if (
-    changes[STORAGE.deviceName]
-    || changes[STORAGE.detectedAccounts]
-    || changes[STORAGE.status]
-    || changes[STORAGE.pending]
-  ) {
-    void ensureLiveConnection().then(() => {
-      return undefined;
-    }).catch((error) => recordUnexpected("connection_status", error));
+  const connectionKeys = [STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts,
+    STORAGE.unattendedRecovery, STORAGE.deviceName, STORAGE.status, STORAGE.pending];
+  if (connectionKeys.some((key) => changes[key])) {
+    void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
   }
 });
 
@@ -4052,4 +4120,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   } else if (alarm.name === LOG_UPLOAD_ALARM) {
     void flushLogBatch();
   }
+});
+
+// One immediate recovery attempt after the machine regains network access.
+self.addEventListener("online", () => {
+  for (const connection of liveConnections.values()) {
+    clearTimeout(connection.reconnectTimer);
+    connection.reconnectTimer = null;
+  }
+  void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
 });

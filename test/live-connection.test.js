@@ -31,7 +31,7 @@ function harness() {
     open() { this.readyState = 1; this.listeners.open(); }
   }
   const globals = {
-    liveConnections, WebSocket: Socket, URL,
+    liveConnections, WebSocket: Socket, URL, AbortController,
     Date: { now: () => now },
     liveEndpoint: () => true,
     updateLiveState: async () => {},
@@ -45,9 +45,9 @@ function harness() {
     setInterval: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearInterval: (id) => timers.delete(id),
   };
-  const setup = source.slice(source.indexOf("function stopLiveConnection()"), source.indexOf("async function signedLiveTicket(context)"));
+  const setup = source.slice(source.indexOf("function stopAccountLiveConnection("), source.indexOf("async function signedLiveTicket("));
   const connection = source.slice(source.indexOf("async function ensureAccountLiveConnection(context)"), source.indexOf("function scheduleLeaderStatusRefresh"));
-  const keepalive = source.slice(source.indexOf("function sendKeepalive(socket)"), source.indexOf("async function ensureLiveConnection()"));
+  const keepalive = source.slice(source.indexOf("function scheduleKeepalive(context, socket)"), source.indexOf("async function ensureLiveConnection()"));
   const interval = source.match(/const KEEPALIVE_INTERVAL_MS = ([^;]+);/)[0];
   const api = vm.runInNewContext(`(() => { ${interval}\n${setup}\n${keepalive}\n${connection}; return { ensureAccountLiveConnection, stopLiveConnection }; })()`, globals);
   return { ...api, ticket, sockets, timers, logs, liveConnections,
@@ -108,7 +108,8 @@ test("socket traffic keeps an idle Chrome worker inside its 30-second activity w
   h.resolveTicket();
   await h.ensureAccountLiveConnection(account);
   h.sockets[0].open();
-  const timer = [...h.timers.values()][0];
+  h.advance(20_000);
+  const timer = [...h.timers.values()].find((item) => item.delay === 20_000);
   assert.ok(timer.delay < 30_000);
   timer.callback();
   assert.deepEqual(h.sockets[0].sent, [{ type: "keepalive" }]);
@@ -142,11 +143,11 @@ test("readiness diagnostics publish changed states once without recording messag
   const socket = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) };
   const connection = { socket, lastStatusKey: null };
   const start = source.indexOf("function statusPublishKey(status)");
-  const end = source.indexOf("function sendKeepalive(socket)");
+  const end = source.indexOf("function scheduleKeepalive(context, socket)");
   const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, {
     liveConnections: new Map([[account.key, connection]]),
     WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
-    scheduleLeaderStatusRefresh: () => {},
+    scheduleLeaderStatusRefresh: () => {}, scheduleKeepalive: () => {},
     recordLog: async (_level, _area, event, _message, details) => logs.push({ event, details }),
   });
   await send(socket, account);
@@ -157,4 +158,57 @@ test("readiness diagnostics publish changed states once without recording messag
   assert.equal(logs.length, 2);
   assert.equal(logs[0].details.reason_code, "seller_chat_bridge_unavailable");
   assert.equal(logs[1].details.ready, true);
+});
+
+test("ticket timeout releases the guard even if the request never settles", async () => {
+  const h = harness();
+  const start = h.ensureAccountLiveConnection(account);
+  await new Promise(setImmediate);
+  [...h.timers.values()].find((timer) => timer.delay === 10_000).callback();
+  await start;
+  assert.equal(h.liveConnections.get(account.key).connecting, false);
+  assert.ok(h.liveConnections.get(account.key).reconnectTimer);
+  assert.equal(h.sockets.length, 0);
+});
+
+test("recent incoming socket activity suppresses unnecessary keepalive traffic", async () => {
+  const h = harness();
+  h.resolveTicket();
+  await h.ensureAccountLiveConnection(account);
+  h.sockets[0].open();
+  const heartbeat = [...h.timers.values()].find((timer) => timer.delay === 20_000);
+  h.advance(19_000);
+  h.sockets[0].listeners.message({ data: "{}" });
+  h.advance(1_000);
+  heartbeat.callback();
+  assert.equal(h.sockets[0].sent.length, 0);
+  h.advance(20_000);
+  heartbeat.callback();
+  assert.equal(h.sockets[0].sent.length, 1);
+});
+
+test("duplicate commands share one provider operation and replay its acknowledgement", async () => {
+  const pending = deferred();
+  let sends = 0;
+  const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+  const command = { provider: "shopee", provider_account_id: "shop", request_id: "request", type: "send_text", text: "secret message" };
+  const start = source.indexOf("async function handleLiveCommand(");
+  const end = source.indexOf("\nchrome.storage.onChanged", start);
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+    providerAdapterForCommand: () => ({ id: "shopee", supportsSend: () => true }),
+    messageProviderAccountId: (value) => value.provider_account_id, canonicalProviderAccountId: () => "shop",
+    exclusive: (action) => action(), sendViaProvider: () => { sends++; return pending.promise; },
+    recordUnexpected: async () => {}, sendConnectionStatus: async () => {}, installationId: async () => "installation",
+  });
+  const context = { ...account, account: { provider: "shopee", provider_account_id: "shop" } };
+  const first = run(JSON.stringify(command), context, socket);
+  const duplicate = run(JSON.stringify(command), context, socket);
+  assert.equal(sends, 1);
+  pending.resolve({ ok: true, provider_message_id: "receipt" });
+  await Promise.all([first, duplicate]);
+  await run(JSON.stringify(command), context, socket);
+  assert.equal(sends, 1);
+  assert.equal(socket.sent.length, 3);
+  assert.equal(JSON.stringify(socket.sent).includes("secret message"), false);
 });

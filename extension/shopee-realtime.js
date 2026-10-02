@@ -1007,6 +1007,16 @@
     const commandType = String(message?.command_type ?? "").trim();
     const clientMessageId = String(message?.client_message_id ?? requestId).trim();
     let routing = state.conversationsById.get(conversationId);
+    const deadlineAt = Number.isFinite(message?.deadline_at_ms) ? message.deadline_at_ms : Infinity;
+    const deadlineExpired = () => Date.now() >= deadlineAt;
+    let nativeAttempted = false;
+    const sendStartedAt = Date.now();
+    let providerRejected = false;
+    let diagnostics = { command_type: commandType, surface: state.surface };
+    if (deadlineExpired()) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply deadline expired before sending." });
+      return;
+    }
     if (!requestId || !conversationId || !clientMessageId || !providerAdapter.supportsSend(commandType)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
@@ -1041,7 +1051,7 @@
       }
     }
     if (!routing?.shop_id || !routing.to_id) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation was not found in the list. It may be closed or more than 7 days since the customer's last message." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Open or refresh Seller Chat and retry after its conversation list loads." });
       return;
     }
     try {
@@ -1085,6 +1095,10 @@
         throw new Error("Shopee Seller Chat send profile does not match the active surface.");
       }
       if (!isBridgeActive()) return;
+      if (deadlineExpired()) throw new Error("Reply deadline expired before sending.");
+      diagnostics = { ...diagnostics, endpoint_path: url.pathname,
+        routing_types: Object.fromEntries(["conversation_id", "shop_id", "to_id", "to_shop_id", "biz_id"].map((key) => [key, typeof payload[key]])) };
+      nativeAttempted = true;
       const response = await sendThroughSurface(template, url.toString(), payload);
       let body = response;
       if (typeof response?.clone === "function") {
@@ -1097,7 +1111,10 @@
       }
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId) ?? shopeeError(body);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
+      const nativeCode = typeof body?.error_code === "string" && /^[a-zA-Z0-9_]{1,64}$/.test(body.error_code) ? body.error_code : null;
+      diagnostics = { ...diagnostics, native_error_code: nativeCode, provider_duration_ms: Date.now() - sendStartedAt };
       if (response?.ok === false || providerReason) {
+        providerRejected = true;
         throw new Error(providerReason ?? `Shopee API returned ${response?.status ?? "an error"}.`);
       }
       const providerMessageId = String(
@@ -1115,9 +1132,9 @@
       state.sendErrorsByClientMessageId.delete(clientMessageId);
       logAsyncError("send_api", error, {
         conversation_id: conversationId,
-        command_type: commandType,
+        ...diagnostics,
       });
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
+      post({ type: "api_send_result", request_id: requestId, ok: false, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
     }
   };
   const captureActiveConversation = (request) => {

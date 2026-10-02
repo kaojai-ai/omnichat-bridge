@@ -4,8 +4,8 @@ Provider adapters send `omnichat.message_batch` version 1 to the configured
 `events_url`.
 
 The envelope is provider-shaped and the delivery contract is provider-neutral.
-The current package ships the `shopee` adapter; other providers can use the
-same envelope after their adapter and receiver support are published.
+The package ships `shopee` and `line_oa` adapters. Both use the same delivery
+envelope; adapters own provider-specific capture and native sending.
 
 ## Configuration envelope
 
@@ -253,3 +253,34 @@ to stay within Chrome storage limits.
 - 20,000 characters per text message
 - Five-minute request timestamp window
 - 100 operational logs per upload batch
+
+## Connection recovery and deadlines
+
+Each configured provider account has one command socket per extension installation,
+shared by its tabs. Startup, tab changes, and recovery checks reuse that account's
+connection attempt. Ticket acquisition and socket establishment each have a
+10-second limit. Failed attempts use exponential backoff with jitter, capped at
+60 seconds; backoff resets after 30 seconds of stable connectivity.
+
+The extension sends `{ "type": "keepalive" }` after 20 seconds without socket
+activity. This is transport activity, not a readiness report. Targets should
+handle it without persistence or application logging. Readiness remains
+change-driven. Browser sleep, extension restart, and hosting connection limits
+still require reconnecting.
+
+Commands may optionally include `deadline_at_ms` (Unix milliseconds). Older
+extensions may ignore it; updated extensions stop before native sending if the
+deadline has expired. An absent deadline preserves legacy behavior. A deadline
+or lost response after native dispatch does not prove rejection: existing
+`send_result.uncertain` remains the delivery-uncertainty signal. The extension
+preserves it across the page/content/background boundaries.
+
+Repeated request IDs within the same running worker share a bounded transient
+result cache for two minutes. This cache is not durable across worker restarts
+and does not establish exactly-once provider delivery. Target servers must not
+blindly resend commands whose acceptance is uncertain.
+
+No new capabilities, response fields, or configuration versions are required
+for these lifecycle fixes. A target can continue issuing existing tickets and
+handling existing status/result envelopes. Optional deadline support does not
+require a particular target product or infrastructure.

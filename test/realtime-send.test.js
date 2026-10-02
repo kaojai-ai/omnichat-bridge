@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, transportFailure = false } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -62,7 +62,8 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         }
         if (path === "/webchat/api/v1.2/mini/messages") {
           nativePayloads.push(await request.clone().json());
-          return jsonResponse({ id: "provider-native-message-1" });
+          if (transportFailure) throw new Error("connection reset");
+          return jsonResponse(sendBody ?? { id: "provider-native-message-1" });
         }
         return jsonResponse({
           url: "https://cdn.example.com/reply.jpg",
@@ -143,6 +144,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     nativeRequests,
     nativeRequestHeaders,
     nativePayloads,
+    posts,
     reattach() {
       vm.runInContext(source, context);
     },
@@ -194,7 +196,8 @@ test("does not send when Shopee's conversation list is exhausted", async () => {
     { conversations: [] },
   ] });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
-  assert.match(result.error, /was not found/);
+  assert.match(result.error, /routing is unavailable/);
+  assert.doesNotMatch(result.error, /7 days|closed/);
   assert.equal(bridge.nativePayloads.length, 0);
 });
 
@@ -385,4 +388,31 @@ test("fails explicitly when Seller Centre capabilities are not initialized", asy
   assert.equal(payload, undefined);
   assert.equal(result.ok, false);
   assert.match(result.error, /Seller Centre chat is still initializing/);
+});
+
+test("does not dispatch expired Shopee commands", async () => {
+  const bridge = createBridge({ sellerCentre: true });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello", deadline_at_ms: Date.now() - 1 });
+  assert.match(result.error, /deadline expired/);
+  assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("native param_error is a rejection while a lost native response is uncertain", async () => {
+  const rejected = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "param_error" } });
+  const failure = await rejected.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(failure.result.ok, false);
+  assert.equal(failure.result.uncertain, undefined);
+  const uncertain = createBridge({ sellerCentre: true, transportFailure: true });
+  const lost = await uncertain.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(lost.result.uncertain, true);
+});
+
+test("native rejection diagnostics omit payloads and credentials", async () => {
+  const bridge = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "param_error" } });
+  await bridge.send({ ...baseCommand, command_type: "send_text", text: "private reply text" });
+  const log = bridge.posts.find((post) => post.type === "diagnostic_log" && post.details?.scope === "send_api");
+  assert.equal(log.details.native_error_code, "param_error");
+  assert.equal(log.details.endpoint_path, "/webchat/api/v1.2/mini/messages");
+  assert.equal(log.details.routing_types.shop_id, "string");
+  assert.doesNotMatch(JSON.stringify(log), /private reply text|Bearer seller-test|csrf_token/);
 });

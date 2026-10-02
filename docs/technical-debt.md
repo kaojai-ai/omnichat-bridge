@@ -5,7 +5,7 @@ The bridge has two independent flows:
 1. **Send observed messages to the target server.**
 2. **Send a live reply from the target server back to the messaging provider.**
 
-The current implementation ships Shopee first. Provider-specific capture,
+The implementation supports Shopee and LINE OA. Provider-specific capture,
 page matching, account normalization, and configuration validation stay behind
 an adapter; delivery and security contracts remain provider-neutral where
 practical.
@@ -251,3 +251,23 @@ image, or product message. Text and image commands may include the optional
   together.
 - Never add provider credentials to a payload, log, remote queue, or presence
   record.
+
+## Reliability release validation
+
+Automated tests cover shared connection races, stalled tickets, stale callbacks,
+account isolation, transient command replay protection, provider deadlines, and
+incoming recovery/acknowledgement behavior. LINE history fixtures use a controlled
+clock matching their epoch timestamps; bootstrap lookback behavior remains intact.
+
+Before publication, validate both adapters in designated test profiles: at least
+three hours including idle time and hosting connection rollover, Chrome restart,
+network interruption, incoming replay, and supported outgoing media/mentions.
+Record installed version, target version, confirmed provider IDs, and observed
+recovery separately from source merge or store approval.
+
+A native Shopee `param_error` is now distinguishable from an uncertain native
+response. Safe diagnostics record surface, endpoint path, routing-field types,
+and a sanitized native code without logging message content or credentials.
+These diagnostics do not establish the cause of a particular customer payload.
+Missing conversation routing requests a refresh; it does not assert that the
+conversation is closed or outside a response window.
