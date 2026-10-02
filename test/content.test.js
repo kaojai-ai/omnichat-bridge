@@ -7,9 +7,10 @@ const source = await readFile(new URL("../extension/content.js", import.meta.url
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
+const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {} } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee" } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
@@ -17,7 +18,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   let context;
   const window = {
     location: {
-      origin: "https://seller.shopee.co.th",
+      origin: provider === "line_oa" ? "https://chat.line.biz" : "https://seller.shopee.co.th",
       pathname,
     },
     addEventListener(type, listener) {
@@ -83,6 +84,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   vm.runInContext(urlSource, context);
   vm.runInContext(adaptersSource, context);
   vm.runInContext(shopeeAdapterSource, context);
+  vm.runInContext(lineOaSource, context);
   vm.runInContext(source, context);
 
   const sendCommand = (message) => new Promise((resolve) => {
@@ -129,6 +131,21 @@ const command = {
   command_type: "send_text",
   text: "Hello",
 };
+
+for (const command_type of ["send_video", "send_file"]) {
+  test(`passes ${command_type} decoded bytes to the LINE page and retains filename and deadline`, async () => {
+    const bridge = contentBridge("/bot-1/chat/chat-1", { provider: "line_oa", localConsent: true });
+    const result = bridge.sendCommand({ ...command, command_type, media_base64: "AQID", media_type: "application/pdf",
+      file_name: "report.pdf", deadline_at_ms: 12345 });
+    const submitted = bridge.runtimeMessages.find(message => message.type === "send_api_v3");
+    assert.deepEqual(Array.from(new Uint8Array(submitted.media_bytes)), [1, 2, 3]);
+    assert.equal(submitted.file_name, "report.pdf");
+    assert.equal(submitted.deadline_at_ms, 12345);
+    assert.equal(submitted.media_base64, undefined);
+    await bridge.providerEvent({ type: "api_send_result", request_id: "request-1", ok: true, provider_message_id: "provider-1", confirmed: true });
+    assert.deepEqual(plain(await result), { ok: true, provider_message_id: "provider-1" });
+  });
+}
 
 test("routes detected accounts through the background merger", async () => {
   const bridge = contentBridge("/new-webchat/conversations", { localConsent: true });

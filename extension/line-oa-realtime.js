@@ -1,6 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-7";
+  const BRIDGE_VERSION = "line-oa-poll-8";
+  // Script revisions remain compatible unless the page bridge interface breaks.
+  const COMPATIBILITY_VERSION = 1;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -73,24 +75,8 @@
     void publishProviderStatus();
   }
 
-  function firstImageUrlPath(payload, path = []) {
-    if (typeof payload === "string") return /^https:\/\//i.test(payload) ? path : null;
-    if (!payload || typeof payload !== "object") return null;
-    for (const [key, item] of Object.entries(payload)) {
-      const found = firstImageUrlPath(item, [...path, key]);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  function setPath(object, path, nextValue) {
-    let current = object;
-    for (let index = 0; index < path.length - 1; index += 1) current = current[path[index]];
-    current[path.at(-1)] = nextValue;
-  }
-
   function commandCapabilities(botId) {
-    return botId ? ["send_text", "send_image", "send_sticker"] : [];
+    return botId ? ["send_text", "send_image", "send_video", "send_file", "send_sticker"] : [];
   }
 
   function postProviderStatus(accounts) {
@@ -231,8 +217,8 @@
     return value(event?.source?.chatId ?? event?.conversation_id ?? event?.source?.conversationId);
   }
 
-  async function waitForSentMessage({ botId, conversationId, sendId }) {
-    const deadline = Date.now() + SEND_CONFIRM_TIMEOUT_MS;
+  async function waitForSentMessage({ botId, conversationId, sendId, deadlineAt = Infinity }) {
+    const deadline = Math.min(Date.now() + SEND_CONFIRM_TIMEOUT_MS, deadlineAt);
     while (Date.now() < deadline) {
       // Always request the newest messages for this conversation. Do not walk
       // backward through history because a newly sent message appears at the front.
@@ -750,7 +736,9 @@
     const expectedType = commandType === "send_text" ? "text"
       : commandType === "send_sticker" ? "sticker"
         : commandType === "send_image" ? "image"
-          : "";
+          : commandType === "send_video" ? "video"
+            : commandType === "send_file" ? "file"
+              : "";
     const profile = botId && expectedType ? profileFor(botId, expectedType) : null;
     if (!botId || !profile) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA sender is not initialized for this reply type." });
@@ -776,22 +764,54 @@
       }
       payload.packageId = packageId;
       payload.stickerId = stickerId;
-    } else {
-      const imageUrl = value(command?.image_url);
-      const imagePath = firstImageUrlPath(payload) ?? (payload.imageUrl === "" ? ["imageUrl"] : null);
-      if (!imageUrl || !/^https:\/\//i.test(imageUrl) || !imagePath) {
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA image sender is not initialized." });
-        return;
-      }
-      setPath(payload, imagePath, imageUrl);
     }
 
+    let sendStarted = false;
     try {
-      const response = await nativeFetch(`${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/send`, {
+      const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, Date.now() + 25_000);
+      const remaining = () => deadlineAt - Date.now();
+      const requestSignal = () => {
+        if (remaining() <= 0) throw new Error("LINE OA reply deadline expired.");
+        return AbortSignal.timeout(Math.max(1, Math.min(20_000, remaining())));
+      };
+      let endpoint = `${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/send`;
+      let body = JSON.stringify(payload);
+      if (["image", "video", "file"].includes(expectedType)) {
+        const bytes = command.image_bytes ?? command.media_bytes;
+        const contentType = value(command.image_type ?? command.media_type);
+        const maxBytes = (expectedType === "image" ? 20 : 32) * 1024 * 1024;
+        if (!(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > maxBytes) {
+          throw new Error("LINE OA attachment is empty or too large.");
+        }
+        if (expectedType === "image" && !contentType.startsWith("image/")) throw new Error("LINE OA image type is invalid.");
+        if (expectedType === "file" && !value(command.file_name)) throw new Error("LINE OA file name is required.");
+        const imageExtension = { "image/jpeg": "jpg", "image/gif": "gif", "image/png": "png" }[contentType];
+        if (expectedType === "image" && !imageExtension) throw new Error("LINE OA supports JPEG, PNG, and GIF images.");
+        const videoExtension = { "video/mp4": "mp4", "video/quicktime": "mov", "video/x-m4v": "m4v", "video/x-msvideo": "avi" }[contentType];
+        if (expectedType === "video" && !videoExtension) throw new Error("LINE OA video type is unsupported.");
+        const fileName = value(command.file_name) || (expectedType === "image" ? `image.${imageExtension}` : `video.${videoExtension}`);
+        const form = new FormData();
+        form.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
+        const uploadHeaders = { ...profile.headers };
+        delete uploadHeaders["content-type"];
+        const upload = await nativeFetch(`${apiBase}/v1/bots/${encodeURIComponent(botId)}/messages/${encodeURIComponent(conversationId)}/uploadFile`, {
+          method: "POST", credentials: "include", headers: uploadHeaders, body: form, signal: requestSignal(),
+        });
+        if (!upload.ok) throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
+        const uploaded = await upload.json();
+        const token = value(uploaded?.contentMessageToken);
+        if (!token) throw new Error("LINE OA attachment upload returned no content token.");
+        endpoint = `${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/bulkSendFiles`;
+        body = JSON.stringify({ items: [{ sendId: confirmationSendId, contentMessageToken: token }] });
+      }
+      const signal = requestSignal();
+      sendStarted = true;
+      const response = await nativeFetch(endpoint, {
         method: "POST",
         headers: profile.headers,
-        body: JSON.stringify(payload),
         credentials: "include",
+        body,
+        signal,
       });
       const responseBody = await response.json().catch(() => null);
       if (!response.ok) {
@@ -803,6 +823,7 @@
         botId,
         conversationId,
         sendId: confirmationSendId,
+        deadlineAt,
       });
       const providerMessageId = confirmedMessageId || responseMessageIdValue;
       post({
@@ -815,7 +836,7 @@
         ...(!confirmedMessageId ? { error: "LINE OA send was accepted but could not be confirmed in message history." } : {}),
       });
     } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: true, error: `LINE OA send was not acknowledged: ${String(error)}` });
+      post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: sendStarted, error: `LINE OA send was not acknowledged: ${String(error)}` });
     }
   }
 
@@ -873,6 +894,7 @@
   window.__omnichatLineOABridgeControl = {
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
+    compatibility_version: COMPATIBILITY_VERSION,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

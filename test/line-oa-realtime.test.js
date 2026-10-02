@@ -45,19 +45,25 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   const listeners = [];
   const posts = [];
   const requests = [];
   const sentPayloads = [];
+  const uploads = [];
   const chatIds = Array.from({ length: chatCount }, (_value, index) => `chat-${index + 1}`);
   const window = {
     location: { origin, pathname: "/bot-1/chats" },
     fetch: async (input, init = {}) => {
       const url = new URL(String(input));
       requests.push(url);
-      if (url.pathname === "/api/v1/bots/bot-1/chats/chat-1/messages/send") {
+      if (url.pathname === "/api/v1/bots/bot-1/messages/chat-1/uploadFile") {
+        uploads.push(init);
+        if (uploadDelayMs) await new Promise(resolve => setTimeout(resolve, uploadDelayMs));
+        return { ok: uploadStatus === 200, status: uploadStatus, json: async () => uploadBody };
+      }
+      if (["/api/v1/bots/bot-1/chats/chat-1/messages/send", "/api/v1/bots/bot-1/chats/chat-1/messages/bulkSendFiles"].includes(url.pathname)) {
         sentPayloads.push({ headers: init.headers, body: init.body });
         return { ok: true, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
       }
@@ -87,6 +93,11 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
+        if (sentPayloads.length && sendResponseBody === undefined) {
+          const body = JSON.parse(sentPayloads.at(-1).body);
+          return { ok: true, json: async () => ({ list: [{ source: { chatId: "chat-1" },
+            message: { id: `sent-${sentPayloads.length}`, sendId: body.sendId ?? body.items?.[0]?.sendId } }] }) };
+        }
         if (chat1MessageCount > 2) {
           return {
             ok: true,
@@ -169,6 +180,7 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
     URL,
     Headers,
     Request,
+    FormData, Blob, ArrayBuffer, AbortSignal,
     document: { documentElement: { outerHTML: basicId ? `<a href="https://manager.line.biz/account/${basicId}">LINE Official Account</a>` : "" } },
     OmnichatLineOA: {
       chatItems: (body) => body?.list ?? [],
@@ -182,12 +194,13 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
     queueMicrotask,
     AbortController,
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source.replace("const SEND_CONFIRM_TIMEOUT_MS = 10_000", "const SEND_CONFIRM_TIMEOUT_MS = 10").replace("const SEND_CONFIRM_POLL_MS = 1_000", "const SEND_CONFIRM_POLL_MS = 1"), context);
 
   return {
     posts,
     requests,
     sentPayloads,
+    uploads,
     async captureManualSend(payload) {
       await context.window.fetch(`${origin}/api/v1/bots/bot-1/chats/chat-1/messages/send`, {
         method: "POST",
@@ -220,7 +233,7 @@ function createBridge({ sendResponseBody, basicId = "@exampleoa", availableAccou
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const result = posts.slice(before).find((post) => post.type === "api_send_result" && post.request_id === "send-1");
         if (result) return result;
-        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setTimeout(resolve, 1));
       }
       throw new Error("LINE OA send command did not complete.");
     },
@@ -328,7 +341,6 @@ test("LINE OA replays an observed text request without copying cookies", async (
   assert.equal(sentBody.type, "text");
   assert.equal(sentBody.text, "bridge message");
   assert.equal(sentBody.sendId, "caller-send-id");
-  assert.match(sentBody.sendId, /^chat-1_\d+_\d{8}$/);
   assert.deepEqual(plain(bridge.sentPayloads[1].headers), {
     accept: "application/json",
     "content-type": "application/json",
@@ -347,11 +359,12 @@ test("LINE OA replays observed image and sticker request shapes", async () => {
   const imageResult = await bridge.sendCommand({
     command_type: "send_image",
     image_url: "https://cdn.example.com/reply.png",
+    image_bytes: new Uint8Array([1, 2, 3]).buffer, image_type: "image/png",
   });
   assert.equal(imageResult.ok, true);
   const imageBody = JSON.parse(bridge.sentPayloads[1].body);
-  assert.equal(imageBody.type, "image");
-  assert.equal(imageBody.imageUrl, "https://cdn.example.com/reply.png");
+  assert.equal(imageBody.items[0].contentMessageToken, "upload-token");
+  assert.equal(bridge.uploads[0].body.get("file").size, 3);
 
   await bridge.captureManualSend({
     type: "sticker",
@@ -701,7 +714,7 @@ test("LINE OA republishes realtime health when a replacement content bridge dete
   const status = bridge.posts.find((post) => post.type === "provider_status");
   assert.equal(status?.realtime_connected, true);
   assert.equal(status?.realtime_transport, "authenticated_polling");
-  assert.deepEqual(plain(status.command_capabilities_by_account), { "@exampleoa": ["send_text", "send_image", "send_sticker"] });
+  assert.deepEqual(plain(status.command_capabilities_by_account), { "@exampleoa": ["send_text", "send_image", "send_video", "send_file", "send_sticker"] });
   bridge.dispose();
 });
 
@@ -709,13 +722,13 @@ test("LINE OA sends without a training message for an accessible account from on
   const bridge = createBridge({ availableAccounts: [{ botId: "bot-1", basicSearchId: "@other" }] });
   for (const command of [
     { command_type: "send_text", text: "hello" },
-    { command_type: "send_image", image_url: "https://cdn.example/image.png" },
+    { command_type: "send_image", image_bytes: new Uint8Array([1]).buffer, image_type: "image/png" },
     { command_type: "send_sticker", package_id: "1", sticker_id: "2" },
   ]) {
     const result = await bridge.sendCommand({ ...command, browser_provider_account_id: "@other" });
     assert.equal(result.ok, true);
   }
-  assert.deepEqual(bridge.sentPayloads.map(p => JSON.parse(p.body).type), ["text", "image", "sticker"]);
+  assert.deepEqual(bridge.sentPayloads.map(p => JSON.parse(p.body).type), ["text", undefined, "sticker"]);
   bridge.dispose();
 });
 
@@ -724,7 +737,8 @@ test("LINE OA acknowledges an accepted send with no response ID without inventin
     const bridge = createBridge({ sendResponseBody });
     const result = await bridge.sendCommand({ command_type: "send_text", text: "accepted" });
     const submitted = JSON.parse(bridge.sentPayloads[0].body);
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, true);
     assert.match(submitted.sendId, /^chat-1_\d+_\d{8}$/);
     assert.equal(result.provider_message_id, undefined);
     bridge.dispose();
@@ -745,4 +759,68 @@ test("LINE OA uses the Admin client message ID as its send correlation ID", asyn
   assert.equal(submitted.sendId, "admin-client-message-1");
   assert.equal(result.provider_message_id, undefined);
   bridge.dispose();
+});
+
+for (const command_type of ["send_video", "send_file"]) {
+  test(`LINE OA uploads ${command_type} bytes and sends the returned token with the caller ID`, async () => {
+    const bridge = createBridge();
+    const result = await bridge.sendCommand({ command_type, media_bytes: new Uint8Array([4, 5, 6]).buffer,
+      media_type: command_type === "send_video" ? "video/mp4" : "application/pdf", file_name: "attachment.pdf", client_message_id: "media-send" });
+    assert.equal(result.ok, true);
+    assert.equal(bridge.uploads.length, 1);
+    assert.equal(bridge.uploads[0].headers["content-type"], undefined);
+    assert.equal(bridge.uploads[0].body.get("file").name, "attachment.pdf");
+    assert.deepEqual(JSON.parse(bridge.sentPayloads[0].body), { items: [{ sendId: "media-send", contentMessageToken: "upload-token" }] });
+    bridge.dispose();
+  });
+}
+
+test("LINE OA never submits media after upload failure or a missing token", async () => {
+  for (const options of [{ uploadStatus: 413 }, { uploadBody: {} }]) {
+    const bridge = createBridge(options);
+    const result = await bridge.sendCommand({ command_type: "send_file", media_bytes: new Uint8Array([1]).buffer,
+      media_type: "application/pdf", file_name: "report.pdf" });
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, false);
+    assert.equal(bridge.sentPayloads.length, 0);
+    bridge.dispose();
+  }
+});
+
+test("LINE OA rejects expired media before uploading or sending", async () => {
+  const bridge = createBridge();
+  const result = await bridge.sendCommand({ command_type: "send_file", deadline_at_ms: Date.now() - 1,
+    media_bytes: new Uint8Array([1]).buffer, media_type: "application/pdf", file_name: "report.pdf" });
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, false);
+  assert.equal(bridge.uploads.length, 0);
+  assert.equal(bridge.sentPayloads.length, 0);
+  bridge.dispose();
+});
+
+test("LINE OA does not submit a token when the deadline expires during upload", async () => {
+  const bridge = createBridge({ uploadDelayMs: 30 });
+  const result = await bridge.sendCommand({ command_type: "send_file", deadline_at_ms: Date.now() + 15,
+    media_bytes: new Uint8Array([1]).buffer, media_type: "application/pdf", file_name: "report.pdf" });
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, false);
+  assert.equal(bridge.uploads.length, 1);
+  assert.equal(bridge.sentPayloads.length, 0);
+  bridge.dispose();
+});
+
+test("LINE OA rejects empty media, unsupported images, and unnamed files before upload", async () => {
+  for (const command of [
+    { command_type: "send_file", media_bytes: new ArrayBuffer(0), file_name: "empty.pdf" },
+    { command_type: "send_image", image_bytes: new Uint8Array([1]).buffer, image_type: "image/webp" },
+    { command_type: "send_file", media_bytes: new Uint8Array([1]).buffer, media_type: "application/pdf" },
+  ]) {
+    const bridge = createBridge();
+    const result = await bridge.sendCommand(command);
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, false);
+    assert.equal(bridge.uploads.length, 0);
+    assert.equal(bridge.sentPayloads.length, 0);
+    bridge.dispose();
+  }
 });

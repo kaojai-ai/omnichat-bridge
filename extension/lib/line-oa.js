@@ -48,7 +48,7 @@
       const incoming = item.type === "message";
       const userId = id(item?.source?.userId ?? item?.source?.groupId) || conversationId;
       const messageType = text(message?.originalType ?? message?.type) ?? "unknown";
-      const type = ["text", "image", "video", "sticker"].includes(messageType) ? messageType : "unsupported";
+      const type = ["text", "image", "video", "file", "sticker"].includes(messageType) ? messageType : "unsupported";
       results.push({
         provider: "line_oa",
         provider_account_id: providerAccountId || undefined,
@@ -62,6 +62,7 @@
         ...(incoming ? { recipient_account_id: providerAccountId } : { sender_account_id: providerAccountId }),
         type,
         ...(message?.text ? { text: String(message.text).slice(0, 20_000) } : {}),
+        ...(type === "file" && message?.fileName ? { text: String(message.fileName).slice(0, 255) } : {}),
         ...(message?.contentProvider?.originalContentUrl ? { media_url: message.contentProvider.originalContentUrl } : {}),
         ...(messageType !== type ? { provider_type: messageType } : {}),
         ...(messageType === "sticker" && id(message?.stickerId) ? {
@@ -131,7 +132,7 @@
     providerStatusReady,
     providerStatusHealthy,
     capabilities: ["account_detection", "message_observation", "message_recovery"],
-    sendCommands: ["send_text", "send_image", "send_sticker"],
+    sendCommands: ["send_text", "send_image", "send_video", "send_file", "send_sticker"],
     matchesUrl: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     matchesPage: (url) => typeof url === "string" && /^https:\/\/chat\.line\.biz(?:\/|$)/i.test(url),
     configOrigins: (account) => [account.events_url, account.api_url, ...(account.image_server_url ? [account.image_server_url] : []), account.logs_url],

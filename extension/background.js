@@ -50,7 +50,8 @@ const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
-const LINE_MAIN_BRIDGE_VERSION = "line-oa-poll-7";
+// Bump only when the LINE page bridge interface becomes incompatible.
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 1;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -1073,8 +1074,8 @@ async function sendViaProvider(message) {
   const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
   await ensureProviderBridge(tab.id, adapter);
   let imagePayload = {};
-  if (commandType === "send_image") {
-    const imageUrl = typeof message.image_url === "string" ? message.image_url : "";
+  if (["send_image", "send_video", "send_file"].includes(commandType)) {
+    const imageUrl = typeof (message.image_url ?? message.media_url) === "string" ? (message.image_url ?? message.media_url) : "";
     let parsedUrl;
     try { parsedUrl = new URL(imageUrl); } catch { /* Validated below. */ }
     if (parsedUrl?.protocol !== "https:") {
@@ -1086,20 +1087,22 @@ async function sendViaProvider(message) {
     if (parsedUrl.origin !== new URL(context.config.image_server_url).origin) {
       return { ok: false, error: "Reply image URL is not from the configured image server." };
     }
-    const response = await fetch(parsedUrl);
+    const response = await fetch(parsedUrl, adapter.id === "line_oa" ? { redirect: "error", signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) } : undefined);
     const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
-    if (!response.ok || !imageType.startsWith("image/")) {
+    if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/"))) {
       return { ok: false, error: "Could not load reply image." };
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.byteLength || bytes.byteLength > MAX_REPLY_IMAGE_BYTES) {
-      return { ok: false, error: "Reply image must be 10 MB or smaller." };
+    if (!bytes.byteLength || bytes.byteLength > (adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+      return { ok: false, error: adapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
     }
     let binary = "";
     for (let offset = 0; offset < bytes.length; offset += 32_768) {
       binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
     }
-    imagePayload = { image_base64: btoa(binary), image_type: imageType };
+    imagePayload = commandType === "send_image"
+      ? { image_base64: btoa(binary), image_type: imageType }
+      : { media_base64: btoa(binary), media_type: imageType };
   }
   return chrome.tabs.sendMessage(tab.id, {
     ...message,
@@ -2595,13 +2598,14 @@ async function providerMainBridgeStatus(tabId, adapter) {
   const mainBridge = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_VERSION],
-    func: (bridgeSource, providerId, lineBridgeVersion) => ({
+    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION],
+    func: (bridgeSource, providerId, lineCompatibilityVersion) => ({
       ready: Boolean(
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
-            && window.__omnichatLineOABridgeControl?.bridge_version === lineBridgeVersion
+            // Existing page scripts predate this field and use compatibility v1.
+            && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
           : globalThis.OmnichatShopeeUrl
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")

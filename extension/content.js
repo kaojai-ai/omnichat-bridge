@@ -863,17 +863,19 @@
       if (!packageId || !stickerId) return { ok: false, error: "Reply sticker is invalid." };
     }
     let imagePayload = {};
-    if (commandType === "send_image") {
-      const imageBase64 = typeof message?.image_base64 === "string" ? message.image_base64 : "";
-      const imageType = typeof message?.image_type === "string" ? message.image_type : "";
-      if (!imageBase64 || !imageType.startsWith("image/")) return { ok: false, error: "Reply image is invalid." };
+    if (["send_image", "send_video", "send_file"].includes(commandType)) {
+      const imageBase64 = typeof (message?.image_base64 ?? message?.media_base64) === "string" ? (message.image_base64 ?? message.media_base64) : "";
+      const imageType = typeof (message?.image_type ?? message?.media_type) === "string" ? (message.image_type ?? message.media_type) : "";
+      if (!imageBase64 || (commandType === "send_image" && !imageType.startsWith("image/"))) return { ok: false, error: "Reply image is invalid." };
       let binary;
       try { binary = atob(imageBase64); } catch { return { ok: false, error: "Reply image is invalid." }; }
       const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
-      if (!imageBytes.byteLength || imageBytes.byteLength > MAX_REPLY_IMAGE_BYTES) {
-        return { ok: false, error: "Reply image must be 10 MB or smaller." };
+      if (!imageBytes.byteLength || imageBytes.byteLength > (providerAdapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+        return { ok: false, error: providerAdapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
       }
-      imagePayload = { image_bytes: imageBytes, image_type: imageType };
+      imagePayload = commandType === "send_image"
+        ? { image_bytes: imageBytes, image_type: imageType }
+        : { media_bytes: imageBytes, media_type: imageType };
     }
     if (!providerAdapter.supportsSend(commandType)) {
       return { ok: false, error: `Unsupported ${providerLabel} reply command.` };
@@ -898,9 +900,10 @@
         result: null,
         providerIdTimeout: null,
       });
+      const { image_base64, media_base64, ...pageCommand } = message;
       post({
         type: "send_api_v3",
-        ...message,
+        ...pageCommand,
         ...imagePayload,
         provider: providerAdapter.id,
         request_id: requestId,

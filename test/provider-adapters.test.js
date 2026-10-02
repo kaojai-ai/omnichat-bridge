@@ -10,6 +10,43 @@ const sources = await Promise.all([
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 
+test("LINE readiness accepts compatible revisions and rejects breaking interfaces", async () => {
+  const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+  const pageBridge = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
+  const expected = background.match(/const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = (\d+)/);
+  const actual = pageBridge.match(/const COMPATIBILITY_VERSION = (\d+)/);
+  assert.ok(expected);
+  assert.ok(actual);
+  assert.equal(expected[1], actual[1]);
+  const source = background.slice(
+    background.indexOf("async function providerMainBridgeStatus("),
+    background.indexOf("async function retireProviderMainBridge("),
+  );
+  const bridgeSource = "omnichat-realtime-bridge-v3";
+  const control = { source: bridgeSource, bridge_version: "line-oa-poll-7", dispose() {} };
+  const context = vm.createContext({
+    BRIDGE_SOURCE: bridgeSource,
+    LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION: Number(expected[1]),
+    window: { __omnichatLineOABridgeControl: control },
+    OmnichatProviderAdapters: { get: () => ({ id: "line_oa" }) },
+    chrome: { scripting: { executeScript: async ({ func, args }) => [{ result: func(...args) }] } },
+  });
+  vm.runInContext(source, context);
+  const status = () => context.providerMainBridgeStatus(1, { id: "line_oa" });
+  assert.equal((await status()).ready, true, "legacy scripts default to compatibility v1");
+  control.compatibility_version = Number(actual[1]);
+  control.bridge_version = "line-oa-poll-999";
+  assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
+  control.compatibility_version += 1;
+  assert.equal((await status()).ready, false, "breaking interfaces require reattachment");
+  control.compatibility_version = Number(actual[1]);
+  control.source = "unrelated-bridge";
+  assert.equal((await status()).ready, false, "bridge identity is still required");
+  control.source = bridgeSource;
+  control.dispose = undefined;
+  assert.equal((await status()).ready, false, "required lifecycle methods are still checked");
+});
+
 function createRegistry({ includeLineOA = false } = {}) {
   const context = vm.createContext({
     URL,
@@ -237,4 +274,17 @@ test("LINE OA retains sticker identity, a display URL, and its send correlation 
   assert.deepEqual(plain(messages[0].sticker), { package_id: "123", sticker_id: "10445608" });
   assert.equal(messages[0].client_message_id, "admin-client-message-1");
   assert.match(messages[0].media_url, /10445608\/ANDROID\/sticker.png$/);
+});
+
+test("LINE OA preserves file replies and their correlation IDs when history is ingested", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+  const messages = adapter.normalizeMessages({ provider_account_id: "@test", messages: [{
+    type: "messageSent", timestamp: 1000, sendId: "file-send", source: { chatId: "chat-1", userId: "user-1" },
+    message: { id: "file-1", type: "file", fileName: "report.pdf" },
+  }] }, "history_recovery");
+  assert.equal(messages[0].type, "file");
+  assert.equal(messages[0].text, "report.pdf");
+  assert.equal(messages[0].client_message_id, "file-send");
+  assert.equal(adapter.supportsSend("send_file"), true);
+  assert.equal(adapter.supportsSend("send_video"), true);
 });
