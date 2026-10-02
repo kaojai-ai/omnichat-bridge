@@ -47,6 +47,10 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 
 function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
+  let fixtureNow = null;
+  class FixtureDate extends Date {
+    static now() { return fixtureNow ?? Date.now(); }
+  }
   const listeners = [];
   const posts = [];
   const requests = [];
@@ -177,7 +181,7 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
   const context = vm.createContext({
     window,
     fetch: window.fetch,
-    URL,
+    URL, Date: FixtureDate,
     Headers,
     Request,
     FormData, Blob, ArrayBuffer, AbortSignal,
@@ -267,6 +271,8 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
       history_since_ms = null,
       history_conversation_ids = null,
     } = {}) {
+      // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
+      fixtureNow = 5_000;
       for (const listener of listeners) {
         listener({
           source: window,
@@ -288,9 +294,10 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
       }
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === requestId);
-        if (complete) return complete;
+        if (complete) { fixtureNow = null; return complete; }
         await new Promise((resolve) => setImmediate(resolve));
       }
+      fixtureNow = null;
       throw new Error("LINE OA recovery did not complete.");
     },
     dispose() {

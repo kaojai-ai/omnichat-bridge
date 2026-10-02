@@ -99,3 +99,18 @@ export function latestSyncFailure(states) {
   }
   return `${failure.stage}${accountLabel} failed: ${detail}`;
 }
+
+export function transportConnectionStatus(live) {
+  if (live?.socket === "connecting") return {
+    label: "CONNECTING", state: "warning", hint: "Connecting this account to your target server.",
+  };
+  if (live?.socket === "reconnecting") return {
+    label: "RECOVERING CONNECTION", state: "warning",
+    hint: "The connection is recovering automatically. Keep Chrome online; provider readiness is checked separately.",
+  };
+  if (live?.socket === "disconnected") return {
+    label: "TARGET UNREACHABLE", state: "warning", action: "logs",
+    hint: "Check your network and target server configuration, then retry from the extension.",
+  };
+  return null;
+}

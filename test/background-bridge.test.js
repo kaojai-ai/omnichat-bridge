@@ -95,7 +95,7 @@ test("keeps provider recovery state scoped to the matching provider accounts", (
     providerRecoveryContexts(contexts, { id: "shopee" }).map((context) => context.key),
     ["shopee:shop-1"],
   );
-  assert.match(source, /import \{ accountConfigKey, accountKey, findAccountConfig \}/);
+  assert.match(source, /import \{ accountConfigKey, accountKey, findAccountConfig,/);
   assert.match(source, /const key = accountConfigKey\(configuredAccount\)/);
 });
 
@@ -168,21 +168,21 @@ test("only opens live command channels for adapters that declare send commands",
 
 test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /function scheduleLeaderStatusRefresh\(context, socket, attemptsRemaining = 2\)/);
-  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);\n  if \(connection\) connection\.lastStatusKey = key;\n  scheduleLeaderStatusRefresh\(context, socket\);/);
+  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);[\s\S]*scheduleLeaderStatusRefresh\(context, socket\);/);
   assert.match(source, /getLiveState\(context\.account\.provider_account_id, context\.account\.provider\)/);
   assert.match(source, /attemptsRemaining - 1/);
 });
 
-test("uses an 8-minute keepalive and preserves immediate status sends", () => {
-  assert.match(source, /const KEEPALIVE_INTERVAL_MS = 8 \* 60_000/);
+test("uses a 20-second worker keepalive and preserves immediate status sends", () => {
+  assert.match(source, /const KEEPALIVE_INTERVAL_MS = 20_000/);
   const start = source.indexOf("async function ensureAccountLiveConnection(context)");
   const end = source.indexOf("\n}\n\nfunction scheduleLeaderStatusRefresh", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const connectionSource = source.slice(start, end);
   assert.match(connectionSource, /sendConnectionStatus\(socket, context\)/);
-  assert.match(connectionSource, /sendKeepalive\(socket\)/);
-  assert.match(connectionSource, /\}, KEEPALIVE_INTERVAL_MS\);/);
+
+  assert.match(connectionSource, /scheduleKeepalive\(context, socket\)/);
   assert.doesNotMatch(connectionSource, /60_000/);
 });
 

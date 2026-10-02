@@ -17,12 +17,12 @@ const canSend = vm.runInNewContext(`(${source.slice(source.indexOf("function pro
 test("live presence advertises sends only for a responding tab belonging to this shop", async () => {
   let status = ready;
   let tabs = [{ id: 1 }];
-  const snapshot = fn("connectionStatusSnapshot", "\nasync function sendConnectionStatus", {
-    STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }) } },
+  const snapshot = fn("connectionStatusSnapshot", "\nfunction statusPublishKey", {
+    STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }), getPlatformInfo: async () => ({ os: "mac" }) } },
     orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
     providerTabCanSend: canSend, providerTabIsReady: (input) => input?.ok === true,
     persistProviderSurfaceState: async () => {}, detectedAccounts: () => [context.account],
-    readAccountState: (_state, _key, fallback) => fallback, normalizeDeviceName: () => "", buildConnectionHealth: (input) => input,
+    readAccountState: (_state, _key, fallback) => fallback, normalizeDeviceName: () => "", buildConnectionHealth: () => ({ checks: ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].map((key) => ({ key, status: "pass" })) }),
     canonicalProviderAccountId: () => "shop", installationId: async () => "installation", navigator: {},
   });
   assert.deepEqual(Array.from((await snapshot(context)).command_capabilities), ["send_text"]);
@@ -34,18 +34,20 @@ test("live presence advertises sends only for a responding tab belonging to this
   assert.equal((await snapshot(context)).command_capabilities.length, 0);
 });
 
-test("every heartbeat schedules leader recovery without requiring a popup", async () => {
+test("unchanged readiness does not add status writes or repeated leader checks", async () => {
   let scheduled = 0;
   let sent = 0;
-  const sendStatus = fn("sendConnectionStatus", "\nasync function ensureLiveConnection", {
-    connectionStatusSnapshot: async () => ({}), WebSocket: { OPEN: 1 },
-    scheduleLeaderStatusRefresh: () => scheduled++,
-  });
   const socket = { readyState: 1, send: () => sent++ };
+  const connection = { socket };
+  const sendStatus = fn("sendConnectionStatus", "\nfunction scheduleKeepalive", {
+    connectionStatusSnapshot: async () => ({ ready: true }), WebSocket: { OPEN: 1 },
+    liveConnections: new Map([[context.key, connection]]), statusPublishKey: JSON.stringify,
+    scheduleLeaderStatusRefresh: () => scheduled++, scheduleKeepalive: () => {}, recordLog: async () => {},
+  });
   await sendStatus(socket, context);
   await sendStatus(socket, context);
-  assert.equal(sent, 2);
-  assert.equal(scheduled, 2);
+  assert.equal(sent, 1);
+  assert.equal(scheduled, 1);
 });
 
 test("an outbound command cannot use a tab for another shop", async () => {

@@ -135,12 +135,13 @@ const command = {
 for (const command_type of ["send_video", "send_file"]) {
   test(`passes ${command_type} decoded bytes to the LINE page and retains filename and deadline`, async () => {
     const bridge = contentBridge("/bot-1/chat/chat-1", { provider: "line_oa", localConsent: true });
+    const deadline = Date.now() + 30_000;
     const result = bridge.sendCommand({ ...command, command_type, media_base64: "AQID", media_type: "application/pdf",
-      file_name: "report.pdf", deadline_at_ms: 12345 });
+      file_name: "report.pdf", deadline_at_ms: deadline });
     const submitted = bridge.runtimeMessages.find(message => message.type === "send_api_v3");
     assert.deepEqual(Array.from(new Uint8Array(submitted.media_bytes)), [1, 2, 3]);
     assert.equal(submitted.file_name, "report.pdf");
-    assert.equal(submitted.deadline_at_ms, 12345);
+    assert.equal(submitted.deadline_at_ms, deadline);
     assert.equal(submitted.media_base64, undefined);
     await bridge.providerEvent({ type: "api_send_result", request_id: "request-1", ok: true, provider_message_id: "provider-1", confirmed: true });
     assert.deepEqual(plain(await result), { ok: true, provider_message_id: "provider-1" });
@@ -529,3 +530,10 @@ for (const pathname of [
     );
   });
 }
+
+test("preserves provider uncertainty instead of reporting a definite rejection", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { localConsent: true });
+  const result = bridge.sendCommand(command);
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: false, uncertain: true, error: "native response lost" });
+  assert.equal((await result).uncertain, true);
+});

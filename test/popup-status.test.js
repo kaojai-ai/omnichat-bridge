@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   latestSyncFailure,
+  transportConnectionStatus,
   providerConnectionStatus,
   sellerCentreConnectionStatus,
 } from "../extension/lib/popup-status.js";
@@ -105,4 +106,11 @@ test("scopes the latest sync error to its provider account", () => {
     }]),
     "Checking provider messages (LINE OA: Support) failed: Open LINE Official Account to sync messages.",
   );
+});
+
+test("connection recovery is visible independently from provider readiness", () => {
+  assert.equal(transportConnectionStatus({ socket: "connecting" }).label, "CONNECTING");
+  assert.equal(transportConnectionStatus({ socket: "reconnecting", provider_recovery_state: "ready" }).state, "warning");
+  assert.equal(transportConnectionStatus({ socket: "disconnected" }).action, "logs");
+  assert.equal(transportConnectionStatus({ socket: "connected" }), null);
 });
