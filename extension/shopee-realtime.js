@@ -43,7 +43,6 @@
   installLegacyMessageFence();
   const LEGACY_CONVERSATIONS_PATH = "/webchat/api/v1.2/conversations";
   const LEGACY_SUBACCOUNT_CONVERSATIONS_PATH = "/webchat/api/v1.2/subaccount/serving_mode/conversations";
-  const LEGACY_SHOP_LIST_PATH = "/webchat/api/v1.2/shop_list";
   const LEGACY_LOGIN_PATH = "/webchat/api/coreapi/v1.2/login";
   const SELLER_CENTRE_CONVERSATIONS_PATH = "/webchat/api/v1.2/mini/conversations";
   const SELLER_CENTRE_SYNC_PATH = "/webchat/api/v1.2/mini/user/sync";
@@ -60,7 +59,6 @@
         LEGACY_CONVERSATIONS_PATH,
         LEGACY_SUBACCOUNT_CONVERSATIONS_PATH,
       ]),
-      shopListPath: LEGACY_SHOP_LIST_PATH,
       loginPath: LEGACY_LOGIN_PATH,
       sendPath: LEGACY_SEND_PATH,
       imagePath: LEGACY_IMAGE_PATH,
@@ -71,7 +69,6 @@
     }),
     [SELLER_CENTRE_SURFACE]: Object.freeze({
       listPaths: Object.freeze([SELLER_CENTRE_CONVERSATIONS_PATH]),
-      shopListPath: null,
       loginPath: "/api/v2/login/",
       sendPath: SELLER_CENTRE_SEND_PATH,
       imagePath: SELLER_CENTRE_IMAGE_PATH,
@@ -84,8 +81,6 @@
   const HISTORY_LIMIT = 100;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
-  const ACCOUNT_DISCOVERY_RETRY_DELAY_MS = 2_000;
-  const ACCOUNT_DISCOVERY_MAX_ATTEMPTS = 2;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
@@ -235,6 +230,7 @@
     post({
       type: "provider_status",
       surface: state.surface,
+      current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
       capabilities,
       realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
@@ -383,7 +379,8 @@
   };
   const firstValue = (item, keys) => keys.map((key) => value(item?.[key])).find(Boolean) ?? null;
   const postAccounts = (requestId) => {
-    const accounts = [...state.accountsById.values()];
+    const accounts = state.currentAccountId
+      ? [state.accountsById.get(state.currentAccountId)].filter(Boolean) : [];
     if (!accounts.length) return false;
     post({
       type: "accounts_detected",
@@ -395,28 +392,57 @@
   const mergeAccounts = (accounts, requestId, publish = true) => {
     for (const account of accounts) {
       const id = value(account?.provider_account_id);
-      if (!id) continue;
+      if (!id || id !== state.currentAccountId) continue;
       const previous = state.accountsById.get(id) ?? {};
       state.accountsById.set(id, { ...previous, ...account, provider: "shopee", provider_account_id: id });
     }
     if (publish) postAccounts(requestId);
     return [...state.accountsById.values()];
   };
-  const captureAccount = (response) => {
-    void response.clone().json().then((body) => {
-      mergeAccounts(accountsFromPayload(body));
-    }).catch((error) => logAsyncError("account_capture", error));
+  const captureSessionAccount = (body) => {
+    const account = providerAdapter.currentAccountFromPayload(body);
+    const nextId = value(account?.provider_account_id);
+    const previousId = state.currentAccountId ?? null;
+    if (previousId !== nextId) {
+      if (previousId) {
+        resetRecovery("Shopee session changed. Retry sync for the open shop.");
+        state.listTemplate = null;
+        state.getTemplate = null;
+        state.historyTemplate = null;
+        state.sendTemplate = null;
+        state.conversationsById.clear();
+        state.profilesByConversation.clear();
+        state.latestMessageIdsByConversation.clear();
+        state.observedMessageKeys.clear();
+        state.pollingConnected = false;
+        state.sellerCentreListInitialized = false;
+      }
+      state.currentAccountId = nextId;
+      state.accountsById.clear();
+      postLog("info", "session_account_changed", "Shopee session account changed; sync follows the open shop.", {
+        previous_provider_account_id: previousId,
+        provider_account_id: nextId,
+      });
+    }
+    if (account) mergeAccounts([account]);
+    publishSurfaceStatus();
+    return account ? [account] : [];
   };
-  const detectSellerCentreSessionAccount = async () => {
-    if (!isSellerCentreSurface()) return [];
+  const captureAccount = (response) => {
+    void response.clone().json().then(captureSessionAccount)
+      .catch((error) => logAsyncError("account_capture", error));
+  };
+  const detectSessionAccount = async () => {
     const url = new URL(surfaceProfile().loginPath, window.location.origin);
     const response = await state.nativeFetch(new Request(url, {
       method: "GET",
       credentials: "include",
     }));
-    if (!response.ok) throw new Error(`Shopee Seller Centre account lookup returned ${response.status}.`);
-    const accounts = accountsFromPayload(await response.json());
-    return mergeAccounts(accounts);
+    if (!response.ok) {
+      captureSessionAccount(null);
+      throw new Error(`Shopee session account lookup returned ${response.status}. Log in to Shopee.`);
+    }
+    return captureSessionAccount(await response.json());
   };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
@@ -466,7 +492,14 @@
     while ((!state.listTemplate || !state.getTemplate) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    if (!state.listTemplate || !state.getTemplate) throw new Error("Refresh Shopee Seller Chat once to initialize realtime sync.");
+    if (!state.listTemplate || !state.getTemplate) {
+      postLog("warn", "initialization_timeout", "Shopee chat request templates are missing.", {
+        provider_account_id: state.currentAccountId ?? null,
+        list_template_ready: Boolean(state.listTemplate),
+        message_template_ready: Boolean(state.getTemplate),
+      });
+      throw new Error("Open Shopee Webchat and refresh the page to initialize sync.");
+    }
   };
 
   const waitForSellerCentreTemplates = async () => {
@@ -490,69 +523,11 @@
     };
   };
 
-  async function fetchShopList() {
-    const shopListPath = surfaceProfile().shopListPath;
-    if (!shopListPath) return [];
-    const template = state.listTemplate ?? state.getTemplate;
-    if (!template) return [];
-    const url = new URL(template.url);
-    url.pathname = shopListPath;
-    const init = { ...template.init, method: "GET" };
-    delete init.body;
-    const response = await state.nativeFetch(new Request(url, init));
-    if (!response.ok) return [];
-    let body;
-    try {
-      body = await response.json();
-    } catch (error) {
-      logAsyncError("shop_list_response_parse", error);
-      return [];
-    }
-    if (!body) return [];
-    const accounts = accountsFromPayload(body);
-    mergeAccounts(accounts, null, false);
-    captureProfiles(conversationItems(body));
-    return accounts;
-  }
-
-  const isShopeeChatPage = () => Boolean(
-    providerAdapter.surfaceForUrl?.(window.location.href)
-      ?? globalThis.OmnichatShopeeUrl?.surfaceForUrl?.(window.location.href),
-  );
+  const isShopeeChatPage = () => Boolean(providerAdapter.surfaceForUrl?.(window.location.href));
 
   async function discoverAccounts() {
     if (state.accountDiscoveryPromise) return state.accountDiscoveryPromise;
-    state.accountDiscoveryPromise = (async () => {
-      let lastResult = null;
-      let lastError = null;
-      for (let attempt = 0; attempt < ACCOUNT_DISCOVERY_MAX_ATTEMPTS; attempt += 1) {
-        try {
-          await waitForTemplate();
-          const shopListAccounts = await fetchShopList();
-          await fetchConversations(false);
-          lastResult = {
-            accounts: [...state.accountsById.values()],
-            shopListAccounts,
-          };
-          if (shopListAccounts.length || isSellerCentreSurface() || attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) {
-            if (!shopListAccounts.length && !isSellerCentreSurface()) {
-              postLog("warn", "shop_discovery_incomplete", "Shopee shop list was empty after account discovery.");
-            }
-            postAccounts();
-            return lastResult.accounts;
-          }
-        } catch (error) {
-          lastError = error;
-          if (attempt === ACCOUNT_DISCOVERY_MAX_ATTEMPTS - 1) throw error;
-          postLog("warn", "shop_discovery_retry", "Shopee shop discovery will retry after page startup.", {
-            error_type: error instanceof Error ? error.constructor.name : "Error",
-          });
-        }
-        await new Promise((resolve) => setTimeout(resolve, ACCOUNT_DISCOVERY_RETRY_DELAY_MS));
-      }
-      if (lastError) throw lastError;
-      return lastResult?.accounts ?? [];
-    })().finally(() => {
+    state.accountDiscoveryPromise = detectSessionAccount().finally(() => {
       state.accountDiscoveryPromise = null;
     });
     return state.accountDiscoveryPromise;
@@ -1240,13 +1215,10 @@
 
   async function detectCurrentAccount(requestId) {
     try {
-      if (isSellerCentreSurface()) {
-        if (postAccounts(requestId)) return;
-        await detectSellerCentreSessionAccount();
-        if (postAccounts(requestId)) return;
-      }
       await discoverAccounts();
-      if (!postAccounts(requestId)) throw new Error("Shopee Shop ID was not found.");
+      const account = state.accountsById.get(state.currentAccountId);
+      if (!account) throw new Error("Log in to Shopee to detect the current shop.");
+      post({ type: "accounts_detected", accounts: [account], request_id: requestId });
     } catch (error) {
       logAsyncError("account_detection", error);
       post({ type: "account_detection_failed", request_id: requestId, error: String(error) });
@@ -1322,6 +1294,12 @@
     }
     const accountId = value(checkpoint?.provider_account_id);
     const recoveryEpoch = state.recoveryEpoch;
+    const assertSessionUnchanged = () => {
+      if (state.recoveryEpoch !== recoveryEpoch
+        || (state.currentAccountId && state.currentAccountId !== accountId)) {
+        throw new Error("Shopee session changed. Retry sync for the open shop.");
+      }
+    };
     state.recoveryInFlight = true;
     state.recoveryRequestId = requestId;
     state.recoveryAbortController = new AbortController();
@@ -1331,10 +1309,14 @@
     let checked = 0;
     try {
       postLog("info", "recovery_started", "Shopee recovery started.", {
+        provider_account_id: accountId,
+        current_provider_account_id: state.currentAccountId ?? null,
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
       await ensureSellerCentreChatOpen();
+      assertSessionUnchanged();
       await waitForTemplate();
+      assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
       const historyDays = Number(checkpoint?.history_days);
@@ -1365,6 +1347,7 @@
         maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
       });
+      assertSessionUnchanged();
       const sorted = [...pages.conversations]
         .sort((left, right) => conversationTime(right) - conversationTime(left));
       let recoveryConversations;
@@ -1481,6 +1464,7 @@
         post({ type: "recovery_progress", request_id: requestId, provider_account_id: accountId, completed_conversations: completedConversations, total_conversations: totalConversations });
       }
       for (const item of [...probes, ...recoveryJobs]) {
+        assertSessionUnchanged();
         const { conversation, cursor, decision } = item;
         checked += 1;
         postLog("debug", "conversation_started", "Checking one conversation for missed messages.", {
@@ -1495,6 +1479,7 @@
           deep || windowJob ? null : cursor,
           deep || windowJob ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
           async (messages, page) => {
+            assertSessionUnchanged();
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
             const acknowledgement = await waitForAcknowledgement(batchRequestId);
@@ -1560,6 +1545,7 @@
           decision,
         });
       }
+      assertSessionUnchanged();
       const recoveredDeepIds = new Set(
         (checkpoint.history_backfill && typeof checkpoint.history_backfill === "object"
           ? Object.keys(checkpoint.history_backfill)
@@ -1591,6 +1577,7 @@
           conversation_id: id,
         });
       }
+      assertSessionUnchanged();
       post({
         type: "recovery_complete",
         request_id: requestId,
@@ -1604,6 +1591,7 @@
           : checkpoint?.watermark ?? null,
       });
       postLog("info", "recovery_completed", "Shopee recovery completed.", {
+        provider_account_id: accountId,
         parsed,
         queued,
         conversations_checked: checked,
@@ -1621,6 +1609,8 @@
         return;
       }
       postLog("error", "recovery_failed", error instanceof Error ? error.message : String(error), {
+        provider_account_id: accountId,
+        current_provider_account_id: state.currentAccountId ?? null,
         conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
         ...errorDetails(error),
@@ -1681,8 +1671,6 @@
         } else {
           captureAccounts(response);
         }
-      } else if (surfaceProfile().shopListPath && path === surfaceProfile().shopListPath) {
-        captureAccounts(response);
       } else if (surfaceProfile().loginPath && path === surfaceProfile().loginPath) {
         captureAccount(response);
       } else if (isSellerCentreSurface() && path === "/webchat/api/workbenchapi/v1.2/mini/shop/setting") {
@@ -1707,7 +1695,7 @@
   }
 
   if (isSellerCentreSurface()) {
-    void observeAsync("seller_centre_session_account", detectSellerCentreSessionAccount);
+    void observeAsync("seller_centre_session_account", detectSessionAccount);
   }
 
   const detachObservedSocket = () => {

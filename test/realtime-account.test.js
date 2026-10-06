@@ -40,7 +40,11 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   const documentListeners = new Map();
   const posts = [];
   const acknowledged = new Set();
-  const responses = new Map(Object.entries(initialResponses));
+  const responses = new Map(Object.entries({
+    "/api/v2/login/": { data: { shop_id: 100000001 } },
+    "/webchat/api/coreapi/v1.2/login": { shop: { id: 100000001, name: "Example Sports Shop" } },
+    ...initialResponses,
+  }));
   const requests = [];
   const intervals = [];
   let miniChatClicks = 0;
@@ -201,7 +205,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     for (let attempt = 0; attempt < 400; attempt += 1) {
       const detection = posts.findLast((post) => post.type === "accounts_detected"
         && !post.request_id
-        && post.accounts?.length > 1);
+        && post.accounts?.length === 1);
       if (detection) return detection;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -269,6 +273,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   }
 
   return {
+    get state() { return window.__omnichatRealtimeState; },
     fetch,
     setResponse,
     seedRecoveryState,
@@ -396,98 +401,35 @@ test("detects the Seller Centre shop before Webchat mini opens", async () => {
   assert.equal(bridge.miniChatClicks, 0);
 });
 
-test("actively detects all shops on initial account detection", async () => {
-  const bridge = createBridge();
-  await bridge.fetch("/webchat/api/v1.2/conversations", [
-    { id: "conversation-th", shop_id: 100000001 },
-  ]);
-  bridge.setResponse("/webchat/api/v1.2/shop_list", {
-    shops: [
-      { id: 100000001, name: "Example Sports Shop" },
-      { id: 1698999861, name: "2daysagobadminton.my" },
-      { id: 1698999856, name: "2daysagobadminton.ph" },
-    ],
-  });
-  bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
-    conversations: [
-      { id: "conversation-th", shop_id: 100000001 },
-    ],
-  });
-
-  const detection = await bridge.detect();
-  assert.ok(detection, JSON.stringify({ posts: bridge.posts, requests: bridge.requests }));
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
-    [
-      ["100000001", "Example Sports Shop"],
-      ["1698999861", "2daysagobadminton.my"],
-      ["1698999856", "2daysagobadminton.ph"],
-    ],
-  );
-});
-
-test("automatically detects all shops when the chat page initializes", async () => {
-  const bridge = createBridge();
-  bridge.setResponse("/webchat/api/v1.2/shop_list", {
-    shops: [
-      { id: 100000001, name: "Example Sports Shop" },
-      { id: 1698999861, name: "2daysagobadminton.my" },
-      { id: 1698999856, name: "2daysagobadminton.ph" },
-    ],
-  });
-  bridge.setResponse("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
-    conversations: [
-      { id: "conversation-th", shop_id: 100000001 },
-    ],
-  });
-  await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
-    conversations: [
-      { id: "conversation-th", shop_id: 100000001 },
-    ],
-  });
-
-  const detection = await bridge.waitForAutomaticDetection();
-  assert.ok(detection, JSON.stringify({ posts: bridge.posts, requests: bridge.requests }));
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
-    [
-      ["100000001", "Example Sports Shop"],
-      ["1698999861", "2daysagobadminton.my"],
-      ["1698999856", "2daysagobadminton.ph"],
-    ],
-  );
-  assert.equal(bridge.requests.includes("/webchat/api/v1.2/shop_list"), true);
-  assert.equal(
-    bridge.requests.filter((path) => path === "/webchat/api/v1.2/subaccount/serving_mode/conversations").length,
-    2,
-  );
-});
-
-test("merges shop-list names with the special multi-shop conversation endpoint", async () => {
+test("detects only the current login shop, ignoring shop-list and conversation catalogues", async () => {
   const bridge = createBridge();
   await bridge.fetch("/webchat/api/v1.2/shop_list", {
-    shops: [
-      { id: 1698999861, name: "2daysagobadminton.my" },
-      { id: 1698999856, name: "2daysagobadminton.ph" },
-      { id: 100000001, name: "Example Sports Shop" },
-    ],
+    shops: [{ id: 100000001 }, { id: 39233325 }],
   });
   await bridge.fetch("/webchat/api/v1.2/subaccount/serving_mode/conversations", {
-    conversations: [
-      { id: "conversation-my", shop_id: 1698999861 },
-      { id: "conversation-th", shop_id: 100000001 },
-    ],
+    conversations: [{ id: "old", shop_id: 39233325 }],
   });
-
   const detection = await bridge.detect();
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(detection.accounts.map((account) => [account.provider_account_id, account.display_name]))),
-    [
-      ["1698999861", "2daysagobadminton.my"],
-      ["1698999856", "2daysagobadminton.ph"],
-      ["100000001", "Example Sports Shop"],
-    ],
-  );
+  assert.deepEqual(Array.from(detection.accounts, (account) => account.provider_account_id), ["100000001"]);
+  assert.equal(bridge.requests.filter((path) => path === "/webchat/api/v1.2/shop_list").length, 1);
+});
+
+test("login switch clears stale templates and recovery, then detects the new shop", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  await bridge.fetch("/webchat/api/v1.2/conversations", []);
+  bridge.seedRecoveryState();
+  await bridge.fetch("/webchat/api/coreapi/v1.2/login", { shop: { id: 39233325, name: "new-shop" } });
+  const state = bridge.state;
+  assert.equal(state.currentAccountId, "39233325");
+  assert.equal(state.listTemplate, null);
+  assert.equal(state.getTemplate, null);
+  assert.equal(state.recoveryInFlight, false);
+  const detection = await bridge.detect("new-session");
+  assert.deepEqual(Array.from(detection.accounts, (account) => account.provider_account_id), ["39233325"]);
+  const status = bridge.posts.findLast((post) => post.type === "provider_status");
+  assert.equal(status.current_provider_account_id, "39233325");
+  assert.equal(status.surface_ready, false);
 });
 
 test("limits recovery to the requested Shop ID", async () => {

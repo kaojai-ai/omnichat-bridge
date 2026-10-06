@@ -28,13 +28,13 @@ test("detects the account from the tab that opened the popup", () => {
   assert.match(backgroundSource, /const hasPreferredTab = preferredTabId !== null && preferredTabId !== undefined;/);
 });
 
-test("keeps manual sync scoped to every configured detected account", () => {
+test("selects current session accounts before manual sync", () => {
   const start = backgroundSource.indexOf("async function runUnifiedSync(trigger, control)");
   const end = backgroundSource.indexOf("\n}\n\nasync function resumeSync", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncSource = backgroundSource.slice(start, end);
-  assert.match(syncSource, /const contexts = configuredAccountContexts\(stored\);/);
+  assert.match(syncSource, /openSessionSyncContexts\(configuredAccountContexts\(stored\), control\)/);
   assert.match(syncSource, /for \(const context of contexts\)/);
   assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
 });
