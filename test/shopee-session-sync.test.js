@@ -57,3 +57,37 @@ test("Shopee tab recovery continues when the owner is between logins", async () 
   await reconnect({ id: 42 });
   assert.deepEqual(calls, ["bridge", "recovery", "connection"]);
 });
+
+for (const failureAt of ["tab_lookup", "detection", "status"]) {
+  test(`LINE sync continues when Shopee ${failureAt} throws`, async () => {
+    const contexts = [context("shopee", "A"), context("line_oa", "L1"), context("line_oa", "L2")];
+    const synced = [];
+    const errors = [];
+    const failure = new Error("Receiving end does not exist");
+    const lookup = async (stage, result) => {
+      if (stage === failureAt) throw failure;
+      return result;
+    };
+    const syncEnd = source.indexOf("\nasync function resumeSync", end);
+    const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+      shopeeAdapter: {}, STORAGE: {},
+      findReadyProviderChatTab: () => lookup("tab_lookup", { id: 42 }),
+      detectOpenProviderAccount: () => lookup("detection", { ok: true }),
+      providerTabStatus: () => lookup("status", { current_provider_account_id: "A" }),
+      readStorage: async () => ({}), configuredAccountContexts: () => contexts,
+      recordUnexpected: async (area, error, details) => errors.push({ area, error, details }),
+      recordLog: async () => {}, updateScopedState: async () => {},
+      hasLocalConsent: () => true, throwIfSyncCancelled: () => {},
+      runAccountSync: async (_trigger, _control, account) => {
+        synced.push(account.key);
+        return { sent: 1 };
+      },
+    });
+    const result = await run("manual", { controller: new AbortController() });
+    assert.deepEqual(synced, ["L1", "L2"]);
+    assert.equal(result.sent, 2);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].error, failure);
+    assert.equal(errors[0].details.provider, "shopee");
+  });
+}

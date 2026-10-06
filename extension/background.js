@@ -3301,10 +3301,16 @@ async function runAccountSync(trigger, control, context) {
 async function openSessionSyncContexts(contexts, control) {
   const shopee = contexts.filter((context) => context.adapter.id === "shopee");
   if (!shopee.length) return contexts;
-  const tab = await findReadyProviderChatTab(shopeeAdapter) ?? await findProviderChatTab(shopeeAdapter);
-  const detected = tab ? await detectOpenProviderAccount("shopee", tab.id) : null;
-  const status = detected?.ok ? await providerTabStatus(tab) : null;
-  const currentId = status?.current_provider_account_id ?? null;
+  let tab = null;
+  let currentId = null;
+  try {
+    tab = await findReadyProviderChatTab(shopeeAdapter) ?? await findProviderChatTab(shopeeAdapter);
+    const detected = tab ? await detectOpenProviderAccount("shopee", tab.id) : null;
+    const status = detected?.ok ? await providerTabStatus(tab) : null;
+    currentId = status?.current_provider_account_id ?? null;
+  } catch (error) {
+    await recordUnexpected("session_detection", error, { provider: "shopee" });
+  }
   // Reload configuration after detection: the owner may have switched shop since the last sync.
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const currentContexts = configuredAccountContexts(stored);
