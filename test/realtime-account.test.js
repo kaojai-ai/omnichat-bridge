@@ -81,6 +81,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
       const path = new URL(input.url ?? input, origin).pathname;
       requests.push(path);
       const body = responses.get(path) ?? {};
+      if (typeof body === "function") return body(input);
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -296,6 +297,8 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
         request_id: "legacy-send",
       }, origin);
     },
+    get state() { return window.__omnichatRealtimeState; },
+    dispose() { window.__omnichatRealtimeBridgeControl.dispose(); },
     get messageListenerCount() { return listeners.length; },
     get miniChatClicks() { return miniChatClicks; },
     get miniChatIsOpen() { return miniChatIsOpen; },
@@ -788,4 +791,111 @@ test("recovers Seller Centre history through the mini conversation route", async
   assert.equal(bridge.miniChatIsOpen, true);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages"), true);
   assert.equal(bridge.requests.some((path) => path.includes("/webchat/api/v1.2/conversations/")), false);
+});
+
+
+const retryListPath = "/webchat/api/v1.2/mini/conversations";
+const retryHistoryPath = `${retryListPath}/retry-conversation/messages`;
+const retryConversation = (latestId) => ({
+  id: "retry-conversation", shop_id: 100000001, to_id: 987654321,
+  to_name: "Synthetic buyer", latest_message_id: latestId,
+  last_message_time: "2026-10-06T10:01:00Z", biz_id: 0,
+});
+const retryMessage = (id, seconds) => ({
+  id, conversation_id: "retry-conversation", from_id: 987654321,
+  to_id: 100000001, shop_id: 100000001, type: "text",
+  content: { text: id }, created_timestamp: 1791280800 + seconds,
+});
+async function pollingRetryBridge() {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  await bridge.fetch(retryListPath, [retryConversation("m1")]);
+  return bridge;
+}
+function capturedRetryIds(bridge) {
+  return bridge.posts.filter((post) => post.type === "realtime_event")
+    .flatMap((post) => Array.from(post.body.messages, (message) => message.id));
+}
+
+test("Seller Centre retries unchanged summaries after repeated history failures and captures intervening messages once", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  bridge.setResponse(retryHistoryPath, () => new Response("{}", { status: 503 }));
+  await bridge.runIntervals();
+  await bridge.runIntervals();
+  assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 2);
+  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  bridge.setResponse(retryListPath, [retryConversation("m3")]);
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1), retryMessage("m3", 2)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+});
+
+test("Seller Centre retains pending capture until a history request template is available", async () => {
+  const bridge = await pollingRetryBridge();
+  const template = bridge.state.getTemplate;
+  bridge.state.getTemplate = null;
+  bridge.state.historyTemplate = null;
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  await bridge.runIntervals();
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
+  assert.equal(bridge.requests.includes(retryHistoryPath), false);
+  bridge.state.getTemplate = template;
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+});
+
+test("Seller Centre prevents overlapping history fetches and retains newer summaries", async () => {
+  const bridge = await pollingRetryBridge();
+  let finish;
+  bridge.setResponse(retryHistoryPath, () => new Promise((resolve) => { finish = resolve; }));
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  await bridge.runIntervals();
+  await bridge.fetch(retryListPath, [retryConversation("m3")]);
+  assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 1);
+  finish(new Response(JSON.stringify([retryMessage("m1", 0), retryMessage("m2", 1)])));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1), retryMessage("m3", 2)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+});
+
+for (const reset of ["shop switch", "dispose"]) {
+  test(`Seller Centre discards in-flight messages after ${reset}`, async () => {
+    const bridge = await pollingRetryBridge();
+    let finish;
+    bridge.setResponse(retryHistoryPath, () => new Promise((resolve) => { finish = resolve; }));
+    bridge.setResponse(retryListPath, [retryConversation("m2")]);
+    await bridge.runIntervals();
+    assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
+    if (reset === "shop switch") {
+      await bridge.fetch("/api/v2/login/", { data: { shop_id: 200000002 } });
+    } else bridge.dispose();
+    finish(new Response(JSON.stringify([retryMessage("m1", 0), retryMessage("m2", 1)])));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(capturedRetryIds(bridge), []);
+    assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
+    assert.equal(bridge.state.capturedMessageIdsByConversation.size, 0);
+  });
+}
+
+
+test("Seller Centre retries m2 on the next poll without a new summary message", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  bridge.setResponse(retryHistoryPath, () => new Response("{}", { status: 503 }));
+  await bridge.runIntervals();
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  await bridge.runIntervals();
+  assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 2);
+  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
 });

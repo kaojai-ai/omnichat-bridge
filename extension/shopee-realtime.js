@@ -120,6 +120,10 @@
     accountDiscoveryPromise: null,
     automaticAccountDiscoveryStarted: false,
     latestMessageIdsByConversation: new Map(),
+    capturedMessageIdsByConversation: new Map(),
+    pendingSellerCentreMessages: new Map(),
+    sellerCentreFetches: new Map(),
+    sellerCentreCaptureEpoch: 0,
     observedMessageKeys: new Set(),
     sellerCentreListInitialized: false,
     sellerCentrePollingStarted: false,
@@ -139,6 +143,10 @@
     state.historyTemplate = null;
     state.sendTemplate = null;
     state.latestMessageIdsByConversation = new Map();
+    state.capturedMessageIdsByConversation = new Map();
+    state.pendingSellerCentreMessages = new Map();
+    state.sellerCentreFetches = new Map();
+    state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
     state.observedMessageKeys = new Set();
     state.sellerCentreListInitialized = false;
     state.sellerCentrePollingStarted = false;
@@ -164,6 +172,10 @@
   state.accountDiscoveryPromise ??= null;
   state.automaticAccountDiscoveryStarted ??= false;
   state.latestMessageIdsByConversation ??= new Map();
+  state.capturedMessageIdsByConversation ??= new Map();
+  state.pendingSellerCentreMessages ??= new Map();
+  state.sellerCentreFetches ??= new Map();
+  state.sellerCentreCaptureEpoch ??= 0;
   state.observedMessageKeys ??= new Set();
   state.sellerCentreListInitialized ??= false;
   state.sellerCentrePollingStarted ??= false;
@@ -413,6 +425,7 @@
         state.conversationsById.clear();
         state.profilesByConversation.clear();
         state.latestMessageIdsByConversation.clear();
+        resetSellerCentreCapture();
         state.observedMessageKeys.clear();
         state.pollingConnected = false;
         state.sellerCentreListInitialized = false;
@@ -676,12 +689,20 @@
     });
   };
 
-  async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId) {
+  const resetSellerCentreCapture = () => {
+    state.sellerCentreCaptureEpoch += 1;
+    state.capturedMessageIdsByConversation.clear();
+    state.pendingSellerCentreMessages.clear();
+    state.sellerCentreFetches.clear();
+  };
+
+  async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
     const template = state.historyTemplate ?? state.getTemplate;
-    if (!template) return;
+    if (!template) return false;
     const response = await state.nativeFetch(sellerCentreHistoryRequest(conversation, template));
     if (!response.ok) throw new Error(`Shopee Seller Centre message poll returned ${response.status}.`);
     const body = await response.json();
+    if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
     const messages = Array.isArray(body)
       ? body
       : conversationItems(body);
@@ -704,9 +725,11 @@
       conversation_id: String(conversation.id ?? ""),
       messages: emitted,
     });
+    return true;
   }
 
   async function captureSellerCentreConversationList(response) {
+    const captureEpoch = state.sellerCentreCaptureEpoch;
     let body;
     try {
       body = await response.clone().json();
@@ -714,11 +737,11 @@
       logAsyncError("seller_centre_conversation_parse", error);
       return;
     }
+    if (!isBridgeActive() || captureEpoch !== state.sellerCentreCaptureEpoch) return;
     const conversations = conversationItems(body);
     mergeAccounts(accountsFromPayload(body), null, true);
     captureProfiles(conversations);
     const wasInitialized = state.sellerCentreListInitialized;
-    const changed = [];
     for (const conversation of conversations) {
       const conversationId = String(conversation?.id ?? "").trim();
       if (!conversationId) continue;
@@ -726,19 +749,38 @@
       const hadPrevious = state.latestMessageIdsByConversation.has(conversationId);
       const previousId = state.latestMessageIdsByConversation.get(conversationId) ?? null;
       state.latestMessageIdsByConversation.set(conversationId, latestId);
+      // The first list is a baseline; bootstrap/recovery owns its history.
+      if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
-        changed.push({ conversation, previousId, latestId });
+        state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
     }
     state.sellerCentreListInitialized = true;
-    if (!wasInitialized || !changed.length) return;
-    for (const item of changed) {
+    if (!wasInitialized) return;
+    for (const [conversationId, item] of state.pendingSellerCentreMessages) {
+      if (state.sellerCentreFetches.has(conversationId)) continue;
+      const epoch = state.sellerCentreCaptureEpoch;
+      const token = {};
+      state.sellerCentreFetches.set(conversationId, token);
       try {
-        await fetchSellerCentreConversationMessages(item.conversation, item.previousId, item.latestId);
+        const captured = await fetchSellerCentreConversationMessages(
+          item.conversation,
+          state.capturedMessageIdsByConversation.get(conversationId) ?? null,
+          item.latestId,
+          epoch,
+        );
+        if (!captured || !isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
+        state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
+        // A newer summary may have arrived while this fetch was in flight.
+        if (state.pendingSellerCentreMessages.get(conversationId) === item) {
+          state.pendingSellerCentreMessages.delete(conversationId);
+        }
       } catch (error) {
-        logAsyncError("seller_centre_message_poll", error, {
-          conversation_id: String(item.conversation?.id ?? ""),
-        });
+        logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
+      } finally {
+        if (state.sellerCentreFetches.get(conversationId) === token) {
+          state.sellerCentreFetches.delete(conversationId);
+        }
       }
     }
   }
@@ -1829,6 +1871,7 @@
   const dispose = (reason = "Page bridge was replaced.") => {
     if (disposed) return false;
     disposed = true;
+    resetSellerCentreCapture();
     resetRecovery(reason);
     if (socketObserverTimer != null) clearInterval(socketObserverTimer);
     socketObserverTimer = null;
