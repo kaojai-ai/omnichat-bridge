@@ -1975,7 +1975,7 @@ async function connectionStatusSnapshot(context) {
       && account.provider_account_id === context.account.provider_account_id,
   );
   const accountMatches = adapter?.id === "shopee"
-    ? providerStatus?.provider_account_ids?.includes(context.account.provider_account_id) === true
+    ? providerStatus?.current_provider_account_id === context.account.provider_account_id
     : accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
@@ -2331,7 +2331,9 @@ async function reconnectProviderTab(tab) {
     const stored = await readStorage([STORAGE.consent]);
     if (hasLocalConsent(stored[STORAGE.consent])) {
       const result = await detectOpenProviderAccount(adapter.id, tabId);
-      if (!result?.ok) throw new Error(result?.error ?? `${providerLabel(adapter)} account detection failed.`);
+      if (!result?.ok && adapter.id !== "shopee") {
+        throw new Error(result?.error ?? `${providerLabel(adapter)} account detection failed.`);
+      }
     }
   }
   await autoStartSellerCentreTab(tab);
@@ -2520,7 +2522,7 @@ function providerTabCanSend(status, context) {
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
   return providerTabIsReady(status, adapter)
     && (adapter?.id !== "shopee"
-      || status?.provider_account_ids?.includes(context.account.provider_account_id) === true);
+      || status?.current_provider_account_id === context.account.provider_account_id);
 }
 
 function providerTabHealthy(status, adapter) {
@@ -3004,6 +3006,12 @@ async function syncOpenProvider(control, context) {
   control.tabId = tab.id;
   control.adapter = adapter;
   await ensureProviderBridge(tab.id, adapter);
+  if (adapter.id === "shopee") {
+    const status = await providerTabStatus(tab);
+    if (status?.current_provider_account_id !== context.account.provider_account_id) {
+      throw new Error("Shopee login changed. Retry sync for the currently open shop.");
+    }
+  }
   throwIfSyncCancelled(signal);
   const syncMessage = {
     type: "sync_now_v3",
@@ -3290,13 +3298,43 @@ async function runAccountSync(trigger, control, context) {
   }
 }
 
+async function openSessionSyncContexts(contexts, control) {
+  const shopee = contexts.filter((context) => context.adapter.id === "shopee");
+  if (!shopee.length) return contexts;
+  const tab = await findReadyProviderChatTab(shopeeAdapter) ?? await findProviderChatTab(shopeeAdapter);
+  const detected = tab ? await detectOpenProviderAccount("shopee", tab.id) : null;
+  const status = detected?.ok ? await providerTabStatus(tab) : null;
+  const currentId = status?.current_provider_account_id ?? null;
+  // Reload configuration after detection: the owner may have switched shop since the last sync.
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const currentContexts = configuredAccountContexts(stored);
+  const selected = currentContexts.filter((context) => context.adapter.id !== "shopee"
+    || (currentId && context.account.provider_account_id === currentId));
+  for (const context of shopee) {
+    if (context.account.provider_account_id === currentId) continue;
+    await recordLog("info", "sync", "skipped", "Shopee sync skipped: log in to this shop to sync it.", {
+      provider: "shopee",
+      provider_account_id: context.account.provider_account_id,
+      current_provider_account_id: currentId,
+      reason: currentId ? "different_session_account" : "session_account_unavailable",
+    });
+    await updateScopedState(STORAGE.status, context.key, {
+      state: "watching", phase: null, caught_up: false,
+      sync_error: "Log in to this Shopee shop and open Webchat to sync it.",
+      sync_error_at: null,
+    });
+  }
+  if (tab) control.preferredTabId = tab.id;
+  return selected;
+}
+
 async function runUnifiedSync(trigger, control) {
   const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
   if (!hasLocalConsent(stored[STORAGE.consent])) {
     throw new Error("Provider browser bridge is not configured.");
   }
-  const contexts = configuredAccountContexts(stored);
-  if (!contexts.length) throw new Error("No configured provider accounts are detected.");
+  const contexts = await openSessionSyncContexts(configuredAccountContexts(stored), control);
+  if (!contexts.length) throw new Error("Log in to a configured provider account and open its chat to sync.");
   const accounts = [];
   for (const context of contexts) {
     throwIfSyncCancelled(control.controller.signal);

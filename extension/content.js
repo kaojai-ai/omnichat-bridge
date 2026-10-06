@@ -30,6 +30,7 @@
   let providerCapabilities = {};
   let providerCommandCapabilitiesByAccount = {};
   let providerAccountIds = [];
+  let currentProviderAccountId = null;
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
   let providerPollingActive = false;
@@ -945,6 +946,9 @@
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
       const wasSurfaceReady = providerSurfaceReady;
+      if (providerAdapter.id === "shopee") {
+        currentProviderAccountId = event.data.current_provider_account_id ?? null;
+      }
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
@@ -1046,6 +1050,7 @@
         ok: true,
         surface: providerSurface,
         provider_account_ids: providerAccountIds,
+        current_provider_account_id: currentProviderAccountId,
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
         command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },

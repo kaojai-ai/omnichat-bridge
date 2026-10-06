@@ -174,6 +174,13 @@
     surfaceForUrl: (url) => globalThis.OmnichatShopeeUrl?.surfaceForUrl(url) ?? null,
     providerStatusReady,
     providerStatusHealthy,
+    currentAccountFromPayload(body) {
+      for (const session of [body, body?.data, body?.result, body?.data?.data]) {
+        const account = accountFromSession(session);
+        if (account) return account;
+      }
+      return null;
+    },
     accountsFromPayload,
     conversationItems,
     normalizeAccount,

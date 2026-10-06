@@ -96,6 +96,21 @@ transfers Shopee cookies, passwords, or login tokens.
 
 ## Sync and recovery
 
+Shopee sync follows the single shop in the current browser login session. Saved
+configuration and previously detected shops do not make another shop available
+in that session. The extension refreshes session detection before syncing and
+skips other shops with a login hint. LINE OA retains its multi-account sync.
+
+Logging out or changing the login shop clears Shopee request templates and
+interrupts recovery for the previous shop. Open Webchat in the new session so
+its fresh conversation and message requests initialize the bridge. Automatic
+provider-tab recovery uses a generic Shopee URL and does not require the old
+shop to remain logged in; account detection failures do not block tab recovery.
+
+Session-change and skipped-sync logs contain shop IDs and reasons. Initialization
+timeouts record which request template is missing, without cookies, tokens,
+request bodies, or customer messages.
+
 Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
 - Without a completed checkpoint, bootstrap reads the 10 newest conversations
