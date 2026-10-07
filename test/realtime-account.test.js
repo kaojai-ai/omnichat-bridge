@@ -127,17 +127,18 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   vm.runInContext(shopeeAdapterSource, context);
   vm.runInContext(source, context);
 
-  async function fetch(path, body) {
+  async function fetch(path, body, requestBody = {}) {
     responses.set(path, body);
     const isConversationList = [
       "/webchat/api/v1.2/conversations",
       "/webchat/api/v1.2/subaccount/serving_mode/conversations",
       "/webchat/api/v1.2/mini/conversations",
+      "/webchat/api/v1.2/mini/subaccount/serving_mode/conversations",
     ].includes(path);
     await window.fetch(isConversationList
-      ? new Request(`${origin}${path}`, { method: "POST", body: "{}" })
+      ? new Request(`${origin}${path}`, { method: "POST", body: JSON.stringify(requestBody) })
       : `${origin}${path}`);
-    if (isConversationList && path !== "/webchat/api/v1.2/mini/conversations") {
+    if (isConversationList && !path.includes("/mini/")) {
       await window.fetch(`${origin}/webchat/api/v1.2/conversation/serving_mode/attr`);
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -898,4 +899,55 @@ test("Seller Centre retries m2 on the next poll without a new summary message", 
   assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
   await bridge.runIntervals();
   assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+});
+
+for (const subaccount of [false, true]) {
+  test(`recovers closed conversations across POST pages in ${subaccount ? "subaccount" : "normal"} mini-chat, restricted to the active shop`, async () => {
+    const bridge = createBridge({ pathname: "/portal", miniChatOpen: true });
+    const path = subaccount
+      ? "/webchat/api/v1.2/mini/subaccount/serving_mode/conversations"
+      : "/webchat/api/v1.2/mini/conversations";
+    const cursor = "1790138871629724048";
+    const conversation = (id, shopId, next) => ({
+      id, shop_id: shopId, status: 2, to_id: 987654321,
+      last_message_time: "2026-08-20T10:00:00.000Z",
+      latest_message_id: `${id}-message`, next_timestamp_nano: next,
+    });
+    const wrap = (items) => subaccount ? { conversations: items, attributions: {}, ShopIds: [] } : items;
+    const first = wrap([conversation("other-shop", 200000002, cursor)]);
+    const payload = { next_timestamp_nano: "0", direction: "older", biz_id: 0, on_message_received: false };
+    await bridge.fetch(path, first, payload);
+    await bridge.fetch("/webchat/api/v1.2/mini/conversations/active-shop/messages", []);
+    const replayBodies = [];
+    bridge.setResponse(path, async (request) => {
+      assert.equal(request.method, "POST");
+      const body = await request.clone().json();
+      replayBodies.push(body);
+      return new Response(JSON.stringify(body.next_timestamp_nano === "0"
+        ? first : wrap([conversation("active-shop", 100000001, "")])), { status: 200 });
+    });
+    const complete = await bridge.sync("100000001");
+    assert.equal(complete.ok, true);
+    assert.equal(replayBodies.length, 2);
+    assert.deepEqual(replayBodies[0], payload);
+    assert.deepEqual(replayBodies[1], { ...payload, next_timestamp_nano: cursor });
+    assert.ok(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/active-shop/messages"));
+    assert.equal(bridge.requests.includes("/webchat/api/v1.2/mini/conversations/other-shop/messages"), false);
+  });
+}
+
+test("subaccount polling captures new active-shop messages without fetching other shops", async () => {
+  const bridge = createBridge({ pathname: "/portal", captureIntervals: true });
+  const path = "/webchat/api/v1.2/mini/subaccount/serving_mode/conversations";
+  await bridge.detect();
+  await bridge.fetch("/webchat/api/v1.2/mini/conversation/unread-count", {});
+  await bridge.fetch(path, { conversations: [retryConversation("m1")] });
+  bridge.setResponse(path, { conversations: [
+    retryConversation("m2"),
+    { ...retryConversation("other-message"), id: "other-conversation", shop_id: 200000002 },
+  ] });
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.equal(bridge.requests.includes(`${retryListPath}/other-conversation/messages`), false);
 });

@@ -68,7 +68,10 @@
       sendSource: null,
     }),
     [SELLER_CENTRE_SURFACE]: Object.freeze({
-      listPaths: Object.freeze([SELLER_CENTRE_CONVERSATIONS_PATH]),
+      listPaths: Object.freeze([
+        SELLER_CENTRE_CONVERSATIONS_PATH,
+        "/webchat/api/v1.2/mini/subaccount/serving_mode/conversations",
+      ]),
       loginPath: "/api/v2/login/",
       sendPath: SELLER_CENTRE_SEND_PATH,
       imagePath: SELLER_CENTRE_IMAGE_PATH,
@@ -743,6 +746,7 @@
     captureProfiles(conversations);
     const wasInitialized = state.sellerCentreListInitialized;
     for (const conversation of conversations) {
+      if (state.currentAccountId && String(conversation?.shop_id ?? "").trim() !== state.currentAccountId) continue;
       const conversationId = String(conversation?.id ?? "").trim();
       if (!conversationId) continue;
       const latestId = latestMessageIdOf(conversation);
@@ -1195,11 +1199,33 @@
     return null;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true) {
-    const response = await recoveryFetch(new Request(requestUrl, {
+  const nextConversationRequest = async (request, body, items) => {
+    // Mini-chat paginates in the POST body, with a nanosecond cursor kept as a string.
+    if (isSellerCentreSurface() && request.method === "POST") {
+      let payload;
+      try { payload = await request.clone().json(); } catch { return null; }
+      if (payload && typeof payload === "object" && Object.hasOwn(payload, "next_timestamp_nano")) {
+        const cursor = value(items.at(-1)?.next_timestamp_nano);
+        if (!cursor || cursor === "0" || cursor === String(payload.next_timestamp_nano)) return null;
+        return new Request(request.url, {
+          ...state.listTemplate.init,
+          body: JSON.stringify({ ...payload, next_timestamp_nano: cursor }),
+        });
+      }
+    }
+    const nextUrl = nextConversationUrl(request.url, body, items);
+    return nextUrl ? new Request(nextUrl, {
       ...state.listTemplate.init,
-      body: state.listTemplate.body?.slice(0)
-    }));
+      body: state.listTemplate.body?.slice(0),
+    }) : null;
+  };
+
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true) {
+    const request = requestUrl instanceof Request ? requestUrl : new Request(requestUrl, {
+      ...state.listTemplate.init,
+      body: state.listTemplate.body?.slice(0),
+    });
+    const response = await recoveryFetch(request.clone());
     if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
     const body = await response.json();
     const allItems = conversationItems(body);
@@ -1211,7 +1237,7 @@
     return {
       items,
       raw_count: allItems.length,
-      next: nextConversationUrl(requestUrl, body, allItems),
+      next: await nextConversationRequest(request, body, allItems),
     };
   }
 
@@ -1228,9 +1254,17 @@
     const conversations = [];
     const seenIds = new Set();
     const required = requiredIds ? new Set(requiredIds) : null;
-    let url = state.listTemplate.url;
+    let url = new Request(state.listTemplate.url, {
+      ...state.listTemplate.init,
+      body: state.listTemplate.body?.slice(0),
+    });
     let firstPage = [];
+    const seenPages = new Set();
     while (url) {
+      const pageKey = url instanceof Request
+        ? `${url.url}:${await url.clone().text()}` : url;
+      if (seenPages.has(pageKey)) break;
+      seenPages.add(pageKey);
       const page = await fetchConversationPage(url, accountId);
       if (!firstPage.length) firstPage = page.items;
       let added = 0;
