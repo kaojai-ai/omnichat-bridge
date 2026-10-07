@@ -14,7 +14,7 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true } = {}) {
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null } = {}) {
   const adapter = { id: provider, matchesUrl: () => true };
   const context = { key: `${provider}:account`, adapter, account: { provider_account_id: "account" } };
   const tab = { id: 42, url: "https://provider.example/chat", status: "complete" };
@@ -32,9 +32,10 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerChatTabs: async () => tabOpen ? [tab] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async () => { calls.checked++; return { healthy, provider_polling_active: true }; },
+    providerTabStatus: async () => { calls.checked++; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => {},
+    persistProviderSurfaceState: async () => {},
     updateProviderRecoveryLiveState: async (_contexts, _adapter, state) => { calls.live = state; },
     updateProviderRecoveryTabState: async (_provider, patch) => (record = { ...record, ...patch }),
     clearProviderRecoveryLiveState: async () => { calls.cleared++; },
@@ -132,4 +133,14 @@ test("connecting schedules provider health checks before the first watchdog run 
   await connect();
   assert.equal(calls.alarm, true);
   assert.equal(calls.cleared, 0);
+});
+
+test("closed Shopee mini-chat waits for user action without reloading or retry backoff", async () => {
+  const { run, calls } = harness({ provider: "shopee", recoveryEnabled: true, healthy: false, chatOpen: false,
+    record: { tab_id: 42, state: "needs_attention", failure_count: 3, next_retry_at: Date.now() + 60_000 } });
+  await run();
+  assert.equal(calls.reloaded, 0);
+  assert.equal(calls.created, 0);
+  assert.match(calls.live.reason, /Open Shopee mini-chat/);
+  assert.equal(calls.live.state, PROVIDER_RECOVERY_STATES.needsAttention);
 });
