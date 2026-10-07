@@ -1679,6 +1679,19 @@ async function runProviderHealthWatchdogOnce() {
       continue;
     }
     const tab = recovery.tab;
+    const closedChatStatus = adapter.id === "shopee" ? await providerTabStatus(tab) : null;
+    if (closedChatStatus?.surface === "seller-centre" && closedChatStatus.chat_open === false) {
+      for (const item of matchingContexts) await persistProviderSurfaceState(item, adapter, closedChatStatus, tab);
+      const reason = "Open Shopee mini-chat to continue syncing.";
+      await updateProviderRecoveryTabState(adapter.id, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention,
+        reason, failure_count: 0, last_failure_at: null, next_retry_at: null,
+      });
+      await updateProviderRecoveryLiveState(contexts, adapter, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention, reason, tabId: tab.id,
+      });
+      continue;
+    }
     if (allowTabRecovery && recovery.record?.state === PROVIDER_RECOVERY_STATES.needsAttention
       && !recoveryRetryDue(recovery.record)) {
       await updateProviderRecoveryLiveState(contexts, adapter, {
@@ -2921,6 +2934,8 @@ async function autoStartSellerCentreTab(tab) {
     }
 
     await ensureProviderBridge(tabId, shopeeAdapter);
+    const status = await providerTabStatus(currentTab);
+    if (status?.chat_open === false) return { skipped: "mini_chat_closed" };
     const result = await sendProviderMessage(tabId, {
       type: "auto_open_chat_and_sync_v3",
       provider: shopeeAdapter.id,
@@ -3008,6 +3023,10 @@ async function syncOpenProvider(control, context) {
   await ensureProviderBridge(tab.id, adapter);
   if (adapter.id === "shopee") {
     const status = await providerTabStatus(tab);
+    await persistProviderSurfaceState(context, adapter, status, tab);
+    if (status?.surface === "seller-centre" && status.chat_open === false) {
+      throw new Error("Open Shopee mini-chat to continue syncing.");
+    }
     if (status?.current_provider_account_id !== context.account.provider_account_id) {
       throw new Error("Shopee login changed. Retry sync for the currently open shop.");
     }
