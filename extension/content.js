@@ -493,7 +493,7 @@
           ? { avatar_url: profile.avatar_url }
           : {})
       };
-      const merged = mergeConversationProfiles(profilesByConversation.get(conversationId), normalizedProfile);
+      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(conversationId));
       if (merged) profilesByConversation.set(conversationId, merged);
     }
   }
@@ -501,7 +501,8 @@
   function addConversationProfile(messages) {
     return messages.map((message) => {
       const profile = profilesByConversation.get(message.conversation_id);
-      const participant = mergeConversationProfiles(profile, message.participant);
+      const participant = mergeConversationProfiles(message.participant, profile);
+      if (participant?.display_name) profilesByConversation.set(message.conversation_id, participant);
       return participant
         ? {
           ...message,
