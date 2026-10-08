@@ -670,34 +670,6 @@
     return output;
   };
 
-  let socketProfileRefresh = null;
-  let nextSocketProfileRefreshAt = 0;
-  async function refreshSocketProfiles(messages) {
-    if (!state.listTemplate || !messages.some((message) =>
-      !state.profilesByConversation.get(String(message.conversation_id))?.display_name)) return;
-    if (socketProfileRefresh) return socketProfileRefresh;
-    if (Date.now() < nextSocketProfileRefreshAt) return;
-    nextSocketProfileRefreshAt = Date.now() + SELLER_CENTRE_POLL_INTERVAL_MS;
-    const epoch = state.recoveryEpoch;
-    socketProfileRefresh = (async () => {
-      try {
-        const response = await state.nativeFetch(new Request(state.listTemplate.url, {
-          ...state.listTemplate.init,
-          body: state.listTemplate.body?.slice(0),
-          signal: AbortSignal.timeout(2_000),
-        }));
-        if (!response.ok) throw new Error(`Shopee profile lookup returned ${response.status}.`);
-        const body = await response.json();
-        if (isBridgeActive() && epoch === state.recoveryEpoch) captureProfiles(conversationItems(body));
-      } catch (error) {
-        logAsyncError("socket_profile_lookup", error);
-      } finally {
-        socketProfileRefresh = null;
-      }
-    })();
-    return socketProfileRefresh;
-  }
-
   const sellerCentreHistoryRequest = (conversation, template, offset = 0) => {
     const sourceUrl = new URL(template.url);
     const url = new URL(surfaceProfile().historyPath(conversation.id), sourceUrl.origin);
@@ -1855,7 +1827,7 @@
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
       publishSurfaceStatus();
     };
-    const onMessage = async (event) => {
+    const onMessage = (event) => {
       if (!isBridgeActive()) return;
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
@@ -1864,9 +1836,6 @@
           ? JSON.parse(envelope.message_content)
           : envelope.message_content;
         const messages = messageItems(body);
-        const epoch = state.recoveryEpoch;
-        await refreshSocketProfiles(messages);
-        if (!isBridgeActive() || epoch !== state.recoveryEpoch) return;
         if (messages.length) emitRealtimeMessages(messages, "realtime_socket");
         else post({ type: "realtime_event", body, capture_method: "realtime_socket" });
       } catch (error) {

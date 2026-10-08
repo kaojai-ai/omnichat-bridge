@@ -552,3 +552,17 @@ test("reuses a message buyer name on later unnamed hooks and accepts newer names
     .map((message) => message.messages[0].participant?.display_name);
   assert.deepEqual(names, ["First name", "First name", "Updated name", "Updated name"]);
 });
+
+test("uses observed conversation mapping and preserves names through incomplete profile updates", async () => {
+  const bridge = contentBridge("/portal/chat-management");
+  for (const [id, name] of [["mapped-1", "List name"], ["mapped-2", undefined], ["mapped-3", "New list name"]]) {
+    await bridge.providerEvent({
+      type: "profiles_detected",
+      profiles: [{ conversation_id: echo.conversation_id, id: "buyer-1", ...(name ? { display_name: name } : {}) }],
+    });
+    await bridge.providerEvent({ type: "realtime_event", body: { messages: [{ ...echo, id }] } });
+  }
+  const names = bridge.runtimeMessages.filter((message) => message.type === "queue_messages")
+    .map((message) => message.messages[0].participant?.display_name);
+  assert.deepEqual(names, ["List name", "List name", "New list name"]);
+});

@@ -493,7 +493,7 @@
           ? { avatar_url: profile.avatar_url }
           : {})
       };
-      const merged = mergeConversationProfiles(profilesByConversation.get(conversationId), normalizedProfile);
+      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(conversationId));
       if (merged) profilesByConversation.set(conversationId, merged);
     }
   }
