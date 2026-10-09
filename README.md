@@ -54,6 +54,42 @@ https://your-server.example.com/omnichat/api
 These are examples only; configure the Bridge with the URLs supplied by your
 server.
 
+### Expected configuration
+
+In the extension's **Settings**, import or paste a version 3 configuration:
+
+```json
+{
+  "version": 3,
+  "accounts": [
+    {
+      "provider": "shopee",
+      "provider_account_id": "123456789",
+      "events_url": "https://your-server.example.com/omnichat/events",
+      "api_url": "https://your-server.example.com/omnichat/api",
+      "hmac_secret": "replace-with-server-issued-secret"
+    },
+    {
+      "provider": "line_oa",
+      "provider_account_id": "@example",
+      "events_url": "https://your-server.example.com/omnichat/events",
+      "api_url": "https://your-server.example.com/omnichat/api",
+      "hmac_secret": "replace-with-server-issued-secret"
+    }
+  ]
+}
+```
+
+Replace the placeholders with your server-issued values. Use the detected
+Shopee **Shop ID** or LINE OA **Basic ID**; include only the accounts you use.
+Both URLs must use HTTPS. The extension appends `/ping`, `/tickets`, and
+`/control` to `api_url`. The HMAC secret signs server requests and is not a
+provider login credential. Keep real configuration private.
+
+Optional `image_server_url` (required for outgoing attachments) and `logs_url`
+also use HTTPS. See the [shared setup guide](docs/setup.md) for additional
+fields and legacy Shopee version 2 support.
+
 ## Demo video
 
 [![Watch the video](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)
