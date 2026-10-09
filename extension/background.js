@@ -18,6 +18,7 @@ import {
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
+import { createReplyQueue } from "./lib/reply-queue.js";
 import {
   LEGACY_STORAGE,
   STORAGE,
@@ -120,6 +121,8 @@ const INBOUND_LOG_MESSAGES = {
   "provider.bridge_reinjected": "Provider content bridge was reattached without refreshing the page.",
 };
 let mutationQueue = Promise.resolve();
+const replyQueue = createReplyQueue();
+let commandTabWriteQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
@@ -639,10 +642,16 @@ async function applyExtensionUpdate() {
     throw new Error("No extension update is ready to install.");
   }
   await storeExtensionUpdate({ status: "updating", attempted_at: Date.now() });
-  await activeSync?.catch(() => undefined);
-  await exclusive(async () => {
-    chrome.runtime.reload();
-  });
+  try {
+    await replyQueue.pauseAndDrain();
+    await activeSync?.catch(() => undefined);
+    await exclusive(async () => {
+      chrome.runtime.reload();
+    });
+  } catch (error) {
+    replyQueue.resume();
+    throw error;
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
@@ -991,6 +1000,17 @@ async function startUnattendedSellerCentreSync(provider) {
   return initializeAndStartSync("automatic");
 }
 
+function rememberCommandTab(account, tabId) {
+  // Different reply accounts can select tabs concurrently. Merge only while
+  // holding this short storage queue, never during provider/network work.
+  const result = commandTabWriteQueue.then(async () => {
+    const stored = await readStorage([STORAGE.commandTab]);
+    await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], account, tabId) });
+  });
+  commandTabWriteQueue = result.catch(() => undefined);
+  return result;
+}
+
 async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
@@ -1052,7 +1072,7 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
       throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
     }
   }
-  await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
+  await rememberCommandTab(context.key, tab.id);
   return tab;
 }
 
@@ -1127,8 +1147,7 @@ async function selectCommandTab(context, tabId) {
   if (!Number.isInteger(tab.id) || !adapter?.matchesUrl(tab.url)) {
     throw new Error(`Open ${providerLabel(adapter)} chat in this tab first.`);
   }
-  const stored = await readStorage([STORAGE.commandTab]);
-  await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], context.key, tab.id) });
+  await rememberCommandTab(context.key, tab.id);
 }
 
 // WIP alternative only. Do not call this from the command path: it needs the target
@@ -2284,9 +2303,9 @@ async function handleLiveCommand(raw, context, socket) {
     }
     cached = {
       expiresAt: Infinity,
-      result: exclusive(async () => {
+      result: replyQueue.run(context.key, async () => {
         const sent = await sendViaProvider(command);
-        // A pending extension restart may run as soon as the exclusive operation exits.
+        // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
           acknowledge({ type: "send_result", request_id: command.request_id,
             ok: true, provider_message_id: sent.provider_message_id });

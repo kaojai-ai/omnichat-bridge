@@ -42,7 +42,7 @@ test("uses Chrome's update lifecycle with bounded checks and queued restart", ()
   assert.match(backgroundSource, /chrome\.runtime\.requestUpdateCheck\(\)/);
   assert.match(backgroundSource, /chrome\.runtime\.onUpdateAvailable\.addListener/);
   assert.match(backgroundSource, /await activeSync\?\.catch/);
-  assert.match(backgroundSource, /await exclusive\(async \(\) => \{\n    chrome\.runtime\.reload\(\);/);
+  assert.match(backgroundSource, /await exclusive\(async \(\) => \{\s+chrome\.runtime\.reload\(\);/);
   assert.match(popupSource, /type: "check_extension_update"/);
   assert.match(popupSource, /type: "apply_extension_update"/);
 });
@@ -51,6 +51,6 @@ test("acknowledges successful provider replies before releasing the restart queu
   const start = backgroundSource.indexOf("async function handleLiveCommand(raw, context, socket)");
   const end = backgroundSource.indexOf("\n}\n\nchrome.storage.onChanged", start);
   const handler = backgroundSource.slice(start, end);
-  assert.match(handler, /exclusive\(async \(\) => \{/);
+  assert.match(handler, /replyQueue\.run\(context\.key, async \(\) => \{/);
   assert.match(handler, /acknowledge\(\{[\s\S]*ok: true/);
 });
