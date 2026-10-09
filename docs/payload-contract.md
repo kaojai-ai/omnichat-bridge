@@ -3,6 +3,8 @@
 Provider adapters send `omnichat.message_batch` version 1 to the configured
 `events_url`.
 
+For setup and a validated version 3 example, see [shared setup](setup.md).
+
 The envelope is provider-shaped and the delivery contract is provider-neutral.
 The package ships `shopee` and `line_oa` adapters. Both use the same delivery
 envelope; adapters own provider-specific capture and native sending.
@@ -10,7 +12,7 @@ envelope; adapters own provider-specific capture and native sending.
 ## Configuration envelope
 
 The Bridge accepts configuration versions 2 and 3 as a shared provider
-envelope. It ignores unknown top-level and account fields, and skips accounts
+envelope. It discards unrecognized top-level and account fields, and skips accounts
 whose provider does not have a registered adapter. It still rejects malformed
 records and malformed accounts for a registered provider. Registered adapters
 own their provider-specific validation and requested server origins.
@@ -47,7 +49,7 @@ The response is:
 The ping is read-only and best-effort. A ping failure does not prevent the
 Bridge from forwarding provider events through `events_url`.
 
-Version 2 remains supported for existing installations. It requires
+Version 2 remains supported for Shopee only; LINE OA requires version 3. It requires
 `commands_url` instead of `api_url`; the extension derives a compatible
 coordination endpoint from `commands_url`.
 
@@ -69,7 +71,7 @@ X-Omnichat-Signature: <HMAC-SHA256 hex>
   "batch_id": "11111111-1111-4111-8111-111111111111",
   "installation_id": "22222222-2222-4222-8222-222222222222",
   "provider": "shopee",
-  "extension_version": "0.2.0",
+  "extension_version": "0.6.51",
   "adapter_version": "shopee-realtime-1",
   "conversations": [
     {
@@ -106,8 +108,7 @@ Optional message fields: `sender_account_id`, `recipient_account_id`,
 `client_message_id`.
 
 `provider_content` is the original provider message body for
-`type: "unsupported"`. The receiver stores it for later display and omits a
-body larger than 64 KiB.
+`type: "unsupported"`. Receiver retention and size handling are target-server responsibilities.
 
 `capture_method` is one of `network_observer`, `poll`, `realtime_socket`, or
 `history_recovery`.
@@ -165,16 +166,10 @@ matches and accepted, duplicate, and skipped messages cover the number sent.
 
 ## Connection status
 
-The extension publishes `omnichat.connection_status` when readiness, the reason,
-the device name, extension version, OS, or last sync time changes. It evaluates
-the shop tab, page bridge, logged-in account, and incoming capture locally and
-sends one `ready` flag. An open socket sends `{ "type": "keepalive" }` every 20
-seconds to keep the extension worker inside Chrome's 30-second activity window.
-That frame is not stored and does not rewrite presence. Connection attempts are
-limited to one per account, and status refreshes respect reconnect backoff.
-Operational connection logs include the close code, clean-close flag, connection
-setup duration, and open duration; raw close reasons and ticket URLs are omitted.
-Readiness logs record the account, ready flag, and reason when status is published.
+The extension publishes `omnichat.connection_status` when readiness or reported
+metadata changes. It evaluates the provider page, logged-in account, bridge,
+and capture locally. An open command socket alone does not establish readiness.
+See [connection recovery](#connection-recovery-and-deadlines) for transport timing.
 
 ```json
 {
@@ -185,7 +180,7 @@ Readiness logs record the account, ready flag, and reason when status is publish
   "provider_account_id": "123456789",
   "installation_id": "22222222-2222-4222-8222-222222222222",
   "device_name": "Front desk MacBook",
-  "extension_version": "0.6.0",
+  "extension_version": "0.6.51",
   "reported_at": "2026-07-31T00:00:00.000Z",
   "ready": true,
   "reason_code": "healthy",
@@ -195,7 +190,7 @@ Readiness logs record the account, ready flag, and reason when status is publish
 ```
 
 The socket being open is liveness. `reported_at` is not used as a heartbeat.
-The server stores `extension_version`, `client.platform`, and `last_sync_at`.
+Target servers should handle `extension_version`, `client.platform`, and `last_sync_at`.
 `client.platform` is the Chrome OS name (`mac`, `win`, `linux`, `cros`,
 `android`), not a user agent. Older extensions may still send `health.checks`;
 the server maps those four results onto `ready` and does not store the checks.
@@ -207,8 +202,8 @@ browser user agent, cookies, login tokens, or passwords are included.
 An account may optionally configure `logs_url`. The extension sends safe
 operational metadata to that HTTPS endpoint using the same timestamp, nonce,
 provider-account, and HMAC signature headers described above. Uploads are
-enabled only after the user clicks **Sync messages**, are best-effort, and do
-not block message sync. Saving or importing configuration clears any pending
+enabled when sync is initialized (manually or through configured automatic sync), are best-effort, and do
+not block message sync. Changing the saved configuration clears any pending
 remote-log outbox so logs are never carried to a newly configured target.
 
 ```json
@@ -219,7 +214,7 @@ remote-log outbox so logs are never carried to a newly configured target.
   "installation_id": "22222222-2222-4222-8222-222222222222",
   "provider": "shopee",
   "provider_account_id": "123456789",
-  "extension_version": "0.3.1",
+  "extension_version": "0.6.51",
   "sent_at": "2026-07-26T00:00:00.000Z",
   "logs": [
     {
@@ -241,7 +236,7 @@ remote-log outbox so logs are never carried to a newly configured target.
 Any `2xx` response accepts the log batch. Log records contain fixed event
 names, bounded sanitized messages, and scalar operational metadata only.
 Sensitive detail keys and values are removed before local storage and upload.
-The extension retains local logs for up to 48 hours, capped at 4,000 records
+The extension retains local logs for up to 48 hours, capped at 100 records
 to stay within Chrome storage limits.
 
 ## Limits
@@ -251,7 +246,7 @@ to stay within Chrome storage limits.
 - 100 messages per conversation
 - 500 messages total
 - 20,000 characters per text message
-- Five-minute request timestamp window
+- Target servers must enforce their timestamp window and nonce policy
 - 100 operational logs per upload batch
 
 ## Connection recovery and deadlines
