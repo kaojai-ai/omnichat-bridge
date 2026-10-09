@@ -1,5 +1,13 @@
 # Omnichat Bridge
 
+![Omnichat Bridge Powered by KaoJai.ai](docs/assets/omnichat-bridge.png)
+
+Powered by [KaoJai.ai](https://kaojai.ai).
+
+<a href="https://kaojai.ai">
+  <img src="https://imgsv.kaojai.ai/resources/press/logo/banner/primary-transparent.png" alt="KaoJai.ai logo" width="320">
+</a>
+
 **Omnichat Bridge is an open-source Chrome extension that helps shops stay
 available by bringing scattered platform chats into one workflow.**
 
