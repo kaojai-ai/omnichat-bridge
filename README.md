@@ -1,88 +1,110 @@
 # Omnichat Bridge
 
-![Omnichat Bridge Powered by KaoJai.ai](docs/assets/omnichat-bridge.png)
+![Omnichat Bridge cover](docs/assets/omnichat-bridge.png)
 
-**An open-source Chrome extension that connects Shopee Seller Chat and LINE
-Official Account chat to your chosen server.** Receive messages and send replies
-through your signed-in browser without transferring provider passwords, cookies,
-or login tokens. See the [Privacy Policy](PRIVACY.md).
+**Omnichat Bridge is an open-source Chrome extension that helps shops stay
+available by bringing scattered platform chats into one workflow.**
 
-[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn)
+From an open Chrome chat tab, it **forwards messages** from supported platforms
+(including **Shopee** and **LINE Official Account**) to your chosen server, where your team can work from one place WITHOUT taking browser credentials. Since this tool is *open-source*, its code and behavior are transparent for you to review alongside the [Privacy Policy](PRIVACY.md).
 
-## Setup (Shopee and LINE)
+It works like a **co-pilot** and requires a **human-in-the-loop**; it is not a hosted bot.
 
-1. Install the extension and sign in to [Shopee Seller Centre](https://seller.shopee.co.th/)
-   or [LINE OA Chat](https://chat.line.biz/). Keep the provider page open.
-2. Open Omnichat Bridge, review the transfer disclosure, and consent.
-3. In **Settings**, import or paste the configuration supplied by your server
-   administrator, then **Save configuration** and allow access to its server URLs.
-4. Select the provider account and click **Sync messages**. On Shopee Seller
-   Centre, the first manual sync can open the Chat panel.
+[Install Omnichat Bridge from the Chrome Web Store](https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn)
 
-Both providers use the same version 3 configuration format. This example can
-configure both in one file:
+> [!IMPORTANT]
+> - **NOT affiliated with or endorsed by Shopee, LINE, or any other provider.**
+> - ⚠️ RISK: This extension may conflict with provider rules, leading to
+>   warnings, restrictions, suspension, or loss of access.
+> - You are responsible for evaluating the terms, privacy rules, and risk that apply to your use.
 
-```json
-{
-  "version": 3,
-  "accounts": [
-    {
-      "provider": "shopee",
-      "provider_account_id": "123456789",
-      "events_url": "https://your-server.example.com/omnichat/events",
-      "api_url": "https://your-server.example.com/omnichat/api",
-      "hmac_secret": "replace-with-server-issued-secret"
-    },
-    {
-      "provider": "line_oa",
-      "provider_account_id": "@example",
-      "events_url": "https://your-server.example.com/omnichat/events",
-      "api_url": "https://your-server.example.com/omnichat/api",
-      "hmac_secret": "replace-with-server-issued-secret"
-    }
-  ]
-}
-```
+## Why we built it
 
-Replace every example value with your server-issued configuration. Use the
-Shopee **Shop ID** or LINE OA **Basic ID** matching the detected account.
-`events_url` and `api_url` must use HTTPS; their actual paths depend on your
-server. `hmac_secret` authenticates the bridge to your server and is **not a
-provider login credential**. Optional `image_server_url` and `logs_url` also
-require HTTPS. Preserve any additional LINE fields supplied by your server.
-Existing Shopee version 2 configurations remain supported; LINE requires
-version 3.
+Shopee told us that applications for Customer Service Apps from individual
+third parties and third-party partner platforms have been closed since
+November 18, 2024. This means shops cannot rely on getting new official app
+access to bring Shopee conversations into one shared customer-service workflow.
+
+![Shopee Agent response stating that applications for Customer Service Apps have been closed since November 18, 2024](docs/assets/shopee-customer-service-app-applications-closed.png)
+
+Omnichat Bridge gives shops a transparent, self-hostable browser-side bridge
+instead. It works through an authenticated provider tab in the user's browser;
+when optional unattended recovery is enabled, it may open one provider page to
+let the user sign in, but it never bypasses login, obtains private API access,
+or transfers browser credentials. See [Shopee Open Platform FAQ 56](https://open.shopee.com/faq/56)
+for the referenced notice.
 
 ## How it works
 
-![Messages flow between your browser and server without transferring provider credentials](docs/assets/omnichat-bridge-how-it-work.png)
+![Omnichat Bridge copies supported chat messages to your server without taking browser credentials](docs/assets/omnichat-bridge-how-it-work.png)
 
-The extension reads supported chat events, queues unsent items locally, and
-sends HMAC-signed batches over HTTPS. For live replies, your server wakes the
-extension over WebSocket and the browser sends through the matching provider
-conversation. Chrome and the provider page must remain available; the bridge
-cannot bypass sign-in or operate while Chrome is closed.
+The provider chat stays in the user's browser. The extension reads supported
+events from that open chat, stores unsent items locally, and delivers signed
+batches over HTTPS. For an optional live reply, your server wakes the connected
+extension over WebSocket; the extension sends through the matching provider
+conversation and returns success, an error, or an uncertain result.
 
-| Provider | Status | Details |
+For example, a self-hosted deployment may expose neutral endpoints such as:
+
+```text
+https://your-server.example.com/omnichat/events
+https://your-server.example.com/omnichat/api
+```
+
+These are examples only; configure the Bridge with the URLs supplied by your
+server.
+
+## Demo video
+
+[![Watch the video](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)
+
+## A simple analogy
+
+Imagine a helpful assistant sitting beside you 👀. They read the open chat,
+write the useful parts in your chosen notebook 📝, and can type a reply when
+you ask 📤.
+
+- ✅ The extension is the **bridge** 🌉, a **co-pilot**.
+- ❌ This extension is **NOT** the shop, the notebook, or a
+remote person holding your keys.
+
+When Chrome is closed, the bridge is closed too. No tiny robot keeps working overnight 🤖💤.
+
+## What we do and do not do
+
+- ✅ DO send messages securely to the server you configure.
+- ✅ DO queue unsent messages and retry after the browser returns.
+- ❌ NEVER save or transfer provider passwords, cookies, login tokens, or
+  browser credentials.
+- ❌ NEVER work while Chrome or the required provider page is unavailable.
+
+## Supported providers
+
+| Provider | Status | Guide |
 | --- | --- | --- |
-| Shopee Seller Chat | Supported | [Provider behavior](docs/providers/shopee.md) |
-| LINE Official Account | Supported | [Attachment behavior](docs/line-oa-attachments.md) |
+| Shopee Seller Chat | Supported | [Setup and behavior](docs/providers/shopee.md) |
+| LINE Official Account | Supported | [Shared setup](docs/setup.md) |
 
-## Demo
-
-[![Watch the demo](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)
-
-## Provider notice
-
-Not affiliated with or endorsed by Shopee, LINE, or other providers. Browser
-integration may conflict with provider rules and lead to restrictions or loss
-of access. Review the applicable terms before use.
+The version 3 configuration envelope is shared across provider integrations.
+LINE requires version 3; existing Shopee version 2 configurations remain
+supported. Both providers use the [same setup flow](docs/setup.md).
+Unknown top-level and account fields are ignored, and accounts for providers
+without a registered Bridge adapter are skipped. Malformed account records and
+malformed accounts for a registered provider remain errors. This release ships
+Shopee and LINE OA adapters; a new provider still needs its own adapter, page runtime,
+and manifest content-script entry.
 
 ## Contributing
 
-Issues and pull requests are welcome. Read the [architecture](docs/technical-debt.md)
-and [message contract](docs/payload-contract.md); keep adapters isolated and
-preserve the credential boundary.
+Issues and pull requests are welcome. Before changing delivery or reply
+behavior, read:
+
+- [Technical debt, architecture, and contracts](docs/technical-debt.md)
+- [Message batch contract](docs/payload-contract.md)
+- [Shopee provider guide](docs/providers/shopee.md)
+
+Please keep provider adapters isolated, preserve the credential boundary, and
+document every contract change.
 
 ## Credits
 
