@@ -198,7 +198,7 @@ test("duplicate commands share one provider operation and replay its acknowledge
     liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     providerAdapterForCommand: () => ({ id: "shopee", supportsSend: () => true }),
     messageProviderAccountId: (value) => value.provider_account_id, canonicalProviderAccountId: () => "shop",
-    exclusive: (action) => action(), sendViaProvider: () => { sends++; return pending.promise; },
+    replyQueue: { run: (_account, action) => action() }, sendViaProvider: () => { sends++; return pending.promise; },
     recordUnexpected: async () => {}, sendConnectionStatus: async () => {}, installationId: async () => "installation",
   });
   const context = { ...account, account: { provider: "shopee", provider_account_id: "shop" } };

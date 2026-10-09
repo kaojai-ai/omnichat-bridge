@@ -42,7 +42,10 @@ The provider chat stays in the user's browser. The extension reads supported
 events from that open chat, stores unsent items locally, and delivers signed
 batches over HTTPS. For an optional live reply, your server wakes the connected
 extension over WebSocket; the extension sends through the matching provider
-conversation and returns success, an error, or an uncertain result.
+conversation and returns success, an error, or an uncertain result. Live replies
+use a separate queue for each provider account, so background uploads do not
+delay them and replies for the same account remain in order. Extension updates
+wait for queued replies to finish before restarting.
 
 For example, a self-hosted deployment may expose neutral endpoints such as:
 
