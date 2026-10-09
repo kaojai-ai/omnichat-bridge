@@ -2,12 +2,6 @@
 
 ![Omnichat Bridge Powered by KaoJai.ai](docs/assets/omnichat-bridge.png)
 
-Powered by [KaoJai.ai](https://kaojai.ai).
-
-<a href="https://kaojai.ai">
-  <img src="https://imgsv.kaojai.ai/resources/press/logo/banner/primary-transparent.png" alt="KaoJai.ai logo" width="320">
-</a>
-
 **An open-source Chrome extension that connects Shopee Seller Chat and LINE
 Official Account chat to your chosen server.** Receive messages and send replies
 through your signed-in browser without transferring provider passwords, cookies,
@@ -89,6 +83,14 @@ of access. Review the applicable terms before use.
 Issues and pull requests are welcome. Read the [architecture](docs/technical-debt.md)
 and [message contract](docs/payload-contract.md); keep adapters isolated and
 preserve the credential boundary.
+
+## Credits
+
+Developed and maintained by [KaoJai.ai](https://kaojai.ai).
+
+<a href="https://kaojai.ai">
+  <img src="https://imgsv.kaojai.ai/resources/press/logo/banner/primary-transparent.png" alt="KaoJai.ai logo" width="240">
+</a>
 
 ## License
 
