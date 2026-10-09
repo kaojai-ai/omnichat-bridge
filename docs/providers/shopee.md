@@ -72,7 +72,8 @@ Chrome and the Seller Centre or legacy chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.
 Recovery may fetch missed messages after the seller returns. The bridge keeps
 request templates only in page memory; it never persists Shopee cookies,
-headers, tokens, or message bodies.
+headers, or login tokens. Captured message bodies remain in the local pending
+queue until acknowledged.
 
 ## Optional live replies
 
@@ -89,10 +90,10 @@ transfers Shopee cookies, passwords, or login tokens.
 - Outbound replies never create or navigate to a Shopee tab. An Admin reply is
   sent only when an already-open Seller Centre or legacy Shopee chat tab is
   available; otherwise it fails with an actionable error.
-- If the browser is offline or another conversation is open, the server returns
-  an error. There is no remote command queue or retry.
-- The live service keeps only a short-lived connection ticket and browser
-  presence record. It does not store message text.
+- If the browser is offline or the target conversation is unavailable, sending
+  fails. There is no remote command queue or retry.
+- The bridge uses a short-lived ticket and browser presence. Target-server
+  storage and retention are deployment-specific.
 
 ## Sync and recovery
 
@@ -130,8 +131,8 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
   minutes. **Sync messages** and **Retry now** bypass that window.
 - Opening the Seller Centre mini-chat manually starts the same debounced
   automatic sync path, so the chat does not need to be opened before syncing.
-- Failed collector delivery retries after approximately 1, 2, 5, 15, and 30
-  minutes, capped at 30 minutes. Retry never calls Shopee.
+- Failed collector delivery retries on an account-scoped exponential schedule,
+  capped at 30 minutes. Retry never calls Shopee.
 - Shopee recovery requests are spaced by at least one second.
 - If a page reload interrupts a recovery response, the extension marks the sync
   failed after 90 seconds and shows a manual-refresh action instead of leaving
@@ -149,56 +150,11 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 - Supported image and video URLs
 - Buyer IDs, display names, avatar URLs, and timestamps
 
-## Local setup
+## Setup
 
-1. Open `chrome://extensions` and enable **Developer mode**.
-2. Select **Load unpacked** and choose the `extension/` folder.
-3. If a Shopee tab was already open, the extension reattaches its content bridge
-   after an extension reload without refreshing the page. A closed tab still
-   needs to be opened again.
-4. Accept the disclosure and let the extension detect the available Shop IDs.
-5. Open **Configure** and add or import the detected Shop IDs you want to sync.
-6. Select **Sync messages**. Every detected Shop ID with a matching
-   configuration is ready for realtime capture, recovery, delivery, and live
-   replies. Shops without a matching configuration remain visible as
-   **NEED CONFIG**.
+Use the [shared Shopee and LINE setup](../setup.md). Configure the detected
+Shop ID, not a Shopee user ID. Only the current browser login shop can sync;
+other saved accounts remain configured but unavailable in that session.
 
-The `api_url` values below use a deployment-neutral placeholder. Replace them
-with the API base supplied by your server; the Bridge does not require a
-particular internal URL layout.
-
-```json
-{
-  "version": 3,
-  "accounts": [
-    {
-      "provider": "shopee",
-      "provider_account_id": "shop-1",
-      "events_url": "https://your-server.example.com/omnichat/events",
-      "api_url": "https://your-server.example.com/omnichat/api",
-      "logs_url": "https://your-server.example.com/omnichat/logs",
-      "hmac_secret": "your-hmac-secret"
-    },
-    {
-      "provider": "shopee",
-      "provider_account_id": "shop-2",
-      "events_url": "https://your-server.example.com/omnichat/events",
-      "api_url": "https://your-server.example.com/omnichat/api",
-      "logs_url": "https://your-server.example.com/omnichat/logs",
-      "hmac_secret": "another-hmac-secret"
-    }
-  ]
-}
-```
-
-`logs_url` is optional. When set, the extension sends sanitized operational
-logs in signed HTTPS batches after **Sync messages** is selected. It never
-includes message text, message bodies, cookies, browser credentials, HMAC
-secrets, request headers, or URLs.
-
-Never commit a real connection setup. The destination server must map each
-detected Shop ID to the same HMAC secret. Import replaces the complete saved
-account list; export includes the HMAC secrets and must be stored securely.
-Shopee user IDs are display-only metadata and are never used as Shop IDs.
-
-See the main [safety and account-risk notice](../../README.md).
+See the [privacy policy](../../PRIVACY.md) and
+[provider notice](../../README.md#provider-notice).

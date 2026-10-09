@@ -1,273 +1,68 @@
-# Technical debt, architecture, and contracts
+# Architecture and limitations
 
-The bridge has two independent flows:
+Shopee and LINE OA share delivery, configuration, and account isolation.
+Adapters own page matching, account IDs, capture, readiness, and native sends.
+See [setup](setup.md) and the [wire contract](payload-contract.md).
 
-1. **Send observed messages to the target server.**
-2. **Send a live reply from the target server back to the messaging provider.**
+## Incoming messages
 
-The implementation supports Shopee and LINE OA. Provider-specific capture,
-page matching, account normalization, and configuration validation stay behind
-an adapter; delivery and security contracts remain provider-neutral where
-practical.
+Open provider page → adapter capture/history → local pending queue →
+HMAC-signed HTTPS batch → server acknowledgement → queue removal.
 
-## Flow 1: Send messages to the target server
+Scan cursors describe captured work, not server acceptance. Pending messages
+remain until accepted, deduplicated, or explicitly skipped in a complete
+acknowledgement. Accounts are partitioned by `provider:provider_account_id`.
+A flush sends at most 10 batches; each allows 50 conversations, 100 messages
+per conversation, 500 messages total, and a 1 MiB body. Delivery failures retry
+queued items without requiring another provider scan.
 
-### Architecture
+Chrome local storage holds configuration, consent, installation/device IDs,
+queues, checkpoints, recovery state, and operational logs (100 entries, 48
+hours). Clearing it loses pending work. Provider login credentials stay in
+page memory and are not stored or forwarded by the extension.
 
-```mermaid
-flowchart TD
-    A["Open provider chat"] --> B["Provider adapter observes realtime events or history"]
-    B --> C["Normalize supported messages"]
-    C --> D["Extension-local pending queue"]
-    D --> E["Build omnichat.message_batch v1"]
-    E --> F["HMAC-signed HTTPS POST"]
-    F --> G["Target server validates account, signature, nonce, and payload"]
-    G --> H["omnichat.message_batch_ack"]
-    H --> I["Remove acknowledged messages and advance local cursor"]
-    F -. "Failure" .-> D
-```
+## Live replies
 
-The scan cursor represents what the extension has **durably persisted to its
-local pending queue**, not a provider API cursor or collector acknowledgement.
-Pending messages remain local until the target accepts or deduplicates the
-whole batch. This keeps provider discovery independent from collector outages.
+The extension requests an HMAC-authenticated ticket at `<api_url>/tickets`,
+then connects to the returned WSS URL. `<api_url>/control` handles leader
+coordination; `/ping` checks API reachability. Ticket lifetime, server presence
+retention, and server request waiting are target-server responsibilities.
 
-### Extension configuration contract
+Commands use an existing signed-in provider tab; outgoing replies do not
+create one. Supported commands:
 
-Configuration version 3 contains an `accounts` list. Each entry is uniquely
-identified by `provider + provider_account_id` and owns its HMAC secret,
-inbound destination, and account-scoped API base. Version 2 remains accepted
-for existing installations. See the
-[multi-account example](providers/shopee.md#local-setup).
+| Provider | Commands |
+| --- | --- |
+| Shopee | Text, image, product; text/image may quote a message. |
+| LINE OA | Text, image, video, file, sticker. |
 
-- `events_url` is the HTTPS message-batch receiver. Generated configurations
-  provide the receiver URL; the Bridge does not require a particular path
-  layout.
-- `api_url` is the HTTPS account-scoped API base. The extension appends `/ping`
-  for a signed API reachability check, `/tickets` for live tickets, and
-  `/control` for browser coordination actions such as leader status, claim, and
-  release. Deployment-specific URL layout is intentionally kept outside the
-  Bridge contract.
-- `commands_url` is the deprecated v2 HTTPS ticket endpoint. Updated
-  extensions continue to use it when importing a v2 configuration.
-- `logs_url` is the optional HTTPS operational-log receiver.
-- The ticket response supplies the WSS browser-presence URL.
-- The provider adapter owns any provider-specific configuration validation and
-  server-origin resolution.
-- Import replaces the saved account list. Export includes HMAC secrets.
-- Pending messages, cursors, status, and resume timing are partitioned by the
-  same account identity.
+Attachments must come from the configured HTTPS `image_server_url` origin.
+Shopee images are limited to 10 MiB; LINE limits and upload flow are described
+in [LINE attachments](line-oa-attachments.md).
 
-### HTTP contract
+An open socket is transport liveness, not proof the provider can send.
+Readiness reports are change-driven. Idle keepalives run every 20 seconds;
+connection attempts have bounded timeouts and exponential reconnect backoff.
+Commands may carry `deadline_at_ms`. An uncertain result must not trigger a
+blind resend. The two-minute in-memory request-result cache is not durable or
+an exactly-once guarantee.
 
-The extension sends [`omnichat.message_batch` version 1](payload-contract.md):
+## Limitations and validation
 
-```http
-POST <events_url>
-Content-Type: application/json
-X-Omnichat-Provider-Account-Id: <provider account ID>
-X-Omnichat-Timestamp: <ISO 8601 timestamp>
-X-Omnichat-Nonce: <unique UUID>
-X-Omnichat-Signature: <HMAC-SHA256 hex>
-```
+- Provider browser interfaces can change without notice.
+- No capture occurs while Chrome is closed. Later recovery is best effort.
+- Provider media URLs may expire; capture does not archive their bytes.
+- Multiple installations have independent capture checkpoints; the server
+  must coordinate presence and deduplication.
+- Shared signing, acknowledgement, and command contracts need conformance
+  checks across extension and server implementations.
 
-The signature covers the method, request path, timestamp, nonce, and SHA-256
-hash of the exact body. The server acknowledges the matching `batch_id` and
-reports accepted plus duplicate message counts. A Shopee message with invalid
-participant routing is logged and returned as a skipped message reference
-while the rest of the batch continues. The extension removes accepted,
-duplicate, and skipped messages from its local queue only when the
-acknowledgement covers every message sent.
+Existing tests cover account isolation, configuration, signing, acknowledgement,
+recovery, connection races, deadlines, and provider commands. Live release
+validation must separately cover both providers, Chrome restart, network loss,
+idle/reconnect behavior, incoming replay, and supported outgoing messages.
+Record installed extension and server versions separately from source merge or
+store approval. Safe diagnostics do not establish a customer incident's cause.
 
-### Current delivery limits
-
-- 50 conversations per batch.
-- 100 messages per conversation.
-- 500 messages total per batch.
-- 1 MiB request body.
-- At most 10 batches in one flush.
-- Configuration, consent, pending messages, installation ID, cursors, and
-  48-hour operational logs live in `chrome.storage.local`.
-- Failed delivery uses an account-scoped Chrome alarm with capped exponential
-  backoff. Manual retry and normal resume reset the backoff.
-
-### Technical debt
-
-- **Provider behavior is brittle.** The adapter boundary isolates provider
-  changes, but Shopee page, socket, or response changes can still break
-  capture and recovery without notice.
-- **Local state has one device boundary.** Clearing extension storage loses the
-  pending queue and acknowledged cursor. Multiple installations do not
-  coordinate their cursors.
-- **Media is referenced, not archived.** Provider image and video URLs may
-  expire; the bridge does not upload a durable copy.
-- **Recovery is best effort.** No capture happens while Chrome is closed. A
-  later history scan may recover messages, but it cannot guarantee that the
-  provider still exposes everything.
-- **Contract checks are split across repositories.** A shared conformance suite
-  should verify signing, limits, acknowledgement, deduplication, and schema
-  compatibility against every target implementation.
-- **Provider configuration still requires operator setup.** A version 2
-  configuration can contain multiple provider accounts. The extension can
-  discover and display accounts exposed by the installed adapters. Every
-  detected account with a matching configuration is synced and connected
-  independently; local delivery, scan, and live state remain partitioned by
-  provider account. Accounts without a matching configuration remain visible
-  as `NEED CONFIG`.
-
-## Flow 2: Reply back to the messaging provider
-
-### Architecture
-
-```mermaid
-flowchart TD
-    A["Extension requests signed short-lived ticket"] --> B["Target server authenticates provider account"]
-    B --> C["One-time ticket in temporary store"]
-    C --> D["Extension opens managed WebSocket"]
-    D --> E["Bridge records browser presence"]
-    F["Admin sends one text, image, or product reply"] --> G["Target server finds newest matching presence"]
-    G --> H["Temporary request status - no message text"]
-    H --> I["WebSocket send command"]
-    I --> J["Extension checks account and Seller Chat tab"]
-    J --> K["Send through authenticated provider page"]
-    K --> L["WebSocket send_result with provider message ID"]
-    L --> M["Target server persists the sent message"]
-    K --> N["Matching provider echo is suppressed"]
-```
-
-This flow is online-only. There is no remote command queue and no delayed
-retry. The Admin request waits briefly for the browser result and fails when
-the browser, account, or conversation is unavailable.
-
-### Ticket contract
-
-The extension authenticates the same provider account with HMAC. It sends the
-ticket request to `<api_url>/tickets`:
-
-```http
-POST <api_url>/tickets
-Content-Type: application/json
-X-Omnichat-Provider-Account-Id: <provider account ID>
-X-Omnichat-Timestamp: <ISO 8601 timestamp>
-X-Omnichat-Nonce: <unique UUID>
-X-Omnichat-Signature: <HMAC-SHA256 hex>
-```
-
-```json
-{
-  "provider": "shopee",
-  "provider_account_id": "shop-1",
-  "installation_id": "22222222-2222-4222-8222-222222222222"
-}
-```
-
-```json
-{
-  "ticket": "one-time-ticket",
-  "socket_url": "wss://socket.example.com/live"
-}
-```
-
-The target server owns the socket address, so the ticket endpoint returns the
-socket URL. The ticket expires after 60 seconds and is deleted when the
-WebSocket connects. Presence expires after two hours unless disconnect or
-stale-connection cleanup removes it earlier.
-
-Leader coordination uses the `/control` action derived from `api_url`, with the
-same signed account identity. The legacy ticket and leader endpoints remain
-available for older configurations during rollout.
-
-### WebSocket contracts
-
-Target server to extension:
-
-```json
-{
-  "type": "send_text",
-  "request_id": "11111111-1111-4111-8111-111111111111",
-  "provider": "shopee",
-  "provider_account_id": "shop-1",
-  "conversation_id": "conversation-1",
-  "client_message_id": "optional-client-message-id",
-  "reply_to_provider_message_id": "provider-message-1",
-  "text": "Hello"
-}
-```
-
-Extension to target server:
-
-```json
-{
-  "type": "send_result",
-  "request_id": "11111111-1111-4111-8111-111111111111",
-  "ok": true,
-  "provider_message_id": "provider-message-1"
-}
-```
-
-Failure includes an `error` string. The current Shopee path accepts one text,
-image, or product message. Text and image commands may include the optional
-`reply_to_provider_message_id`; the extension maps it to Shopee's native
-`content.quoted_msg_id`. Shopee Seller Chat must be open and authenticated.
-
-### Security and storage boundary
-
-- Ticket requests use HTTPS and per-account HMAC authentication.
-- Tickets are short-lived and single-use.
-- Remote presence contains account, installation, connection, tenant, and
-  expiry metadata.
-- Temporary request state contains connection, status, result, and expiry - not
-  message text.
-- Provider passwords, cookies, login tokens, and request headers stay in the
-  provider page and are never carried through this bridge.
-
-### Technical debt
-
-- **Contracts are duplicated.** Ticket, `send_text`, `send_result`, presence,
-  and temporary request types exist in the extension, Admin, and WebSocket
-  runtime. Publish one versioned contract package or conformance fixture.
-- **Result waiting polls temporary storage.** The Admin currently checks every
-  100 ms for up to about five seconds. A direct callback or bounded event
-  mechanism could reduce reads while keeping the same short timeout.
-- **Multiple installations use newest-presence routing.** There is no explicit
-  operator choice when more than one browser is connected to the same account.
-- **The provider composer is fragile.** DOM or framework changes may stop
-  visible-composer submission even when the WebSocket is healthy.
-- **Ticket-request nonces are signed but not stored for replay detection.**
-  HTTPS, a short timestamp window, and one-time WebSocket tickets reduce risk,
-  but server-side nonce replay protection should be added.
-- **Presence can be briefly stale.** Abrupt browser shutdown may leave presence
-  until a failed send or TTL cleanup removes it.
-- **Reply echo needs end-to-end coverage.** `client_message_id` should reconcile
-  the optimistic Admin message with the provider echo arriving through Flow 1.
-
-## Contract-change rules
-
-- Treat payload shapes, signature inputs, limits, identifiers, and WebSocket
-  message types as cross-service contracts.
-- Version breaking changes. Do not silently reinterpret existing fields.
-- Keep new fields optional for a non-breaking rollout.
-- Update this page, fixtures, target receiver, extension, and provider adapter
-  together.
-- Never add provider credentials to a payload, log, remote queue, or presence
-  record.
-
-## Reliability release validation
-
-Automated tests cover shared connection races, stalled tickets, stale callbacks,
-account isolation, transient command replay protection, provider deadlines, and
-incoming recovery/acknowledgement behavior. LINE history fixtures use a controlled
-clock matching their epoch timestamps; bootstrap lookback behavior remains intact.
-
-Before publication, validate both adapters in designated test profiles: at least
-three hours including idle time and hosting connection rollover, Chrome restart,
-network interruption, incoming replay, and supported outgoing media/mentions.
-Record installed version, target version, confirmed provider IDs, and observed
-recovery separately from source merge or store approval.
-
-A native Shopee `param_error` is now distinguishable from an uncertain native
-response. Safe diagnostics record surface, endpoint path, routing-field types,
-and a sanitized native code without logging message content or credentials.
-These diagnostics do not establish the cause of a particular customer payload.
-Missing conversation routing requests a refresh; it does not assert that the
-conversation is closed or outside a response window.
+Version breaking contracts and update receivers, fixtures, extension, and
+adapters together. Never add provider credentials to payloads or logs.
