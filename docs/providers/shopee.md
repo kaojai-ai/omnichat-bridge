@@ -157,4 +157,4 @@ Shop ID, not a Shopee user ID. Only the current browser login shop can sync;
 other saved accounts remain configured but unavailable in that session.
 
 See the [privacy policy](../../PRIVACY.md) and
-[provider notice](../../README.md#provider-notice).
+[provider notice](../../README.md).
