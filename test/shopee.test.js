@@ -272,3 +272,40 @@ test("does not attach provider content to text messages", () => {
   assert.equal(message.text, "Hello");
   assert.equal(message.provider_content, undefined);
 });
+
+test("preserves polled Shopee rejection evidence without inferring successful delivery", () => {
+  const input = {
+    id: "failed-message", conversation_id: "conversation-1", from_id: "seller-1",
+    to_id: "buyer-1", type: "text", content: { text: "Hello" },
+  };
+  for (const option of [2, 16, 256, 258, "256"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({
+      ...input, message_option: option, msg_tag: { msg_ui_opt: 12 },
+    }, "poll");
+    assert.equal(message.text, "Hello");
+    assert.equal(message.provider_content.delivery_failed, true);
+    assert.equal(message.provider_content.message_option, Number(option));
+    assert.equal(message.provider_content.msg_ui_opt, 12);
+  }
+  for (const option of [0, 1, 1024]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({ ...input, message_option: option }, "poll");
+    assert.equal(message.provider_content.message_option, option);
+    assert.equal(message.provider_content.delivery_failed, undefined);
+  }
+  for (const option of [null, true, {}, "", "bad", -1, 1.5, 4294967298]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({ ...input, message_option: option }, "poll");
+    assert.equal(message.provider_content, undefined);
+  }
+});
+
+test("keeps notification content alongside delivery flags for every capture method", () => {
+  for (const captureMethod of ["poll", "network_observer", "realtime_socket", "history_recovery"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({
+      id: "notice-1", conversation_id: "conversation-1", from_id: "seller-1", to_id: "buyer-1",
+      type: "notification", content: { notification_for_sender: "Sending failed" },
+      message_option: 256,
+    }, captureMethod);
+    assert.equal(message.provider_content.notification_for_sender, "Sending failed");
+    assert.equal(message.provider_content.delivery_failed, true);
+  }
+});

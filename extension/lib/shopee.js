@@ -192,6 +192,23 @@ function candidates(value, output = [], depth = 0, seen = new WeakSet()) {
   return output;
 }
 
+function deliveryFlags(message) {
+  const flag = (value) => {
+    if (typeof value !== "number" && !(typeof value === "string" && /^\d+$/.test(value))) return null;
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 && number <= 0xffffffff ? number : null;
+  };
+  const option = flag(message.message_option);
+  const uiOption = flag(record(message.msg_tag)?.msg_ui_opt);
+  return {
+    ...(option !== null ? { message_option: option } : {}),
+    ...(uiOption !== null ? { msg_ui_opt: uiOption } : {}),
+    // Seller Chat MessageOption: blocked, blacklist, receiver-invisible.
+    // No flags (or unfamiliar flags) must not be treated as proof of success.
+    ...(option !== null && (option & (2 | 16 | 256)) ? { delivery_failed: true } : {}),
+  };
+}
+
 function parseShopeeMessages(payload, captureMethod) {
   const observedAt = new Date().toISOString();
   const results = [];
@@ -204,11 +221,14 @@ function parseShopeeMessages(payload, captureMethod) {
     const senderAccountId = string(message.from_shop_id);
     const recipientAccountId = string(message.to_shop_id);
     const content = contentRecord(message.content);
+    const flags = deliveryFlags(message);
     const providerAccountId = recipientAccountId
       ?? senderAccountId
       ?? string(message.shop_id)
       ?? string(content?.shop_id);
     const parsedType = messageType(message.type ?? message.message_type);
+    const storedContent = parsedType.type === "unsupported" ? content : null;
+    const providerContent = Object.keys(flags).length ? { ...storedContent, ...flags } : storedContent;
     const text = parsedType.type === "product"
       ? string(content?.product_name) ?? ""
       : textContent(message.content);
@@ -261,7 +281,7 @@ function parseShopeeMessages(payload, captureMethod) {
         ? { order: { provider_order_id: orderId } }
         : {}),
       ...(parsedType.provider_type ? { provider_type: parsedType.provider_type } : {}),
-      ...(parsedType.type === "unsupported" && content ? { provider_content: content } : {}),
+      ...(providerContent ? { provider_content: providerContent } : {}),
       capture_method: captureMethod
     });
   }
