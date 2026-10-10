@@ -928,14 +928,30 @@
   };
 
   const shopeeError = (body) => {
-    const code = typeof body?.error_code === "string" && body.error_code.trim()
-      && !["0", "success"].includes(body.error_code.toLowerCase())
-      ? body.error_code
+    // Shopee can return HTTP 200 and an ID for a message hidden from the buyer.
+    // These bit values come from Seller Chat's MessageOption enum.
+    const option = Number(body?.message_option);
+    if (Number.isSafeInteger(option) && option >= 0) {
+      if (option & 2) return "Shopee blocked this message.";
+      if (option & 16) return "Shopee rejected this message because it violates chat rules.";
+      if (option & 256) return "Shopee did not deliver this message to the buyer. Check Seller Chat for the rejection reason before retrying.";
+    }
+    const rawCode = body?.error_code;
+    const code = (typeof rawCode === "string" || typeof rawCode === "number")
+      && String(rawCode).trim()
+      && !["0", "success"].includes(String(rawCode).trim().toLowerCase())
+      ? String(rawCode).trim()
       : null;
-    if (!code && !body?.error) return null;
+    const rawError = body?.error;
+    const error = (typeof rawError === "string" || typeof rawError === "number")
+      && String(rawError).trim()
+      && !["0", "success"].includes(String(rawError).trim().toLowerCase())
+      ? String(rawError).trim()
+      : null;
+    if (!code && !error) return null;
     return typeof body?.message === "string" && body.message.trim()
-      ? body.message
-      : code ?? (typeof body?.error === "string" ? body.error : null);
+      ? body.message.trim()
+      : code ?? error;
   };
 
   const quotedMessageId = (message) => {
@@ -1060,7 +1076,7 @@
       return;
     }
     if (!isBridgeActive()) return;
-    if (!routing) {
+    if (!routing?.shop_id || !routing?.to_id) {
       try {
         await waitForTemplate();
         await fetchConversationPages({ requiredIds: [conversationId] });
@@ -1138,16 +1154,23 @@
         providerRejected = true;
         throw new Error(providerReason ?? `Shopee API returned ${response?.status ?? "an error"}.`);
       }
-      const providerMessageId = String(
-        body?.id
-        ?? body?.message_id
-        ?? body?.message?.id
-        ?? body?.data?.id
-        ?? body?.data?.message_id
-        ?? body?.data?.message?.id
-        ?? ""
-      ).trim();
-      post({ type: "api_send_result", request_id: requestId, ok: true, ...(providerMessageId ? { provider_message_id: providerMessageId } : {}) });
+      // Accept only the direct message response with an explicit normal option.
+      // An HTTP 200, success code, or message ID alone does not prove acceptance.
+      const providerMessageId = typeof body?.id === "string" ? body.id.trim() : "";
+      const successfulCode = (value) => value === undefined || value === null
+        || value === 0 || value === "0" || value === "success";
+      const knownAcceptance = body && typeof body === "object" && !Array.isArray(body)
+        && providerMessageId.length > 0 && providerMessageId.length <= 200
+        && body.message_option === 0
+        && (body.status === undefined || body.status === "normal")
+        && (body.msg_tag === undefined || (body.msg_tag && typeof body.msg_tag === "object"
+          && body.msg_tag.msg_ui_opt === 0))
+        && (body.conversation_id === undefined || body.conversation_id === conversationId)
+        && successfulCode(body.error_code) && successfulCode(body.error);
+      if (!knownAcceptance) {
+        throw new Error("Shopee returned an unrecognized send result. Delivery is uncertain; check Seller Chat before retrying.");
+      }
+      post({ type: "api_send_result", request_id: requestId, ok: true, provider_message_id: providerMessageId });
     } catch (error) {
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
