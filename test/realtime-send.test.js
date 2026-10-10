@@ -453,3 +453,27 @@ test("refreshes an incomplete cached route before reporting a provider rejection
   assert.equal(result.ok, false);
   assert.equal(result.error, "Message violates Shopee chat rules.");
 });
+
+for (const sellerCentre of [false, true]) {
+  for (const option of [256, 288, 2, 16]) {
+    test(`rejects HTTP 200 message ID with failed delivery option ${option} on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+      // Sanitized shape captured from Seller Centre: no error_code despite failure.
+      const bridge = createBridge({ sellerCentre, sendBody: {
+        id: "provider-rejected-message", type: "text", content: { text: "test" },
+        message_option: option, to_id_status: 0, msg_tag: { msg_ui_opt: 12 },
+      } });
+      const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "test" });
+      assert.equal(result.ok, false);
+      assert.equal(result.uncertain, undefined);
+      assert.equal(result.provider_message_id, undefined);
+      assert.match(result.error, /Shopee (did not deliver|blocked|rejected)/);
+    });
+  }
+  for (const option of [0, 1, 32, 64, 128, 512, 1024]) {
+    test(`does not mistake unrelated option ${option} for delivery failure on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+      const bridge = createBridge({ sellerCentre, sendBody: { id: "accepted", message_option: option } });
+      const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
+      assert.equal(result.ok, true);
+    });
+  }
+}

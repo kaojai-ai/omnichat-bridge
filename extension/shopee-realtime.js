@@ -928,6 +928,14 @@
   };
 
   const shopeeError = (body) => {
+    // Shopee can return HTTP 200 and an ID for a message hidden from the buyer.
+    // These bit values come from Seller Chat's MessageOption enum.
+    const option = Number(body?.message_option);
+    if (Number.isSafeInteger(option) && option >= 0) {
+      if (option & 2) return "Shopee blocked this message.";
+      if (option & 16) return "Shopee rejected this message because it violates chat rules.";
+      if (option & 256) return "Shopee did not deliver this message to the buyer. Check Seller Chat for the rejection reason before retrying.";
+    }
     const rawCode = body?.error_code;
     const code = (typeof rawCode === "string" || typeof rawCode === "number")
       && String(rawCode).trim()
