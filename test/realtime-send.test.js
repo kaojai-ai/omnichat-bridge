@@ -45,7 +45,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         poster: async (url, payload) => {
           sentUrls.push(url);
           sent.push(payload);
-          return jsonResponse(sendBody ?? { id: "provider-message-1" });
+          return jsonResponse(sendBody ?? { id: "provider-message-1", message_option: 0 });
         },
       },
     } : {}),
@@ -63,7 +63,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         if (path === "/webchat/api/v1.2/mini/messages") {
           nativePayloads.push(await request.clone().json());
           if (transportFailure) throw new Error("connection reset");
-          return jsonResponse(sendBody ?? { id: "provider-native-message-1" });
+          return jsonResponse(sendBody ?? { id: "provider-native-message-1", message_option: 0 });
         }
         return jsonResponse({
           url: "https://cdn.example.com/reply.jpg",
@@ -434,7 +434,7 @@ for (const sellerCentre of [false, true]) {
     });
   }
   test(`accepts numeric zero error on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
-    const bridge = createBridge({ sellerCentre, sendBody: { error_code: 0, error: 0, id: "accepted" } });
+    const bridge = createBridge({ sellerCentre, sendBody: { error_code: 0, error: 0, id: "accepted", message_option: 0 } });
     const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
     assert.equal(result.ok, true);
     assert.equal(result.provider_message_id, "accepted");
@@ -470,10 +470,33 @@ for (const sellerCentre of [false, true]) {
     });
   }
   for (const option of [0, 1, 32, 64, 128, 512, 1024]) {
-    test(`does not mistake unrelated option ${option} for delivery failure on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+    test(`only accepts known normal option ${option} on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
       const bridge = createBridge({ sellerCentre, sendBody: { id: "accepted", message_option: option } });
       const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
-      assert.equal(result.ok, true);
+      assert.equal(result.ok, option === 0);
+      assert.equal(result.uncertain, option === 0 ? undefined : true);
+    });
+  }
+}
+
+for (const sellerCentre of [false, true]) {
+  for (const sendBody of [
+    {}, { id: "id-only" }, { error_code: 0 },
+    { id: "id", message_option: "0" }, { id: "id", message_option: null },
+    { id: "id", message_option: 2 ** 32 },
+    { id: "id", message_option: 0, status: "pending" },
+    { id: "id", message_option: 0, msg_tag: { msg_ui_opt: 12 } },
+    { id: "id", message_option: 0, error: {} },
+    { id: "id", message_option: 0, conversation_id: "another-chat" },
+    { data: { id: "nested", message_option: 0 } },
+  ]) {
+    test(`unknown response remains uncertain on ${sellerCentre ? "Seller Centre" : "legacy"}: ${JSON.stringify(sendBody)}`, async () => {
+      const bridge = createBridge({ sellerCentre, sendBody });
+      const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "test" });
+      assert.equal(result.ok, false);
+      assert.equal(result.uncertain, true);
+      assert.equal(result.provider_message_id, undefined);
+      assert.match(result.error, /check Seller Chat before retrying/);
     });
   }
 }

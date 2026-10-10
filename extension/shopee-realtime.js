@@ -1154,16 +1154,23 @@
         providerRejected = true;
         throw new Error(providerReason ?? `Shopee API returned ${response?.status ?? "an error"}.`);
       }
-      const providerMessageId = String(
-        body?.id
-        ?? body?.message_id
-        ?? body?.message?.id
-        ?? body?.data?.id
-        ?? body?.data?.message_id
-        ?? body?.data?.message?.id
-        ?? ""
-      ).trim();
-      post({ type: "api_send_result", request_id: requestId, ok: true, ...(providerMessageId ? { provider_message_id: providerMessageId } : {}) });
+      // Accept only the direct message response with an explicit normal option.
+      // An HTTP 200, success code, or message ID alone does not prove acceptance.
+      const providerMessageId = typeof body?.id === "string" ? body.id.trim() : "";
+      const successfulCode = (value) => value === undefined || value === null
+        || value === 0 || value === "0" || value === "success";
+      const knownAcceptance = body && typeof body === "object" && !Array.isArray(body)
+        && providerMessageId.length > 0 && providerMessageId.length <= 200
+        && body.message_option === 0
+        && (body.status === undefined || body.status === "normal")
+        && (body.msg_tag === undefined || (body.msg_tag && typeof body.msg_tag === "object"
+          && body.msg_tag.msg_ui_opt === 0))
+        && (body.conversation_id === undefined || body.conversation_id === conversationId)
+        && successfulCode(body.error_code) && successfulCode(body.error);
+      if (!knownAcceptance) {
+        throw new Error("Shopee returned an unrecognized send result. Delivery is uncertain; check Seller Chat before retrying.");
+      }
+      post({ type: "api_send_result", request_id: requestId, ok: true, provider_message_id: providerMessageId });
     } catch (error) {
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
