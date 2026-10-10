@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, transportFailure = false } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -45,7 +45,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         poster: async (url, payload) => {
           sentUrls.push(url);
           sent.push(payload);
-          return jsonResponse({ id: "provider-message-1" });
+          return jsonResponse(sendBody ?? { id: "provider-message-1" });
         },
       },
     } : {}),
@@ -86,7 +86,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         },
         body: null,
       } : null,
-      conversationsById: new Map(conversationPages ? [] : [
+      conversationsById: new Map(cachedRouting ? [["conversation-1", cachedRouting]] : conversationPages ? [] : [
         ["conversation-1", { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0" }],
       ]),
       sendTemplate: sellerCentre ? null : {
@@ -415,4 +415,41 @@ test("native rejection diagnostics omit payloads and credentials", async () => {
   assert.equal(log.details.endpoint_path, "/webchat/api/v1.2/mini/messages");
   assert.equal(log.details.routing_types.shop_id, "string");
   assert.doesNotMatch(JSON.stringify(log), /private reply text|Bearer seller-test|csrf_token/);
+});
+
+for (const sellerCentre of [false, true]) {
+  for (const sendBody of [
+    { error_code: "illegal", message: "Message violates Shopee chat rules." },
+    { error_code: 123, message: "Message violates Shopee chat rules." },
+    { error: 123, message: "Message violates Shopee chat rules." },
+    { error_code: "illegal" },
+  ]) {
+    test(`preserves content rejection on ${sellerCentre ? "Seller Centre" : "legacy"}: ${JSON.stringify(sendBody)}`, async () => {
+      const bridge = createBridge({ sellerCentre, sendBody });
+      const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "blocked text" });
+      assert.equal(result.ok, false);
+      assert.equal(result.error, sendBody.message ?? "illegal");
+      assert.equal(result.uncertain, undefined);
+      assert.doesNotMatch(result.error, /routing is unavailable/);
+    });
+  }
+  test(`accepts numeric zero error on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+    const bridge = createBridge({ sellerCentre, sendBody: { error_code: 0, error: 0, id: "accepted" } });
+    const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
+    assert.equal(result.ok, true);
+    assert.equal(result.provider_message_id, "accepted");
+  });
+}
+
+test("refreshes an incomplete cached route before reporting a provider rejection", async () => {
+  const bridge = createBridge({
+    sellerCentre: true,
+    cachedRouting: { conversation_id: "conversation-1", to_id: "buyer-1" },
+    conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" }] }],
+    sendBody: { error_code: "illegal", message: "Message violates Shopee chat rules." },
+  });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "blocked text" });
+  assert.equal(bridge.nativePayloads.length, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Message violates Shopee chat rules.");
 });

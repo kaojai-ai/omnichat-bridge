@@ -928,14 +928,22 @@
   };
 
   const shopeeError = (body) => {
-    const code = typeof body?.error_code === "string" && body.error_code.trim()
-      && !["0", "success"].includes(body.error_code.toLowerCase())
-      ? body.error_code
+    const rawCode = body?.error_code;
+    const code = (typeof rawCode === "string" || typeof rawCode === "number")
+      && String(rawCode).trim()
+      && !["0", "success"].includes(String(rawCode).trim().toLowerCase())
+      ? String(rawCode).trim()
       : null;
-    if (!code && !body?.error) return null;
+    const rawError = body?.error;
+    const error = (typeof rawError === "string" || typeof rawError === "number")
+      && String(rawError).trim()
+      && !["0", "success"].includes(String(rawError).trim().toLowerCase())
+      ? String(rawError).trim()
+      : null;
+    if (!code && !error) return null;
     return typeof body?.message === "string" && body.message.trim()
-      ? body.message
-      : code ?? (typeof body?.error === "string" ? body.error : null);
+      ? body.message.trim()
+      : code ?? error;
   };
 
   const quotedMessageId = (message) => {
@@ -1060,7 +1068,7 @@
       return;
     }
     if (!isBridgeActive()) return;
-    if (!routing) {
+    if (!routing?.shop_id || !routing?.to_id) {
       try {
         await waitForTemplate();
         await fetchConversationPages({ requiredIds: [conversationId] });
