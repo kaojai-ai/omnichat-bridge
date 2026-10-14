@@ -396,6 +396,11 @@ async function persistProviderSurfaceState(context, adapter, providerStatus, tab
       ? providerStatus.realtime_transport
       : null,
     provider_status_at: new Date().toISOString(),
+    ...(providerTabCanSend(providerStatus, context) && providerTabHealthy(providerStatus, adapter) ? {
+      provider_recovery_state: PROVIDER_RECOVERY_STATES.ready,
+      provider_recovery_reason: null,
+      provider_recovery_tab_id: tab?.id ?? null,
+    } : {}),
   });
 }
 
@@ -1429,7 +1434,8 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  if (!trackedTab && listedTabs.length) {
+  // A tracked Shopee tab may have mini-chat closed while another tab is healthy.
+  if (listedTabs.length && (!trackedTab || adapter.id === "shopee")) {
     const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
     let selectedHealthy = null;
     for (const candidate of orderedTabs) {
@@ -1439,8 +1445,10 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
         break;
       }
     }
-    trackedTab = selectedHealthy ?? orderedTabs[0] ?? null;
-    if (trackedTab && allowTabRecovery) {
+    trackedTab = selectedHealthy ?? trackedTab ?? orderedTabs[0] ?? null;
+    if (trackedTab && (allowTabRecovery || selectedHealthy)
+      && (record?.tab_id !== trackedTab.id
+        || (selectedHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready))) {
       const healthy = trackedTab === selectedHealthy;
       record = await updateProviderRecoveryTabState(adapter.id, {
         state: healthy ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
