@@ -296,3 +296,18 @@ customer commands. Recovery has one background-owned 60-second inactivity watchd
 refreshed by attempt-scoped local content activity; there is no fixed total-sync
 cutoff. Open tabs with an older recovery bridge are reattached before use. These
 are extension-internal messages, not additions to the target server protocol.
+
+
+### Missing Shopee conversations
+
+Shopee replies refresh conversation routing before sending when a list template
+is available. A successful, exhausted lookup that cannot find the conversation
+returns `send_result` with `ok: false`, `error_code: "SHOPEE_CONVERSATION_MISSING"`,
+and a short error message. Cached routing is discarded. This means the connected
+session cannot find the conversation; it does not establish that chat distribution
+is enabled. Invalid, failed, incomplete, and timed-out lookups keep generic errors.
+
+Targets must accept and preserve the optional `error_code` field before releasing
+this extension change. KaoJai Admin maps it to a possible fix: turn off Shopee Chat
+Distribution and refresh Seller Chat, with a setup-guide link. Deploy the backend
+support first, then Admin and the extension. No database migration is required.

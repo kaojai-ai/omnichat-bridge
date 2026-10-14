@@ -65,6 +65,9 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
           if (transportFailure) throw new Error("connection reset");
           return jsonResponse(sendBody ?? { id: "provider-native-message-1", message_option: 0 });
         }
+        if (path === "/webchat/api/v1.2/mini/conversations") return jsonResponse({ conversations: [{
+          id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0",
+        }] });
         return jsonResponse({
           url: "https://cdn.example.com/reply.jpg",
           thumbnail: "https://cdn.example.com/reply-thumb.jpg",
@@ -197,7 +200,8 @@ test("does not send when Shopee's conversation list is exhausted", async () => {
     { conversations: [] },
   ] });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
-  assert.match(result.error, /routing is unavailable/);
+  assert.equal(result.error_code, "SHOPEE_CONVERSATION_MISSING");
+  assert.match(result.error, /conversation is missing/);
   assert.doesNotMatch(result.error, /7 days|closed/);
   assert.equal(bridge.nativePayloads.length, 0);
 });
@@ -501,3 +505,23 @@ for (const sellerCentre of [false, true]) {
     });
   }
 }
+
+
+test("rejects disappeared conversations even when routing is cached", async () => {
+  const bridge = createBridge({ sellerCentre: true,
+    cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
+    conversationPages: [{ conversations: [] }],
+  });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(result.error_code, "SHOPEE_CONVERSATION_MISSING");
+  assert.equal(result.uncertain, undefined);
+  assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("does not label malformed conversation responses as missing", async () => {
+  const bridge = createBridge({ sellerCentre: true, conversationPages: [{ error_code: "unauthorized" }] });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.match(result.error, /lookup failed/);
+  assert.equal(result.error_code, undefined);
+  assert.equal(bridge.nativePayloads.length, 0);
+});

@@ -2387,6 +2387,7 @@ async function handleLiveCommand(raw, context, socket) {
   if (!result?.ok) acknowledge({
     type: "send_result", request_id: command.request_id, ok: false,
     error: result?.error ?? "Reply failed.",
+    ...(result?.error_code ? { error_code: result.error_code } : {}),
     ...(result?.uncertain === true ? { uncertain: true } : {}),
   });
 }

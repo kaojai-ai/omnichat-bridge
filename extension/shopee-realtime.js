@@ -1118,10 +1118,22 @@
       return;
     }
     if (!isBridgeActive()) return;
-    if (!routing?.shop_id || !routing?.to_id) {
+    if (isSellerCentreSurface() && typeof state.nativeFetch !== "function") {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Seller Centre native sender is unavailable." });
+      return;
+    }
+    if (state.listTemplate || !routing?.shop_id || !routing?.to_id) {
       try {
         await waitForTemplate();
-        await fetchConversationPages({ requiredIds: [conversationId] });
+        state.conversationsById.delete(conversationId);
+        const lookup = await fetchConversationPages({ requiredIds: [conversationId],
+          accountId: value(message.provider_account_id) || state.currentAccountId, sendLookup: true, deadlineAt });
+        if (!lookup.conversations.some((conversation) => String(conversation.id ?? "") === conversationId)) {
+          if (!lookup.exhausted) throw new Error("Shopee conversation lookup was incomplete.");
+          post({ type: "api_send_result", request_id: requestId, ok: false,
+            error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
+          return;
+        }
         routing = state.conversationsById.get(conversationId);
       } catch (error) {
         logAsyncError("send_routing", error, { conversation_id: conversationId });
@@ -1285,12 +1297,17 @@
     }) : null;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true) {
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true, sendLookup = false) {
     const request = requestUrl instanceof Request ? requestUrl : new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0),
     });
-    const body = await recoveryFetchJson(request.clone());
+    const body = await (sendLookup ? fetchProviderJson(request.clone()) : recoveryFetchJson(request.clone()));
+    if (sendLookup && (!Array.isArray(body) && ![
+      body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
+    ].some(Array.isArray) || shopeeError(body))) {
+      throw new Error("Shopee returned an invalid conversation list.");
+    }
     const allItems = conversationItems(body);
     mergeAccounts(accountsFromPayload(body), null, publish);
     captureProfiles(allItems);
@@ -1313,6 +1330,8 @@
     requiredIds = null,
     maxItems = null,
     accountId = null,
+    sendLookup = false,
+    deadlineAt = Infinity,
   } = {}) {
     const conversations = [];
     const seenIds = new Set();
@@ -1323,12 +1342,15 @@
     });
     let firstPage = [];
     const seenPages = new Set();
+    let exhausted = false;
     while (url) {
+      if (sendLookup && Date.now() >= deadlineAt) throw new Error("Reply deadline expired before sending.");
       const pageKey = url instanceof Request
         ? `${url.url}:${await url.clone().text()}` : url;
       if (seenPages.has(pageKey)) break;
       seenPages.add(pageKey);
-      const page = await fetchConversationPage(url, accountId);
+      const page = await fetchConversationPage(url, accountId, true, sendLookup);
+      exhausted = !page.next;
       if (!firstPage.length) firstPage = page.items;
       let added = 0;
       for (const conversation of page.items) {
@@ -1349,7 +1371,7 @@
       if (!page.next || (!added && !page.raw_count)) break;
       url = page.next;
     }
-    return { conversations, firstPage };
+    return { conversations, firstPage, exhausted };
   }
 
   async function detectCurrentAccount(requestId) {
