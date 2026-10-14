@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   configuredProviderAccounts,
+  popupAccountsForSession,
   hydrateDetectedAccounts,
   visibleDetectedAccounts,
 } from "../extension/lib/popup-accounts.js";
@@ -76,4 +77,16 @@ test("shows an unconfigured LINE account only when its chat tab is open", () => 
     visibleDetectedAccounts(detected, lineConfig, "https://chat.line.biz/bot-1/"),
     [],
   );
+});
+
+test("popup hides inactive Shopee configuration while retaining multiple LINE accounts", () => {
+  const accounts = [
+    { provider: "shopee", provider_account_id: "old" },
+    { provider: "shopee", provider_account_id: "current" },
+    { provider: "line_oa", provider_account_id: "@one" },
+    { provider: "line_oa", provider_account_id: "@two" },
+  ];
+  const live = { version: 2, accounts: { "shopee:current": { active_in_profile: true } } };
+  assert.deepEqual(popupAccountsForSession(accounts, live), accounts.slice(1));
+  assert.deepEqual(popupAccountsForSession(accounts, null), accounts.slice(2));
 });

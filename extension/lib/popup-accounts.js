@@ -54,8 +54,7 @@ export function hydrateDetectedAccounts({
   );
 }
 
-export function orderAccountsBySession(accounts, liveState) {
-  const active = (account) => account.provider === "shopee"
-    && readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
-  return [...accounts].sort((left, right) => Number(active(right)) - Number(active(left)));
+export function popupAccountsForSession(accounts, liveState) {
+  return accounts.filter((account) => account.provider !== "shopee"
+    || readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true);
 }

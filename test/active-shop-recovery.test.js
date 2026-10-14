@@ -3,7 +3,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { readAccountState, writeAccountState } from "../extension/lib/storage.js";
-import { orderAccountsBySession } from "../extension/lib/popup-accounts.js";
+import { popupAccountsForSession } from "../extension/lib/popup-accounts.js";
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 
@@ -35,7 +35,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
   assert.deepEqual(connected, ["shopee:b"]);
   assert.deepEqual(retired, ["shopee:a"]);
   assert.equal(readAccountState(live, "shopee:a", {}).active_in_profile, false);
-  assert.equal(orderAccountsBySession(contexts.map(c => c.account), live)[0].provider_account_id, "b");
+  assert.equal(popupAccountsForSession(contexts.map(c => c.account), live)[0].provider_account_id, "b");
   active = "a";
   await sandbox.ensureLiveConnection();
   assert.deepEqual(retired, ["shopee:a", "shopee:b"]);

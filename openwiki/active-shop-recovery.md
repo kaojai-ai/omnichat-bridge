@@ -3,7 +3,7 @@ type: Explanation
 title: Active-shop connection recovery
 description: Planned isolation of Shopee profiles and bounded connection recovery.
 created: "2026-10-14T11:22:00+07:00"
-updated: "2026-10-14T11:22:00+07:00"
+updated: "2026-10-14T11:26:44+07:00"
 ---
 
 # Active-shop connection recovery
@@ -36,7 +36,7 @@ sequenceDiagram
 | omnichat-bridge: capture | Fetch or JSON parsing can hold the polling lock indefinitely | Bound provider requests to 15 seconds; release lock; ignore completion from an old shop session |
 | omnichat-bridge: readiness | Successful list polling can hide message-history failure | Report capture failure and apply existing freshness checks to ready status |
 | omnichat-bridge: delivery | Upload can delay watchdog; retry timestamp is not enforced | Bound upload/log requests to 15 seconds; independent transport repair; respect automatic retry time |
-| omnichat-bridge: popup | All configured shops can look ready | Signed-in shop first; collapse other configured shops; show inactive/unknown explicitly |
+| omnichat-bridge: popup | All configured shops can look ready | Show only the signed-in Shopee shop; hide inactive shops; show unknown explicitly |
 | stateless-apps: bridge Lambda | Connection log context can use global tenant | Use authenticated ticket tenant context, without new database reads |
 
 ## Database and contracts
@@ -49,7 +49,7 @@ Example existing status: `{ "ready": false }` when capture is stale or failed. E
 
 1. Prevent indefinite stalls and misleading readiness. Tests cover hung fetch/body, recovery during backoff and session changes.
 2. Isolate profile ownership. Test switching between two configured shops, retiring predecessor sockets and preserving queued messages.
-3. Make support status understandable. Signed-in shop is first and labelled in English/Thai; other shops are inactive here.
+3. Make support status understandable. Only the signed-in Shopee shop is shown and labelled in English/Thai. LINE retains multiple OA accounts per profile. Already captured queues for inactive shops may finish uploading without accessing those provider sessions.
 4. Correct tenant attribution without per-heartbeat logging or new network calls.
 
 No heartbeat frequency increase, provisioned concurrency or warm-up scheduler. Fewer inactive connections should reduce unnecessary traffic, but exact savings require post-release measurement. Provider read/upload deadlines do not retry outgoing customer sends or alter uncertain-send handling.

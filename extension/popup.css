@@ -1117,6 +1117,3 @@ footer a:hover,
   border-radius: 8px;
 }
 .signed-in-shop { font-size: 11px; font-weight: 700; }
-.other-configured-shops { margin-top: 14px; }
-.other-configured-shops > summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
-.account-session-unknown { font-size: 12px; line-height: 1.5; }
