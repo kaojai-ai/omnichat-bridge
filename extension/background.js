@@ -1,3 +1,4 @@
+import { withRequestTimeout } from "./lib/request-timeout.js";
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, historySyncSettings } from "./lib/config.js";
 import { buildConnectionHealth } from "./lib/connection-status.js";
@@ -305,6 +306,27 @@ function liveCommandContexts(contexts) {
   return contexts.filter((context) => (context?.adapter?.sendCommands?.length ?? 0) > 0);
 }
 
+let activeShopeeStatusPromise = null;
+async function activeLiveCommandContexts(contexts) {
+  const candidates = liveCommandContexts(contexts);
+  if (!candidates.some((context) => context.adapter.id === "shopee")) return candidates;
+  if (!activeShopeeStatusPromise) {
+    activeShopeeStatusPromise = providerChatTabs(shopeeAdapter)
+      .then((tabs) => Promise.all(tabs.map(providerTabStatus)))
+      .finally(() => { activeShopeeStatusPromise = null; });
+  }
+  const statuses = await activeShopeeStatusPromise;
+  const activeIds = new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  for (const context of candidates.filter((item) => item.adapter.id === "shopee")) {
+    const active = activeIds.has(context.account.provider_account_id);
+    await updateLiveState(context, {
+      active_in_profile: active,
+      ...(!active ? { socket: "inactive", leader: false, leader_installation_id: null } : {}),
+    });
+  }
+  return candidates.filter((context) => context.adapter.id !== "shopee" || activeIds.has(context.account.provider_account_id));
+}
+
 function messageProviderAccountId(message) {
   const value = message?.provider_account_id;
   return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
@@ -337,9 +359,17 @@ async function updateScopedState(storageKey, key, patch) {
   });
 }
 
-async function updateLiveState(context, patch) {
+let liveStateWriteQueue = Promise.resolve();
+function updateLiveState(context, patch) {
+  const operation = liveStateWriteQueue.then(() => writeLiveState(context, patch));
+  liveStateWriteQueue = operation.catch(() => undefined);
+  return operation;
+}
+
+async function writeLiveState(context, patch) {
   const stored = await readStorage([STORAGE.live]);
   const current = readAccountState(stored[STORAGE.live], context.key, {});
+  if (Object.entries(patch).every(([key, value]) => current[key] === value)) return;
   await writeStorage({
     [STORAGE.live]: writeAccountState(stored[STORAGE.live], context.key, {
       ...current,
@@ -1315,28 +1345,13 @@ async function updateProviderRecoveryLiveState(contexts, adapter, {
   reason = null,
   tabId = null,
 } = {}) {
-  const matchingContexts = providerRecoveryContexts(contexts, adapter);
-  if (!matchingContexts.length) return;
-  const stored = await readStorage([STORAGE.live]);
-  let nextLive = stored[STORAGE.live];
-  let changed = false;
-  const updatedAt = new Date().toISOString();
-  for (const context of matchingContexts) {
-    const current = readAccountState(nextLive, context.key, {});
-    const patch = {
+  for (const context of providerRecoveryContexts(contexts, adapter)) {
+    await updateLiveState(context, {
       provider_recovery_state: state,
       provider_recovery_reason: reason,
       provider_recovery_tab_id: Number.isInteger(tabId) ? tabId : null,
-    };
-    if (Object.entries(patch).every(([key, value]) => current[key] === value)) continue;
-    nextLive = writeAccountState(nextLive, context.key, {
-      ...current,
-      ...patch,
-      provider_recovery_updated_at: updatedAt,
     });
-    changed = true;
   }
-  if (changed) await writeStorage({ [STORAGE.live]: nextLive });
 }
 
 async function updateProviderRecoveryTabState(provider, patch) {
@@ -1711,15 +1726,6 @@ async function runProviderHealthWatchdogOnce() {
       });
       continue;
     }
-    if (allowTabRecovery && recovery.record?.state === PROVIDER_RECOVERY_STATES.needsAttention
-      && !recoveryRetryDue(recovery.record)) {
-      await updateProviderRecoveryLiveState(contexts, adapter, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention,
-        reason: recovery.record.reason || `${providerLabel(adapter)} recovery is waiting before the next retry.`,
-        tabId: tab.id,
-      });
-      continue;
-    }
     try {
       if (!adapter.matchesUrl(tab.url)) {
         await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
@@ -1762,7 +1768,8 @@ async function runProviderHealthWatchdogOnce() {
     }
   }
   await ensureLiveConnection();
-  await exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+  void exclusive(() => attemptAllDeliveries({ resetBackoff: false }))
+    .catch((error) => recordUnexpected("message_delivery", error));
 }
 
 async function runProviderHealthWatchdog() {
@@ -1783,7 +1790,7 @@ async function pingConfiguredAccountApis() {
     STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
   ]);
-  const contexts = apiPingContexts(configuredAccountContexts(stored));
+  const contexts = apiPingContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)));
   const shouldRun = contexts.length > 0
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
@@ -1837,7 +1844,7 @@ async function getLiveState(providerAccountId, provider = "") {
   const configuredContexts = providerAccountId
     ? [accountContextFor(stored, providerAccountId, provider)].filter(Boolean)
     : configuredAccountContexts(stored);
-  const contexts = liveCommandContexts(configuredContexts);
+  const contexts = await activeLiveCommandContexts(configuredContexts);
   if (!contexts.length) return { ok: false, error: "No configured provider accounts support live commands." };
   const results = [];
   for (const context of contexts) {
@@ -1874,7 +1881,7 @@ function providerLiveCommandContexts(contexts, provider) {
 
 async function claimLeader(tabId, provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
+  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) {
@@ -1886,7 +1893,7 @@ async function claimLeader(tabId, provider = "") {
 
 async function releaseLeader(provider = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = providerLiveCommandContexts(configuredAccountContexts(stored), provider);
+  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
@@ -2018,7 +2025,7 @@ async function connectionStatusSnapshot(context) {
     contentReady: adapter?.id === "shopee" ? providerTabIsReady(providerStatus, adapter) : Boolean(providerStatus),
     accountDetected,
     accountMatches,
-    realtimeConnected: providerStatus?.realtime_connected === true,
+    realtimeConnected: providerTabHealthy(providerStatus, adapter),
     lastRealtimeConnectedAt: providerStatus?.last_realtime_connected_at,
     pendingMessages: pending.length,
     status,
@@ -2109,7 +2116,10 @@ async function ensureLiveConnection() {
     STORAGE.unattendedRecovery,
   ]);
   const configuredContexts = configuredAccountContexts(stored);
-  const pingContexts = apiPingContexts(configuredContexts);
+
+  const contexts = hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])
+    ? await activeLiveCommandContexts(configuredContexts) : [];
+  const pingContexts = apiPingContexts(contexts);
   const canPing = pingContexts.length > 0
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
@@ -2122,7 +2132,6 @@ async function ensureLiveConnection() {
   if (canPing) {
     ensureApiPings(pingContexts);
   }
-  const contexts = liveCommandContexts(configuredContexts);
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
     || !contexts.length) {
@@ -3694,36 +3703,38 @@ async function signedRequest(config, providerAccountId, payload, signal) {
   const nonce = crypto.randomUUID();
   const bodyHash = await sha256Hex(body);
   const signature = await hmacHex(config.hmac_secret, `POST\n${url.pathname}\n${timestamp}\n${nonce}\n${bodyHash}`);
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-omnichat-provider-account-id": providerAccountId,
-      "x-omnichat-timestamp": timestamp,
-      "x-omnichat-nonce": nonce,
-      "x-omnichat-signature": signature
-    },
-    body,
-    signal,
-  });
-  if (!response.ok) {
-    let code = "";
-    try {
-      const error = await response.json();
-      code = [error?.error, error?.error_code, error?.code]
-        .find((value) => typeof value === "string" && value.trim())
-        ?.trim() ?? "";
-    } catch {
-      // The HTTP status remains actionable when the target has no JSON error body.
+  return withRequestTimeout(async (requestSignal) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-omnichat-provider-account-id": providerAccountId,
+        "x-omnichat-timestamp": timestamp,
+        "x-omnichat-nonce": nonce,
+        "x-omnichat-signature": signature
+      },
+      body,
+      signal: requestSignal,
+    });
+    if (!response.ok) {
+      let code = "";
+      try {
+        const error = await response.json();
+        code = [error?.error, error?.error_code, error?.code]
+          .find((value) => typeof value === "string" && value.trim())
+          ?.trim() ?? "";
+      } catch {
+        // The HTTP status remains actionable when the target has no JSON error body.
+      }
+      const failure = new Error(
+        "Target server returned " + response.status + (code ? ": " + code : ""),
+      );
+      failure.http_status = response.status;
+      if (code) failure.server_error_code = code;
+      throw failure;
     }
-    const failure = new Error(
-      "Target server returned " + response.status + (code ? ": " + code : ""),
-    );
-    failure.http_status = response.status;
-    if (code) failure.server_error_code = code;
-    throw failure;
-  }
-  return response.json();
+    return response.json();
+  }, 15_000, signal);
 }
 
 async function sendLogBatch(context, logs) {
@@ -3747,19 +3758,22 @@ async function sendLogBatch(context, logs) {
     context.config.hmac_secret,
     `POST\n${url.pathname}\n${timestamp}\n${nonce}\n${await sha256Hex(body)}`,
   );
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-omnichat-provider-account-id": context.account.provider_account_id,
-      "x-omnichat-timestamp": timestamp,
-      "x-omnichat-nonce": nonce,
-      "x-omnichat-signature": signature,
-    },
-    body,
-  });
-  if (!response.ok) throw new Error(`Logs server returned ${response.status}.`);
-  return payload.batch_id;
+  return withRequestTimeout(async (requestSignal) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-omnichat-provider-account-id": context.account.provider_account_id,
+        "x-omnichat-timestamp": timestamp,
+        "x-omnichat-nonce": nonce,
+        "x-omnichat-signature": signature,
+      },
+      body,
+      signal: requestSignal,
+    });
+    if (!response.ok) throw new Error(`Logs server returned ${response.status}.`);
+    return payload.batch_id;
+  }, 15_000);
 }
 
 async function flushLogBatch() {
@@ -4129,6 +4143,7 @@ async function attemptDelivery(context, { resetBackoff, signal }) {
     STORAGE.consent,
     STORAGE.pending,
     STORAGE.serverInitialized,
+    STORAGE.deliveryRetry,
   ]);
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
   if (!hasServerInitialized(stored)
@@ -4141,6 +4156,11 @@ async function attemptDelivery(context, { resetBackoff, signal }) {
   if (!pending.length) {
     await clearDeliveryRetry(context);
     return { sent: 0, pending: 0 };
+  }
+  const retry = readAccountState(stored[STORAGE.deliveryRetry], context.key, {});
+  const nextAt = Date.parse(retry.next_at ?? "");
+  if (!resetBackoff && Number.isFinite(nextAt) && nextAt > Date.now()) {
+    return { sent: 0, pending: pending.length, skipped: "backoff" };
   }
   try {
     const result = await flushAll(context, signal);
@@ -4198,6 +4218,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     void recordLog("info", "delivery", "retry_started", "Retrying queued message delivery.");
     void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
   } else if (alarm.name === PROVIDER_HEALTH_ALARM) {
+    // Transport repair must not wait for provider checks or queued uploads.
+    void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   } else if (alarm.name === LOG_UPLOAD_ALARM) {
     void flushLogBatch();

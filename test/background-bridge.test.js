@@ -163,7 +163,7 @@ test("only opens live command channels for adapters that declare send commands",
   const end = source.indexOf("\n}\n\nasync function ensureAccountLiveConnection", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
-  assert.match(source.slice(start, end), /const contexts = liveCommandContexts\(configuredContexts\)/);
+  assert.match(source.slice(start, end), /await activeLiveCommandContexts\(configuredContexts\)/);
 });
 
 test("refreshes leader status after live presence is sent", () => {

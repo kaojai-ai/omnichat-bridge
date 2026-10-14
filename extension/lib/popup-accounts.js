@@ -1,5 +1,5 @@
-import { findAccountConfig } from "./config.js";
-import { mergeDetectedAccounts } from "./storage.js";
+import { accountConfigKey, findAccountConfig } from "./config.js";
+import { mergeDetectedAccounts, readAccountState } from "./storage.js";
 
 function lineBotIdFromUrl(activeTabUrl = "") {
   try {
@@ -52,4 +52,10 @@ export function hydrateDetectedAccounts({
     config,
     activeTabUrl,
   );
+}
+
+export function orderAccountsBySession(accounts, liveState) {
+  const active = (account) => account.provider === "shopee"
+    && readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
+  return [...accounts].sort((left, right) => Number(active(right)) - Number(active(left)));
 }

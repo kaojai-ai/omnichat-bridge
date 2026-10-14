@@ -1111,3 +1111,12 @@ footer a:hover,
 .update-extension:disabled { cursor: wait; }
 
 .update-extension[data-state="current"]:disabled { cursor: default; }
+
+.account-row[data-active-here="true"][data-provider="shopee"] {
+  border: 1px solid var(--color-border, #c8d5dc);
+  border-radius: 8px;
+}
+.signed-in-shop { font-size: 11px; font-weight: 700; }
+.other-configured-shops { margin-top: 14px; }
+.other-configured-shops > summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
+.account-session-unknown { font-size: 12px; line-height: 1.5; }

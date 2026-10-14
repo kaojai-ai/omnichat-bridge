@@ -55,6 +55,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     apiPingContexts: () => [],
     ensureApiPingAlarm: async () => {},
     liveCommandContexts: () => [],
+    activeLiveCommandContexts: async () => [],
     stopLiveConnection: () => {},
     chrome: { tabs: {
       create: async () => { calls.created++; return tab; },
@@ -144,3 +145,20 @@ test("closed Shopee mini-chat waits for user action without reloading or retry b
   assert.match(calls.live.reason, /Open Shopee mini-chat/);
   assert.equal(calls.live.state, PROVIDER_RECOVERY_STATES.needsAttention);
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: a healthy tab clears old backoff with automatic recovery enabled`, async () => {
+    const { run, calls } = harness({ provider, recoveryEnabled: true, healthy: true,
+      record: { tab_id: 42, state: "needs_attention", failure_count: 8, next_retry_at: Date.now() + 30 * 60_000 } });
+    await run();
+    assert.equal(calls.live.state, "ready");
+    assert.equal(calls.reloaded, 0);
+  });
+  test(`${provider}: unhealthy tabs are probed but not reloaded during backoff`, async () => {
+    const { run, calls } = harness({ provider, recoveryEnabled: true, healthy: false,
+      record: { tab_id: 42, state: "needs_attention", failure_count: 8, next_retry_at: Date.now() + 30 * 60_000 } });
+    await run();
+    assert.ok(calls.checked > 0);
+    assert.equal(calls.reloaded, 0);
+  });
+}

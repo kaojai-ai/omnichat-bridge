@@ -250,7 +250,9 @@
       capabilities,
       realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
       ...(isSellerCentreSurface() ? { chat_open: chatOpen } : {}),
-      realtime_connected: isSellerCentreSurface() ? state.pollingConnected : Boolean(state.socket?.connected ?? state.socket),
+      realtime_connected: isSellerCentreSurface()
+        ? state.pollingConnected && state.sellerCentreCaptureFailed !== true
+        : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
       last_provider_check_at: state.lastProviderCheckAt,
     });
@@ -448,17 +450,39 @@
     void response.clone().json().then(captureSessionAccount)
       .catch((error) => logAsyncError("account_capture", error));
   };
+  // Keep browser networking and JSON parsing bounded, including hung responses.
+  const fetchProviderJson = async (request) => {
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("Shopee provider request timed out."));
+      }, 15_000);
+    });
+    try {
+      return await Promise.race([
+        (async () => {
+          const response = await state.nativeFetch(request, { signal: controller.signal });
+          if (!response.ok) throw Object.assign(new Error(`Shopee provider request returned ${response.status}.`), { http_status: response.status });
+          return response.json();
+        })(),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const detectSessionAccount = async () => {
     const url = new URL(surfaceProfile().loginPath, window.location.origin);
-    const response = await state.nativeFetch(new Request(url, {
-      method: "GET",
-      credentials: "include",
-    }));
-    if (!response.ok) {
-      captureSessionAccount(null);
-      throw new Error(`Shopee session account lookup returned ${response.status}. Log in to Shopee.`);
+    try {
+      const body = await fetchProviderJson(new Request(url, { method: "GET", credentials: "include" }));
+      return captureSessionAccount(body);
+    } catch (error) {
+      if (error.http_status === 401 || error.http_status === 403) captureSessionAccount(null);
+      throw error;
     }
-    return captureSessionAccount(await response.json());
   };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
@@ -697,14 +721,13 @@
     state.capturedMessageIdsByConversation.clear();
     state.pendingSellerCentreMessages.clear();
     state.sellerCentreFetches.clear();
+    state.sellerCentreCaptureFailed = false;
   };
 
   async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
     const template = state.historyTemplate ?? state.getTemplate;
     if (!template) return false;
-    const response = await state.nativeFetch(sellerCentreHistoryRequest(conversation, template));
-    if (!response.ok) throw new Error(`Shopee Seller Centre message poll returned ${response.status}.`);
-    const body = await response.json();
+    const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template));
     if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
     const messages = Array.isArray(body)
       ? body
@@ -735,7 +758,7 @@
     const captureEpoch = state.sellerCentreCaptureEpoch;
     let body;
     try {
-      body = await response.clone().json();
+      body = typeof response?.clone === "function" ? await response.clone().json() : response;
     } catch (error) {
       logAsyncError("seller_centre_conversation_parse", error);
       return;
@@ -761,7 +784,9 @@
     }
     state.sellerCentreListInitialized = true;
     if (!wasInitialized) return;
+    const captureDeadline = Date.now() + 15_000;
     for (const [conversationId, item] of state.pendingSellerCentreMessages) {
+      if (Date.now() >= captureDeadline) break;
       if (state.sellerCentreFetches.has(conversationId)) continue;
       const epoch = state.sellerCentreCaptureEpoch;
       const token = {};
@@ -773,13 +798,18 @@
           item.latestId,
           epoch,
         );
-        if (!captured || !isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
+        if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
+        if (!captured) {
+          state.sellerCentreCaptureFailed = true;
+          continue;
+        }
         state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
         // A newer summary may have arrived while this fetch was in flight.
         if (state.pendingSellerCentreMessages.get(conversationId) === item) {
           state.pendingSellerCentreMessages.delete(conversationId);
         }
       } catch (error) {
+        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) state.sellerCentreCaptureFailed = true;
         logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
       } finally {
         if (state.sellerCentreFetches.get(conversationId) === token) {
@@ -787,18 +817,21 @@
         }
       }
     }
+    if (!state.pendingSellerCentreMessages.size) state.sellerCentreCaptureFailed = false;
   }
 
   async function refreshSellerCentreConversations() {
     if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
     state.pollingRefreshInFlight = true;
+    const epoch = state.sellerCentreCaptureEpoch;
     try {
-      const response = await state.nativeFetch(new Request(state.listTemplate.url, {
+      const body = await fetchProviderJson(new Request(state.listTemplate.url, {
         ...state.listTemplate.init,
         body: state.listTemplate.body?.slice(0),
       }));
-      if (!response.ok) throw new Error(`Shopee Seller Centre conversation refresh returned ${response.status}.`);
-      await captureSellerCentreConversationList(response);
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      await captureSellerCentreConversationList(body);
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       state.lastProviderCheckAt = new Date().toISOString();
     } finally {
       state.pollingRefreshInFlight = false;
@@ -811,11 +844,14 @@
     const poll = () => {
       if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight) return;
       void (async () => {
+        const epoch = state.sellerCentreCaptureEpoch;
         try {
           await refreshSellerCentreConversations();
+          if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = true;
           state.pollingConnectedAt ??= new Date().toISOString();
         } catch (error) {
+          if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = false;
           postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
         } finally {
