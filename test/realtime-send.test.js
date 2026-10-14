@@ -111,7 +111,8 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     structuredClone,
     setInterval: () => 0,
     clearInterval,
-    setTimeout: (callback) => { queueMicrotask(callback); return 0; },
+    AbortController,
+    setTimeout: (callback, delay) => { if (delay === 15_000) return setTimeout(callback, delay); queueMicrotask(callback); return 0; },
     clearTimeout,
   });
   vm.runInContext(urlSource, context);

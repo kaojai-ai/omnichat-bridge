@@ -2,7 +2,8 @@
 
 Shopee and LINE OA share delivery, configuration, and account isolation.
 Adapters own page matching, account IDs, capture, readiness, and native sends.
-See [setup](setup.md) and the [wire contract](payload-contract.md).
+See [setup](setup.md), the [wire contract](payload-contract.md), and the
+[planned active-shop recovery changes](../openwiki/active-shop-recovery.md).
 
 ## Incoming messages
 

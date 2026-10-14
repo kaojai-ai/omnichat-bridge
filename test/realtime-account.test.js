@@ -35,7 +35,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {} } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
@@ -118,7 +118,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
       intervals.push({ callback, delay });
       return intervals.length;
     },
-    setTimeout,
+    setTimeout: (callback, delay, ...args) => setTimeout(callback, delay === 15_000 ? requestTimeoutMs : delay, ...args),
     clearInterval,
     clearTimeout,
   });
@@ -826,6 +826,7 @@ test("Seller Centre retries unchanged summaries after repeated history failures 
   await bridge.runIntervals();
   assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 2);
   assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.sellerCentreCaptureFailed, true);
   bridge.setResponse(retryListPath, [retryConversation("m3")]);
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1), retryMessage("m3", 2)]);
   await bridge.runIntervals();
@@ -844,6 +845,7 @@ test("Seller Centre retains pending capture until a history request template is 
   await bridge.runIntervals();
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
   assert.equal(bridge.requests.includes(retryHistoryPath), false);
+  assert.equal(bridge.state.sellerCentreCaptureFailed, true);
   bridge.state.getTemplate = template;
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   await bridge.runIntervals();
@@ -884,6 +886,7 @@ for (const reset of ["shop switch", "dispose"]) {
     assert.deepEqual(capturedRetryIds(bridge), []);
     assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
     assert.equal(bridge.state.capturedMessageIdsByConversation.size, 0);
+    assert.equal(bridge.state.pollingConnected, false);
   });
 }
 
@@ -951,3 +954,40 @@ test("subaccount polling captures new active-shop messages without fetching othe
   assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
   assert.equal(bridge.requests.includes(`${retryListPath}/other-conversation/messages`), false);
 });
+
+for (const hangBody of [false, true]) {
+  test(`Seller Centre releases a hung ${hangBody ? "body" : "request"} and polls again`, async () => {
+    const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true, requestTimeoutMs: 20 });
+    await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+    await bridge.fetch(retryListPath, [retryConversation("m1")]);
+    bridge.setResponse(retryListPath, () => hangBody
+      ? { ok: true, json: () => new Promise(() => {}) }
+      : new Promise(() => {}));
+    await bridge.runIntervals();
+    assert.equal(bridge.state.pollingRefreshInFlight, true);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(bridge.state.pollingRefreshInFlight, false);
+    assert.equal(bridge.state.pollingConnected, false);
+    bridge.setResponse(retryListPath, [retryConversation("m1")]);
+    await bridge.runIntervals();
+    assert.equal(bridge.state.pollingConnected, true);
+  });
+}
+
+for (const hangBody of [false, true]) {
+  test(`initial recovery bounds a hung ${hangBody ? "body" : "request"} and a fresh attempt succeeds`, async () => {
+    const bridge = createBridge({ pathname: "/portal/chat-management", requestTimeoutMs: 20 });
+    await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+    await bridge.fetch(retryListPath, []);
+    bridge.setResponse(retryListPath, () => hangBody
+      ? { ok: true, json: () => new Promise(() => {}) }
+      : new Promise(() => {}));
+    const failed = await bridge.sync("100000001", "hung-initial");
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /timed out/);
+    assert.equal(bridge.state.recoveryInFlight, false);
+    bridge.setResponse(retryListPath, []);
+    const retried = await bridge.sync("100000001", "fresh-initial");
+    assert.equal(retried.ok, true);
+  });
+}

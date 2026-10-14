@@ -115,7 +115,7 @@ p { color: var(--muted); }
   animation: loading-spin 700ms linear infinite;
   border: 2px solid var(--line);
   border-radius: 50%;
-  border-top-color: var(--green);
+  border-top-color: var(--muted);
   height: 24px;
   width: 24px;
 }
@@ -479,7 +479,7 @@ input:focus-visible {
 }
 
 input[type="checkbox"] {
-  accent-color: var(--shopee);
+  accent-color: var(--muted);
   height: 15px;
   margin: 2px 0 0;
   width: 15px;
@@ -615,7 +615,6 @@ input[type="checkbox"] {
 }
 
 .account-row[data-state="ready"]::before { background: var(--green); }
-.account-row[data-state="warning"]::before { background: var(--amber); }
 .account-row[data-state="error"]::before { background: var(--danger); }
 
 .account-row:hover {
@@ -684,7 +683,6 @@ input[type="checkbox"] {
 }
 
 .account-row-status[data-state="ready"] { color: var(--green); }
-.account-row-status[data-state="warning"] { color: var(--amber); }
 .account-row-status[data-state="error"] { color: var(--danger); }
 
 .account-row-status-link {
@@ -814,12 +812,6 @@ input[type="checkbox"] {
   color: var(--green);
 }
 .leader-status[data-state="ready"] i { background: var(--green); }
-.leader-status[data-state="warning"] {
-  background: var(--soft-amber);
-  border-color: #fedf89;
-  color: var(--amber);
-}
-.leader-status[data-state="warning"] i { background: var(--amber); }
 
 .progress-area {
   border-top: 1px solid var(--line);
@@ -855,7 +847,7 @@ input[type="checkbox"] {
 .status-log-link:hover { color: var(--shopee-hover); }
 
 progress {
-  accent-color: var(--shopee);
+  accent-color: var(--muted);
   height: 5px;
   width: 100%;
 }
@@ -1111,3 +1103,39 @@ footer a:hover,
 .update-extension:disabled { cursor: wait; }
 
 .update-extension[data-state="current"]:disabled { cursor: default; }
+
+
+/* Status color indicates outcome; animation indicates work in progress. */
+.account-row-status[data-state="neutral"],
+#status[data-state="neutral"] { color: #475467; }
+#status[data-state="ready"] { color: var(--green); }
+#status[data-state="error"] { color: var(--danger); }
+.account-row-status[data-loading="true"]::before,
+#account-list-empty[data-loading="true"]::before,
+#status[data-loading="true"]::before {
+  animation: loading-spin 700ms linear infinite;
+  background: transparent;
+  border: 2px solid var(--line);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  box-sizing: border-box;
+  content: "";
+  display: inline-block;
+  flex-shrink: 0;
+  height: 12px;
+  width: 12px;
+}
+.account-row-status[data-loading="true"]::before,
+#account-list-empty[data-loading="true"]::before {
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+#status[data-loading="true"] {
+  align-items: start;
+  grid-template-columns: 12px 1fr;
+  column-gap: 6px;
+}
+#status[data-loading="true"]::before { margin-top: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  [data-loading="true"]::before { animation: none; }
+}

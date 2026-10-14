@@ -20,6 +20,7 @@ test("live presence advertises sends only for a responding tab belonging to this
   const snapshot = fn("connectionStatusSnapshot", "\nfunction statusPublishKey", {
     STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }), getPlatformInfo: async () => ({ os: "mac" }) } },
     orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
+    providerTabHealthy: (input) => input?.ok === true && input?.realtime_connected === true,
     providerTabCanSend: canSend, providerTabIsReady: (input) => input?.ok === true,
     persistProviderSurfaceState: async () => {}, detectedAccounts: () => [context.account],
     readAccountState: (_state, _key, fallback) => fallback, normalizeDeviceName: () => "", buildConnectionHealth: () => ({ checks: ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].map((key) => ({ key, status: "pass" })) }),
@@ -55,6 +56,7 @@ test("an outbound command cannot use a tab for another shop", async () => {
     STORAGE: {}, providerLabel: () => "Shopee Seller Chat", readStorage: async () => ({}), readAccountState: () => null,
     providerChatTabs: async () => [{ id: 1, url: "https://seller.shopee.co.th/" }], providerRecoveryRecord: () => null,
     getTab: async () => null, orderProviderTabs: (_adapter, tabs) => tabs,
+    providerTabHealthy: (input) => input?.ok === true && input?.realtime_connected === true,
     providerTabCanSend: canSend, providerTabStatus: async () => ({ ...ready, provider_account_ids: ["shop", "another-shop"], current_provider_account_id: "another-shop" }),
     recordLog: async () => {}, writeStorage: async () => assert.fail("must not select a mismatched tab"),
   });

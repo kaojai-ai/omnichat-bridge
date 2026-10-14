@@ -251,8 +251,11 @@ to stay within Chrome storage limits.
 
 ## Connection recovery and deadlines
 
-Each configured provider account has one command socket per extension installation,
-shared by its tabs. Startup, tab changes, and recovery checks reuse that account's
+Each active provider account has one command socket per extension installation,
+shared by its tabs. For Shopee, only the signed-in shop reported by an open provider
+tab is active; importing configuration for other shops does not open their sockets.
+Configuration and already captured message queues remain available after switching
+shops. Startup, tab changes, and recovery checks reuse that account's
 connection attempt. Ticket acquisition and socket establishment each have a
 10-second limit. Failed attempts use exponential backoff with jitter, capped at
 60 seconds; backoff resets after 30 seconds of stable connectivity.
@@ -262,6 +265,12 @@ activity. This is transport activity, not a readiness report. Targets should
 handle it without persistence or application logging. Readiness remains
 change-driven. Browser sleep, extension restart, and hosting connection limits
 still require reconnecting.
+
+Shopee polling, initial history recovery, and ingestion/log upload requests have a 15-second deadline,
+including provider and ingestion response-body reads. Automatic delivery respects
+its stored retry time; explicit retry can bypass that backoff. Reload backoff does
+not suspend provider health checks. Capture failures and stale checks suppress
+readiness even when the bridge socket remains connected.
 
 Commands may optionally include `deadline_at_ms` (Unix milliseconds). Older
 extensions may ignore it; updated extensions stop before native sending if the
@@ -279,3 +288,11 @@ No new capabilities, response fields, or configuration versions are required
 for these lifecycle fixes. A target can continue issuing existing tickets and
 handling existing status/result envelopes. Optional deadline support does not
 require a particular target product or infrastructure.
+
+
+Manual Retry replaces the current recovery attempt and bypasses automatic delivery
+and reconnect backoff. It preserves captured queues and never replays outgoing
+customer commands. Recovery has one background-owned 60-second inactivity watchdog,
+refreshed by attempt-scoped local content activity; there is no fixed total-sync
+cutoff. Open tabs with an older recovery bridge are reattached before use. These
+are extension-internal messages, not additions to the target server protocol.

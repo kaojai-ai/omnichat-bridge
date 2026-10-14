@@ -14,10 +14,11 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null } = {}) {
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false } = {}) {
   const adapter = { id: provider, matchesUrl: () => true };
   const context = { key: `${provider}:account`, adapter, account: { provider_account_id: "account" } };
   const tab = { id: 42, url: "https://provider.example/chat", status: "complete" };
+  const alternative = { ...tab, id: 43 };
   const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: 0, alarm: null, live: null };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
@@ -29,10 +30,10 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerAdapters: { list: () => [adapter] },
     providerRecoveryContexts: (contexts) => contexts,
     providerRecoveryRecord: () => record,
-    providerChatTabs: async () => tabOpen ? [tab] : [],
+    providerChatTabs: async () => tabOpen ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async () => { calls.checked++; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, surface: "seller-centre", chat_open: true }; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => {},
     persistProviderSurfaceState: async () => {},
@@ -55,6 +56,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     apiPingContexts: () => [],
     ensureApiPingAlarm: async () => {},
     liveCommandContexts: () => [],
+    activeLiveCommandContexts: async () => [],
     stopLiveConnection: () => {},
     chrome: { tabs: {
       create: async () => { calls.created++; return tab; },
@@ -143,4 +145,56 @@ test("closed Shopee mini-chat waits for user action without reloading or retry b
   assert.equal(calls.created, 0);
   assert.match(calls.live.reason, /Open Shopee mini-chat/);
   assert.equal(calls.live.state, PROVIDER_RECOVERY_STATES.needsAttention);
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: a healthy tab clears old backoff with automatic recovery enabled`, async () => {
+    const { run, calls } = harness({ provider, recoveryEnabled: true, healthy: true,
+      record: { tab_id: 42, state: "needs_attention", failure_count: 8, next_retry_at: Date.now() + 30 * 60_000 } });
+    await run();
+    assert.equal(calls.live.state, "ready");
+    assert.equal(calls.reloaded, 0);
+  });
+  test(`${provider}: unhealthy tabs are probed but not reloaded during backoff`, async () => {
+    const { run, calls } = harness({ provider, recoveryEnabled: true, healthy: false,
+      record: { tab_id: 42, state: "needs_attention", failure_count: 8, next_retry_at: Date.now() + 30 * 60_000 } });
+    await run();
+    assert.ok(calls.checked > 0);
+    assert.equal(calls.reloaded, 0);
+  });
+}
+
+
+for (const recoveryEnabled of [false, true]) {
+  test(`Shopee uses an open healthy mini-chat instead of the tracked closed chat (recovery ${recoveryEnabled})`, async () => {
+    const { run, calls } = harness({ provider: "shopee", recoveryEnabled, healthy: false, chatOpen: false,
+      alternativeHealthyTab: true, record: { tab_id: 42, state: "needs_attention" } });
+    await run();
+    assert.equal(calls.live.state, "ready");
+    assert.equal(calls.live.tabId, 43);
+    assert.equal(calls.live.reason, null);
+    assert.equal(calls.reloaded, 0);
+    assert.equal(calls.created, 0);
+  });
+}
+
+test("fresh matching provider health clears stale attention without hiding unhealthy or mismatched tabs", async () => {
+  let patch;
+  const runtime = vm.createContext({
+    PROVIDER_RECOVERY_STATES,
+    updateLiveState: async (_context, value) => { patch = value; },
+    providerTabCanSend: (status) => status.matches === true,
+    providerTabHealthy: (status) => status.healthy === true,
+  });
+  vm.runInContext(functionSource("persistProviderSurfaceState", "async function getAccountScanState("), runtime);
+  for (const [healthy, matches] of [[false, true], [true, false], [true, true]]) {
+    await runtime.persistProviderSurfaceState({}, {}, { surface: "seller-centre", healthy, matches }, { id: 43 });
+    if (healthy && matches) {
+      assert.equal(patch.provider_recovery_state, "ready");
+      assert.equal(patch.provider_recovery_reason, null);
+      assert.equal(patch.provider_recovery_tab_id, 43);
+    } else {
+      assert.equal(Object.hasOwn(patch, "provider_recovery_state"), false);
+    }
+  }
 });

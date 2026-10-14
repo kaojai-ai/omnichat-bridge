@@ -30,7 +30,7 @@ test("shows a progress bar once conversation totals are known", () => {
       active: true,
       showBar: true,
       value: 30,
-      text: "Checking conversation 3 of 10 · 30%",
+      text: "Recovering conversation messages… 3 of 10 conversations · 30%",
     },
   );
 });
@@ -47,7 +47,7 @@ test("falls back to counted copy when totals are still unknown", () => {
       active: true,
       showBar: false,
       value: 0,
-      text: "Checking provider conversations… 4 checked",
+      text: "Recovering conversation messages… 4 conversations checked",
     },
   );
 });
