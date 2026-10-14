@@ -49,7 +49,7 @@ Example existing status: `{ "ready": false }` when capture is stale or failed. E
 
 1. Prevent indefinite stalls and misleading readiness. Tests cover hung fetch/body, recovery during backoff and session changes.
 2. Isolate profile ownership. Test switching between two configured shops, retiring predecessor sockets and preserving queued messages.
-3. Make support status understandable. Only the signed-in Shopee shop is shown and labelled in English/Thai. LINE retains multiple OA accounts per profile. Already captured queues for inactive shops may finish uploading without accessing those provider sessions.
+3. Make support status understandable. Only the signed-in Shopee shop is shown using the existing plain account row, without an extra card border or session label. LINE retains multiple OA accounts per profile. Already captured queues for inactive shops may finish uploading without accessing those provider sessions.
 4. Correct tenant attribution without per-heartbeat logging or new network calls.
 
 No heartbeat frequency increase, provisioned concurrency or warm-up scheduler. Fewer inactive connections should reduce unnecessary traffic, but exact savings require post-release measurement. Provider read/upload deadlines do not retry outgoing customer sends or alter uncertain-send handling.
