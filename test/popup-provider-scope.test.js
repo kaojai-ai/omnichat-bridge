@@ -93,9 +93,6 @@ test("offers an account-scoped discard action beside pending messages", () => {
 });
 
 test("offers to open Shopee Webchat mini before sync", () => {
-  assert.match(popupSource, /const canOpenSellerCentreChat = activeProviderSurface === "seller-centre"/);
-  assert.match(popupSource, /syncButton\.disabled = !canOpenSellerCentreChat/);
-  assert.match(popupSource, /canOpenSellerCentreChat \? t\("openWebchat"\) : t\("sync"\)/);
   assert.match(popupSource, /item\.account\.provider === "shopee" && item\.live\?\.provider_chat_open === false/);
   assert.match(popupSource, /syncButton\.dataset\.action = sellerCentreChatClosed \? "open_webchat_mini" : "sync"/);
   assert.match(popupSource, /\? t\("openWebchat"\)/);

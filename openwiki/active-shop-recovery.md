@@ -94,3 +94,8 @@ Removed: content-owned recovery inactivity timer and background fixed 90-second 
 Representative internal contracts: `sync_now_v3 { request_id: "attempt-uuid", provider, provider_account_id }` and `sync_activity { request_id: "attempt-uuid" }`. Only the active attempt from the selected tab refreshes the watchdog. Stale progress cannot overwrite the replacement's status. Cancellation during checkpoint loading prevents a late page-side start.
 
 Acceptance covers a hung initial fetch/body followed by successful retry, a long recovery making progress past 90 seconds, silence cancellation, duplicate Retry clicks, cancellation during checkpoint loading, stale-tab progress and late completion of a superseded run. Actual installed-extension recovery still needs release validation.
+
+
+### Popup processing feedback (Planned)
+
+The existing status area now distinguishes account detection, opening provider chat, server connection recovery, live Shopee connection readiness, and message recovery phases. An empty discovery result does not imply missing configuration: saved provider configuration produces a waiting-for-account state; missing configuration is shown after discovery completes. Retry feedback survives storage refreshes until actual recovery progress takes over. A completed history check does not imply that live commands are ready. No extra polling, server requests, database changes, cards, or account badges are added. Current provider progress comes from existing local storage fields, including `provider_realtime_connected`.

@@ -32,7 +32,7 @@ export function syncProgressPresentation(progressState) {
       active: true,
       showBar: true,
       value: percent,
-      text: `Checking conversation ${completed} of ${total} · ${percent}%`,
+      text: `${phaseLabel} ${completed} of ${total} conversations · ${percent}%`,
     };
   }
 
@@ -41,7 +41,7 @@ export function syncProgressPresentation(progressState) {
       active: true,
       showBar: false,
       value: 0,
-      text: `Checking provider conversations… ${completed} checked`,
+      text: `${phaseLabel} ${completed} conversations checked`,
     };
   }
 

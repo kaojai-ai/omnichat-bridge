@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accountConnectionStatus,
+  accountDiscoveryStatus,
   latestSyncFailure,
   transportConnectionStatus,
   providerConnectionStatus,
@@ -113,4 +115,26 @@ test("connection recovery is visible independently from provider readiness", () 
   assert.equal(transportConnectionStatus({ socket: "reconnecting", provider_recovery_state: "ready" }).state, "warning");
   assert.equal(transportConnectionStatus({ socket: "disconnected" }).action, "logs");
   assert.equal(transportConnectionStatus({ socket: "connected" }), null);
+});
+
+
+test("account discovery never claims missing configuration while still running", () => {
+  for (const hasConfiguration of [true, false]) {
+    assert.equal(accountDiscoveryStatus({ detecting: true, hasConfiguration }).label, "detectingShop");
+  }
+  assert.equal(accountDiscoveryStatus({ detecting: false, hasConfiguration: true }).label, "waitingForShop");
+  assert.equal(accountDiscoveryStatus({ detecting: false, hasConfiguration: false }).action, "configure");
+});
+
+test("chat recovery is visible before the target socket connects", () => {
+  assert.equal(accountConnectionStatus({ provider_recovery_state: "opening" }).label, "OPENING PROVIDER CHAT");
+  assert.equal(accountConnectionStatus({ provider_recovery_state: "needs_attention" }).action, "logs");
+});
+
+test("captured request templates do not imply a healthy Shopee realtime connection", () => {
+  const live = { ...connected, provider_surface_ready: true, provider_chat_open: true,
+    provider_recovery_state: "ready", provider_realtime_connected: false };
+  assert.equal(accountConnectionStatus(live).label, "WAITING FOR SHOPEE CONNECTION");
+  assert.equal(accountConnectionStatus({ ...live, provider_realtime_connected: true }).state, "ready");
+  assert.equal(accountConnectionStatus({ ...live, socket: "reconnecting" }).label, "RECOVERING CONNECTION");
 });

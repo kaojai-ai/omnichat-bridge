@@ -114,3 +114,33 @@ export function transportConnectionStatus(live) {
   };
   return null;
 }
+
+// Startup discovery is not evidence that configuration is missing.
+export function accountDiscoveryStatus({ detecting, hasConfiguration }) {
+  if (detecting) return { label: "detectingShop", hint: "detectingShop", action: "sync" };
+  if (hasConfiguration) return { label: "waitingForShop", hint: "shopUnknown", action: "sync" };
+  return { label: "needConfig", hint: "configurationMissing", action: "configure" };
+}
+
+export function accountConnectionStatus(live) {
+  // Recovery can run before a server socket exists.
+  if (live?.provider_recovery_state === "opening") return {
+    label: "OPENING PROVIDER CHAT", state: "warning",
+    hint: live.provider_recovery_reason || "Opening the provider chat…",
+  };
+  if (live?.provider_recovery_state === "needs_attention") return {
+    label: "ACTION REQUIRED", state: "warning", action: "logs",
+    hint: live.provider_recovery_reason || "The provider tab needs attention. Open its chat and retry.",
+  };
+  const transport = transportConnectionStatus(live);
+  if (transport) return transport;
+  if (live?.socket === "connected" && live?.provider_surface === SELLER_CENTRE_SURFACE
+    && live.provider_chat_open !== false && live.provider_realtime_connected === false) return {
+    label: "WAITING FOR SHOPEE CONNECTION", state: "warning",
+    hint: "Waiting for Shopee's live connection. Keep its chat open.",
+  };
+  return sellerCentreConnectionStatus(live) || providerConnectionStatus(live) || {
+    label: "WAITING FOR CONNECTION", state: "warning",
+    hint: "Waiting for connection status. Keep the provider chat open; retry if this continues.",
+  };
+}
