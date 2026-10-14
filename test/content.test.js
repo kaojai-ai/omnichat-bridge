@@ -599,3 +599,12 @@ test("content forwards attempt-scoped recovery activity and cancellation", async
   await bridge.requestMessage({ type: "cancel_sync_v3", request_id: "current" });
   assert.equal((await running).ok, false);
 });
+
+
+test("preserves missing-conversation codes across the content bridge", async () => {
+  const bridge = contentBridge();
+  const pending = bridge.sendCommand({ ...command, request_id: "missing-1" });
+  await bridge.providerEvent({ type: "api_send_result", request_id: "missing-1", ok: false,
+    error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
+  assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
+});
