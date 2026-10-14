@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee" } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
@@ -52,7 +52,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
         },
         async sendMessage(message) {
           runtimeMessages.push(message);
-          return { ok: true };
+          return runtimeHandler ? runtimeHandler(message) : { ok: true };
         },
       },
       storage: {
@@ -114,6 +114,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     runtimeMessages,
     storageWrites,
     sendCommand,
+    requestMessage: message => new Promise(resolve => runtimeListeners[0](message, {}, resolve)),
     triggerWindowEvent,
     reattach() {
       vm.runInContext(source, context);
@@ -565,4 +566,36 @@ test("uses observed conversation mapping and preserves names through incomplete 
   const names = bridge.runtimeMessages.filter((message) => message.type === "queue_messages")
     .map((message) => message.messages[0].participant?.display_name);
   assert.deepEqual(names, ["List name", "List name", "New list name"]);
+});
+
+
+test("cancel during checkpoint loading prevents a stale recovery from starting", async () => {
+  let finishCheckpoint;
+  const account = { provider: "shopee", provider_account_id: "shop-1" };
+  const bridge = contentBridge("/new-webchat/conversations", {
+    localConsent: true, storage: { config: { accounts: [account] }, detected_accounts: [account] },
+    runtimeHandler: message => message.type === "get_sync_state"
+      ? new Promise(resolve => { finishCheckpoint = resolve; }) : { ok: true },
+  });
+  const old = bridge.sendCommand({ type: "sync_now_v3", provider_account_id: "shop-1", request_id: "old" });
+  await new Promise(resolve => setImmediate(resolve));
+  await bridge.requestMessage({ type: "cancel_sync_v3" });
+  finishCheckpoint({ ok: true, checkpoint: {} });
+  assert.equal((await old).ok, false);
+  assert.equal(bridge.runtimeMessages.some(message => message.type === "sync_v3"), false);
+});
+
+test("content forwards attempt-scoped recovery activity and cancellation", async () => {
+  const account = { provider: "shopee", provider_account_id: "shop-1" };
+  const bridge = contentBridge("/new-webchat/conversations", {
+    localConsent: true, storage: { config: { accounts: [account] }, detected_accounts: [account] },
+  });
+  const running = bridge.sendCommand({ type: "sync_now_v3", provider_account_id: "shop-1", request_id: "current" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(bridge.runtimeMessages.find(message => message.type === "sync_v3").request_id, "current");
+  assert.equal(bridge.runtimeMessages.find(message => message.type === "sync_activity").request_id, "current");
+  await bridge.requestMessage({ type: "cancel_sync_v3", request_id: "old" });
+  assert.equal(bridge.runtimeMessages.some(message => message.type === "cancel_sync_v3"), false);
+  await bridge.requestMessage({ type: "cancel_sync_v3", request_id: "current" });
+  assert.equal((await running).ok, false);
 });

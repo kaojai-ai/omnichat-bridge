@@ -973,3 +973,21 @@ for (const hangBody of [false, true]) {
     assert.equal(bridge.state.pollingConnected, true);
   });
 }
+
+for (const hangBody of [false, true]) {
+  test(`initial recovery bounds a hung ${hangBody ? "body" : "request"} and a fresh attempt succeeds`, async () => {
+    const bridge = createBridge({ pathname: "/portal/chat-management", requestTimeoutMs: 20 });
+    await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+    await bridge.fetch(retryListPath, []);
+    bridge.setResponse(retryListPath, () => hangBody
+      ? { ok: true, json: () => new Promise(() => {}) }
+      : new Promise(() => {}));
+    const failed = await bridge.sync("100000001", "hung-initial");
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /timed out/);
+    assert.equal(bridge.state.recoveryInFlight, false);
+    bridge.setResponse(retryListPath, []);
+    const retried = await bridge.sync("100000001", "fresh-initial");
+    assert.equal(retried.ok, true);
+  });
+}

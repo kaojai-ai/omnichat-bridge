@@ -72,7 +72,9 @@ const KEEPALIVE_INTERVAL_MS = 20_000;
 const API_PING_TIMEOUT_MS = 15_000;
 const MAX_REPLY_TEXT_LENGTH = 2_000;
 const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
-const PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000;
+const PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
+const RECOVERY_IDLE_TIMEOUT_MS = 60_000;
+const PROVIDER_PREPARATION_TIMEOUT_MS = 35_000;
 const PROVIDER_STATUS_RESPONSE_TIMEOUT_MS = 5_000;
 const DELIVERY_RETRY_ALARM = "omnichat-delivery-retry";
 const LOG_UPLOAD_ALARM = "omnichat-log-upload";
@@ -127,6 +129,7 @@ let commandTabWriteQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
+let syncRestart = null;
 const liveConnections = new Map();
 const liveCommandResults = new Map();
 const apiPingAttempts = new Map();
@@ -838,8 +841,23 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "sync_activity") {
+    const control = activeSyncControl;
+    if (control && control.tabId === _sender?.tab?.id && control.providerRequestId === message.request_id) {
+      control.touchRecovery?.();
+    }
+    respond({ ok: true });
+    return false;
+  }
   if (message?.type === "sync_progress") {
+    const attempt = activeSyncControl;
+    if (!attempt || attempt.tabId !== _sender?.tab?.id
+      || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
+      respond({ ok: true, skipped: "superseded" });
+      return false;
+    }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
+      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -865,7 +883,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_phase") {
+    const attempt = activeSyncControl;
+    if (!attempt || attempt.tabId !== _sender?.tab?.id
+      || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
+      respond({ ok: true, skipped: "superseded" });
+      return false;
+    }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
+      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -1011,8 +1036,16 @@ async function initializeAndStartSync(trigger) {
       ? "Automatic sync requested by unattended recovery."
       : "Manual sync requested.",
   );
-  await ensureLiveConnection();
-  return startSync(trigger);
+  if (trigger === "manual") {
+    for (const connection of liveConnections.values()) {
+      clearTimeout(connection.reconnectTimer);
+      connection.reconnectTimer = null;
+      connection.reconnectAttempt = 0;
+    }
+  }
+  // Ticket/reconnect backoff must not hold up a user-requested retry.
+  void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
+  return trigger === "manual" ? restartSync() : startSync(trigger);
 }
 
 async function startUnattendedSellerCentreSync(provider) {
@@ -2600,11 +2633,14 @@ async function ensureProviderBridge(tabId, adapter) {
   let pingFailed = false;
   let bridgeReady = false;
   try {
-    response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
+    response = await sendProviderMessage(tabId, { type: "ping_v3" }, {
+      label, operation: "bridge ping", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+    });
     bridgeReady = Boolean(
       response?.ok
       && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
-      && response.bridge_source === BRIDGE_SOURCE,
+      && response.bridge_source === BRIDGE_SOURCE
+      && response.recovery_watchdog_version === 1,
     );
     if (bridgeReady && adapter.id === "line_oa") {
       try {
@@ -2625,11 +2661,14 @@ async function ensureProviderBridge(tabId, adapter) {
 
   if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
-      response = await chrome.tabs.sendMessage(tabId, { type: "ping_v3" });
+      response = await sendProviderMessage(tabId, { type: "ping_v3" }, {
+        label, operation: "bridge ping", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+      });
       bridgeReady = Boolean(
         response?.ok
         && response.bridge_protocol_version === BRIDGE_PROTOCOL_VERSION
-        && response.bridge_source === BRIDGE_SOURCE,
+        && response.bridge_source === BRIDGE_SOURCE
+        && response.recovery_watchdog_version === 1,
       );
       if (bridgeReady && adapter.id === "line_oa") {
         try {
@@ -2680,7 +2719,7 @@ async function prepareProviderTab(tab, adapter) {
   }, {
     label: providerLabel(adapter),
     operation: "surface preparation",
-    timeoutMs: PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
+    timeoutMs: PROVIDER_PREPARATION_TIMEOUT_MS,
   });
   if (!result?.ok) {
     throw new Error(result?.error || "Shopee Seller Centre could not be prepared for an outbound reply.");
@@ -2998,14 +3037,28 @@ function sendProviderMessage(tabId, message, {
   label,
   operation,
   signal,
-  timeoutMs = PROVIDER_SYNC_RESPONSE_TIMEOUT_MS,
+  timeoutMs = PROVIDER_REQUEST_TIMEOUT_MS,
+  recoveryControl,
 } = {}) {
   let timeout;
   let onAbort;
+  if (signal?.aborted) return Promise.reject(syncCancelledError());
   const response = Promise.resolve()
     .then(() => chrome.tabs.sendMessage(tabId, message));
   const deadline = new Promise((_, reject) => {
-    timeout = setTimeout(() => reject(providerMessageTimeout(label ?? "Provider", operation ?? "request")), timeoutMs);
+    const touch = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        if (recoveryControl) {
+          void Promise.resolve(chrome.tabs.sendMessage(tabId, {
+            type: "cancel_sync_v3", request_id: message.request_id,
+          })).catch(() => undefined);
+        }
+        reject(providerMessageTimeout(label ?? "Provider", operation ?? "request"));
+      }, timeoutMs);
+    };
+    if (recoveryControl) recoveryControl.touchRecovery = touch;
+    touch();
   });
   const cancellation = new Promise((_, reject) => {
     if (!signal) return;
@@ -3015,6 +3068,7 @@ function sendProviderMessage(tabId, message, {
   });
   return Promise.race([response, deadline, cancellation]).finally(() => {
     clearTimeout(timeout);
+    if (recoveryControl) recoveryControl.touchRecovery = null;
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
   });
 }
@@ -3060,8 +3114,19 @@ async function syncOpenProvider(control, context) {
     }
   }
   throwIfSyncCancelled(signal);
+  if (control.manualRestart) {
+    await sendProviderMessage(tab.id, { type: "cancel_sync_v3", provider: adapter.id }, {
+      label, operation: "reset recovery", signal, timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+    });
+    if (adapter.id === "shopee") {
+      await withRequestTimeout(() => resetProviderRecovery(tab.id), PROVIDER_STATUS_RESPONSE_TIMEOUT_MS, signal);
+    }
+    throwIfSyncCancelled(signal);
+  }
+  control.providerRequestId = crypto.randomUUID();
   const syncMessage = {
     type: "sync_now_v3",
+    request_id: control.providerRequestId,
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...(context.config.bot_id || context.account.bot_id
@@ -3071,6 +3136,8 @@ async function syncOpenProvider(control, context) {
   let result = await sendProviderMessage(tab.id, syncMessage, {
     label,
     operation: "sync request",
+    timeoutMs: RECOVERY_IDLE_TIMEOUT_MS,
+    recoveryControl: control,
     signal,
   });
   throwIfSyncCancelled(signal);
@@ -3080,6 +3147,8 @@ async function syncOpenProvider(control, context) {
     result = await sendProviderMessage(tab.id, syncMessage, {
       label,
       operation: "retry sync request",
+      timeoutMs: RECOVERY_IDLE_TIMEOUT_MS,
+      recoveryControl: control,
       signal,
     });
     throwIfSyncCancelled(signal);
@@ -3088,17 +3157,40 @@ async function syncOpenProvider(control, context) {
   return result;
 }
 
-function startSync(trigger = "manual") {
+function restartSync() {
+  if (!syncRestart) {
+    syncRestart = (async () => {
+      const previous = activeSyncControl;
+      previous?.controller.abort();
+      // Detach immediately: a non-cooperative old request must not own the new run.
+      activeSyncControl = null;
+      activeSync = null;
+      if (previous?.tabId) {
+        await sendProviderMessage(previous.tabId, { type: "cancel_sync_v3" }, {
+          label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+        }).catch(() => undefined);
+      }
+      return { sync: startSync("manual", true) };
+    })().finally(() => { syncRestart = null; });
+  }
+  return syncRestart.then((result) => result.sync);
+}
+
+function startSync(trigger = "manual", restarting = false) {
+  if (syncRestart && !restarting) return syncRestart.then((result) => result.sync);
   if (activeSync) return activeSync;
   const control = {
     controller: new AbortController(),
+    manualRestart: restarting,
     tabId: null,
   };
   activeSyncControl = control;
   activeSync = runUnifiedSync(trigger, control)
     .finally(() => {
-      if (activeSyncControl === control) activeSyncControl = null;
-      activeSync = null;
+      if (activeSyncControl === control) {
+        activeSyncControl = null;
+        activeSync = null;
+      }
     });
   return activeSync;
 }
@@ -3187,6 +3279,7 @@ async function runAccountSync(trigger, control, context) {
   const prepared = await exclusive(async () => {
     throwIfSyncCancelled(signal);
     const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
+    throwIfSyncCancelled(signal);
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
     const lastSyncAt = Date.parse(
       readAccountState(stored[STORAGE.status], context.key, {}).last_sync_at ?? "",
@@ -3254,7 +3347,9 @@ async function runAccountSync(trigger, control, context) {
     const recovered = await syncOpenProvider(control, context);
     throwIfSyncCancelled(signal);
     await exclusive(async () => {
+      throwIfSyncCancelled(signal);
       const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
+      throwIfSyncCancelled(signal);
       await writeAccountScanState(context, {
         ...state,
         watermark: recovered.watermark ?? state.watermark,
@@ -3270,6 +3365,7 @@ async function runAccountSync(trigger, control, context) {
       total_conversations: null,
     });
     const delivered = await attemptDelivery(context, { resetBackoff: true, signal });
+    throwIfSyncCancelled(signal);
     throwIfSyncCancelled(signal);
     const result = {
       provider: context.account.provider,
@@ -3298,6 +3394,7 @@ async function runAccountSync(trigger, control, context) {
     }
     return result;
   } catch (error) {
+    if (activeSyncControl !== control) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
     const message = cancelled
       ? "Sync cancelled."
@@ -3361,6 +3458,7 @@ async function openSessionSyncContexts(contexts, control) {
   // Reload configuration after detection: the owner may have switched shop since the last sync.
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const currentContexts = configuredAccountContexts(stored);
+  throwIfSyncCancelled(control.controller.signal);
   const selected = currentContexts.filter((context) => context.adapter.id !== "shopee"
     || (currentId && context.account.provider_account_id === currentId));
   for (const context of shopee) {

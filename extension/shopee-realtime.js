@@ -451,16 +451,21 @@
       .catch((error) => logAsyncError("account_capture", error));
   };
   // Keep browser networking and JSON parsing bounded, including hung responses.
-  const fetchProviderJson = async (request) => {
+  const fetchProviderJson = async (request, signal) => {
     const controller = new AbortController();
     let timer;
+    let onAbort;
     const timeout = new Promise((_, reject) => {
+      onAbort = () => { controller.abort(); reject(new Error("Shopee request cancelled.")); };
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener("abort", onAbort, { once: true });
       timer = setTimeout(() => {
         controller.abort();
         reject(new Error("Shopee provider request timed out."));
       }, 15_000);
     });
     try {
+      if (signal?.aborted) return await timeout;
       return await Promise.race([
         (async () => {
           const response = await state.nativeFetch(request, { signal: controller.signal });
@@ -471,6 +476,7 @@
       ]);
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
   };
 
@@ -513,18 +519,18 @@
     return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
   };
 
-  const recoveryFetch = async (request) => {
+  const recoveryFetchJson = async (request) => {
+    const signal = state.recoveryAbortController?.signal;
+    const requestId = state.recoveryRequestId;
     const scheduledAt = Math.max(Date.now(), state.nextRecoveryRequestAt);
     state.nextRecoveryRequestAt = scheduledAt + MIN_RECOVERY_REQUEST_INTERVAL_MS;
     const waitMs = scheduledAt - Date.now();
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
-    const response = await state.nativeFetch(request, {
-      signal: state.recoveryAbortController?.signal,
-    });
-    if (state.recoveryRequestId) {
-      post({ type: "recovery_activity", request_id: state.recoveryRequestId });
+    const body = await fetchProviderJson(request, signal);
+    if (requestId && state.recoveryRequestId === requestId) {
+      post({ type: "recovery_activity", request_id: requestId });
     }
-    return response;
+    return body;
   };
 
   const waitForTemplate = async () => {
@@ -1284,9 +1290,7 @@
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0),
     });
-    const response = await recoveryFetch(request.clone());
-    if (!response.ok) throw new Error(`Shopee conversation recovery returned ${response.status}. Refresh Seller Chat.`);
-    const body = await response.json();
+    const body = await recoveryFetchJson(request.clone());
     const allItems = conversationItems(body);
     mergeAccounts(accountsFromPayload(body), null, publish);
     captureProfiles(allItems);
@@ -1384,14 +1388,12 @@
       if (isSellerCentreSurface()) url.searchParams.set("on_message_received", "true");
       const headers = new Headers(historyTemplate.init.headers);
       headers.delete("content-type");
-      const response = await recoveryFetch(new Request(url, {
+      const pageMessages = await recoveryFetchJson(new Request(url, {
         ...historyTemplate.init,
         method: "GET",
         headers,
         body: undefined,
       }));
-      if (!response.ok) throw new Error(`Shopee message recovery returned ${response.status}. Refresh Seller Chat.`);
-      const pageMessages = await response.json();
       if (!Array.isArray(pageMessages)) break;
       let currentMessages = pageMessages
         .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)

@@ -3,7 +3,7 @@ type: Explanation
 title: Active-shop connection recovery
 description: Planned isolation of Shopee profiles and bounded connection recovery.
 created: "2026-10-14T11:22:00+07:00"
-updated: "2026-10-14T11:26:44+07:00"
+updated: "2026-10-14T11:40:50+07:00"
 ---
 
 # Active-shop connection recovery
@@ -61,3 +61,36 @@ Extension and logging changes are independently compatible; neither requires a s
 The production bridge was observed without APP_ENV/KJ_RUNTIME_ENVIRONMENT even though current Terraform declares them. Reconcile through the existing reviewed infrastructure workflow separately; do not guess environment from a socket URL. No production configuration is changed by this patch.
 
 Heartbeat acknowledgements and half-open socket detection remain phase two. The observed customer disconnect after two hours is not conclusively explained by server logs alone. This patch addresses reproduced failure paths; production resolution must be verified after rollout. Existing send-worker execute/ack budgets stay unchanged.
+
+## Manual retry and timeout ownership
+
+**Planned refinement.** Manual Retry replaces the active recovery, including an automatic attempt. It aborts and detaches the old run, sends a bounded cancellation, resets the selected Shopee page recovery, and starts a fresh run with a new attempt ID. Duplicate clicks during cancellation share one restart. Automatic triggers join the current run. Capture queues and cursors remain; outgoing customer sends are never replayed by this action. The popup keeps Retry available during syncing and ignores responses from superseded clicks.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant E as Extension background — UPDATE
+    participant C as Content bridge — UPDATE
+    participant P as Provider page — UPDATE
+    U->>E: Retry
+    E->>C: Cancel old recovery
+    C->>P: Cancel/reset old request
+    E->>C: sync_now_v3 with fresh request_id
+    C->>P: Existing sync_v3 with matching request_id
+    P-->>C: Recovery activity and captured batches
+    C-->>E: sync_activity with matching request_id
+    Note over E: Single 60-second inactivity watchdog
+```
+
+| Limit | Owner and purpose |
+| --- | --- |
+| 15-second request deadline | Shopee polling/initial-history fetch and body reads; background ingestion/log uploads. Cancels stuck I/O. |
+| 60 seconds without progress | Background recovery handoff. Matching activity from the selected tab refreshes it; expiry cancels that request. No fixed total-sync cutoff. |
+| 5-second bridge control checks | Status, ping and cancellation acknowledgements. A dead tab cannot hold the Retry handoff indefinitely. |
+| Existing operation-specific limits | Surface preparation uses its 30-second page wait plus a 35-second transport guard; local queue acknowledgements, WebSocket ticket/handshake, and outgoing-send deadlines remain separate contracts. |
+
+Removed: content-owned recovery inactivity timer and background fixed 90-second sync timer. The progress notification is local Chrome messaging, not a server heartbeat. Content reports `recovery_watchdog_version: 1` in its ping so open tabs with older code are reattached before recovery. No server or database contract changes.
+
+Representative internal contracts: `sync_now_v3 { request_id: "attempt-uuid", provider, provider_account_id }` and `sync_activity { request_id: "attempt-uuid" }`. Only the active attempt from the selected tab refreshes the watchdog. Stale progress cannot overwrite the replacement's status. Cancellation during checkpoint loading prevents a late page-side start.
+
+Acceptance covers a hung initial fetch/body followed by successful retry, a long recovery making progress past 90 seconds, silence cancellation, duplicate Retry clicks, cancellation during checkpoint loading, stale-tab progress and late completion of a superseded run. Actual installed-extension recovery still needs release validation.

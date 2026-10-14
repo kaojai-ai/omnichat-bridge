@@ -186,13 +186,13 @@ test("uses a 20-second worker keepalive and preserves immediate status sends", (
   assert.doesNotMatch(connectionSource, /60_000/);
 });
 
-test("refreshes live status before a manual sync starts", () => {
+test("repairs live status independently of manual retry", () => {
   const start = source.indexOf("async function initializeAndStartSync(trigger)");
   const end = source.indexOf("\n}\n\nasync function startUnattendedSellerCentreSync", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncStartSource = source.slice(start, end);
-  assert.match(syncStartSource, /await ensureLiveConnection\(\);\s*return startSync\(trigger\);/);
+  assert.match(syncStartSource, /void ensureLiveConnection\(\)[\s\S]*restartSync\(\) : startSync\(trigger\)/);
 });
 
 test("scopes leader changes to the provider shown in the popup", () => {
@@ -249,7 +249,7 @@ test("does not redeclare page bridge dependencies during reattachment", () => {
 });
 
 test("bounds the provider sync handoff when a page reload interrupts its response", () => {
-  assert.match(source, /PROVIDER_SYNC_RESPONSE_TIMEOUT_MS = 90_000/);
+  assert.match(source, /RECOVERY_IDLE_TIMEOUT_MS = 60_000/);
   assert.match(source, /PROVIDER_STATUS_RESPONSE_TIMEOUT_MS = 5_000/);
   assert.match(source, /function sendProviderMessage\(/);
   assert.match(source, /providerMessageTimeout\(label, operation\)/);

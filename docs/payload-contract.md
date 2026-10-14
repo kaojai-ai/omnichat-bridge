@@ -266,7 +266,7 @@ handle it without persistence or application logging. Readiness remains
 change-driven. Browser sleep, extension restart, and hosting connection limits
 still require reconnecting.
 
-Provider polling and ingestion/log upload requests have a 15-second deadline,
+Shopee polling, initial history recovery, and ingestion/log upload requests have a 15-second deadline,
 including provider and ingestion response-body reads. Automatic delivery respects
 its stored retry time; explicit retry can bypass that backoff. Reload backoff does
 not suspend provider health checks. Capture failures and stale checks suppress
@@ -288,3 +288,11 @@ No new capabilities, response fields, or configuration versions are required
 for these lifecycle fixes. A target can continue issuing existing tickets and
 handling existing status/result envelopes. Optional deadline support does not
 require a particular target product or infrastructure.
+
+
+Manual Retry replaces the current recovery attempt and bypasses automatic delivery
+and reconnect backoff. It preserves captured queues and never replays outgoing
+customer commands. Recovery has one background-owned 60-second inactivity watchdog,
+refreshed by attempt-scoped local content activity; there is no fixed total-sync
+cutoff. Open tabs with an older recovery bridge are reattached before use. These
+are extension-internal messages, not additions to the target server protocol.

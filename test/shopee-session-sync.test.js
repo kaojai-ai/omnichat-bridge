@@ -11,6 +11,7 @@ for (const currentId of ["A", "B", null]) {
     const contexts = [context("shopee", "A"), context("shopee", "B"), context("line_oa", "L1"), context("line_oa", "L2")];
     const skipped = [];
     const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+      throwIfSyncCancelled: () => {},
       shopeeAdapter: { id: "shopee" }, STORAGE: {},
       findReadyProviderChatTab: async () => ({ id: 42 }), findProviderChatTab: async () => null,
       detectOpenProviderAccount: async () => ({ ok: Boolean(currentId) }),
@@ -19,27 +20,29 @@ for (const currentId of ["A", "B", null]) {
       recordLog: async (_level, _area, _event, _message, data) => skipped.push(data.provider_account_id),
       updateScopedState: async () => {},
     });
-    const selected = await select(contexts, {});
+    const selected = await select(contexts, { controller: { signal: {} } });
     assert.deepEqual(Array.from(selected, (entry) => entry.key), [...(currentId ? [currentId] : []), "L1", "L2"]);
     assert.deepEqual(skipped, ["A", "B"].filter((id) => id !== currentId));
   });
 }
 test("LINE-only sync does not inspect a Shopee session", async () => {
-  const select = vm.runInNewContext(`(${source.slice(start, end)})`, {});
+  const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+      throwIfSyncCancelled: () => {},});
   const contexts = [context("line_oa", "L1"), context("line_oa", "L2")];
-  assert.equal(await select(contexts, {}), contexts);
+  assert.equal(await select(contexts, { controller: { signal: {} } }), contexts);
 });
 
 test("a failed fresh lookup cannot reuse the previous shop ID", async () => {
   const contexts = [context("shopee", "A"), context("line_oa", "L1")];
   const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+      throwIfSyncCancelled: () => {},
     shopeeAdapter: {}, STORAGE: {}, findReadyProviderChatTab: async () => ({ id: 42 }),
     detectOpenProviderAccount: async () => ({ ok: false }),
     providerTabStatus: async () => assert.fail("stale status must not be read"),
     readStorage: async () => ({}), configuredAccountContexts: () => contexts,
     recordLog: async () => {}, updateScopedState: async () => {},
   });
-  assert.deepEqual(Array.from(await select(contexts, {}), (entry) => entry.key), ["L1"]);
+  assert.deepEqual(Array.from(await select(contexts, { controller: { signal: {} } }), (entry) => entry.key), ["L1"]);
 });
 
 test("Shopee tab recovery continues when the owner is between logins", async () => {

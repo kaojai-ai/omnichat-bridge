@@ -42,7 +42,6 @@
   let resumeSyncTimer;
   const MAX_REPLY_TEXT_LENGTH = 2_000;
   const MAX_REPLY_IMAGE_BYTES = 10 * 1024 * 1024;
-  const RECOVERY_INACTIVITY_TIMEOUT_MS = 60_000;
 
   const post = (message) => {
     if (!isBridgeActive()) return;
@@ -133,17 +132,8 @@
     const id = recoveryIdFrom(requestId);
     const pending = recoveries.get(id);
     if (!pending) return;
-    clearTimeout(pending.timeout);
-    pending.timeout = setTimeout(() => {
-      if (recoveries.get(id) !== pending) return;
-      recoveries.delete(id);
-      post({ type: "cancel_sync_v3", request_id: id });
-      log("error", "recovery_timeout", `${providerLabel} recovery stopped responding.`);
-      pending.resolve({
-        ok: false,
-        error: `${providerLabel} recovery stopped responding for 60 seconds. Retry.`,
-      });
-    }, RECOVERY_INACTIVITY_TIMEOUT_MS);
+    void sendRuntimeMessage({ type: "sync_activity", request_id: id })
+      .catch((error) => logAsyncError("recovery_activity", error));
   }
 
   function trackOutbound(conversationId, text, commandId, clientMessageId) {
@@ -322,7 +312,9 @@
       && (detected || configuredLineBot));
   }
 
-  async function requestRecovery(providerAccountId, botId = "") {
+  let recoveryGeneration = 0;
+  async function requestRecovery(providerAccountId, botId = "", attemptId = "") {
+    const generation = recoveryGeneration;
     if (!providerAdapter.supports("message_recovery")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
     }
@@ -333,18 +325,20 @@
       });
       return { ok: false, error: "Extension setup is required." };
     }
+    if (generation !== recoveryGeneration) return { ok: false, error: "Sync cancelled." };
     const syncState = await sendRuntimeMessage({
       type: "get_sync_state",
       provider: providerAdapter.id,
       provider_account_id: accountId,
     });
+    if (generation !== recoveryGeneration) return { ok: false, error: "Sync cancelled." };
     if (!syncState?.ok) {
       log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
       return syncState;
     }
-    const requestId = crypto.randomUUID();
+    const requestId = attemptId || crypto.randomUUID();
     const result = new Promise((resolve) => {
-      recoveries.set(requestId, { resolve, timeout: null });
+      recoveries.set(requestId, { resolve });
       touchRecovery(requestId);
     });
     post({
@@ -369,10 +363,11 @@
     return result;
   }
 
-  function cancelRecovery() {
+  function cancelRecovery(onlyRequestId = null) {
+    recoveryGeneration++;
     let cancelled = 0;
     for (const [requestId, pending] of recoveries) {
-      clearTimeout(pending.timeout);
+      if (onlyRequestId && requestId !== onlyRequestId) continue;
       recoveries.delete(requestId);
       post({ type: "cancel_sync_v3", request_id: requestId });
       pending.resolve({ ok: false, error: "Sync cancelled." });
@@ -769,7 +764,6 @@
       }
     }
     const pending = recoveries.get(message.request_id);
-    if (pending) clearTimeout(pending.timeout);
     if (!message.ok) {
       log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
         request_id: message.request_id,
@@ -1043,7 +1037,7 @@
       return false;
     }
     if (message?.type === "ping_v3") {
-      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION, bridge_source: SOURCE });
+      respond({ ok: true, bridge_protocol_version: BRIDGE_PROTOCOL_VERSION, bridge_source: SOURCE, recovery_watchdog_version: 1 });
       return false;
     }
     if (message?.type === "get_provider_status_v3") {
@@ -1072,11 +1066,11 @@
       return false;
     }
     if (message?.type === "sync_now_v3") {
-      void requestRecovery(message.provider_account_id, message.bot_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
+      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
     }
     if (message?.type === "cancel_sync_v3") {
-      respond(cancelRecovery());
+      respond(cancelRecovery(message.request_id));
       return false;
     }
     if (message?.type === "detect_account_v3") {
@@ -1123,7 +1117,6 @@
     disposed = true;
     clearTimeout(resumeSyncTimer);
     for (const pending of recoveries.values()) {
-      clearTimeout(pending.timeout);
       pending.resolve({ ok: false, error: reason });
     }
     recoveries.clear();
