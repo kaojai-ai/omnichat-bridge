@@ -147,14 +147,14 @@ const TRANSLATIONS = {
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
     supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", provider: "Provider", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Latest 100 safe operational logs · kept up to 2 days", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
-    detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Starting a fresh sync…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NO READY LEADER", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
+    failed: "FAILED", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Starting a fresh sync…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NO READY LEADER", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", noNew: "No new messages.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", provider: "ผู้ให้บริการ", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "Logs การทำงานล่าสุด 100 รายการ · เก็บไว้สูงสุด 2 วัน", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
-    detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ไม่มีตัวหลักที่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
+    failed: "ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ไม่มีตัวหลักที่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
   },
 };
 
@@ -393,6 +393,13 @@ function setLeaderStatus(label, state, action, isLeader = false) {
       : action ? "Set this tab as leader" : "";
 }
 
+function setStatusAppearance(state = "neutral", loading = false) {
+  status.dataset.state = state;
+  status.dataset.loading = String(loading);
+  status.classList.toggle("error", state === "error");
+  status.setAttribute("aria-busy", String(loading));
+}
+
 function renderDeviceNameBadge() {
   const deviceName = normalizeDeviceName(storedDeviceName);
   deviceNameBadge.textContent = deviceName;
@@ -472,10 +479,12 @@ function accountIsActiveHere(account) {
 function accountRowStatus(account) {
   const key = accountConfigKey(account);
   const config = findAccountConfig(storedConfig, account);
-  if (!config) return { label: t("needConfig"), state: "warning", action: "config" };
+  if (!config) return { label: t("needConfig"), state: "neutral", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
-  if (["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "ready" };
+  if (["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "neutral", loading: true };
+  const failure = latestSyncFailure([syncState]);
+  if (failure) return { label: t("failed"), state: "error", hint: failure, action: "logs" };
   return accountConnectionStatus(live);
 }
 
@@ -541,6 +550,8 @@ function renderDetectedAccounts() {
   ));
   accountList.replaceChildren();
   accountListEmpty.hidden = accounts.length !== 0;
+  accountListEmpty.dataset.loading = String(detectingAccount);
+  accountListEmpty.setAttribute("aria-busy", String(detectingAccount));
   accountListEmpty.textContent = detectingAccount ? t("detectingShop")
     : activeProviderAdapter?.id === "shopee" ? t("shopUnknown") : t("noAccounts");
   for (const account of accounts) {
@@ -571,6 +582,8 @@ function renderDetectedAccounts() {
     const statusLabel = document.createElement(cardState.action ? "a" : "span");
     statusLabel.className = "account-row-status";
     statusLabel.dataset.state = cardState.state;
+    statusLabel.dataset.loading = String(cardState.loading === true);
+    statusLabel.setAttribute("aria-busy", String(cardState.loading === true));
     statusLabel.textContent = cardState.label;
     if (cardState.hint) statusLabel.title = cardState.hint;
     if (cardState.action) {
@@ -638,7 +651,7 @@ function renderDashboard(message = "", isError = false) {
   showAccounts(detectedAccounts.filter(accountIsActiveHere));
   renderDetectedAccounts();
   status.replaceChildren();
-  status.classList.toggle("error", isError);
+  setStatusAppearance(isError ? "error" : "neutral");
   lastSync.hidden = true;
   lastSync.textContent = "";
   const accountStates = detectedAccounts.map((account) => {
@@ -699,7 +712,7 @@ function renderDashboard(message = "", isError = false) {
   const hasLeader = configuredStates.some((item) => item.live?.leader_installation_id);
   const surfaceHint = configuredStates
     .map((item) => accountConnectionStatus(item.live))
-    .find((item) => item?.state === "warning" && item?.hint);
+    .find((item) => item?.state !== "ready" && item?.hint);
   const latestSync = configuredStates
     .map((item) => item.syncState?.last_sync_at)
     .filter(Boolean)
@@ -711,7 +724,8 @@ function renderDashboard(message = "", isError = false) {
       detecting: detectingAccount,
       hasConfiguration: storedConfig.accounts.some((account) => account.provider === activeProviderAdapter?.id),
     });
-    setLeaderStatus(pendingAction ? t(pendingAction) : t(discovery.label), "warning", pendingAction ? "" : discovery.action === "configure" ? "config" : "");
+    setLeaderStatus(t("noLeader"), "neutral", "");
+    setStatusAppearance(isError ? "error" : "neutral", !isError && Boolean(pendingAction || detectingAccount));
     status.textContent = message || (pendingAction ? t(pendingAction) : t(discovery.hint));
     syncButton.disabled = false;
     syncButton.dataset.action = discovery.action;
@@ -725,7 +739,7 @@ function renderDashboard(message = "", isError = false) {
   }
 
   status.classList.toggle("error", isError);
-  setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : hasLeader ? "neutral" : "warning", "leader", anyLeader);
+  setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
   syncButton.disabled = false;
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
@@ -742,12 +756,8 @@ function renderDashboard(message = "", isError = false) {
     lastSync.hidden = false;
   }
 
-  if (pendingAction || progressView?.active || surfaceHint) {
-    const label = progressView?.active ? t("syncing") : pendingAction ? t(pendingAction) : surfaceHint.label;
-    setLeaderStatus(label, "warning", "");
-  }
-
-  if (progressView?.active) {
+  if (progressView?.active && !isError) {
+    setStatusAppearance("neutral", true);
     syncProgress.hidden = !progressView.showBar;
     syncProgress.value = progressView.value;
     progressArea.hidden = false;
@@ -760,8 +770,10 @@ function renderDashboard(message = "", isError = false) {
     syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage && !anyError;
     if (message || pendingAction || !anyError) {
+      setStatusAppearance(isError ? "error" : pendingAction ? "neutral" : surfaceHint?.state || (latestResult && !message && !latestResult.pending ? "ready" : "neutral"), !isError && Boolean(pendingAction || (!message && surfaceHint?.loading)));
       status.textContent = resultMessage;
     } else {
+      setStatusAppearance("error");
       const error = document.createElement("span");
       error.className = "status-error";
       error.textContent = latestFailure;
@@ -1109,6 +1121,7 @@ syncButton.addEventListener("click", async () => {
     progressArea.hidden = false;
     status.classList.remove("error");
     status.textContent = t("openingWebchat");
+    setStatusAppearance("neutral", true);
     try {
       const result = await chrome.tabs.sendMessage(popupTabId, {
         type: "prepare_provider_v3",
@@ -1169,6 +1182,7 @@ cancelSyncButton.addEventListener("click", async () => {
   cancelSyncButton.textContent = t("cancelling");
   status.classList.remove("error");
   status.textContent = t("cancellingSync");
+  setStatusAppearance("neutral", true);
   try {
     const result = await chrome.runtime.sendMessage({ type: "cancel_sync" });
     await refreshStoredState();

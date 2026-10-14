@@ -24,7 +24,7 @@ test("separates a connected server from a provider that needs attention", () => 
     }),
     {
       label: "CONNECTED · ACTION REQUIRED",
-      state: "warning",
+      state: "error",
       hint: "The tracked provider tab was closed.",
       action: "logs",
     },
@@ -47,7 +47,7 @@ test("distinguishes a connected Seller Centre bridge before mini-chat is open", 
     sellerCentreConnectionStatus({ ...connected, provider_surface_ready: false, provider_chat_open: false }),
     {
       label: "CONNECTED · OPEN CHAT",
-      state: "warning",
+      state: "neutral",
       hint: "Connected to your server. Open Seller Centre Chat to start syncing.",
     },
   );
@@ -112,7 +112,7 @@ test("scopes the latest sync error to its provider account", () => {
 
 test("connection recovery is visible independently from provider readiness", () => {
   assert.equal(transportConnectionStatus({ socket: "connecting" }).label, "CONNECTING");
-  assert.equal(transportConnectionStatus({ socket: "reconnecting", provider_recovery_state: "ready" }).state, "warning");
+  assert.equal(transportConnectionStatus({ socket: "reconnecting", provider_recovery_state: "ready" }).state, "neutral");
   assert.equal(transportConnectionStatus({ socket: "disconnected" }).action, "logs");
   assert.equal(transportConnectionStatus({ socket: "connected" }), null);
 });
