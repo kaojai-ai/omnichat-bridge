@@ -58,6 +58,10 @@ Version 2 is legacy Shopee-only configuration using `commands_url` instead of
 `api_url`; LINE requires version 3. Unsupported provider entries are skipped;
 malformed supported entries are rejected. Unrecognized fields are discarded.
 
+Initial sync covers the last 1 day. Later polling and reconnect recovery use
+the saved checkpoint, capped at the last 5 days even with a missing or stale
+cursor.
+
 Optional top-level `history_days` is an integer from 1 to 366.
 `history_conversation_ids`, when supplied, must contain unique nonempty strings
 and requires `history_days`. Historical capture remains provider-dependent.

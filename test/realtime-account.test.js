@@ -100,9 +100,11 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     },
     __CHAT_GLOBAL__: {},
   };
+  const clockStartedAt = Date.now();
   const context = vm.createContext({
     window,
     document,
+    Date: class extends Date { static now() { return Date.parse("2026-08-20T12:00:00Z") + Date.now() - clockStartedAt; } },
     URL,
     Headers,
     Request,
@@ -750,7 +752,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     shop_id: 100000001,
     type: "text",
     content: { text: "First" },
-    created_timestamp: 1_724_141_000,
+    created_timestamp: Date.parse("2026-08-20T10:00:00Z") / 1000,
   }, {
     id: "seller-message-2",
     conversation_id: "seller-centre-conversation",
@@ -759,7 +761,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     shop_id: 100000001,
     type: "text",
     content: { text: "Second" },
-    created_timestamp: 1_724_141_060,
+    created_timestamp: Date.parse("2026-08-20T10:01:00Z") / 1000,
   }]);
   await bridge.runIntervals();
   assert.equal(bridge.intervals.filter(({ delay }) => delay === 3_000).length, 1);
@@ -991,3 +993,70 @@ for (const hangBody of [false, true]) {
     assert.equal(retried.ok, true);
   });
 }
+
+test("default polling ignores ancient newly discovered conversations and filters ancient messages from a missing-marker page", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  const conversation = (id, latest) => ({
+    id, shop_id: 100000001, latest_message_id: latest,
+    last_message_time: "2026-08-20T11:00:00Z",
+  });
+  await bridge.fetch(retryListPath, [conversation("recent", "missing-marker")]);
+  const messages = Array.from({ length: 40 }, (_, i) => ({
+    ...retryMessage(`bounded-${i}`, 0), conversation_id: "recent",
+    created_timestamp: Date.parse(i < 5 ? "2021-01-01T00:00:00Z" : "2026-08-20T11:00:00Z") / 1000 + i,
+  }));
+  let requestedLimit;
+  bridge.setResponse(`${retryListPath}/recent/messages`, (request) => {
+    requestedLimit = new URL(request.url).searchParams.get("limit");
+    return new Response(JSON.stringify(messages));
+  });
+  await bridge.fetch(retryListPath, [conversation("recent", "bounded-39"), {
+    ...conversation("ancient", "old"), last_message_time: "2021-01-01T00:00:00Z",
+  }]);
+  await bridge.runIntervals();
+  const ids = capturedRetryIds(bridge);
+  assert.equal(requestedLimit, "100");
+  assert.equal(ids.length, 35);
+  assert.deepEqual(ids, messages.slice(5).map((message) => message.id));
+  assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), false);
+});
+
+
+test("default recovery with no conversation cursor stops at the 5-day floor", async () => {
+  const bridge = createBridge();
+  const listPath = "/webchat/api/v1.2/conversations";
+  const conversation = { id: "missing-cursor", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
+  await bridge.fetch(listPath, [conversation]);
+  bridge.setResponse(`${listPath}/${conversation.id}/messages`, [
+    { ...retryMessage("ancient", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2021-01-01T00:00:00Z") / 1000 },
+    { ...retryMessage("outside-window", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-14T12:00:00Z") / 1000 },
+    { ...retryMessage("inside-window", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-16T12:00:00Z") / 1000 },
+    { ...retryMessage("recent", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 },
+  ]);
+  const complete = await bridge.sync("100000001");
+  assert.equal(complete.ok, true);
+  const messages = bridge.posts.filter(post => post.type === "recovery_batch").flatMap(post => Array.from(post.body));
+  assert.deepEqual(messages.map(message => message.id), ["recent", "inside-window"]);
+});
+
+test("initial Shopee sync uses one day while reconnect can recover within five days", async () => {
+  const listPath = "/webchat/api/v1.2/conversations";
+  const historyPath = `${listPath}/initial-window/messages`;
+  const conversation = { id: "initial-window", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
+  const messages = [
+    { ...retryMessage("two-days-old", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-18T12:00:00Z") / 1000 },
+    { ...retryMessage("today", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 },
+  ];
+  const recovered = async (checkpoint) => {
+    const bridge = createBridge();
+    await bridge.fetch(listPath, [conversation]);
+    bridge.setResponse(historyPath, messages);
+    const complete = await bridge.sync("100000001", "window-test", checkpoint);
+    assert.equal(complete.ok, true);
+    return bridge.posts.filter(post => post.type === "recovery_batch")
+      .flatMap(post => Array.from(post.body, message => message.id));
+  };
+  assert.deepEqual(await recovered({}), ["today"]);
+  assert.deepEqual(await recovered({ watermark: "2026-08-01T00:00:00Z" }), ["today", "two-days-old"]);
+});

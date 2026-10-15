@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-8";
+  const BRIDGE_VERSION = "line-oa-poll-9";
   // Script revisions remain compatible unless the page bridge interface breaks.
   const COMPATIBILITY_VERSION = 1;
   const CHAT_PAGE_LIMIT = 25;
@@ -8,6 +8,7 @@
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const INCREMENTAL_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -469,7 +470,9 @@
       const historyWindow = historyWindowActive(selection, checkpoint);
       const lowerBoundMs = historyWindow
         ? selection.sinceMs
-        : (bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : checkpointMs);
+        : bootstrap
+          ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
+          : Math.max(Date.now() - INCREMENTAL_SYNC_LOOKBACK_MS, checkpointMs);
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );

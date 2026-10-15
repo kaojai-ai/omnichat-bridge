@@ -82,6 +82,8 @@
     }),
   });
   const HISTORY_LIMIT = 100;
+  const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const MAX_HISTORY_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
@@ -695,6 +697,8 @@
       const conversationId = firstValue(message, ["conversation_id"]);
       const messageId = messageIdOf(message);
       if (!conversationId || !messageId) continue;
+      const eventMs = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
+      if (!eventMs || eventMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) continue;
       const key = `${conversationId}:${messageId}`;
       if (state.observedMessageKeys.has(key)) continue;
       state.observedMessageKeys.add(key);
@@ -807,6 +811,12 @@
       state.latestMessageIdsByConversation.set(conversationId, latestId);
       // The first list is a baseline; bootstrap/recovery owns its history.
       if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
+      const summaryMs = conversationTime(conversation);
+      if (summaryMs && summaryMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) {
+        state.pendingSellerCentreMessages.delete(conversationId);
+        state.capturedMessageIdsByConversation.set(conversationId, latestId);
+        continue;
+      }
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
         state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
@@ -1454,7 +1464,7 @@
 
   async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0) {
     const cursorMs = timeMs(cursor?.event_timestamp);
-    const sinceMs = sinceFloorMs > 0 ? sinceFloorMs : cursorMs;
+    const sinceMs = Math.max(sinceFloorMs, cursorMs);
     const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
     let accepted = 0;
     let parsed = 0;
@@ -1544,6 +1554,7 @@
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
+      const defaultSinceMs = Date.now() - (bootstrap ? INITIAL_SYNC_LOOKBACK_MS : MAX_HISTORY_LOOKBACK_MS);
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
@@ -1567,7 +1578,7 @@
         : null;
       const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
       const pages = await fetchConversationPages({
-        checkpointMs: historyWindow ? historySinceMs : (bootstrap ? 0 : watermarkMs),
+        checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
         requiredIds: pageRequired.length ? pageRequired : null,
         maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
@@ -1629,6 +1640,9 @@
         }
         if (deepIds.includes(String(conversation.id))) {
           return { decision: "history_job", reason: "configured_history", cursor, deep: true };
+        }
+        if (summaryMs && summaryMs < defaultSinceMs) {
+          return { decision: "skip", reason: "older_than_default_window", cursor };
         }
         if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
         if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
@@ -1713,7 +1727,7 @@
             }
             return acknowledgement;
           },
-          deep || windowJob ? historySinceMs : 0,
+          deep || windowJob ? historySinceMs : defaultSinceMs,
         );
         if (deep) {
           const backfillRequestId = `${requestId}:${conversation.id}:history`;

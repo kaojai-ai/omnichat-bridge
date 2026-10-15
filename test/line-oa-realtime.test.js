@@ -270,9 +270,10 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
       history_days = null,
       history_since_ms = null,
       history_conversation_ids = null,
+      now = 5_000,
     } = {}) {
       // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
-      fixtureNow = 5_000;
+      fixtureNow = now;
       for (const listener of listeners) {
         listener({
           source: window,
@@ -859,4 +860,39 @@ test("LINE OA rejects malformed mention commands before sending", async () => {
   } });
   assert.equal(result.ok, false);
   assert.equal(bridge.sentPayloads.length, 0);
+});
+
+
+test("LINE OA stale checkpoints cannot import messages older than 5 days", async () => {
+  const bridge = createBridge();
+  const complete = await bridge.sync({
+    checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
+    now: 6 * 24 * 60 * 60 * 1_000,
+  });
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 0);
+  assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
+  assert.equal(bridge.requests.some(url => url.searchParams.has("backward")), false);
+});
+
+
+test("LINE OA initial setup excludes two-day-old history", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  const complete = await bridge.sync({ now: 2 * 24 * 60 * 60 * 1_000 + 2_000 });
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 0);
+  assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
+});
+
+test("LINE OA reconnect includes two-day-old messages within the five-day maximum", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  const complete = await bridge.sync({
+    now: 2 * 24 * 60 * 60 * 1_000 + 2_000,
+    checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
+  });
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 2);
+  const messages = bridge.posts.filter(post => post.type === "recovery_batch")
+    .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+  assert.deepEqual(messages.map(message => message.id), ["message-1", "message-2"]);
 });
