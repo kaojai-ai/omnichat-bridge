@@ -2256,7 +2256,7 @@ async function ensureAccountLiveConnection(context) {
       existing.stableTimer = setTimeout(() => {
         if (liveConnections.get(context.key)?.socket === socket) existing.reconnectAttempt = 0;
       }, 30_000);
-      void updateLiveState(context, { socket: "connected" });
+      void updateLiveState(context, { socket: "connected", endpoint_not_found: false });
       void recordLog("info", "live", "connected", "Live command channel connected.", {
         provider_account_id: context.account.provider_account_id,
         connect_duration_ms: openedAt - attemptStartedAt,
@@ -2297,7 +2297,10 @@ async function ensureAccountLiveConnection(context) {
     socket.addEventListener("error", () => socket.close());
   } catch (error) {
     if (liveConnections.get(context.key) !== existing) return;
-    await updateLiveState(context, { socket: "reconnecting" });
+    await updateLiveState(context, {
+      socket: "reconnecting",
+      endpoint_not_found: error?.message === "Live reply endpoint returned 404.",
+    });
     await recordUnexpected("live_connection", error, {
       provider_account_id: context.account.provider_account_id,
     });

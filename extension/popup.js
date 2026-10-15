@@ -483,6 +483,7 @@ function accountRowStatus(account) {
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
   if (["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "neutral", loading: true };
+  if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
   const failure = latestSyncFailure([syncState]);
   if (failure) return { label: t("failed"), state: "error", hint: failure, action: "logs" };
   return accountConnectionStatus(live);
@@ -691,7 +692,11 @@ function renderDashboard(message = "", isError = false) {
     ...item.syncState,
     account_label: accountDisplayLabel(item.account, adapterForAccount(item.account)),
   })));
-  const latestFailure = statusFailure
+  const endpointFailure = configuredStates
+    .filter((item) => item.live?.endpoint_not_found && item.live.socket !== "connected")
+    .map((item) => accountConnectionStatus(item.live).hint)[0];
+  const latestFailure = endpointFailure
+    || statusFailure
     || (pendingTotal ? latestLoggedDeliveryFailure?.details.error_message : "")
     || latestLoggedProviderFailure?.details.error_message
     || "";
