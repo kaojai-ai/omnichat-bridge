@@ -123,6 +123,10 @@ export function accountDiscoveryStatus({ detecting, hasConfiguration }) {
 }
 
 export function accountConnectionStatus(live) {
+  if (live?.endpoint_not_found && live.socket !== "connected") return {
+    label: "SERVER ENDPOINT NOT FOUND", state: "error", action: "logs",
+    hint: "Cannot connect to the KaoJai server: endpoint not found (404). Check the extension connection settings and server deployment, then retry.",
+  };
   // Recovery can run before a server socket exists.
   if (live?.provider_recovery_state === "opening") return {
     label: "OPENING PROVIDER CHAT", state: "neutral", loading: true,

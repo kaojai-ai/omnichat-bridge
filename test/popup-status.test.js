@@ -138,3 +138,13 @@ test("captured request templates do not imply a healthy Shopee realtime connecti
   assert.equal(accountConnectionStatus({ ...live, provider_realtime_connected: true }).state, "ready");
   assert.equal(accountConnectionStatus({ ...live, socket: "reconnecting" }).label, "RECOVERING CONNECTION");
 });
+
+test("server 404 takes precedence over Shopee login guidance and clears on connection", () => {
+  const live = { socket: "reconnecting", endpoint_not_found: true,
+    provider_recovery_state: "needs_attention", provider_recovery_reason: "Log in to Shopee" };
+  const status = accountConnectionStatus(live);
+  assert.equal(status.state, "error");
+  assert.match(status.hint, /endpoint not found \(404\)/);
+  assert.doesNotMatch(status.hint, /Log in/);
+  assert.notEqual(accountConnectionStatus({ ...live, socket: "connected" }).label, status.label);
+});
