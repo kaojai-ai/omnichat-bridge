@@ -300,11 +300,14 @@ are extension-internal messages, not additions to the target server protocol.
 
 ### Missing Shopee conversations
 
-Shopee replies refresh conversation routing before sending when a list template
-is available. A successful, exhausted lookup that cannot find the conversation
+Shopee replies use a complete cached route for the requested shop first, without
+requiring the conversation to appear in the current list. Shopee's send response
+still determines success or failure; an uncertain send is not automatically retried.
+When no complete route for that shop is cached, replies look up conversation routing.
+A successful, exhausted lookup that cannot find the conversation
 returns `send_result` with `ok: false`, `error_code: "SHOPEE_CONVERSATION_MISSING"`,
-and a short error message. Cached routing is discarded. This means the connected
-session cannot find the conversation; it does not establish that chat distribution
+and a short error message. Incomplete or mismatched cached routing is discarded.
+This means the connected session cannot find the conversation; it does not establish that chat distribution
 is enabled. Invalid, failed, incomplete, and timed-out lookups keep generic errors.
 
 Targets must accept and preserve the optional `error_code` field before releasing

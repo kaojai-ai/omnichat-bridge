@@ -454,7 +454,10 @@ test("refreshes an incomplete cached route before reporting a provider rejection
     sendBody: { error_code: "illegal", message: "Message violates Shopee chat rules." },
   });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "blocked text" });
+  assert.equal(bridge.nativeRequests.filter((path) => path.endsWith("/mini/conversations")).length, 1);
   assert.equal(bridge.nativePayloads.length, 1);
+  assert.equal(bridge.nativePayloads[0].shop_id, "shop-1");
+  assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
   assert.equal(result.ok, false);
   assert.equal(result.error, "Message violates Shopee chat rules.");
 });
@@ -507,16 +510,54 @@ for (const sellerCentre of [false, true]) {
 }
 
 
-test("rejects disappeared conversations even when routing is cached", async () => {
-  const bridge = createBridge({ sellerCentre: true,
-    cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
-    conversationPages: [{ conversations: [] }],
+for (const listFailure of [false, true]) {
+  test(`sends with a same-shop cached route without consulting ${listFailure ? "unavailable" : "empty"} list`, async () => {
+    const bridge = createBridge({ sellerCentre: true,
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
+      conversationPages: [{ conversations: [] }], listFailure,
+    });
+    const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(bridge.nativeRequests.filter((path) => path.startsWith("/webchat/")), ["/webchat/api/v1.2/mini/messages"]);
+    assert.equal(bridge.nativePayloads.length, 1);
+    assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
   });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
-  assert.equal(result.error_code, "SHOPEE_CONVERSATION_MISSING");
-  assert.equal(result.uncertain, undefined);
-  assert.equal(bridge.nativePayloads.length, 0);
-});
+}
+
+for (const found of [false, true]) {
+  test(`a different-shop cached route is ${found ? "replaced by lookup" : "never sent when lookup misses"}`, async () => {
+    const bridge = createBridge({ sellerCentre: true,
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "wrong-shop", to_id: "wrong-buyer" },
+      conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: found ? "shop-1" : "wrong-shop", to_id: "buyer-1" }] }],
+    });
+    const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
+    assert.ok(bridge.nativeRequests.some((path) => path.endsWith("/mini/conversations")));
+    assert.equal(bridge.nativePayloads.length, found ? 1 : 0);
+    if (found) {
+      assert.equal(result.ok, true);
+      assert.equal(bridge.nativePayloads[0].shop_id, "shop-1");
+      assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
+    } else {
+      assert.equal(result.error_code, "SHOPEE_CONVERSATION_MISSING");
+    }
+  });
+}
+
+for (const transportFailure of [false, true]) {
+  test(`cached-route ${transportFailure ? "transport uncertainty" : "provider rejection"} does not retry`, async () => {
+    const bridge = createBridge({ sellerCentre: true,
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
+      conversationPages: [{ conversations: [] }], transportFailure,
+      sendBody: { error_code: "illegal", message: "Message violates Shopee chat rules." },
+    });
+    const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, transportFailure ? true : undefined);
+    if (!transportFailure) assert.equal(result.error, "Message violates Shopee chat rules.");
+    assert.deepEqual(bridge.nativeRequests.filter((path) => path.startsWith("/webchat/")), ["/webchat/api/v1.2/mini/messages"]);
+    assert.equal(bridge.nativePayloads.length, 1);
+  });
+}
 
 test("does not label malformed conversation responses as missing", async () => {
   const bridge = createBridge({ sellerCentre: true, conversationPages: [{ error_code: "unauthorized" }] });
