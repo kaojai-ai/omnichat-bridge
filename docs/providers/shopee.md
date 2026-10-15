@@ -114,8 +114,8 @@ request bodies, or customer messages.
 
 Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
-- Without a completed checkpoint, bootstrap reads the 10 newest conversations
-  and at most 25 newest messages from each.
+- Without a completed checkpoint, initial sync covers the last 1 day, reading
+  the 10 newest conversations and at most 25 newest messages from each.
 - With a checkpoint, sync follows changed conversations back to their cursor
   or the last 5 days, whichever is newer. Polling ignores older conversation
   summaries and messages. There are no additional caps on recent traffic.

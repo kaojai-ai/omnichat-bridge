@@ -82,7 +82,8 @@
     }),
   });
   const HISTORY_LIMIT = 100;
-  const DEFAULT_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
+  const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const MAX_HISTORY_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
@@ -697,7 +698,7 @@
       const messageId = messageIdOf(message);
       if (!conversationId || !messageId) continue;
       const eventMs = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
-      if (!eventMs || eventMs < Date.now() - DEFAULT_SYNC_LOOKBACK_MS) continue;
+      if (!eventMs || eventMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) continue;
       const key = `${conversationId}:${messageId}`;
       if (state.observedMessageKeys.has(key)) continue;
       state.observedMessageKeys.add(key);
@@ -811,7 +812,7 @@
       // The first list is a baseline; bootstrap/recovery owns its history.
       if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
       const summaryMs = conversationTime(conversation);
-      if (summaryMs && summaryMs < Date.now() - DEFAULT_SYNC_LOOKBACK_MS) {
+      if (summaryMs && summaryMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) {
         state.pendingSellerCentreMessages.delete(conversationId);
         state.capturedMessageIdsByConversation.set(conversationId, latestId);
         continue;
@@ -1553,7 +1554,7 @@
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
-      const defaultSinceMs = Date.now() - DEFAULT_SYNC_LOOKBACK_MS;
+      const defaultSinceMs = Date.now() - (bootstrap ? INITIAL_SYNC_LOOKBACK_MS : MAX_HISTORY_LOOKBACK_MS);
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)

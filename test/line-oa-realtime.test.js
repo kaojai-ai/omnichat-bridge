@@ -9,7 +9,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /const INITIAL_SYNC_MAX_CONVERSATIONS = 10/);
   assert.match(source, /const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25/);
-  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 5 \* 24 \* 60 \* 60 \* 1_000/);
+  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 24 \* 60 \* 60 \* 1_000/);
   assert.match(source, /url\.searchParams\.set\("next", next\)/);
   assert.match(source, /url\.searchParams\.set\("backward", backward\)/);
   assert.match(source, /const nextCursor = cursor\(body\?\.next\)/);
@@ -873,4 +873,26 @@ test("LINE OA stale checkpoints cannot import messages older than 5 days", async
   assert.equal(complete.recovered, 0);
   assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
   assert.equal(bridge.requests.some(url => url.searchParams.has("backward")), false);
+});
+
+
+test("LINE OA initial setup excludes two-day-old history", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  const complete = await bridge.sync({ now: 2 * 24 * 60 * 60 * 1_000 + 2_000 });
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 0);
+  assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
+});
+
+test("LINE OA reconnect includes two-day-old messages within the five-day maximum", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  const complete = await bridge.sync({
+    now: 2 * 24 * 60 * 60 * 1_000 + 2_000,
+    checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
+  });
+  assert.equal(complete.ok, true);
+  assert.equal(complete.recovered, 2);
+  const messages = bridge.posts.filter(post => post.type === "recovery_batch")
+    .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+  assert.deepEqual(messages.map(message => message.id), ["message-1", "message-2"]);
 });

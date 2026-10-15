@@ -7,7 +7,8 @@
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
-  const INITIAL_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
+  const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const INCREMENTAL_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -469,7 +470,9 @@
       const historyWindow = historyWindowActive(selection, checkpoint);
       const lowerBoundMs = historyWindow
         ? selection.sinceMs
-        : Math.max(Date.now() - INITIAL_SYNC_LOOKBACK_MS, checkpointMs);
+        : bootstrap
+          ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
+          : Math.max(Date.now() - INCREMENTAL_SYNC_LOOKBACK_MS, checkpointMs);
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );
