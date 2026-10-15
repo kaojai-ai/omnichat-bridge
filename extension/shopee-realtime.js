@@ -1186,7 +1186,7 @@
     if (!routeComplete(routing)) {
       post({ type: "api_send_result", request_id: requestId, ok: false,
         error_code: "SHOPEE_CONVERSATION_MISSING",
-        error: "Shopee conversation routing could not be resolved. Open this conversation in Seller Chat and retry." });
+        error: "Shopee conversation routing could not be resolved. Please check Seller Chat for the correct shop." });
       return;
     }
     try {

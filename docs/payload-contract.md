@@ -314,8 +314,7 @@ Routes discovered during initialization or lookup are checked again before sendi
 The authenticated session must remain unchanged through the send attempt.
 
 An unresolved scoped lookup retains the compatible `SHOPEE_CONVERSATION_MISSING`
-error code with neutral guidance to open the conversation in the correct shop's
-Seller Chat and retry. Failed, invalid, and timed-out requests retain lookup errors.
+error code with neutral guidance to check Seller Chat for the correct shop. Failed, invalid, and timed-out requests retain lookup errors.
 Admin must not attribute this code to Chat Distribution: the extension does not
 verify that setting. The Admin wording change can ship independently; release it
 before the extension where practical so older extension failures also get neutral
