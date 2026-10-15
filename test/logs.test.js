@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 import {
   LOG_RETENTION_MS,
@@ -9,6 +11,47 @@ import {
   logEntryForUpload,
   pruneLogs,
 } from "../extension/lib/logs.js";
+
+test("background accepts route diagnostics and stores sanitized correlation details", async () => {
+  const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
+  const allowStart = source.indexOf("const INBOUND_LOG_MESSAGES =");
+  const allowEnd = source.indexOf("\n};", allowStart) + 3;
+  const recordStart = source.indexOf("async function recordLog(");
+  const recordEnd = source.indexOf("\nasync function recordUnexpected", recordStart);
+  const listenerStart = source.indexOf("chrome.runtime.onMessage.addListener(");
+  const listenerEnd = source.indexOf("\n});", listenerStart) + 4;
+  const storage = {};
+  let listener;
+  const context = vm.createContext({
+    chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } } },
+    STORAGE: { logs: "logs", logOutbox: "outbox" },
+    mutateLogs: fn => fn(), readStorage: async () => storage,
+    writeStorage: async value => Object.assign(storage, value),
+    accountContextFor: () => null, hasServerInitialized: () => false,
+    createLogEntry, pruneLogs,
+  });
+  vm.runInContext(source.slice(allowStart, allowEnd) + "\n"
+    + source.slice(recordStart, recordEnd) + "\n" + source.slice(listenerStart, listenerEnd), context);
+  const response = await new Promise(resolve => {
+    assert.equal(listener({ type: "record_log", area: "provider", level: "info",
+      event: "send_route_resolution", message: "untrusted page message",
+      details: { request_id: "request-123", cache_reason: "absent", pages: 2,
+        stop_reason: "scoped_end", lookup_scope: "captured_filters", route_resolved: false,
+        message_text: "private reply", request_url: "https://private.example", token: "private-token" },
+    }, {}, resolve), true);
+  });
+  assert.equal(response.ok, true);
+  assert.equal(storage.logs.length, 1);
+  const entry = storage.logs[0];
+  assert.equal(entry.event, "send_route_resolution");
+  assert.equal(entry.message, "Shopee reply routing checked.");
+  assert.deepEqual(entry.details, { request_id: "request-123", cache_reason: "absent", pages: 2,
+    stop_reason: "scoped_end", lookup_scope: "captured_filters", route_resolved: false });
+  const rejected = await new Promise(resolve => listener({ type: "record_log", area: "provider",
+    event: "unregistered_event" }, {}, resolve));
+  assert.equal(rejected.ok, false);
+  assert.equal(storage.logs.length, 1);
+});
 
 test("log entries redact sensitive strings and detail keys", () => {
   const entry = createLogEntry({

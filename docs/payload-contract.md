@@ -298,19 +298,30 @@ cutoff. Open tabs with an older recovery bridge are reattached before use. These
 are extension-internal messages, not additions to the target server protocol.
 
 
-### Missing Shopee conversations
+### Shopee conversation routing
 
-Shopee replies use a complete cached route for the requested shop first, without
-requiring the conversation to appear in the current list. Shopee's send response
-still determines success or failure; an uncertain send is not automatically retried.
-When no complete route for that shop is cached, replies look up conversation routing.
-A successful, exhausted lookup that cannot find the conversation
-returns `send_result` with `ok: false`, `error_code: "SHOPEE_CONVERSATION_MISSING"`,
-and a short error message. Incomplete or mismatched cached routing is discarded.
-This means the connected session cannot find the conversation; it does not establish that chat distribution
-is enabled. Invalid, failed, incomplete, and timed-out lookups keep generic errors.
+Shopee replies initialize the chat surface, then use a complete cached route scoped
+by shop and conversation. Partial observations cannot erase known routing fields;
+explicit valid values (including zero) can update them. An authenticated shop change
+clears cached routes. Existing page caches migrate only entries with an explicit shop.
 
-Targets must accept and preserve the optional `error_code` field before releasing
-this extension change. KaoJai Admin maps it to a possible fix: turn off Shopee Chat
-Distribution and refresh Seller Chat, with a setup-guide link. Deploy the backend
-support first, then Admin and the extension. No database migration is required.
+When no complete route is available, lookup has a 15-second budget bounded by the
+command deadline. Mini-chat lookup starts at its known initial nanosecond cursor
+(`next_timestamp_nano: "0"`), independently of the latest UI pagination position.
+Other pagination schemes retain their observed start; filters remain in force.
+Exhausting such a list does not prove that a conversation no longer exists.
+Routes discovered during initialization or lookup are checked again before sending.
+The authenticated session must remain unchanged through the send attempt.
+
+An unresolved scoped lookup retains the compatible `SHOPEE_CONVERSATION_MISSING`
+error code with neutral guidance to check Seller Chat for the correct shop. Failed, invalid, and timed-out requests retain lookup errors.
+Admin must not attribute this code to Chat Distribution: the extension does not
+verify that setting. The Admin wording change can ship independently; release it
+before the extension where practical so older extension failures also get neutral
+wording. No database migration or backend contract change is required.
+
+Route diagnostics record the request correlation ID, cache decision, pages searched,
+and lookup stop reason. Existing diagnostic batches include the extension version.
+They do not include message content, credentials, or raw request URLs/bodies.
+Shopee's response still determines acceptance; rejected or uncertain sends are never
+automatically resent by route resolution.

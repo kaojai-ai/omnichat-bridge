@@ -143,6 +143,7 @@
     state.surface = currentSurface;
     state.getTemplate = null;
     state.listTemplate = null;
+    state.lookupListTemplate = null;
     state.historyTemplate = null;
     state.sendTemplate = null;
     state.latestMessageIdsByConversation = new Map();
@@ -162,6 +163,7 @@
   }
   state.profilesByConversation ??= new Map();
   state.conversationsById ??= new Map();
+  state.routesByShopConversation ??= new Map();
   state.accountsById ??= new Map();
   state.sendErrorsByClientMessageId ??= new Map();
   if (!Object.hasOwn(state, "nativeFetch")) state.nativeFetch = window.fetch.bind(window);
@@ -394,6 +396,30 @@
     const normalized = String(input).trim();
     return normalized || null;
   };
+  const routeKey = (shopId, conversationId) => JSON.stringify([shopId, conversationId]);
+  const rememberRoute = (conversation) => {
+    const conversationId = value(conversation?.id) ?? value(conversation?.conversation_id);
+    const shopId = value(conversation?.shop_id);
+    if (!conversationId || !shopId) return;
+    const key = routeKey(shopId, conversationId);
+    const previous = state.routesByShopConversation.get(key) ?? {};
+    const route = { biz_id: "0", to_shop_id: "", ...previous, conversation_id: conversationId, shop_id: shopId };
+    for (const field of ["to_id", "to_shop_id", "biz_id"]) {
+      const next = value(conversation[field]);
+      if (next !== null) route[field] = next;
+    }
+    state.routesByShopConversation.set(key, route);
+  };
+  // Old page bridges keyed routes by conversation alone. Migrate only explicit shops.
+  for (const route of state.conversationsById.values()) rememberRoute(route);
+  state.conversationsById.clear();
+  const cachedRoute = (conversationId, shopId) => {
+    if (shopId) return state.routesByShopConversation.get(routeKey(shopId, conversationId));
+    const matches = [...state.routesByShopConversation.values()]
+      .filter((route) => route.conversation_id === conversationId && value(route.to_id));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const routeComplete = (route) => Boolean(value(route?.shop_id) && value(route?.to_id));
   const firstValue = (item, keys) => keys.map((key) => value(item?.[key])).find(Boolean) ?? null;
   const postAccounts = (requestId) => {
     const accounts = state.currentAccountId
@@ -421,13 +447,16 @@
     const nextId = value(account?.provider_account_id);
     const previousId = state.currentAccountId ?? null;
     if (previousId !== nextId) {
+      state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
       if (previousId) {
         resetRecovery("Shopee session changed. Retry sync for the open shop.");
         state.listTemplate = null;
+        state.lookupListTemplate = null;
         state.getTemplate = null;
         state.historyTemplate = null;
         state.sendTemplate = null;
         state.conversationsById.clear();
+        state.routesByShopConversation.clear();
         state.profilesByConversation.clear();
         state.latestMessageIdsByConversation.clear();
         resetSellerCentreCapture();
@@ -451,7 +480,7 @@
       .catch((error) => logAsyncError("account_capture", error));
   };
   // Keep browser networking and JSON parsing bounded, including hung responses.
-  const fetchProviderJson = async (request, signal) => {
+  const fetchProviderJson = async (request, signal, timeoutMs = 15_000) => {
     const controller = new AbortController();
     let timer;
     let onAbort;
@@ -462,7 +491,7 @@
       timer = setTimeout(() => {
         controller.abort();
         reject(new Error("Shopee provider request timed out."));
-      }, 15_000);
+      }, Math.max(1, Math.min(15_000, timeoutMs)));
     });
     try {
       if (signal?.aborted) return await timeout;
@@ -627,14 +656,8 @@
     for (const conversation of Array.isArray(conversations) ? conversations : []) {
       const conversationId = String(conversation.id ?? "").trim();
       const id = String(conversation.to_id ?? "").trim();
+      rememberRoute(conversation);
       if (!conversationId || !id) continue;
-      state.conversationsById.set(conversationId, {
-        conversation_id: conversationId,
-        shop_id: String(conversation.shop_id ?? "").trim(),
-        to_id: id,
-        to_shop_id: String(conversation.to_shop_id ?? "").trim(),
-        biz_id: String(conversation.biz_id ?? "0").trim() || "0",
-      });
       const displayName = String(conversation.to_name ?? "").trim();
       const avatar = String(conversation.to_avatar ?? "").trim();
       let avatarUrl = "";
@@ -1085,7 +1108,7 @@
     const conversationId = String(message?.conversation_id ?? "").trim();
     const commandType = String(message?.command_type ?? "").trim();
     const clientMessageId = String(message?.client_message_id ?? requestId).trim();
-    let routing = state.conversationsById.get(conversationId);
+    let routing;
     const deadlineAt = Number.isFinite(message?.deadline_at_ms) ? message.deadline_at_ms : Infinity;
     const deadlineExpired = () => Date.now() >= deadlineAt;
     let nativeAttempted = false;
@@ -1123,34 +1146,51 @@
       return;
     }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
-    const hasSendRoute = (route) => Boolean(value(route?.shop_id) && value(route?.to_id)
-      && (!accountId || value(route.shop_id) === accountId));
-    // A filtered Shopee list can omit a conversation that still accepts replies.
-    // Prefer a complete route from this shop and let the send response decide.
-    if (!hasSendRoute(routing)) {
+    const resolutionDeadline = Math.min(deadlineAt, Date.now() + 15_000);
+    const sessionAccountId = state.currentAccountId;
+    const sessionEpoch = state.routeSessionEpoch ?? 0;
+    const sessionUnchanged = () => state.currentAccountId === sessionAccountId
+      && (state.routeSessionEpoch ?? 0) === sessionEpoch;
+    routing = cachedRoute(conversationId, accountId);
+    const cacheReason = routeComplete(routing) ? "complete" : routing ? "incomplete"
+      : [...state.routesByShopConversation.values()].some((route) => route.conversation_id === conversationId)
+        ? accountId ? "shop_mismatch" : "ambiguous_shop" : "absent";
+    let lookup = null;
+    if (!routeComplete(routing)) {
       try {
         await waitForTemplate();
-        state.conversationsById.delete(conversationId);
-        const lookup = await fetchConversationPages({ requiredIds: [conversationId],
-          accountId, sendLookup: true, deadlineAt });
-        if (!lookup.conversations.some((conversation) => String(conversation.id ?? "") === conversationId)) {
-          if (!lookup.exhausted) throw new Error("Shopee conversation lookup was incomplete.");
+        // Initialization/polling can capture routing while templates are awaited.
+        routing = cachedRoute(conversationId, accountId);
+        if (!routeComplete(routing)) {
+          lookup = await fetchConversationPages({ requiredIds: [conversationId],
+            accountId, sendLookup: true, deadlineAt: resolutionDeadline });
+          routing = cachedRoute(conversationId, accountId);
+        }
+      } catch (error) {
+        routing = cachedRoute(conversationId, accountId);
+        if (!routeComplete(routing)) {
+          postLog("warn", "send_route_resolution", "Shopee reply routing could not be resolved.", {
+            request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, stop_reason: "lookup_failed",
+          });
           post({ type: "api_send_result", request_id: requestId, ok: false,
-            error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
+            error: `Shopee conversation lookup failed: ${error instanceof Error ? error.message : String(error)}` });
           return;
         }
-        routing = state.conversationsById.get(conversationId);
-      } catch (error) {
-        logAsyncError("send_routing", error, { conversation_id: conversationId });
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: `Shopee conversation lookup failed: ${error instanceof Error ? error.message : String(error)}` });
-        return;
       }
     }
-    if (!hasSendRoute(routing)) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Open or refresh Seller Chat and retry after its conversation list loads." });
+    postLog("info", "send_route_resolution", "Shopee reply routing checked.", {
+      request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, pages: lookup?.pages ?? 0,
+      stop_reason: lookup?.stopReason ?? "cache", lookup_scope: lookup ? "captured_filters" : "cache",
+      route_resolved: routeComplete(routing),
+    });
+    if (!routeComplete(routing)) {
+      post({ type: "api_send_result", request_id: requestId, ok: false,
+        error_code: "SHOPEE_CONVERSATION_MISSING",
+        error: "Shopee conversation routing could not be resolved. Please check Seller Chat for the correct shop." });
       return;
     }
     try {
+      if (!sessionUnchanged()) throw new Error("Shopee session changed. Retry from the connected shop.");
       const template = senderTemplate(routing, requestId, clientMessageId);
       if (!template) throw new Error("Shopee Seller Chat is still initializing. Refresh and wait for the conversation list.");
       const payload = structuredClone(template.payload);
@@ -1191,6 +1231,7 @@
         throw new Error("Shopee Seller Chat send profile does not match the active surface.");
       }
       if (!isBridgeActive()) return;
+      if (!sessionUnchanged()) throw new Error("Shopee session changed. Retry from the connected shop.");
       if (deadlineExpired()) throw new Error("Reply deadline expired before sending.");
       diagnostics = { ...diagnostics, endpoint_path: url.pathname,
         routing_types: Object.fromEntries(["conversation_id", "shop_id", "to_id", "to_shop_id", "biz_id"].map((key) => [key, typeof payload[key]])) };
@@ -1290,24 +1331,39 @@
         const cursor = value(items.at(-1)?.next_timestamp_nano);
         if (!cursor || cursor === "0" || cursor === String(payload.next_timestamp_nano)) return null;
         return new Request(request.url, {
-          ...state.listTemplate.init,
+          ...(await templateFrom(request.clone())).init,
           body: JSON.stringify({ ...payload, next_timestamp_nano: cursor }),
         });
       }
     }
     const nextUrl = nextConversationUrl(request.url, body, items);
     return nextUrl ? new Request(nextUrl, {
-      ...state.listTemplate.init,
-      body: state.listTemplate.body?.slice(0),
+      ...(await templateFrom(request.clone())).init,
+      ...(request.method !== "GET" && request.method !== "HEAD" ? { body: await request.clone().arrayBuffer() } : {}),
     }) : null;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true, sendLookup = false) {
+  const lookupTemplateFrom = async (template) => {
+    const lookup = { ...template, init: { ...template.init }, body: template.body?.slice(0) ?? null };
+    // This initial cursor is observed in mini-chat traffic. Other paging schemes
+    // retain their captured values; an exhausted scoped list is never proof of absence.
+    if (isSellerCentreSurface() && template.init.method === "POST" && template.body) {
+      try {
+        const payload = await new Request(template.url, { ...template.init, body: template.body.slice(0) }).json();
+        if (payload && Object.hasOwn(payload, "next_timestamp_nano")) {
+          lookup.body = await new Blob([JSON.stringify({ ...payload, next_timestamp_nano: "0" })]).arrayBuffer();
+        }
+      } catch { /* Preserve an opaque provider request without guessing its shape. */ }
+    }
+    return lookup;
+  };
+
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true, sendLookup = false, deadlineAt = Infinity) {
     const request = requestUrl instanceof Request ? requestUrl : new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0),
     });
-    const body = await (sendLookup ? fetchProviderJson(request.clone()) : recoveryFetchJson(request.clone()));
+    const body = await (sendLookup ? fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now()) : recoveryFetchJson(request.clone()));
     if (sendLookup && (!Array.isArray(body) && ![
       body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
     ].some(Array.isArray) || shopeeError(body))) {
@@ -1341,20 +1397,23 @@
     const conversations = [];
     const seenIds = new Set();
     const required = requiredIds ? new Set(requiredIds) : null;
-    let url = new Request(state.listTemplate.url, {
-      ...state.listTemplate.init,
-      body: state.listTemplate.body?.slice(0),
-    });
+    const template = sendLookup
+      ? state.lookupListTemplate ?? await lookupTemplateFrom(state.listTemplate)
+      : state.listTemplate;
+    let url = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
     let firstPage = [];
     const seenPages = new Set();
     let exhausted = false;
+    let pages = 0;
+    let stopReason = "scoped_end";
     while (url) {
       if (sendLookup && Date.now() >= deadlineAt) throw new Error("Reply deadline expired before sending.");
       const pageKey = url instanceof Request
         ? `${url.url}:${await url.clone().text()}` : url;
-      if (seenPages.has(pageKey)) break;
+      if (seenPages.has(pageKey)) { stopReason = "repeated_page"; break; }
       seenPages.add(pageKey);
-      const page = await fetchConversationPage(url, accountId, true, sendLookup);
+      const page = await fetchConversationPage(url, accountId, true, sendLookup, deadlineAt);
+      pages += 1;
       exhausted = !page.next;
       if (!firstPage.length) firstPage = page.items;
       let added = 0;
@@ -1371,12 +1430,14 @@
         const candidate = conversationTime(conversation);
         return candidate && candidate < value ? candidate : value;
       }, Number.POSITIVE_INFINITY);
-      if (required && required.size === 0) break;
+      if (required && (required.size === 0 || (sendLookup && [...required].every((id) => routeComplete(cachedRoute(id, accountId)))))) {
+        stopReason = "target_found"; break;
+      }
       if (!required && checkpointMs && oldest < checkpointMs) break;
       if (!page.next || (!added && !page.raw_count)) break;
       url = page.next;
     }
-    return { conversations, firstPage, exhausted };
+    return { conversations, firstPage, exhausted, pages, stopReason };
   }
 
   async function detectCurrentAccount(requestId) {
@@ -1822,9 +1883,10 @@
         }));
       }
       if (isListPath(path)) {
-        void observeAsync("conversation_template", () => templateFrom(request).then((template) => {
+        void observeAsync("conversation_template", () => templateFrom(request).then(async (template) => {
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
+          state.lookupListTemplate = await lookupTemplateFrom(template);
           startSellerCentrePolling();
           publishSurfaceStatus();
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");

@@ -111,6 +111,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.history_window_completed": "Configured history window was loaded.",
   "provider.history_conversation_skipped": "Configured history conversation was not in the chat list.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
+  "provider.send_route_resolution": "Shopee reply routing checked.",
   "provider.content_unready": "Provider content bridge is not ready. Refresh the provider tab manually before retrying.",
   "provider.seller_centre_messages_observed": "Seller Centre realtime messages observed.",
   "provider.seller_centre_conversation_parse": "Seller Centre conversation response could not be parsed.",
