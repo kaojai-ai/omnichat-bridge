@@ -1,13 +1,14 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-8";
+  const BRIDGE_VERSION = "line-oa-poll-9";
   // Script revisions remain compatible unless the page bridge interface breaks.
   const COMPATIBILITY_VERSION = 1;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
-  const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
-  const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
-  const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const DEFAULT_SYNC_MAX_CONVERSATIONS = 10;
+  const DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
+  const DEFAULT_MAX_CHAT_PAGES = 10;
+  const DEFAULT_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -298,7 +299,7 @@
     return !disposed && generation === pollGeneration;
   }
 
-  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0 }) {
+  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0, maxPages = Infinity }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
     const knownMessageIds = knownMessageIdsByChat.get(chatId) ?? new Set();
@@ -308,14 +309,17 @@
     let parsed = 0;
     let queued = 0;
     let accepted = 0;
+    let limited = false;
     const seenCursors = new Set();
 
-    while (pollIsActive(generation)) {
+    while (pollIsActive(generation) && page < maxPages) {
       const remaining = maxMessages === null ? PAGE_LIMIT : maxMessages - accepted;
       if (remaining <= 0) break;
       const body = await json(messagesUrl(botId, chatId, backward, Math.min(PAGE_LIMIT, remaining)));
       if (!pollIsActive(generation)) return { parsed, queued };
       const rawMessages = Array.isArray(body?.list) ? body.list : [];
+      limited = maxPages !== Infinity
+        && (Boolean(cursor(body?.backward)) || rawMessages.length >= maxMessages);
       const allKnown = rawMessages.length > 0 && rawMessages.every((message) => {
         const id = messageId(message);
         return id && knownMessageIds.has(id);
@@ -369,7 +373,7 @@
       backward = nextBackward;
       page += 1;
     }
-    return { parsed, queued };
+    return { parsed, queued, limited };
   }
 
   function numberFrom(body, keys) {
@@ -465,16 +469,17 @@
       const selection = historySelection(history);
       if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
-      const bootstrap = checkpointMs <= 0;
       const historyWindow = historyWindowActive(selection, checkpoint);
       const lowerBoundMs = historyWindow
         ? selection.sinceMs
-        : (bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : checkpointMs);
+        : Math.max(Date.now() - DEFAULT_SYNC_LOOKBACK_MS, checkpointMs);
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );
       const seenChatIds = new Set();
       let next = null;
+      let chatPages = 0;
+      let defaultLimited = false;
       let parsed = 0;
       let queued = 0;
       let completedConversations = 0;
@@ -485,12 +490,13 @@
       postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
       while (pollIsActive(generation)) {
         const body = await json(chatUrl(resolvedBotId, next));
+        chatPages += 1;
         if (!pollIsActive(generation)) return;
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
-          const visibleTotal = bootstrap && !historyWindow && pendingIds.size === 0
-            ? Math.min(pageTotal, INITIAL_SYNC_MAX_CONVERSATIONS)
+          const visibleTotal = !historyWindow && pendingIds.size === 0
+            ? Math.min(pageTotal, DEFAULT_SYNC_MAX_CONVERSATIONS)
             : pageTotal;
           totalConversations = Math.max(totalConversations ?? 0, visibleTotal);
         }
@@ -507,9 +513,12 @@
           if (chatId) seenChatIds.add(chatId);
           const targeted = Boolean(chatId && pendingIds.has(chatId));
           if (historyWindow && !targeted && chatBeforeHistory(chat, selection.sinceMs)) continue;
-          if (!targeted && bootstrap && !historyWindow && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) continue;
+          if (!targeted && !historyWindow && nonTargetConversations >= DEFAULT_SYNC_MAX_CONVERSATIONS) {
+            defaultLimited = true;
+            continue;
+          }
           chatsToRecover.push(chat);
-          if (!targeted && bootstrap) nonTargetConversations += 1;
+          if (!targeted && !historyWindow) nonTargetConversations += 1;
         }
         if (trackedRequest) {
           post({
@@ -536,7 +545,8 @@
               knownMessageIdsByChat,
               maxMessages: deep || historyWindow
                 ? null
-                : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
+                : DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION,
+              maxPages: deep || historyWindow ? Infinity : 1,
               sinceMs: deep || historyWindow ? selection.sinceMs : lowerBoundMs,
             })
             : { parsed: 0, queued: 0 };
@@ -551,6 +561,7 @@
             });
             pendingIds.delete(chatId);
           }
+          defaultLimited ||= Boolean(result.limited);
           parsed += result.parsed;
           queued += result.queued;
           knownChatIds.add(chatId);
@@ -569,7 +580,11 @@
           }
         }
         if (pageBeforeHistory) break;
-        if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
+        if (!historyWindow && pendingIds.size === 0
+          && (nonTargetConversations >= DEFAULT_SYNC_MAX_CONVERSATIONS || chatPages >= DEFAULT_MAX_CHAT_PAGES)) {
+          defaultLimited = true;
+          break;
+        }
         const nextCursor = cursor(body?.next);
         if (!nextCursor || seenCursors.has(nextCursor) || (allKnown && pendingIds.size === 0)) break;
         seenCursors.add(nextCursor);
@@ -615,7 +630,11 @@
           checkpoint,
         });
       }
-      const watermark = new Date().toISOString();
+      // A bounded snapshot may leave recent messages unprocessed. Do not certify
+      // those messages as recovered by moving the account-wide watermark ahead.
+      const watermark = defaultLimited
+        ? new Date(lowerBoundMs).toISOString()
+        : new Date().toISOString();
       const state = pollingAccounts.get(providerAccountId);
       if (state) {
         state.checkpoint = {

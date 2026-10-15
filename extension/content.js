@@ -713,6 +713,10 @@
         finishPendingApiSend(apiSend.requestId, apiSend.pending);
       }
 
+      // Ordinary observation never doubles as an unbounded historical import.
+      // Explicit history batches use handleRecoveryBatch instead.
+      const eventMs = Date.parse(message.event_timestamp);
+      if (Number.isFinite(eventMs) && eventMs < Date.now() - 24 * 60 * 60 * 1_000) continue;
       const realtimeKey = `${message.conversation_id}:${message.id}`;
       if (realtimeMessageKeys.has(realtimeKey)) continue;
       realtimeMessageKeys.add(realtimeKey);

@@ -16,7 +16,7 @@ vm.runInContext(shopeeParserSource, parserContext);
 test("Shopee history window is not capped at the bootstrap conversation limit", () => {
   assert.match(
     source,
-    /maxItems: !historyWindow && bootstrap && !pageRequired\.length \? MANUAL_SYNC_MAX_CONVERSATIONS : null/,
+    /maxItems: !historyWindow && !pageRequired\.length \? DEFAULT_SYNC_MAX_CONVERSATIONS : null/,
   );
   assert.match(source, /\} else if \(!historyWindow && bootstrap\) \{/);
 });
@@ -35,7 +35,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000, now = Date.parse("2026-08-20T12:00:00Z") } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
@@ -100,9 +100,11 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
     },
     __CHAT_GLOBAL__: {},
   };
+  const clockStartedAt = Date.now();
   const context = vm.createContext({
     window,
     document,
+    Date: class extends Date { static now() { return now + Date.now() - clockStartedAt; } },
     URL,
     Headers,
     Request,
@@ -228,7 +230,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
         },
       });
     }
-    for (let attempt = 0; attempt < 300; attempt += 1) {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
       for (const post of posts) {
         if (![
           "recovery_batch",
@@ -750,7 +752,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     shop_id: 100000001,
     type: "text",
     content: { text: "First" },
-    created_timestamp: 1_724_141_000,
+    created_timestamp: Date.parse("2026-08-20T10:00:00Z") / 1000,
   }, {
     id: "seller-message-2",
     conversation_id: "seller-centre-conversation",
@@ -759,7 +761,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
     shop_id: 100000001,
     type: "text",
     content: { text: "Second" },
-    created_timestamp: 1_724_141_060,
+    created_timestamp: Date.parse("2026-08-20T10:01:00Z") / 1000,
   }]);
   await bridge.runIntervals();
   assert.equal(bridge.intervals.filter(({ delay }) => delay === 3_000).length, 1);
@@ -991,3 +993,59 @@ for (const hangBody of [false, true]) {
     assert.equal(retried.ok, true);
   });
 }
+
+test("default polling ignores ancient newly discovered conversations and bounds a missing-marker page", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  const conversation = (id, latest) => ({
+    id, shop_id: 100000001, latest_message_id: latest,
+    last_message_time: "2026-08-20T11:00:00Z",
+  });
+  await bridge.fetch(retryListPath, [conversation("recent", "missing-marker")]);
+  const messages = Array.from({ length: 40 }, (_, i) => ({
+    ...retryMessage(`bounded-${i}`, 0), conversation_id: "recent",
+    created_timestamp: Date.parse(i < 5 ? "2021-01-01T00:00:00Z" : "2026-08-20T11:00:00Z") / 1000 + i,
+  }));
+  let requestedLimit;
+  bridge.setResponse(`${retryListPath}/recent/messages`, (request) => {
+    requestedLimit = new URL(request.url).searchParams.get("limit");
+    return new Response(JSON.stringify(messages));
+  });
+  await bridge.fetch(retryListPath, [conversation("recent", "bounded-39"), {
+    ...conversation("ancient", "old"), last_message_time: "2021-01-01T00:00:00Z",
+  }]);
+  await bridge.runIntervals();
+  const ids = capturedRetryIds(bridge);
+  assert.equal(requestedLimit, "25");
+  assert.equal(ids.length, 25);
+  assert.deepEqual(ids, messages.slice(-25).map((message) => message.id));
+  assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), false);
+});
+
+test("default incremental recovery bounds missing cursors to 10 conversations and 25 recent messages each", async () => {
+  const bridge = createBridge();
+  const listPath = "/webchat/api/v1.2/conversations";
+  const conversations = Array.from({ length: 15 }, (_, i) => ({
+    id: `cap-${i}`, shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z",
+  }));
+  await bridge.fetch(listPath, conversations);
+  let historyRequests = 0;
+  for (const conversation of conversations) {
+    bridge.setResponse(`${listPath}/${conversation.id}/messages`, (request) => {
+      historyRequests += 1;
+      assert.equal(new URL(request.url).searchParams.get("offset"), "0");
+      assert.equal(new URL(request.url).searchParams.get("limit"), "25");
+      return new Response(JSON.stringify(Array.from({ length: 40 }, (_, i) => ({
+        ...retryMessage(`${conversation.id}-${i}`, 0), conversation_id: conversation.id,
+        created_timestamp: Date.parse(i < 5 ? "2021-01-01T00:00:00Z" : "2026-08-20T11:00:00Z") / 1000 + i,
+      }))));
+    });
+  }
+  const complete = await bridge.sync("100000001");
+  assert.equal(complete.ok, true);
+  assert.equal(historyRequests, 10);
+  const batches = bridge.posts.filter((post) => post.type === "recovery_batch");
+  assert.equal(batches.length, 10);
+  assert.equal(batches.reduce((total, post) => total + post.body.length, 0), 250);
+  assert.ok(batches.every((post) => post.body.every((message) => message.created_timestamp > Date.parse("2026-08-19T12:00:00Z") / 1000)));
+});

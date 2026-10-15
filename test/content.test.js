@@ -608,3 +608,13 @@ test("preserves missing-conversation codes across the content bridge", async () 
     error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
 });
+
+test("ordinary realtime hooks discard old messages while explicit recovery remains separate", async () => {
+  const bridge = contentBridge();
+  const recent = { ...echo, id: "recent", event_timestamp: new Date().toISOString() };
+  await bridge.providerEvent({ type: "realtime_event", capture_method: "poll", body: { messages: [
+    { ...echo, id: "ancient", event_timestamp: "2021-01-01T00:00:00Z" }, recent,
+  ] } });
+  const queued = bridge.runtimeMessages.filter((message) => message.type === "queue_messages");
+  assert.deepEqual(plain(queued.flatMap((message) => message.messages)), [recent]);
+});

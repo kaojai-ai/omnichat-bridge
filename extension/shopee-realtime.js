@@ -82,13 +82,16 @@
     }),
   });
   const HISTORY_LIMIT = 100;
-  const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
-  const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
+  const DEFAULT_SYNC_MAX_CONVERSATIONS = 10;
+  const DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
+  const DEFAULT_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
+  const DEFAULT_SYNC_MAX_LIST_PAGES = 10;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 1_000;
   const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
   const SELLER_CENTRE_CHAT_OPEN_POLL_MS = 250;
+  let sellerCentreCaptureInFlight = false;
   let sellerCentreClickListener = null;
   let socketObserverTimer = null;
   let pageMessageListener = null;
@@ -695,6 +698,8 @@
       const conversationId = firstValue(message, ["conversation_id"]);
       const messageId = messageIdOf(message);
       if (!conversationId || !messageId) continue;
+      const timestamp = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
+      if (!timestamp || timestamp < Date.now() - DEFAULT_SYNC_LOOKBACK_MS) continue;
       const key = `${conversationId}:${messageId}`;
       if (state.observedMessageKeys.has(key)) continue;
       state.observedMessageKeys.add(key);
@@ -732,7 +737,7 @@
     url.searchParams.set("shop_id", String(conversation.shop_id ?? ""));
     url.searchParams.set("biz_id", String(conversation.biz_id ?? 0));
     url.searchParams.set("offset", String(offset));
-    url.searchParams.set("limit", String(HISTORY_LIMIT));
+    url.searchParams.set("limit", String(DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION));
     url.searchParams.set("direction", "older");
     url.searchParams.set("on_message_received", "true");
     const headers = new Headers(template.init?.headers ?? {});
@@ -775,7 +780,7 @@
       : previousLatestId
         ? ordered
         : (latestId ? ordered.filter((message) => messageIdOf(message) === latestId) : ordered.slice(-1));
-    const emitted = emitRealtimeMessages(candidates);
+    const emitted = emitRealtimeMessages(candidates.slice(-DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION));
     if (emitted) postLog("debug", "seller_centre_messages_observed", "Seller Centre polling delivered new messages.", {
       conversation_id: String(conversation.id ?? ""),
       messages: emitted,
@@ -807,46 +812,60 @@
       state.latestMessageIdsByConversation.set(conversationId, latestId);
       // The first list is a baseline; bootstrap/recovery owns its history.
       if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
+      const summaryMs = conversationTime(conversation);
+      if (summaryMs && summaryMs < Date.now() - DEFAULT_SYNC_LOOKBACK_MS) {
+        state.pendingSellerCentreMessages.delete(conversationId);
+        state.capturedMessageIdsByConversation.set(conversationId, latestId);
+        continue;
+      }
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
         state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
     }
     state.sellerCentreListInitialized = true;
-    if (!wasInitialized) return;
-    const captureDeadline = Date.now() + 15_000;
-    for (const [conversationId, item] of state.pendingSellerCentreMessages) {
-      if (Date.now() >= captureDeadline) break;
-      if (state.sellerCentreFetches.has(conversationId)) continue;
-      const epoch = state.sellerCentreCaptureEpoch;
-      const token = {};
-      state.sellerCentreFetches.set(conversationId, token);
-      try {
-        const captured = await fetchSellerCentreConversationMessages(
-          item.conversation,
-          state.capturedMessageIdsByConversation.get(conversationId) ?? null,
-          item.latestId,
-          epoch,
-        );
-        if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
-        if (!captured) {
-          state.sellerCentreCaptureFailed = true;
-          continue;
-        }
-        state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
-        // A newer summary may have arrived while this fetch was in flight.
-        if (state.pendingSellerCentreMessages.get(conversationId) === item) {
-          state.pendingSellerCentreMessages.delete(conversationId);
-        }
-      } catch (error) {
-        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) state.sellerCentreCaptureFailed = true;
-        logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
-      } finally {
-        if (state.sellerCentreFetches.get(conversationId) === token) {
-          state.sellerCentreFetches.delete(conversationId);
+    if (!wasInitialized || sellerCentreCaptureInFlight) return;
+    sellerCentreCaptureInFlight = true;
+    try {
+      const captureDeadline = Date.now() + 15_000;
+      let checked = 0;
+      for (const [conversationId, item] of state.pendingSellerCentreMessages) {
+        if (Date.now() >= captureDeadline || checked >= DEFAULT_SYNC_MAX_CONVERSATIONS
+          || state.sellerCentreFetches.size >= DEFAULT_SYNC_MAX_CONVERSATIONS) break;
+        if (state.sellerCentreFetches.has(conversationId)) continue;
+        checked += 1;
+        const epoch = state.sellerCentreCaptureEpoch;
+        const token = {};
+        state.sellerCentreFetches.set(conversationId, token);
+        try {
+          const captured = await fetchSellerCentreConversationMessages(
+            item.conversation,
+            state.capturedMessageIdsByConversation.get(conversationId) ?? null,
+            item.latestId,
+            epoch,
+          );
+          if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
+          if (!captured) {
+            state.sellerCentreCaptureFailed = true;
+            continue;
+          }
+          state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
+          // A newer summary may have arrived while this fetch was in flight.
+          if (state.pendingSellerCentreMessages.get(conversationId) === item) {
+            state.pendingSellerCentreMessages.delete(conversationId);
+          }
+        } catch (error) {
+          if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) state.sellerCentreCaptureFailed = true;
+          logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
+        } finally {
+          if (state.sellerCentreFetches.get(conversationId) === token) {
+            state.sellerCentreFetches.delete(conversationId);
+          }
         }
       }
+      if (!state.pendingSellerCentreMessages.size) state.sellerCentreCaptureFailed = false;
+    } finally {
+      sellerCentreCaptureInFlight = false;
     }
-    if (!state.pendingSellerCentreMessages.size) state.sellerCentreCaptureFailed = false;
   }
 
   async function refreshSellerCentreConversations() {
@@ -1390,6 +1409,7 @@
     checkpointMs = 0,
     requiredIds = null,
     maxItems = null,
+    maxPages = Infinity,
     accountId = null,
     sendLookup = false,
     deadlineAt = Infinity,
@@ -1406,7 +1426,7 @@
     let exhausted = false;
     let pages = 0;
     let stopReason = "scoped_end";
-    while (url) {
+    while (url && pages < maxPages) {
       if (sendLookup && Date.now() >= deadlineAt) throw new Error("Reply deadline expired before sending.");
       const pageKey = url instanceof Request
         ? `${url.url}:${await url.clone().text()}` : url;
@@ -1452,15 +1472,15 @@
     }
   }
 
-  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0) {
+  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0, maxPages = Infinity) {
     const cursorMs = timeMs(cursor?.event_timestamp);
-    const sinceMs = sinceFloorMs > 0 ? sinceFloorMs : cursorMs;
+    const sinceMs = Math.max(sinceFloorMs, cursorMs);
     const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
     let accepted = 0;
     let parsed = 0;
     let queued = 0;
     let latestCursor = null;
-    for (let page = 0; ; page += 1) {
+    for (let page = 0; page < maxPages; page += 1) {
       const historyTemplate = state.historyTemplate ?? state.getTemplate;
       if (!historyTemplate) throw new Error("Shopee message history is still initializing. Refresh Seller Chat.");
       const sourceUrl = new URL(historyTemplate.url);
@@ -1544,6 +1564,7 @@
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
+      const defaultSinceMs = Date.now() - DEFAULT_SYNC_LOOKBACK_MS;
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
@@ -1567,9 +1588,10 @@
         : null;
       const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
       const pages = await fetchConversationPages({
-        checkpointMs: historyWindow ? historySinceMs : (bootstrap ? 0 : watermarkMs),
+        checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
         requiredIds: pageRequired.length ? pageRequired : null,
-        maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
+        maxItems: !historyWindow && !pageRequired.length ? DEFAULT_SYNC_MAX_CONVERSATIONS : null,
+        maxPages: historyActive ? Infinity : DEFAULT_SYNC_MAX_LIST_PAGES,
         accountId,
       });
       assertSessionUnchanged();
@@ -1582,7 +1604,7 @@
           (conversation) => liveById.get(String(conversation.id)) ?? conversation,
         );
       } else if (!historyWindow && bootstrap) {
-        recoveryConversations = sorted.slice(0, MANUAL_SYNC_MAX_CONVERSATIONS);
+        recoveryConversations = sorted.slice(0, DEFAULT_SYNC_MAX_CONVERSATIONS);
         for (const id of deepIds) {
           const conversation = sorted.find((item) => String(item.id) === id);
           if (conversation && !recoveryConversations.some((item) => String(item.id) === id)) {
@@ -1601,7 +1623,12 @@
           throw new Error(acknowledgement.error ?? "Could not save bootstrap state.");
         }
       } else {
-        recoveryConversations = sorted;
+        recoveryConversations = historyActive ? sorted : sorted.slice(0, DEFAULT_SYNC_MAX_CONVERSATIONS);
+      }
+      if (!historyWindow) {
+        let defaultConversations = 0;
+        recoveryConversations = recoveryConversations.filter((conversation) =>
+          deepIds.includes(String(conversation.id)) || defaultConversations++ < DEFAULT_SYNC_MAX_CONVERSATIONS);
       }
       const firstPageFloor = pages.firstPage.reduce((value, conversation) => {
         const candidate = conversationTime(conversation);
@@ -1611,7 +1638,9 @@
         const candidate = conversationTime(conversation);
         return candidate && candidate < value ? candidate : value;
       }, Number.POSITIVE_INFINITY);
-      const nextWatermarkMs = bootstrap
+      const nextWatermarkMs = !historyActive
+        ? Math.max(defaultSinceMs, watermarkMs)
+        : bootstrap
         ? bootstrapFloor
         : (Number.isFinite(firstPageFloor) ? Math.max(watermarkMs, firstPageFloor) : watermarkMs);
       const cursors = checkpoint?.conversations ?? {};
@@ -1629,6 +1658,9 @@
         }
         if (deepIds.includes(String(conversation.id))) {
           return { decision: "history_job", reason: "configured_history", cursor, deep: true };
+        }
+        if (summaryMs && summaryMs < defaultSinceMs) {
+          return { decision: "skip", reason: "older_than_default_window", cursor };
         }
         if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
         if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
@@ -1702,7 +1734,7 @@
         const history = await fetchHistory(
           conversation,
           deep || windowJob ? null : cursor,
-          deep || windowJob ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
+          deep || windowJob ? null : DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION,
           async (messages, page) => {
             assertSessionUnchanged();
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
@@ -1713,7 +1745,8 @@
             }
             return acknowledgement;
           },
-          deep || windowJob ? historySinceMs : 0,
+          deep || windowJob ? historySinceMs : defaultSinceMs,
+          deep || windowJob ? Infinity : 1,
         );
         if (deep) {
           const backfillRequestId = `${requestId}:${conversation.id}:history`;

@@ -114,19 +114,26 @@ request bodies, or customer messages.
 
 Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
-- Without a completed checkpoint, bootstrap reads the 10 newest conversations
-  and at most 25 newest messages from each.
-- With a checkpoint, sync follows every changed conversation back to its local
-  cursor without an extension-imposed conversation or message cap.
+- Default bootstrap, incremental recovery, resume, retry, and **Sync messages**
+  take a bounded snapshot: last 24 hours, at most 10 conversations and 25 newest
+  messages per conversation. Default discovery reads at most 10 list pages;
+  message recovery reads one page per conversation, including missing cursors.
+- Ordinary Seller Centre polling fetches at most 25 messages per conversation
+  and drains at most 10 conversations per pass, with overlapping list captures
+  sharing one drain. Old conversation summaries are not fetched. Poll and socket
+  observation discard messages older than 24 hours.
+- These are catch-up bounds, not a lifetime limit on live messaging. Overflow
+  or older missing messages require explicit history settings. Default completion
+  means the bounded snapshot finished; it does not certify complete history.
+- Explicit `history_days` (1–366) imports remain separate and paginate within
+  the configured date window, optionally for selected conversations.
 - Conversation-list and message-history pages are requested sequentially.
-- Every history page is saved to the local queue immediately. A conversation
-  cursor advances only after all required pages for that conversation finish.
-- Realtime capture starts only after bootstrap completes and pauses while a
-  recovery scan is incomplete. The scan catches messages received during that
-  window before realtime cursor advancement resumes.
-- The global conversation-list watermark advances only after the complete scan
-  finishes. An interrupted scan restarts discovery and skips work already
-  covered by conversation cursors.
+  Accepted history pages are queued immediately. Conversation cursors identify
+  the newest accepted message; default account watermarks stay conservative
+  because a capped snapshot may omit messages.
+- Realtime capture starts after bootstrap completes. Explicit history batches
+  retain `history_recovery`; ordinary polling cannot bypass the age limit by
+  tagging old messages as `poll`.
 - Load, reconnect, and visible focus can resume sync at most once every five
   minutes. **Sync messages** and **Retry now** bypass that window.
 - Opening the Seller Centre mini-chat manually starts the same debounced
