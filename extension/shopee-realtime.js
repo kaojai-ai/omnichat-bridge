@@ -1122,12 +1122,17 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Seller Centre native sender is unavailable." });
       return;
     }
-    if (state.listTemplate || !routing?.shop_id || !routing?.to_id) {
+    const accountId = value(message.provider_account_id) || state.currentAccountId;
+    const hasSendRoute = (route) => Boolean(value(route?.shop_id) && value(route?.to_id)
+      && (!accountId || value(route.shop_id) === accountId));
+    // A filtered Shopee list can omit a conversation that still accepts replies.
+    // Prefer a complete route from this shop and let the send response decide.
+    if (!hasSendRoute(routing)) {
       try {
         await waitForTemplate();
         state.conversationsById.delete(conversationId);
         const lookup = await fetchConversationPages({ requiredIds: [conversationId],
-          accountId: value(message.provider_account_id) || state.currentAccountId, sendLookup: true, deadlineAt });
+          accountId, sendLookup: true, deadlineAt });
         if (!lookup.conversations.some((conversation) => String(conversation.id ?? "") === conversationId)) {
           if (!lookup.exhausted) throw new Error("Shopee conversation lookup was incomplete.");
           post({ type: "api_send_result", request_id: requestId, ok: false,
@@ -1141,7 +1146,7 @@
         return;
       }
     }
-    if (!routing?.shop_id || !routing.to_id) {
+    if (!hasSendRoute(routing)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Conversation routing is unavailable. Open or refresh Seller Chat and retry after its conversation list loads." });
       return;
     }
