@@ -58,7 +58,7 @@ Version 2 is legacy Shopee-only configuration using `commands_url` instead of
 `api_url`; LINE requires version 3. Unsupported provider entries are skipped;
 malformed supported entries are rejected. Unrecognized fields are discarded.
 
-Default polling and recovery do not import messages older than 24 hours, even
+Default polling and recovery do not import messages older than 5 days, even
 with a missing or stale cursor. Older imports require explicit history settings.
 
 Optional top-level `history_days` is an integer from 1 to 366.

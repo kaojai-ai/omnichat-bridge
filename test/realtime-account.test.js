@@ -1023,17 +1023,19 @@ test("default polling ignores ancient newly discovered conversations and filters
 });
 
 
-test("default recovery with no conversation cursor stops at the 24-hour floor", async () => {
+test("default recovery with no conversation cursor stops at the 5-day floor", async () => {
   const bridge = createBridge();
   const listPath = "/webchat/api/v1.2/conversations";
   const conversation = { id: "missing-cursor", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
   await bridge.fetch(listPath, [conversation]);
   bridge.setResponse(`${listPath}/${conversation.id}/messages`, [
     { ...retryMessage("ancient", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2021-01-01T00:00:00Z") / 1000 },
+    { ...retryMessage("outside-window", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-14T12:00:00Z") / 1000 },
+    { ...retryMessage("inside-window", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-16T12:00:00Z") / 1000 },
     { ...retryMessage("recent", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 },
   ]);
   const complete = await bridge.sync("100000001");
   assert.equal(complete.ok, true);
   const messages = bridge.posts.filter(post => post.type === "recovery_batch").flatMap(post => Array.from(post.body));
-  assert.deepEqual(messages.map(message => message.id), ["recent"]);
+  assert.deepEqual(messages.map(message => message.id), ["recent", "inside-window"]);
 });

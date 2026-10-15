@@ -9,7 +9,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /const INITIAL_SYNC_MAX_CONVERSATIONS = 10/);
   assert.match(source, /const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25/);
-  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 24 \* 60 \* 60 \* 1_000/);
+  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 5 \* 24 \* 60 \* 60 \* 1_000/);
   assert.match(source, /url\.searchParams\.set\("next", next\)/);
   assert.match(source, /url\.searchParams\.set\("backward", backward\)/);
   assert.match(source, /const nextCursor = cursor\(body\?\.next\)/);
@@ -863,11 +863,11 @@ test("LINE OA rejects malformed mention commands before sending", async () => {
 });
 
 
-test("LINE OA stale checkpoints cannot import messages older than 24 hours", async () => {
+test("LINE OA stale checkpoints cannot import messages older than 5 days", async () => {
   const bridge = createBridge();
   const complete = await bridge.sync({
     checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
-    now: 2 * 24 * 60 * 60 * 1_000,
+    now: 6 * 24 * 60 * 60 * 1_000,
   });
   assert.equal(complete.ok, true);
   assert.equal(complete.recovered, 0);
