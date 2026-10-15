@@ -7,15 +7,16 @@ const source = await readFile(new URL("../extension/line-oa-realtime.js", import
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("LINE OA recovery paginates chat and message history", () => {
-  assert.match(source, /const DEFAULT_SYNC_MAX_CONVERSATIONS = 10/);
-  assert.match(source, /const DEFAULT_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25/);
-  assert.match(source, /const DEFAULT_SYNC_LOOKBACK_MS = 24 \* 60 \* 60 \* 1_000/);
+  assert.match(source, /const INITIAL_SYNC_MAX_CONVERSATIONS = 10/);
+  assert.match(source, /const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25/);
+  assert.match(source, /const INITIAL_SYNC_LOOKBACK_MS = 24 \* 60 \* 60 \* 1_000/);
   assert.match(source, /url\.searchParams\.set\("next", next\)/);
   assert.match(source, /url\.searchParams\.set\("backward", backward\)/);
   assert.match(source, /const nextCursor = cursor\(body\?\.next\)/);
   assert.match(source, /const nextBackward = cursor\(body\?\.backward\)/);
+  assert.match(source, /const bootstrap = checkpointMs <= 0/);
   assert.match(source, /const lowerBoundMs = historyWindow/);
-  assert.match(source, /Date\.now\(\) - DEFAULT_SYNC_LOOKBACK_MS/);
+  assert.match(source, /Date\.now\(\) - INITIAL_SYNC_LOOKBACK_MS/);
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
@@ -266,10 +267,10 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
       providerAccountId = "line-oa-account-1",
       botId = "bot-1",
       checkpoint = null,
-      now = 5_000,
       history_days = null,
       history_since_ms = null,
       history_conversation_ids = null,
+      now = 5_000,
     } = {}) {
       // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
       fixtureNow = now;
@@ -402,7 +403,7 @@ test("LINE OA discovers a closed account bot ID before polling it", async () => 
   assert.ok(bridge.requests.some((url) => url.pathname === "/api/v1/bots"));
 });
 
-test("LINE OA default recovery persists only the newest page per conversation", async () => {
+test("LINE OA recovers every chat and message page only after each page is acknowledged", async () => {
   const bridge = createBridge();
 
   const complete = await bridge.sync();
@@ -414,11 +415,11 @@ test("LINE OA default recovery persists only the newest page per conversation", 
     request_id: "sync-1",
     provider_account_id: "line-oa-account-1",
     ok: true,
-    recovered: 2,
-    queued: 2,
+    recovered: 3,
+    queued: 3,
   });
   assert.match(watermark, /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(bridge.posts.filter((post) => post.type === "recovery_batch").length, 2);
+  assert.equal(bridge.posts.filter((post) => post.type === "recovery_batch").length, 3);
   const progress = bridge.posts.filter((post) => post.type === "recovery_progress");
   assert.equal(progress.length, 3);
   assert.deepEqual(plain(progress[0]), {
@@ -435,6 +436,7 @@ test("LINE OA default recovery persists only the newest page per conversation", 
       "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true",
       "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true&next=chat-page-2",
       "/api/v3/bots/bot-1/chats/chat-1/messages?limit=25",
+      "/api/v3/bots/bot-1/chats/chat-1/messages?limit=24&backward=message-page-2",
       "/api/v3/bots/bot-1/chats/chat-2/messages?limit=25",
     ].sort(),
   );
@@ -446,10 +448,10 @@ test("LINE OA saves a per-conversation cursor after each persisted message page"
   await bridge.sync();
 
   const cursors = bridge.posts.filter((post) => post.type === "recovery_cursor");
-  assert.equal(cursors.length, 2);
+  assert.equal(cursors.length, 3);
   assert.deepEqual(
     cursors.map((post) => post.conversation_id),
-    ["chat-1", "chat-2"],
+    ["chat-1", "chat-1", "chat-2"],
   );
   assert.ok(cursors.every((post) => post.cursor?.event_timestamp && post.cursor?.message_id));
 });
@@ -460,8 +462,8 @@ test("LINE OA first setup stops after ten conversations", async () => {
   const complete = await bridge.sync();
 
   assert.equal(complete.ok, true);
-  assert.equal(complete.recovered, 10);
-  assert.equal(bridge.posts.filter((post) => post.type === "recovery_batch").length, 10);
+  assert.equal(complete.recovered, 11);
+  assert.equal(bridge.posts.filter((post) => post.type === "recovery_batch").length, 11);
   const chatRequests = bridge.requests.filter((url) => url.pathname === "/api/v2/bots/bot-1/chats");
   assert.equal(chatRequests.length, 10);
   assert.equal(chatRequests.some((url) => url.searchParams.get("next") === "chat-page-11"), false);
@@ -623,8 +625,8 @@ test("LINE OA incremental recovery stops at the saved watermark", async () => {
       .map((url) => `${url.pathname}?${url.searchParams}`)
       .sort(),
     [
-      "/api/v3/bots/bot-1/chats/chat-1/messages?limit=25",
-      "/api/v3/bots/bot-1/chats/chat-2/messages?limit=25",
+      "/api/v3/bots/bot-1/chats/chat-1/messages?limit=100",
+      "/api/v3/bots/bot-1/chats/chat-2/messages?limit=100",
     ].sort(),
   );
 });
@@ -644,7 +646,7 @@ test("LINE OA skips unchanged chats using latestEvent timestamp", async () => {
     bridge.requests
       .filter((url) => url.pathname.includes("/messages"))
       .map((url) => `${url.pathname}?${url.searchParams}`),
-    ["/api/v3/bots/bot-1/chats/chat-2/messages?limit=25"],
+    ["/api/v3/bots/bot-1/chats/chat-2/messages?limit=100"],
   );
 });
 
@@ -861,20 +863,6 @@ test("LINE OA rejects malformed mention commands before sending", async () => {
 });
 
 
-test("LINE OA incremental recovery keeps the default conversation and message caps", async () => {
-  const bridge = createBridge({ chatCount: 11, chat1MessageCount: 30 });
-  const checkpoint = { watermark: "1970-01-01T00:00:00.900Z" };
-  const complete = await bridge.sync({ checkpoint });
-  assert.equal(complete.ok, true);
-  assert.equal(complete.watermark, checkpoint.watermark);
-  const batches = bridge.posts.filter(post => post.type === "recovery_batch");
-  assert.ok(batches.length <= 10);
-  assert.equal(batches[0].body.conversations[0].messages.length, 25);
-  assert.equal(bridge.requests.filter(url => url.pathname === "/api/v2/bots/bot-1/chats").length, 10);
-  assert.ok(bridge.requests.filter(url => url.pathname.endsWith("/messages"))
-    .every(url => url.searchParams.get("limit") === "25" && !url.searchParams.has("backward")));
-});
-
 test("LINE OA stale checkpoints cannot import messages older than 24 hours", async () => {
   const bridge = createBridge();
   const complete = await bridge.sync({
@@ -885,20 +873,4 @@ test("LINE OA stale checkpoints cannot import messages older than 24 hours", asy
   assert.equal(complete.recovered, 0);
   assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
   assert.equal(bridge.requests.some(url => url.searchParams.has("backward")), false);
-});
-
-test("LINE OA explicit history can exceed default conversation and message caps", async () => {
-  const bridge = createBridge({ chatCount: 11, chat1MessageCount: 30 });
-  const complete = await bridge.sync({
-    checkpoint: { watermark: "1970-01-01T00:00:02.000Z" },
-    history_days: 35,
-    history_since_ms: 900,
-  });
-  assert.equal(complete.ok, true);
-  const batches = bridge.posts.filter(post => post.type === "recovery_batch");
-  assert.equal(batches[0].body.conversations[0].messages.length, 30);
-  assert.equal(bridge.requests.filter(url => url.pathname === "/api/v2/bots/bot-1/chats").length, 11);
-  assert.ok(bridge.requests.filter(url => url.pathname.endsWith("/messages"))
-    .every(url => url.searchParams.get("limit") === "100"));
-  assert.ok(bridge.posts.some(post => post.type === "history_window" && post.history_days === 35));
 });

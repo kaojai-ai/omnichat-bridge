@@ -16,7 +16,7 @@ vm.runInContext(shopeeParserSource, parserContext);
 test("Shopee history window is not capped at the bootstrap conversation limit", () => {
   assert.match(
     source,
-    /maxItems: !historyWindow && !pageRequired\.length \? DEFAULT_SYNC_MAX_CONVERSATIONS : null/,
+    /maxItems: !historyWindow && bootstrap && !pageRequired\.length \? MANUAL_SYNC_MAX_CONVERSATIONS : null/,
   );
   assert.match(source, /\} else if \(!historyWindow && bootstrap\) \{/);
 });
@@ -35,7 +35,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000, now = Date.parse("2026-08-20T12:00:00Z") } = {}) {
+function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
@@ -104,7 +104,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
   const context = vm.createContext({
     window,
     document,
-    Date: class extends Date { static now() { return now + Date.now() - clockStartedAt; } },
+    Date: class extends Date { static now() { return Date.parse("2026-08-20T12:00:00Z") + Date.now() - clockStartedAt; } },
     URL,
     Headers,
     Request,
@@ -230,7 +230,7 @@ function createBridge({ pathname = "/webchat/conversations", captureIntervals = 
         },
       });
     }
-    for (let attempt = 0; attempt < 600; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
       for (const post of posts) {
         if (![
           "recovery_batch",
@@ -994,7 +994,7 @@ for (const hangBody of [false, true]) {
   });
 }
 
-test("default polling ignores ancient newly discovered conversations and bounds a missing-marker page", async () => {
+test("default polling ignores ancient newly discovered conversations and filters ancient messages from a missing-marker page", async () => {
   const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   const conversation = (id, latest) => ({
@@ -1016,36 +1016,24 @@ test("default polling ignores ancient newly discovered conversations and bounds 
   }]);
   await bridge.runIntervals();
   const ids = capturedRetryIds(bridge);
-  assert.equal(requestedLimit, "25");
-  assert.equal(ids.length, 25);
-  assert.deepEqual(ids, messages.slice(-25).map((message) => message.id));
+  assert.equal(requestedLimit, "100");
+  assert.equal(ids.length, 35);
+  assert.deepEqual(ids, messages.slice(5).map((message) => message.id));
   assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), false);
 });
 
-test("default incremental recovery bounds missing cursors to 10 conversations and 25 recent messages each", async () => {
+
+test("default recovery with no conversation cursor stops at the 24-hour floor", async () => {
   const bridge = createBridge();
   const listPath = "/webchat/api/v1.2/conversations";
-  const conversations = Array.from({ length: 15 }, (_, i) => ({
-    id: `cap-${i}`, shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z",
-  }));
-  await bridge.fetch(listPath, conversations);
-  let historyRequests = 0;
-  for (const conversation of conversations) {
-    bridge.setResponse(`${listPath}/${conversation.id}/messages`, (request) => {
-      historyRequests += 1;
-      assert.equal(new URL(request.url).searchParams.get("offset"), "0");
-      assert.equal(new URL(request.url).searchParams.get("limit"), "25");
-      return new Response(JSON.stringify(Array.from({ length: 40 }, (_, i) => ({
-        ...retryMessage(`${conversation.id}-${i}`, 0), conversation_id: conversation.id,
-        created_timestamp: Date.parse(i < 5 ? "2021-01-01T00:00:00Z" : "2026-08-20T11:00:00Z") / 1000 + i,
-      }))));
-    });
-  }
+  const conversation = { id: "missing-cursor", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
+  await bridge.fetch(listPath, [conversation]);
+  bridge.setResponse(`${listPath}/${conversation.id}/messages`, [
+    { ...retryMessage("ancient", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2021-01-01T00:00:00Z") / 1000 },
+    { ...retryMessage("recent", 0), conversation_id: conversation.id, created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 },
+  ]);
   const complete = await bridge.sync("100000001");
   assert.equal(complete.ok, true);
-  assert.equal(historyRequests, 10);
-  const batches = bridge.posts.filter((post) => post.type === "recovery_batch");
-  assert.equal(batches.length, 10);
-  assert.equal(batches.reduce((total, post) => total + post.body.length, 0), 250);
-  assert.ok(batches.every((post) => post.body.every((message) => message.created_timestamp > Date.parse("2026-08-19T12:00:00Z") / 1000)));
+  const messages = bridge.posts.filter(post => post.type === "recovery_batch").flatMap(post => Array.from(post.body));
+  assert.deepEqual(messages.map(message => message.id), ["recent"]);
 });

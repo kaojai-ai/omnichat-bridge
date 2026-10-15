@@ -58,11 +58,8 @@ Version 2 is legacy Shopee-only configuration using `commands_url` instead of
 `api_url`; LINE requires version 3. Unsupported provider entries are skipped;
 malformed supported entries are rejected. Unrecognized fields are discarded.
 
-Default sync and recovery cover the last 24 hours, at most 10 conversations
-and 25 newest messages per conversation per pass. Default discovery is limited
-to 10 conversation-list pages and one message page per conversation. Larger
-or older imports require explicit history settings; default completion does not
-mean all historical messages have been imported.
+Default polling and recovery do not import messages older than 24 hours, even
+with a missing or stale cursor. Older imports require explicit history settings.
 
 Optional top-level `history_days` is an integer from 1 to 366.
 `history_conversation_ids`, when supplied, must contain unique nonempty strings
