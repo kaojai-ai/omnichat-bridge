@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { createReplyQueue } from "../extension/lib/reply-queue.js";
-import { sanitizeSendDiagnostics } from "../extension/lib/logs.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 function deferred() {
@@ -18,7 +17,7 @@ function harness(sendViaProvider) {
   const background = deferred();
   const events = [];
   const sandbox = {
-    sanitizeSendDiagnostics, replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
+    replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
     scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     providerAdapterForCommand: (command) => ({ id: command.provider, supportsSend: () => true }),
     messageProviderAccountId: (command) => command.provider_account_id,
@@ -44,8 +43,8 @@ function harness(sendViaProvider) {
   } };
   return {
     replyQueue, background, events, socket, update,
-    send(request, account = "shop", provider = "shopee", extra = {}) {
-      return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request, ...extra }),
+    send(request, account = "shop", provider = "shopee") {
+      return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request }),
         { key: `${provider}:${account}`, account: { provider, provider_account_id: account } }, socket);
     },
   };
@@ -121,18 +120,4 @@ test("concurrent tab selections preserve both accounts", async () => {
   });
   await Promise.all([remember("shopee:one", 1), remember("shopee:two", 2)]);
   assert.deepEqual(stored, { "shopee:one": 1, "shopee:two": 2 });
-});
-
-
-test("failure acknowledgement sends sanitized diagnostics only when target requested them", async () => {
-  const h = harness(async () => ({ ok: false, error: "param_error", diagnostics: {
-    diagnostic_version: 1, native_error_code: "param_error", payload_shop_id_state: "absent",
-    text: "private text", headers: { authorization: "secret" },
-  } }));
-  await h.send("old-target");
-  await h.send("new-target", "shop", "shopee", { send_diagnostics_version: 1 });
-  assert.equal(h.socket.sent[0].diagnostics, undefined);
-  assert.deepEqual(h.socket.sent[1].diagnostics, { diagnostic_version: 1,
-    native_error_code: "param_error", payload_shop_id_state: "absent" });
-  assert.doesNotMatch(JSON.stringify(h.socket.sent), /private text|authorization|secret/);
 });

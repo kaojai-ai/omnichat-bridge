@@ -13,10 +13,11 @@ import {
 } from "./lib/sync-state.js";
 import {
   createLogEntry,
+  availableLogBudget,
+  createRoutineLogFilter,
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
-  sanitizeSendDiagnostics,
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
@@ -88,6 +89,7 @@ const INBOUND_LOG_MESSAGES = {
   "popup.uncaught_error": "Unhandled popup error.",
   "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
+  "provider.send_failed": "Shopee reply failed. See routing diagnostics.",
   "provider.uncaught_error": "Unhandled provider error.",
   "provider.recovery_not_configured": "Provider recovery could not start because setup is incomplete.",
   "provider.checkpoint_failed": "Could not load the sync checkpoint.",
@@ -170,8 +172,12 @@ async function resumeLogUpload() {
   }
 }
 
+const filterRoutineLog = createRoutineLogFilter();
+
 async function recordLog(level, area, event, message, details = {}, { remote = true } = {}) {
   try {
+    details = filterRoutineLog(level, area, event, details);
+    if (details === null) return;
     await mutateLogs(async () => {
       const stored = await readStorage([
         STORAGE.logs,
@@ -190,7 +196,12 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         details,
         account_key: context?.key,
       });
-      const logs = pruneLogs([entry, ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])]);
+      const local = chrome.storage.local;
+      const [totalBytes, currentLogBytes] = await Promise.all([
+        local.getBytesInUse(null), local.getBytesInUse([STORAGE.logs, STORAGE.logOutbox]),
+      ]);
+      const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
+      const logs = pruneLogs([entry, ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
       const retainedIds = new Set(logs.map((item) => item.id));
       const outbox = (Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : [])
         .filter((id) => retainedIds.has(id));
@@ -198,7 +209,7 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         && hasServerInitialized(stored)
         && stored[STORAGE.logUploadEnabled] === true
         && Boolean(context?.config.logs_url);
-      if (shouldUpload) outbox.push(entry.id);
+      if (shouldUpload && retainedIds.has(entry.id)) outbox.push(entry.id);
       await writeStorage({
         [STORAGE.logs]: logs,
         [STORAGE.logOutbox]: outbox,
@@ -2377,7 +2388,6 @@ async function handleLiveCommand(raw, context, socket) {
     liveCommandResults.set(key, cached);
   }
   const result = await cached.result;
-  const diagnostics = adapter.id === "shopee" && result?.diagnostics ? sanitizeSendDiagnostics(result.diagnostics) : undefined;
   if (duplicate && result?.ok && socket.readyState === WebSocket.OPEN) {
     acknowledge({ type: "send_result", request_id: command.request_id,
       ok: true, provider_message_id: result.provider_message_id });
@@ -2386,8 +2396,6 @@ async function handleLiveCommand(raw, context, socket) {
     await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
       provider_account_id: context.account.provider_account_id,
       request_id: command.request_id,
-      conversation_id: command.conversation_id,
-      ...(diagnostics ?? {}),
       installation_id: await installationId(),
     });
     void sendConnectionStatus(socket, context).catch((error) => recordUnexpected("connection_status", error));
@@ -2397,7 +2405,6 @@ async function handleLiveCommand(raw, context, socket) {
     error: result?.error ?? "Reply failed.",
     ...(result?.error_code ? { error_code: result.error_code } : {}),
     ...(result?.uncertain === true ? { uncertain: true } : {}),
-    ...(command.send_diagnostics_version === 1 && diagnostics ? { diagnostics } : {}),
   });
 }
 

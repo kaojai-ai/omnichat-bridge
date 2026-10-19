@@ -327,31 +327,42 @@ Shopee's response still determines acceptance; rejected or uncertain sends are n
 automatically resent by route resolution.
 
 
-### Shopee send failure diagnostics
+### Local Shopee send failure diagnostics
 
-A target may request `send_diagnostics_version: 1` on Shopee commands. On failed
-results, supporting extensions attach an optional `diagnostics` object to the
-existing `send_result` acknowledgement. Older commands retain the existing result
-shape; older extensions may ignore the request. Targets with strict result schemas
-must accept the optional object before issuing commands that request it.
+Shopee send failures record a sanitized `provider.send_failed` event in the
+extension's local operational logs. The existing Logs download includes its
+scalar details without changing Admin, popup UI, command/result envelopes,
+provider routing, delivery uncertainty or retry behavior. No server release is
+required for local diagnostics.
 
-Diagnostics use version 1 and an explicit scalar allowlist: native error code,
-HTTP status when available, elapsed send-attempt time, known endpoint path, chat
-surface, captured/derived template source, cache/lookup source, routing field
-presence/types, and consistency booleans for the resolved route versus outgoing
-body, URL parameters, and nested shop identity. They contain no native IDs,
-message text, request/response bodies, headers, cookies, or full URLs. The target
-correlates them with the existing request, conversation, shop and installation IDs.
-The legacy secure poster may expose a response body without HTTP status.
+The event records request and conversation correlation IDs, provider account,
+known endpoint path, chat surface, captured/derived template source, cache/lookup
+source, native error code and HTTP status when available. Routing diagnostics
+include numeric IDs from the resolved route and outgoing request/query/nested
+shop identity, field presence/types and consistency booleans. Text diagnostics
+contain length only; quote/UID diagnostics describe type or UUID shape. No message
+text, raw request/response bodies, credentials, headers, cookies or full URLs are
+recorded. The legacy secure poster may expose a response body without HTTP status.
+Provider rejection, transport uncertainty, unknown response and pre-dispatch
+failures are distinguished. Shopee may still omit the exact invalid field.
 
-The background worker sanitizes diagnostics before forwarding them. Failed result
-telemetry follows the command socket, independently of optional operational-log
-upload settings and the local log buffer. It is best effort: a disconnected socket,
-expired command, stopped browser, or failed server logging path can still prevent
-receipt. Targets must retain uncertainty and deadline behavior when diagnostics
-are absent or malformed; diagnostics never authorize a retry.
+The local buffer retains up to 48 hours under a combined **4 MiB UTF-8 JSON
+budget**, including allowance for optional log-upload references. Warnings/errors
+receive up to 1 MiB of reserved space. The actual budget shrinks using Chrome's
+reported total storage usage and quota, leaving 1 MiB headroom for other extension
+operations. A full budget evicts older entries sooner; one-day retention is a
+capacity target, not a guarantee under arbitrary activity. No `unlimitedStorage`
+permission or automatic upload is added. Existing opt-in log uploading is unchanged.
 
-The local 100-entry buffer reserves up to 30 entries for recent warnings/errors
-within its existing two-day retention, preventing routine discovery events from
-immediately evicting send failures. Safe scalar diagnostics remain exportable.
-This change records evidence; it does not repair native Shopee request parameters.
+Successful content-ready, detection-started and duplicate account-detected chatter
+is discarded. Unchanged provider account observations are sampled at most every
+five minutes, with a suppressed-event count on the next sample; changed details
+and warnings/errors are kept immediately. This filtering runs before reading and
+rewriting the larger local buffer.
+
+For a new `param_error`, download Logs and inspect `native_error_code`,
+`request_id`, `conversation_id`, route/request numeric identifiers, the field
+states and `*_matches_route` booleans. A missing or mismatched field is evidence
+to compare against the correct Shopee endpoint contract, not proof that every
+endpoint requires that field. This change improves evidence; it does not repair
+native Shopee parameters or establish a successful live send.

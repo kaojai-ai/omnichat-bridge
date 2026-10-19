@@ -200,7 +200,6 @@
       ok: false,
       ...(pending.result.uncertain === true ? { uncertain: true } : {}),
       ...(pending.result.error_code ? { error_code: pending.result.error_code } : {}),
-      ...(providerAdapter.id === "shopee" && pending.result.diagnostics ? { diagnostics: pending.result.diagnostics } : {}),
       error: pending.result.error
         ? `${providerLabel} API error: ${pending.result.error}`
         : `${providerLabel} API reply failed.`
@@ -435,6 +434,7 @@
     }
     log("info", "account_detected", `${providerLabel} accounts detected on the provider page.`, {
       accounts: accounts.length,
+      ...(accounts.length === 1 ? { provider_account_id: accounts[0].provider_account_id } : {}),
     });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;

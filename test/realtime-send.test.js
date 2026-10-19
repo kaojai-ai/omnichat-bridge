@@ -285,7 +285,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
   });
 
   assert.equal(payload, undefined);
-  assert.deepEqual(plain({ ...result, diagnostics: undefined }), {
+  assert.deepEqual(plain(result), {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "request-invalid-1",
@@ -426,19 +426,20 @@ test("native param_error is a rejection while a lost native response is uncertai
 
 test("native rejection diagnostics omit payloads and credentials", async () => {
   const bridge = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "param_error" } });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "private reply text" });
-  const log = bridge.posts.find((post) => post.type === "diagnostic_log" && post.details?.scope === "send_api");
+  await bridge.send({ ...baseCommand, command_type: "send_text", text: "private reply text" });
+  const log = bridge.posts.find((post) => post.type === "diagnostic_log" && post.event === "send_failed");
   assert.equal(log.details.native_error_code, "param_error");
   assert.equal(log.details.endpoint_path, "/webchat/api/v1.2/mini/messages");
   assert.equal(log.details.payload_shop_id_state, "string");
-  assert.equal(result.diagnostics.diagnostic_version, 1);
-  assert.equal(result.diagnostics.template_source, "derived");
-  assert.equal(result.diagnostics.route_source, "cache");
-  assert.equal(result.diagnostics.payload_shop_matches_route, true);
-  assert.equal(result.diagnostics.payload_to_matches_route, true);
-  assert.equal(result.diagnostics.http_status, 200);
-  assert.deepEqual(plain(result.diagnostics), plain(Object.fromEntries(Object.entries(log.details).filter(([key]) => !key.startsWith("error_") && key !== "scope" && key !== "request_id" && key !== "conversation_id"))));
-  assert.doesNotMatch(JSON.stringify(result.diagnostics), /private reply text|Bearer seller-test|csrf_token|buyer-1|shop-1/);
+  assert.equal(log.details.diagnostic_version, 1);
+  assert.equal(log.details.request_id, baseCommand.request_id);
+  assert.equal(log.details.conversation_id, baseCommand.conversation_id);
+  assert.equal(log.details.failure_kind, "provider_rejection");
+  assert.equal(log.details.delivery_uncertain, false);
+  assert.equal(log.details.template_source, "derived");
+  assert.equal(log.details.payload_shop_matches_route, true);
+  assert.equal(log.details.payload_to_matches_route, true);
+  assert.equal(log.details.http_status, 200);
   assert.doesNotMatch(JSON.stringify(log), /private reply text|Bearer seller-test|csrf_token/);
 });
 
@@ -706,14 +707,40 @@ test("a shop session switch during lookup prevents sending the old shop route", 
 });
 
 
-test("rejection diagnostics expose missing captured fields without copying recipient data", async () => {
+test("param_error diagnostics survive local sanitization and export with exact numeric routing IDs", async () => {
+  const { createLogEntry, logEntryForUpload } = await import("../extension/lib/logs.js");
+  const bridge = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "private rejected text" },
+    cachedRouting: { conversation_id: "conversation-1", shop_id: "207459663", to_id: "123456789", biz_id: "0" } });
+  const command = { ...baseCommand, provider_account_id: "207459663", command_type: "send_text", text: "private rejected text" };
+  const { result } = await bridge.send(command);
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics, undefined); // No target-server protocol change.
+  const event = bridge.posts.find(post => post.type === "diagnostic_log" && post.event === "send_failed");
+  const saved = createLogEntry({ level: event.level, area: "provider", event: event.event, message: event.message, details: event.details });
+  assert.equal(saved.details.native_error_code, "param_error");
+  assert.equal(saved.details.route_shop_id, "207459663");
+  assert.equal(saved.details.request_shop_id, "207459663");
+  assert.equal(saved.details.route_recipient_id, "123456789");
+  assert.equal(saved.details.request_recipient_id, "123456789");
+  assert.equal(saved.details.provider_account_id, "207459663");
+  assert.equal(saved.details.request_id, command.request_id);
+  assert.equal(saved.details.http_status, 200);
+  assert.equal(saved.details.failure_kind, "provider_rejection");
+  const exportText = Object.entries(saved.details).map(([key, value]) => `${key}=${value}`).join(" · ");
+  assert.match(exportText, /native_error_code=param_error/);
+  assert.match(exportText, /request_recipient_id=123456789/);
+  assert.doesNotMatch(JSON.stringify(saved), /private rejected text|Bearer seller-test|csrf_token/);
+});
+
+test("captured request missing routing fields is visible in local rejection diagnostics", async () => {
+  const { createLogEntry } = await import("../extension/lib/logs.js");
   const bridge = createBridge({ sendBody: { error_code: "param_error" } });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "private text" });
-  assert.equal(result.diagnostics.template_source, "captured");
-  assert.equal(result.diagnostics.native_error_code, "param_error");
-  assert.equal(result.diagnostics.payload_shop_id_state, "absent");
-  assert.equal(result.diagnostics.payload_shop_matches_route, false);
-  assert.equal(result.diagnostics.payload_to_id_state, "absent");
-  assert.equal(result.diagnostics.payload_to_matches_route, false);
-  assert.doesNotMatch(JSON.stringify(result.diagnostics), /private text|buyer-1|shop-1/);
+  await bridge.send({ ...baseCommand, command_type: "send_text", text: "private text" });
+  const event = bridge.posts.find(post => post.type === "diagnostic_log" && post.event === "send_failed");
+  const saved = createLogEntry({ details: event.details });
+  assert.equal(saved.details.template_source, "captured");
+  assert.equal(saved.details.payload_shop_id_state, "absent");
+  assert.equal(saved.details.payload_shop_matches_route, false);
+  assert.equal(saved.details.payload_to_id_state, "absent");
+  assert.equal(saved.details.payload_to_matches_route, false);
 });
