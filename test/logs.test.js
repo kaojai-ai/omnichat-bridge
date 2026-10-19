@@ -66,7 +66,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
       failure_kind: "provider_rejection", message_text: "private reply", request_url: "https://private.example?token=secret" },
   }, {}, resolve));
   assert.equal(storage.logs[0].event, "send_failed");
-  assert.equal(storage.logs[0].message, "Shopee reply failed. See routing diagnostics.");
+  assert.equal(storage.logs[0].message, "Provider reply failed. See routing diagnostics.");
   assert.equal(storage.logs[0].details.native_error_code, "param_error");
   assert.equal(storage.logs[0].details.payload_shop_id_state, "absent");
   const popup = readFileSync(new URL("../extension/popup.js", import.meta.url), "utf8");

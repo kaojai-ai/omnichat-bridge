@@ -1324,7 +1324,7 @@
         delivery_uncertain: nativeAttempted && !providerRejected && !providerReason,
         failure_kind: providerRejected || providerReason ? "provider_rejection"
           : !nativeAttempted ? "pre_dispatch_failure" : nativeResponseReceived ? "unrecognized_response" : "transport_failure" };
-      postLog("error", "send_failed", "Shopee reply failed. See routing diagnostics.", {
+      postLog("error", "send_failed", "Provider reply failed. See routing diagnostics.", {
         scope: "send_api", request_id: requestId, conversation_id: conversationId, provider_account_id: accountId,
         ...diagnostics,
       });

@@ -89,7 +89,7 @@ const INBOUND_LOG_MESSAGES = {
   "popup.uncaught_error": "Unhandled popup error.",
   "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
-  "provider.send_failed": "Shopee reply failed. See routing diagnostics.",
+  "provider.send_failed": "Provider reply failed. See routing diagnostics.",
   "provider.uncaught_error": "Unhandled provider error.",
   "provider.recovery_not_configured": "Provider recovery could not start because setup is incomplete.",
   "provider.checkpoint_failed": "Could not load the sync checkpoint.",
