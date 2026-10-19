@@ -16,6 +16,7 @@ import {
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
+  sanitizeSendDiagnostics,
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
@@ -2376,6 +2377,7 @@ async function handleLiveCommand(raw, context, socket) {
     liveCommandResults.set(key, cached);
   }
   const result = await cached.result;
+  const diagnostics = adapter.id === "shopee" && result?.diagnostics ? sanitizeSendDiagnostics(result.diagnostics) : undefined;
   if (duplicate && result?.ok && socket.readyState === WebSocket.OPEN) {
     acknowledge({ type: "send_result", request_id: command.request_id,
       ok: true, provider_message_id: result.provider_message_id });
@@ -2384,6 +2386,8 @@ async function handleLiveCommand(raw, context, socket) {
     await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
       provider_account_id: context.account.provider_account_id,
       request_id: command.request_id,
+      conversation_id: command.conversation_id,
+      ...(diagnostics ?? {}),
       installation_id: await installationId(),
     });
     void sendConnectionStatus(socket, context).catch((error) => recordUnexpected("connection_status", error));
@@ -2393,6 +2397,7 @@ async function handleLiveCommand(raw, context, socket) {
     error: result?.error ?? "Reply failed.",
     ...(result?.error_code ? { error_code: result.error_code } : {}),
     ...(result?.uncertain === true ? { uncertain: true } : {}),
+    ...(command.send_diagnostics_version === 1 && diagnostics ? { diagnostics } : {}),
   });
 }
 

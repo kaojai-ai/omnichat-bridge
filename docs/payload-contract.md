@@ -325,3 +325,33 @@ and lookup stop reason. Existing diagnostic batches include the extension versio
 They do not include message content, credentials, or raw request URLs/bodies.
 Shopee's response still determines acceptance; rejected or uncertain sends are never
 automatically resent by route resolution.
+
+
+### Shopee send failure diagnostics
+
+A target may request `send_diagnostics_version: 1` on Shopee commands. On failed
+results, supporting extensions attach an optional `diagnostics` object to the
+existing `send_result` acknowledgement. Older commands retain the existing result
+shape; older extensions may ignore the request. Targets with strict result schemas
+must accept the optional object before issuing commands that request it.
+
+Diagnostics use version 1 and an explicit scalar allowlist: native error code,
+HTTP status when available, elapsed send-attempt time, known endpoint path, chat
+surface, captured/derived template source, cache/lookup source, routing field
+presence/types, and consistency booleans for the resolved route versus outgoing
+body, URL parameters, and nested shop identity. They contain no native IDs,
+message text, request/response bodies, headers, cookies, or full URLs. The target
+correlates them with the existing request, conversation, shop and installation IDs.
+The legacy secure poster may expose a response body without HTTP status.
+
+The background worker sanitizes diagnostics before forwarding them. Failed result
+telemetry follows the command socket, independently of optional operational-log
+upload settings and the local log buffer. It is best effort: a disconnected socket,
+expired command, stopped browser, or failed server logging path can still prevent
+receipt. Targets must retain uncertainty and deadline behavior when diagnostics
+are absent or malformed; diagnostics never authorize a retry.
+
+The local 100-entry buffer reserves up to 30 entries for recent warnings/errors
+within its existing two-day retention, preventing routine discovery events from
+immediately evicting send failures. Safe scalar diagnostics remain exportable.
+This change records evidence; it does not repair native Shopee request parameters.

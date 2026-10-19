@@ -285,7 +285,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
   });
 
   assert.equal(payload, undefined);
-  assert.deepEqual(plain(result), {
+  assert.deepEqual(plain({ ...result, diagnostics: undefined }), {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "request-invalid-1",
@@ -426,11 +426,19 @@ test("native param_error is a rejection while a lost native response is uncertai
 
 test("native rejection diagnostics omit payloads and credentials", async () => {
   const bridge = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "param_error" } });
-  await bridge.send({ ...baseCommand, command_type: "send_text", text: "private reply text" });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "private reply text" });
   const log = bridge.posts.find((post) => post.type === "diagnostic_log" && post.details?.scope === "send_api");
   assert.equal(log.details.native_error_code, "param_error");
   assert.equal(log.details.endpoint_path, "/webchat/api/v1.2/mini/messages");
-  assert.equal(log.details.routing_types.shop_id, "string");
+  assert.equal(log.details.payload_shop_id_state, "string");
+  assert.equal(result.diagnostics.diagnostic_version, 1);
+  assert.equal(result.diagnostics.template_source, "derived");
+  assert.equal(result.diagnostics.route_source, "cache");
+  assert.equal(result.diagnostics.payload_shop_matches_route, true);
+  assert.equal(result.diagnostics.payload_to_matches_route, true);
+  assert.equal(result.diagnostics.http_status, 200);
+  assert.deepEqual(plain(result.diagnostics), plain(Object.fromEntries(Object.entries(log.details).filter(([key]) => !key.startsWith("error_") && key !== "scope" && key !== "request_id" && key !== "conversation_id"))));
+  assert.doesNotMatch(JSON.stringify(result.diagnostics), /private reply text|Bearer seller-test|csrf_token|buyer-1|shop-1/);
   assert.doesNotMatch(JSON.stringify(log), /private reply text|Bearer seller-test|csrf_token/);
 });
 
@@ -695,4 +703,17 @@ test("a shop session switch during lookup prevents sending the old shop route", 
   assert.equal(result.ok, false);
   assert.match(result.error, /session changed/);
   assert.equal(bridge.nativePayloads.length, 0);
+});
+
+
+test("rejection diagnostics expose missing captured fields without copying recipient data", async () => {
+  const bridge = createBridge({ sendBody: { error_code: "param_error" } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "private text" });
+  assert.equal(result.diagnostics.template_source, "captured");
+  assert.equal(result.diagnostics.native_error_code, "param_error");
+  assert.equal(result.diagnostics.payload_shop_id_state, "absent");
+  assert.equal(result.diagnostics.payload_shop_matches_route, false);
+  assert.equal(result.diagnostics.payload_to_id_state, "absent");
+  assert.equal(result.diagnostics.payload_to_matches_route, false);
+  assert.doesNotMatch(JSON.stringify(result.diagnostics), /private text|buyer-1|shop-1/);
 });

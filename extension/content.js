@@ -200,6 +200,7 @@
       ok: false,
       ...(pending.result.uncertain === true ? { uncertain: true } : {}),
       ...(pending.result.error_code ? { error_code: pending.result.error_code } : {}),
+      ...(providerAdapter.id === "shopee" && pending.result.diagnostics ? { diagnostics: pending.result.diagnostics } : {}),
       error: pending.result.error
         ? `${providerLabel} API error: ${pending.result.error}`
         : `${providerLabel} API reply failed.`

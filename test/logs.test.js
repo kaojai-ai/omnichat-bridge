@@ -10,6 +10,7 @@ import {
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
+  sanitizeSendDiagnostics,
 } from "../extension/lib/logs.js";
 
 test("background accepts route diagnostics and stores sanitized correlation details", async () => {
@@ -155,4 +156,29 @@ test("retains safe delivery correlation details without message content", () => 
   assert.equal(entry.details.text_length, 42);
   assert.equal(entry.details.request_bytes, 4096);
   assert.equal(entry.details.message_text, undefined);
+});
+
+
+test("send diagnostics allowlist excludes secrets, arbitrary strings, and oversized values", () => {
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1, surface: "seller-centre",
+    payload_shop_id_state: "absent", payload_shop_matches_route: false, native_error_code: "param_error",
+    http_status: 200, provider_duration_ms: 500, text: "private message", cookie: "secret", shop_id: "123",
+    endpoint_path: "https://private.example?token=secret", route_source: "private value",
+  }), { diagnostic_version: 1, surface: "seller-centre", payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, native_error_code: "param_error", http_status: 200, provider_duration_ms: 500 });
+  assert.equal(sanitizeSendDiagnostics({ surface: "legacy" }), undefined);
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1, provider_duration_ms: Infinity, http_status: 999 }), { diagnostic_version: 1 });
+  const entry = createLogEntry({ details: { diagnostic_version: 1, payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, endpoint_path: "/webchat/api/v1.2/mini/messages", payload: "secret", request_url: "https://private.example" } });
+  assert.deepEqual(entry.details, { diagnostic_version: 1, payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, endpoint_path: "/webchat/api/v1.2/mini/messages" });
+});
+
+test("discovery noise cannot evict the last send failure before retention expires", () => {
+  const now = Date.now();
+  const failure = createLogEntry({ level: "error", event: "send_api" }, now - 1000, "failure");
+  const entries = Array.from({ length: 150 }, (_, i) => createLogEntry({ event: "account_detected" }, now - i, `noise-${i}`));
+  const retained = pruneLogs([...entries, failure], now);
+  assert.equal(retained.length, MAX_LOG_ENTRIES);
+  assert.equal(retained.at(-1).id, "failure");
 });

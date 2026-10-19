@@ -25,6 +25,37 @@ const IDENTIFIER_DETAIL_KEYS = new Set([
   "message_fingerprint",
 ]);
 
+// Explicit, bounded diagnostics for the command acknowledgement. Never include IDs,
+// payloads, response bodies, arbitrary messages, URLs, headers, or credentials.
+export function sanitizeSendDiagnostics(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || input.diagnostic_version !== 1) return undefined;
+  const result = { diagnostic_version: 1 };
+  const enums = {
+    surface: ["legacy", "seller-centre"],
+    endpoint_path: ["/webchat/api/v1.2/messages", "/webchat/api/v1.2/mini/messages"],
+    template_source: ["captured", "derived"], route_source: ["cache", "lookup"],
+    cache_reason: ["complete", "incomplete", "shop_mismatch", "ambiguous_shop", "absent"],
+  };
+  for (const key of ["payload_conversation_id_state", "payload_shop_id_state", "payload_to_id_state", "payload_to_shop_id_state", "payload_biz_id_state"]) {
+    enums[key] = ["absent", "number", "string", "other"];
+  }
+  for (const [key, allowed] of Object.entries(enums)) {
+    if (allowed.includes(input[key])) result[key] = input[key];
+  }
+  for (const key of ["route_resolved", "route_shop_matches_account", "payload_conversation_matches_route", "payload_to_shop_matches_route", "payload_biz_matches_route", "payload_shop_matches_route", "payload_to_matches_route",
+    "url_shop_matches_route", "url_biz_matches_route", "choice_shop_matches_route"]) {
+    if (typeof input[key] === "boolean") result[key] = input[key];
+  }
+  if (typeof input.native_error_code === "string" && /^[a-zA-Z0-9_]{1,64}$/.test(input.native_error_code)) {
+    result.native_error_code = input.native_error_code;
+  }
+  if (Number.isInteger(input.http_status) && input.http_status >= 100 && input.http_status <= 599) result.http_status = input.http_status;
+  if (Number.isFinite(input.provider_duration_ms) && input.provider_duration_ms >= 0 && input.provider_duration_ms <= 300_000) {
+    result.provider_duration_ms = input.provider_duration_ms;
+  }
+  return result;
+}
+
 function safeName(value, fallback) {
   const name = String(value ?? "").trim().toLowerCase();
   return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) ? name : fallback;
@@ -91,8 +122,13 @@ export function diagnosticErrorDetails(error) {
 export function sanitizeLogDetails(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const details = {};
+  const sendDiagnostics = sanitizeSendDiagnostics(value) ?? {};
   for (const [rawKey, rawValue] of Object.entries(value).slice(0, 32)) {
     const key = safeName(rawKey, "");
+    if (Object.hasOwn(sendDiagnostics, key)) {
+      details[key] = sendDiagnostics[key];
+      continue;
+    }
     if (!key || BLOCKED_DETAIL_KEY.test(key)) continue;
     if (IDENTIFIER_DETAIL_KEYS.has(key) && typeof rawValue === "string") {
       details[key] = sanitizeIdentifier(rawValue);
@@ -130,9 +166,16 @@ export function createLogEntry(value, now = Date.now(), id = crypto.randomUUID()
 
 export function pruneLogs(items, now = Date.now()) {
   const cutoff = now - LOG_RETENTION_MS;
-  return (Array.isArray(items) ? items : [])
-    .filter((item) => Number.isFinite(Date.parse(item?.at)) && Date.parse(item.at) >= cutoff)
-    .slice(0, MAX_LOG_ENTRIES);
+  const recent = (Array.isArray(items) ? items : [])
+    .filter((item) => Number.isFinite(Date.parse(item?.at)) && Date.parse(item.at) >= cutoff);
+  // Keep failures exportable even while repetitive discovery events fill the buffer.
+  const protectedFailures = new Set(recent.filter((item) => ["error", "warn"].includes(item.level)).slice(0, 30));
+  const retained = new Set(protectedFailures);
+  for (const item of recent) {
+    if (retained.size >= MAX_LOG_ENTRIES) break;
+    retained.add(item);
+  }
+  return recent.filter((item) => retained.has(item));
 }
 
 export function logEntryForUpload(entry) {

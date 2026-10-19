@@ -608,3 +608,15 @@ test("preserves missing-conversation codes across the content bridge", async () 
     error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
 });
+
+
+test("forwards Shopee failure diagnostics across the content bridge", async () => {
+  const bridge = contentBridge();
+  const pending = bridge.sendCommand(command);
+  const diagnostics = { diagnostic_version: 1, native_error_code: "param_error", payload_shop_id_state: "absent" };
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: false,
+    error: "param_error", diagnostics });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.deepEqual(plain(result.diagnostics), diagnostics);
+});
