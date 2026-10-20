@@ -325,3 +325,44 @@ and lookup stop reason. Existing diagnostic batches include the extension versio
 They do not include message content, credentials, or raw request URLs/bodies.
 Shopee's response still determines acceptance; rejected or uncertain sends are never
 automatically resent by route resolution.
+
+
+### Local Shopee send failure diagnostics
+
+Shopee send failures record a sanitized `provider.send_failed` event in the
+extension's local operational logs. The existing Logs download includes its
+scalar details without changing Admin, popup UI, command/result envelopes,
+provider routing, delivery uncertainty or retry behavior. No server release is
+required for local diagnostics.
+
+The event records request and conversation correlation IDs, provider account,
+known endpoint path, chat surface, captured/derived template source, cache/lookup
+source, native error code and HTTP status when available. Routing diagnostics
+include numeric IDs from the resolved route and outgoing request/query/nested
+shop identity, field presence/types and consistency booleans. Text diagnostics
+contain length only; quote/UID diagnostics describe type or UUID shape. No message
+text, raw request/response bodies, credentials, headers, cookies or full URLs are
+recorded. The legacy secure poster may expose a response body without HTTP status.
+Provider rejection, transport uncertainty, unknown response and pre-dispatch
+failures are distinguished. Shopee may still omit the exact invalid field.
+
+The local buffer retains up to 48 hours under a combined **4 MiB UTF-8 JSON
+budget**, including allowance for optional log-upload references. Warnings/errors
+receive up to 1 MiB of reserved space. The actual budget shrinks using Chrome's
+reported total storage usage and quota, leaving 1 MiB headroom for other extension
+operations. A full budget evicts older entries sooner; one-day retention is a
+capacity target, not a guarantee under arbitrary activity. No `unlimitedStorage`
+permission or automatic upload is added. Existing opt-in log uploading is unchanged.
+
+Successful content-ready, detection-started and duplicate account-detected chatter
+is discarded. Unchanged provider account observations are sampled at most every
+five minutes, with a suppressed-event count on the next sample; changed details
+and warnings/errors are kept immediately. This filtering runs before reading and
+rewriting the larger local buffer.
+
+For a new `param_error`, download Logs and inspect `native_error_code`,
+`request_id`, `conversation_id`, route/request numeric identifiers, the field
+states and `*_matches_route` booleans. A missing or mismatched field is evidence
+to compare against the correct Shopee endpoint contract, not proof that every
+endpoint requires that field. This change improves evidence; it does not repair
+native Shopee parameters or establish a successful live send.

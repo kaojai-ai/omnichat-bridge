@@ -5,11 +5,15 @@ import vm from "node:vm";
 
 import {
   LOG_RETENTION_MS,
-  MAX_LOG_ENTRIES,
+  MAX_LOG_BYTES,
+  logStorageBytes,
+  availableLogBudget,
+  createRoutineLogFilter,
   createLogEntry,
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
+  sanitizeSendDiagnostics,
 } from "../extension/lib/logs.js";
 
 test("background accepts route diagnostics and stores sanitized correlation details", async () => {
@@ -23,12 +27,13 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   const storage = {};
   let listener;
   const context = vm.createContext({
-    chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } } },
+    chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } },
+      storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
     STORAGE: { logs: "logs", logOutbox: "outbox" },
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => null, hasServerInitialized: () => false,
-    createLogEntry, pruneLogs,
+    createLogEntry, pruneLogs, availableLogBudget, filterRoutineLog: createRoutineLogFilter(),
   });
   vm.runInContext(source.slice(allowStart, allowEnd) + "\n"
     + source.slice(recordStart, recordEnd) + "\n" + source.slice(listenerStart, listenerEnd), context);
@@ -51,6 +56,28 @@ test("background accepts route diagnostics and stores sanitized correlation deta
     event: "unregistered_event" }, {}, resolve));
   assert.equal(rejected.ok, false);
   assert.equal(storage.logs.length, 1);
+
+  await new Promise(resolve => listener({ type: "record_log", area: "provider", level: "error",
+    event: "send_failed", message: "private provider message",
+    details: { request_id: "request-123", conversation_id: "conversation-123",
+      diagnostic_version: 1, ...Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`unused_${i}`, i])),
+      native_error_code: "param_error", http_status: 200, route_shop_id: "207459663",
+      request_recipient_id: "123456789", payload_shop_id_state: "absent", payload_shop_matches_route: false,
+      failure_kind: "provider_rejection", message_text: "private reply", request_url: "https://private.example?token=secret" },
+  }, {}, resolve));
+  assert.equal(storage.logs[0].event, "send_failed");
+  assert.equal(storage.logs[0].message, "Provider reply failed. See routing diagnostics.");
+  assert.equal(storage.logs[0].details.native_error_code, "param_error");
+  assert.equal(storage.logs[0].details.payload_shop_id_state, "absent");
+  const popup = readFileSync(new URL("../extension/popup.js", import.meta.url), "utf8");
+  const formatStart = popup.indexOf("function formatLogDetails(");
+  const formatEnd = popup.indexOf("function safeFilenamePart(", formatStart);
+  const exported = vm.runInNewContext(popup.slice(formatStart, formatEnd) + "\nformatVisibleLogs()", { visibleLogs: () => storage.logs });
+  assert.match(exported, /native_error_code=param_error/);
+  assert.match(exported, /request_recipient_id=123456789/);
+  assert.match(exported, /request_id=request-123/);
+  assert.match(exported, /payload_shop_matches_route=false/);
+  assert.doesNotMatch(exported, /private provider message|private reply|private.example|token=secret/);
 });
 
 test("log entries redact sensitive strings and detail keys", () => {
@@ -84,16 +111,11 @@ test("logs older than two days are removed", () => {
   assert.deepEqual(pruneLogs([recent, expired], now).map((item) => item.id), ["recent"]);
 });
 
-test("keeps only the newest 100 logs", () => {
-  const now = Date.parse("2026-07-26T12:00:00.000Z");
-  const entries = Array.from({ length: 101 }, (_, index) => (
-    createLogEntry({ event: `event-${index}` }, now - index, `log-${index}`)
-  ));
-  const retained = pruneLogs(entries, now);
-
-  assert.equal(MAX_LOG_ENTRIES, 100);
-  assert.equal(retained.length, 100);
-  assert.equal(retained.at(-1).id, "log-99");
+test("retains more than 100 entries within the byte budget", () => {
+  const now = Date.now();
+  const entries = Array.from({ length: 1000 }, (_, index) => createLogEntry({ event: "useful_event" }, now - index, `log-${index}`));
+  assert.equal(pruneLogs(entries, now).length, 1000);
+  assert.ok(logStorageBytes(pruneLogs(entries, now)) <= MAX_LOG_BYTES);
 });
 
 test("remote log payload omits internal account routing", () => {
@@ -155,4 +177,71 @@ test("retains safe delivery correlation details without message content", () => 
   assert.equal(entry.details.text_length, 42);
   assert.equal(entry.details.request_bytes, 4096);
   assert.equal(entry.details.message_text, undefined);
+});
+
+
+test("send diagnostics allowlist excludes secrets, arbitrary strings, and oversized values", () => {
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1, surface: "seller-centre",
+    payload_shop_id_state: "absent", payload_shop_matches_route: false, native_error_code: "param_error",
+    http_status: 200, provider_duration_ms: 500, text: "private message", cookie: "secret", shop_id: "123",
+    endpoint_path: "https://private.example?token=secret", route_source: "private value",
+  }), { diagnostic_version: 1, surface: "seller-centre", payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, native_error_code: "param_error", http_status: 200, provider_duration_ms: 500 });
+  assert.equal(sanitizeSendDiagnostics({ surface: "legacy" }), undefined);
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1, provider_duration_ms: Infinity, http_status: 999 }), { diagnostic_version: 1 });
+  const entry = createLogEntry({ details: { diagnostic_version: 1, payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, endpoint_path: "/webchat/api/v1.2/mini/messages", payload: "secret", request_url: "https://private.example" } });
+  assert.deepEqual(entry.details, { diagnostic_version: 1, payload_shop_id_state: "absent",
+    payload_shop_matches_route: false, endpoint_path: "/webchat/api/v1.2/mini/messages" });
+});
+
+test("discovery noise cannot evict the last send failure before retention expires", () => {
+  const now = Date.now();
+  const failure = createLogEntry({ level: "error", event: "send_api" }, now - 1000, "failure");
+  const entries = Array.from({ length: 150 }, (_, i) => createLogEntry({ event: "account_detected" }, now - i, `noise-${i}`));
+  const retained = pruneLogs([...entries, failure], now);
+  assert.ok(logStorageBytes(retained) <= MAX_LOG_BYTES);
+  assert.equal(retained.at(-1).id, "failure");
+});
+
+
+test("byte budget includes UTF-8 data and optional outbox references", () => {
+  const now = Date.now();
+  const entries = Array.from({ length: 2000 }, (_, i) => createLogEntry({ event: "event", message: "ทดสอบ".repeat(50) }, now - i, `entry-${i}`));
+  const budget = 32 * 1024;
+  const retained = pruneLogs(entries, now, budget);
+  assert.ok(retained.length > 0 && retained.length < entries.length);
+  assert.ok(logStorageBytes(retained) + logStorageBytes(retained.map(entry => entry.id)) <= budget);
+  assert.deepEqual(pruneLogs(entries, now, 0), []);
+  const failure = createLogEntry({ level: "error", event: "send_failed", message: "param_error" }, now - 3000, "failure");
+  assert.equal(pruneLogs([...entries, failure], now, budget).at(-1).id, "failure");
+});
+
+test("log budget leaves Chrome quota headroom as other extension data grows", () => {
+  const MiB = 1024 * 1024;
+  assert.equal(availableLogBudget(2 * MiB, 0, 10 * MiB), 4 * MiB);
+  assert.equal(availableLogBudget(9 * MiB, 2 * MiB, 10 * MiB), 2 * MiB);
+  assert.equal(availableLogBudget(10 * MiB, 0, 10 * MiB), 0);
+});
+
+test("removes readiness chatter, samples unchanged detections, and keeps every failure", () => {
+  const filter = createRoutineLogFilter();
+  const details = { provider: "shopee", accounts: 1 };
+  assert.equal(filter("debug", "provider", "content_ready", details, 0), null);
+  assert.equal(filter("info", "account", "detected", details, 0), null);
+  assert.equal(filter("info", "account", "detection_started", details, 0), null);
+  assert.deepEqual(filter("info", "provider", "account_detected", details, 0), details);
+  assert.equal(filter("info", "provider", "account_detected", details, 3000), null);
+  assert.equal(filter("info", "provider", "account_detected", details, 6000), null);
+  assert.deepEqual(filter("info", "provider", "account_detected", details, 300_000), { ...details, suppressed_count: 2 });
+  assert.deepEqual(filter("info", "provider", "account_detected", { ...details, accounts: 2 }, 300_001), { ...details, accounts: 2 });
+  assert.deepEqual(filter("error", "provider", "account_detected", details, 300_002), details);
+  assert.deepEqual(filter("error", "provider", "account_detected", details, 300_003), details);
+});
+
+
+test("invalid routing IDs cannot bypass the diagnostic allowlist through generic details", () => {
+  const entry = createLogEntry({ details: { diagnostic_version: 1, request_shop_id: "private-text",
+    query_shop_id: { token: "secret" }, route_recipient_id: "123456789" } });
+  assert.deepEqual(entry.details, { diagnostic_version: 1, route_recipient_id: "123456789" });
 });

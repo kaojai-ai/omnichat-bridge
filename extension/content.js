@@ -434,6 +434,7 @@
     }
     log("info", "account_detected", `${providerLabel} accounts detected on the provider page.`, {
       accounts: accounts.length,
+      ...(accounts.length === 1 ? { provider_account_id: accounts[0].provider_account_id } : {}),
     });
     const pending = message.request_id ? accountDetections.get(message.request_id) : null;
     if (!pending) return;

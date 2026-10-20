@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: October 9, 2026_
+_Last updated: October 19, 2026_
 
 Omnichat Bridge is an open-source Chrome extension. It bridges a
 provider chat open in the user's browser with the HTTPS or WSS server that the
@@ -36,7 +36,8 @@ operational logs to that configured HTTPS destination in signed batches.
 Upload starts when sync is initialized, manually or through configured
 automatic sync.
 These logs describe extension lifecycle, provider readiness, sync progress,
-queue counts, delivery status, and errors. They do not include chat content,
+queue counts, delivery status, errors, and numeric provider routing identifiers
+needed for send diagnostics. They do not include chat content,
 provider credentials, cookies, login tokens, request headers, HMAC secrets,
 or full request URLs.
 
@@ -56,8 +57,12 @@ it for creditworthiness or lending decisions.
 
 The extension stores its configuration, a small temporary delivery queue, and
 operational logs in Chrome's local extension storage on the user's device.
-Operational logs expire after 48 hours and are also capped to stay within
-Chrome storage limits (100 local log entries). Users can delete all local configuration, consent,
+Operational logs expire after 48 hours. Logs and their optional upload outbox
+have a combined budget of up to 4 MiB, reduced further when other extension data
+uses Chrome storage. The extension reserves 1 MiB of Chrome's quota for other
+operations. Older logs can be removed before 48 hours when the budget is full;
+recent warnings/errors receive a reserved share. Repetitive routine detection
+chatter is suppressed. Users can delete all local configuration, consent,
 queued data, cursors, and logs from the extension settings, or remove the
 extension. Queued data is removed after a successful delivery where supported
 by the configured destination.

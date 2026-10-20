@@ -13,6 +13,8 @@ import {
 } from "./lib/sync-state.js";
 import {
   createLogEntry,
+  availableLogBudget,
+  createRoutineLogFilter,
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
@@ -87,6 +89,7 @@ const INBOUND_LOG_MESSAGES = {
   "popup.uncaught_error": "Unhandled popup error.",
   "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
+  "provider.send_failed": "Provider reply failed. See routing diagnostics.",
   "provider.uncaught_error": "Unhandled provider error.",
   "provider.recovery_not_configured": "Provider recovery could not start because setup is incomplete.",
   "provider.checkpoint_failed": "Could not load the sync checkpoint.",
@@ -169,8 +172,12 @@ async function resumeLogUpload() {
   }
 }
 
+const filterRoutineLog = createRoutineLogFilter();
+
 async function recordLog(level, area, event, message, details = {}, { remote = true } = {}) {
   try {
+    details = filterRoutineLog(level, area, event, details);
+    if (details === null) return;
     await mutateLogs(async () => {
       const stored = await readStorage([
         STORAGE.logs,
@@ -189,7 +196,12 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         details,
         account_key: context?.key,
       });
-      const logs = pruneLogs([entry, ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])]);
+      const local = chrome.storage.local;
+      const [totalBytes, currentLogBytes] = await Promise.all([
+        local.getBytesInUse(null), local.getBytesInUse([STORAGE.logs, STORAGE.logOutbox]),
+      ]);
+      const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
+      const logs = pruneLogs([entry, ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
       const retainedIds = new Set(logs.map((item) => item.id));
       const outbox = (Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : [])
         .filter((id) => retainedIds.has(id));
@@ -197,7 +209,7 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         && hasServerInitialized(stored)
         && stored[STORAGE.logUploadEnabled] === true
         && Boolean(context?.config.logs_url);
-      if (shouldUpload) outbox.push(entry.id);
+      if (shouldUpload && retainedIds.has(entry.id)) outbox.push(entry.id);
       await writeStorage({
         [STORAGE.logs]: logs,
         [STORAGE.logOutbox]: outbox,

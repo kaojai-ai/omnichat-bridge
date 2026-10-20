@@ -1122,9 +1122,10 @@
     const deadlineAt = Number.isFinite(message?.deadline_at_ms) ? message.deadline_at_ms : Infinity;
     const deadlineExpired = () => Date.now() >= deadlineAt;
     let nativeAttempted = false;
+    let nativeResponseReceived = false;
     const sendStartedAt = Date.now();
     let providerRejected = false;
-    let diagnostics = { command_type: commandType, surface: state.surface };
+    let diagnostics = { diagnostic_version: 1, command_type: commandType, surface: state.surface };
     if (deadlineExpired()) {
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply deadline expired before sending." });
       return;
@@ -1188,6 +1189,9 @@
         }
       }
     }
+    diagnostics = { ...diagnostics, cache_reason: cacheReason,
+      route_source: lookup ? "lookup" : "cache", route_resolved: routeComplete(routing),
+      ...(routing && accountId ? { route_shop_matches_account: value(routing.shop_id) === value(accountId) } : {}) };
     postLog("info", "send_route_resolution", "Shopee reply routing checked.", {
       request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, pages: lookup?.pages ?? 0,
       stop_reason: lookup?.stopReason ?? "cache", lookup_scope: lookup ? "captured_filters" : "cache",
@@ -1203,6 +1207,8 @@
       if (!sessionUnchanged()) throw new Error("Shopee session changed. Retry from the connected shop.");
       const template = senderTemplate(routing, requestId, clientMessageId);
       if (!template) throw new Error("Shopee Seller Chat is still initializing. Refresh and wait for the conversation list.");
+      diagnostics.template_source = template === state.sendTemplate ? "captured" : "derived";
+      diagnostics.endpoint_path = pathOf(template.url);
       const payload = structuredClone(template.payload);
       payload.request_id = requestId;
       updateKnown(payload, "conversation_id", conversationId);
@@ -1243,10 +1249,35 @@
       if (!isBridgeActive()) return;
       if (!sessionUnchanged()) throw new Error("Shopee session changed. Retry from the connected shop.");
       if (deadlineExpired()) throw new Error("Reply deadline expired before sending.");
+      const fieldState = (key) => !Object.hasOwn(payload, key) ? "absent"
+        : ["number", "string"].includes(typeof payload[key]) ? typeof payload[key] : "other";
       diagnostics = { ...diagnostics, endpoint_path: url.pathname,
-        routing_types: Object.fromEntries(["conversation_id", "shop_id", "to_id", "to_shop_id", "biz_id"].map((key) => [key, typeof payload[key]])) };
+        request_conversation_id: payload.conversation_id,
+        client_id_is_uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(payload.content?.uid ?? "")),
+        quoted_message_id_state: !Object.hasOwn(payload.content ?? {}, "quoted_msg_id") ? "absent"
+          : ["number", "string"].includes(typeof payload.content.quoted_msg_id) ? typeof payload.content.quoted_msg_id : "other",
+        ...(commandType === "send_text" ? { text_length: String(payload.content?.text ?? "").length } : {}),
+        route_shop_id: routing.shop_id, route_recipient_id: routing.to_id,
+        route_recipient_shop_id: routing.to_shop_id, route_business_id: routing.biz_id,
+        request_shop_id: payload.shop_id, request_recipient_id: payload.to_id,
+        request_recipient_shop_id: payload.to_shop_id, request_business_id: payload.biz_id,
+        query_shop_id: url.searchParams.get("shop_id"), query_business_id: url.searchParams.get("biz_id"),
+        choice_shop_id: payload.choice_info?.real_shop_id,
+        payload_conversation_id_state: fieldState("conversation_id"),
+        payload_conversation_matches_route: value(payload.conversation_id) === value(conversationId),
+        payload_to_shop_matches_route: value(payload.to_shop_id) === value(routing.to_shop_id),
+        payload_biz_matches_route: value(payload.biz_id) === value(routing.biz_id),
+        payload_shop_id_state: fieldState("shop_id"), payload_to_id_state: fieldState("to_id"),
+        payload_to_shop_id_state: fieldState("to_shop_id"), payload_biz_id_state: fieldState("biz_id"),
+        payload_shop_matches_route: value(payload.shop_id) === value(routing.shop_id),
+        payload_to_matches_route: value(payload.to_id) === value(routing.to_id),
+        ...(url.searchParams.has("shop_id") ? { url_shop_matches_route: value(url.searchParams.get("shop_id")) === value(routing.shop_id) } : {}),
+        ...(url.searchParams.has("biz_id") ? { url_biz_matches_route: value(url.searchParams.get("biz_id")) === value(routing.biz_id) } : {}),
+        ...(Object.hasOwn(payload.choice_info ?? {}, "real_shop_id")
+          ? { choice_shop_matches_route: value(payload.choice_info.real_shop_id) === value(routing.shop_id) } : {}) };
       nativeAttempted = true;
       const response = await sendThroughSurface(template, url.toString(), payload);
+      nativeResponseReceived = true;
       let body = response;
       if (typeof response?.clone === "function") {
         try {
@@ -1258,8 +1289,12 @@
       }
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId) ?? shopeeError(body);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
-      const nativeCode = typeof body?.error_code === "string" && /^[a-zA-Z0-9_]{1,64}$/.test(body.error_code) ? body.error_code : null;
-      diagnostics = { ...diagnostics, native_error_code: nativeCode, provider_duration_ms: Date.now() - sendStartedAt };
+      const nativeCode = [body?.error_code, body?.error]
+        .map((code) => typeof code === "string" ? code : Number.isSafeInteger(code) ? String(code) : "")
+        .find((code) => /^[a-zA-Z0-9_]{1,64}$/.test(code) && !["0", "success"].includes(code.toLowerCase()));
+      diagnostics = { ...diagnostics, ...(nativeCode ? { native_error_code: nativeCode } : {}),
+        ...(Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599 ? { http_status: response.status } : {}),
+        provider_duration_ms: Math.min(300_000, Math.max(0, Date.now() - sendStartedAt)) };
       if (response?.ok === false || providerReason) {
         providerRejected = true;
         throw new Error(providerReason ?? `Shopee API returned ${response?.status ?? "an error"}.`);
@@ -1282,10 +1317,15 @@
       }
       post({ type: "api_send_result", request_id: requestId, ok: true, provider_message_id: providerMessageId });
     } catch (error) {
+      diagnostics.provider_duration_ms = Math.min(300_000, Math.max(0, Date.now() - sendStartedAt));
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
-      logAsyncError("send_api", error, {
-        conversation_id: conversationId,
+      diagnostics = { ...diagnostics, native_attempted: nativeAttempted,
+        delivery_uncertain: nativeAttempted && !providerRejected && !providerReason,
+        failure_kind: providerRejected || providerReason ? "provider_rejection"
+          : !nativeAttempted ? "pre_dispatch_failure" : nativeResponseReceived ? "unrecognized_response" : "transport_failure" };
+      postLog("error", "send_failed", "Provider reply failed. See routing diagnostics.", {
+        scope: "send_api", request_id: requestId, conversation_id: conversationId, provider_account_id: accountId,
         ...diagnostics,
       });
       post({ type: "api_send_result", request_id: requestId, ok: false, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
