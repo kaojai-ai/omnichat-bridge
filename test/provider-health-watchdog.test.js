@@ -15,10 +15,12 @@ function functionSource(name, next) {
 }
 
 function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false } = {}) {
-  const adapter = { id: provider, matchesUrl: () => true };
+  const adapter = { id: provider, matchesUrl: () => true,
+    surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre" };
   const context = { key: `${provider}:account`, adapter, account: { provider_account_id: "account" } };
-  const tab = { id: 42, url: "https://provider.example/chat", status: "complete" };
-  const alternative = { ...tab, id: 43 };
+  const primaryUrl = "https://seller.shopee.co.th/new-webchat/conversations";
+  const tab = { id: 42, url: provider === "shopee" ? (chatOpen === null ? primaryUrl : "https://seller.shopee.co.th/portal") : "https://provider.example/chat", status: "complete" };
+  const alternative = { ...tab, id: 43, url: primaryUrl };
   const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: 0, alarm: null, live: null };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
@@ -33,7 +35,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerChatTabs: async () => tabOpen ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, surface: "seller-centre", chat_open: true }; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => {},
     persistProviderSurfaceState: async () => {},
@@ -46,7 +48,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     recoveryRetryDue: (value) => !value?.next_retry_at || value.next_retry_at <= Date.now(),
     recoveryRetryDelay: () => 60_000,
     providerRecoveryFailureReason: () => "Provider unavailable",
-    providerRecoveryUrl: () => tab.url,
+    providerRecoveryUrl: () => provider === "shopee" ? primaryUrl : tab.url,
     providerLabel: () => provider,
     recordLog: async () => {},
     recordUnexpected: async () => {},
@@ -137,8 +139,8 @@ test("connecting schedules provider health checks before the first watchdog run 
   assert.equal(calls.cleared, 0);
 });
 
-test("closed Shopee mini-chat waits for user action without reloading or retry backoff", async () => {
-  const { run, calls } = harness({ provider: "shopee", recoveryEnabled: true, healthy: false, chatOpen: false,
+test("closed Shopee mini-chat waits for user action when recovery is disabled", async () => {
+  const { run, calls } = harness({ provider: "shopee", recoveryEnabled: false, healthy: false, chatOpen: false,
     record: { tab_id: 42, state: "needs_attention", failure_count: 3, next_retry_at: Date.now() + 60_000 } });
   await run();
   assert.equal(calls.reloaded, 0);
@@ -166,7 +168,7 @@ for (const provider of ["shopee", "line_oa"]) {
 
 
 for (const recoveryEnabled of [false, true]) {
-  test(`Shopee uses an open healthy mini-chat instead of the tracked closed chat (recovery ${recoveryEnabled})`, async () => {
+  test(`Shopee selects healthy New Webchat instead of tracked closed mini-chat (recovery ${recoveryEnabled})`, async () => {
     const { run, calls } = harness({ provider: "shopee", recoveryEnabled, healthy: false, chatOpen: false,
       alternativeHealthyTab: true, record: { tab_id: 42, state: "needs_attention" } });
     await run();

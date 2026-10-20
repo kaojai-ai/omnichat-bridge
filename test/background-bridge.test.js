@@ -77,7 +77,7 @@ test("keeps provider recovery one-tab and toggle-gated across retries", () => {
   assert.match(source, /stored\[STORAGE\.unattendedRecovery\] === true/);
   assert.match(source, /tab_id: null/);
   assert.match(source, /opened_by_extension: true/);
-  assert.match(source, /opened_by_extension: false/);
+  assert.match(source, /opened_by_extension: record\?\.tab_id === trackedTab.id \? record\?\.opened_by_extension === true : false/);
   assert.match(source, /Recovery will create one replacement on its next retry/);
 });
 
@@ -371,7 +371,7 @@ test("requires an already-open Shopee tab for outbound replies", () => {
   assert.match(source, /The browser selected to send this reply has no/);
 });
 
-test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {
+test("prepares fallback Seller Centre while respecting surface priority", () => {
   const commandStart = source.indexOf("async function commandTab(");
   const commandEnd = source.indexOf("\n}\n\nfunction providerAdapterForCommand", commandStart);
   assert.ok(commandStart >= 0);
@@ -380,7 +380,7 @@ test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {
   assert.match(commandSource, /prepareForSend = false/);
   assert.match(commandSource, /prepareProviderTab\(candidate, adapter\)/);
   assert.match(commandSource, /for \(const candidate of orderedTabs\)/);
-  assert.match(commandSource, /isReadyProviderTab\(candidate, adapter\)/);
+  assert.match(commandSource, /if \(!tab && prepareForSend && adapter.id === "shopee"\)/);
   assert.match(commandSource, /orderedTabs\[0\] \?\? selectedTab/);
   assert.match(source, /function orderProviderTabs\(adapter, tabs, preferredTabId = null\)/);
   assert.match(source, /leftRank !== rightRank/);
@@ -389,26 +389,26 @@ test("prepares Seller Centre and ranks it ahead of a stored legacy tab", () => {
   assert.match(source, /operation: "surface preparation"/);
 });
 
-test("orders a ready Seller Centre candidate ahead of a preferred legacy tab", () => {
+test("orders New Webchat ahead of an active preferred Seller Centre tab", () => {
   const start = source.indexOf("function orderProviderTabs(");
   const end = source.indexOf("\n}\n\nasync function providerTabStatus", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const orderProviderTabs = vm.runInNewContext(`(${source.slice(start, end + 2)})`);
   const adapter = {
-    surfacePriority: ["seller-centre", "legacy"],
+    surfacePriority: ["new-webchat", "seller-centre"],
     surfaceForUrl(url) {
-      return url.includes("/portal/") ? "seller-centre" : "legacy";
+      return url.includes("/portal/") ? "seller-centre" : "new-webchat";
     },
   };
   const ordered = orderProviderTabs(adapter, [
-    { id: 7, url: "https://seller.shopee.co.th/new-webchat/conversations", active: true },
-    { id: 3, url: "https://seller.shopee.co.th/portal/chat-management", active: false },
-  ], 7);
-  assert.deepEqual(Array.from(ordered, (tab) => tab.id), [3, 7]);
+    { id: 7, url: "https://seller.shopee.co.th/new-webchat/conversations", active: false },
+    { id: 3, url: "https://seller.shopee.co.th/portal/chat-management", active: true },
+  ], 3);
+  assert.deepEqual(Array.from(ordered, (tab) => tab.id), [7, 3]);
 });
 
-test("does not cross-send a Seller Centre command through the legacy endpoint", () => {
+test("does not cross-send a Seller Centre command through the standalone endpoint", () => {
   const sendStart = source.indexOf("async function sendViaProvider(");
   const sendEnd = source.indexOf("\n}\n\nasync function selectCommandTab", sendStart);
   assert.ok(sendStart >= 0);

@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -71,14 +71,14 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
           return jsonResponse(sendBody ?? { id: "provider-native-message-1", message_option: 0 });
         }
         if (path === "/webchat/api/v1.2/mini/conversations") return jsonResponse({ conversations: [{
-          id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0",
+          id: "conversation-1", shop_id: "shop-1", to_id: "101", biz_id: "0",
         }] });
         return jsonResponse({
           url: "https://cdn.example.com/reply.jpg",
           thumbnail: "https://cdn.example.com/reply-thumb.jpg",
         });
       },
-      surface: sellerCentre ? "seller-centre" : "legacy",
+      surface: sellerCentre ? "seller-centre" : "new-webchat",
       listTemplate: sellerCentre && ready ? {
         url: `${origin}/webchat/api/v1.2/mini/conversations?csrf_token=test${conversationPages ? "&page=0&limit=1" : ""}`,
         init: { method: "POST", headers: { "content-type": "application/json" } },
@@ -95,7 +95,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
         body: null,
       } : null,
       conversationsById: new Map(cachedRouting ? [["conversation-1", cachedRouting]] : conversationPages ? [] : [
-        ["conversation-1", { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", biz_id: "0" }],
+        ["conversation-1", { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "101", biz_id: "0" }],
       ]),
       sendTemplate: sellerCentre ? null : {
         url: `${origin}${sendPath}?csrf_token=test`,
@@ -107,6 +107,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
   };
   if (!nativeSender) window.__omnichatRealtimeState.nativeFetch = null;
   const context = vm.createContext({
+    ...(videoUploader ? { OmnichatShopeeVideo: { upload: videoUploader } } : {}),
     window,
     document: { documentElement: { dataset: {} }, ...(onTemplateWait ? { getElementById: () => ({ getBoundingClientRect: () => ({ width: 48, height: 48 }), closest: () => ({ classList: { contains: () => true } }) }) } : {}) },
     URL,
@@ -192,22 +193,22 @@ test("maps a quoted text command to Shopee content.quoted_msg_id", async () => {
 
 test("finds a send route on Shopee conversation page two", async () => {
   const bridge = createBridge({ sellerCentre: true, conversationPages: [
-    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "other-buyer", biz_id: "0" }] },
-    { conversations: [{ id: "conversation-1", shop_id: "shop-2", to_id: "buyer-2", to_shop_id: "buyer-shop", biz_id: "3" }] },
+    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "199", biz_id: "0" }] },
+    { conversations: [{ id: "conversation-1", shop_id: "shop-2", to_id: "102", to_shop_id: "201", biz_id: "3" }] },
   ] });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
   assert.equal(result.ok, true);
   assert.equal(bridge.nativeRequests.filter((path) => path.endsWith("/mini/conversations")).length, 2);
   assert.equal(bridge.nativePayloads.length, 1);
   assert.equal(bridge.nativePayloads[0].shop_id, "shop-2");
-  assert.equal(bridge.nativePayloads[0].to_id, "buyer-2");
-  assert.equal(bridge.nativePayloads[0].to_shop_id, "buyer-shop");
+  assert.equal(bridge.nativePayloads[0].to_id, 102);
+  assert.equal(bridge.nativePayloads[0].to_shop_id, 201);
   assert.equal(bridge.nativePayloads[0].biz_id, 3);
 });
 
 test("does not send when Shopee's conversation list is exhausted", async () => {
   const bridge = createBridge({ sellerCentre: true, conversationPages: [
-    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "other-buyer" }] },
+    { conversations: [{ id: "other", shop_id: "shop-1", to_id: "199" }] },
     { conversations: [] },
   ] });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
@@ -348,7 +349,7 @@ test("keeps Seller Centre image and product replies on the new request profile",
   assert.equal(productBridge.nativePayloads.at(-1).content.product_id, 12345);
 });
 
-test("sends a quoted Seller Centre text without the legacy secure poster", async () => {
+test("sends a quoted Seller Centre text without the New Webchat secure poster", async () => {
   const bridge = createBridge({ sellerCentre: true });
   const result = await bridge.send({
     ...baseCommand,
@@ -364,7 +365,7 @@ test("sends a quoted Seller Centre text without the legacy secure poster", async
   assert.equal(bridge.nativePayloads.at(-1).content.quoted_msg_id, "provider-message-quoted");
 });
 
-test("keeps the legacy secure-sender failure scoped to the legacy surface", async () => {
+test("keeps the New Webchat secure-sender failure scoped to the New Webchat surface", async () => {
   const bridge = createBridge({ secureSender: false });
   const { payload, result } = await bridge.send({
     ...baseCommand,
@@ -450,7 +451,7 @@ for (const sellerCentre of [false, true]) {
     { error: 123, message: "Message violates Shopee chat rules." },
     { error_code: "illegal" },
   ]) {
-    test(`preserves content rejection on ${sellerCentre ? "Seller Centre" : "legacy"}: ${JSON.stringify(sendBody)}`, async () => {
+    test(`preserves content rejection on ${sellerCentre ? "Seller Centre" : "New Webchat"}: ${JSON.stringify(sendBody)}`, async () => {
       const bridge = createBridge({ sellerCentre, sendBody });
       const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "blocked text" });
       assert.equal(result.ok, false);
@@ -459,7 +460,7 @@ for (const sellerCentre of [false, true]) {
       assert.doesNotMatch(result.error, /routing is unavailable/);
     });
   }
-  test(`accepts numeric zero error on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+  test(`accepts numeric zero error on ${sellerCentre ? "Seller Centre" : "New Webchat"}`, async () => {
     const bridge = createBridge({ sellerCentre, sendBody: { error_code: 0, error: 0, id: "accepted", message_option: 0 } });
     const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
     assert.equal(result.ok, true);
@@ -470,22 +471,22 @@ for (const sellerCentre of [false, true]) {
 test("refreshes an incomplete cached route before reporting a provider rejection", async () => {
   const bridge = createBridge({
     sellerCentre: true,
-    cachedRouting: { conversation_id: "conversation-1", to_id: "buyer-1" },
-    conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" }] }],
+    cachedRouting: { conversation_id: "conversation-1", to_id: "101" },
+    conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "101" }] }],
     sendBody: { error_code: "illegal", message: "Message violates Shopee chat rules." },
   });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "blocked text" });
   assert.equal(bridge.nativeRequests.filter((path) => path.endsWith("/mini/conversations")).length, 1);
   assert.equal(bridge.nativePayloads.length, 1);
   assert.equal(bridge.nativePayloads[0].shop_id, "shop-1");
-  assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
+  assert.equal(bridge.nativePayloads[0].to_id, 101);
   assert.equal(result.ok, false);
   assert.equal(result.error, "Message violates Shopee chat rules.");
 });
 
 for (const sellerCentre of [false, true]) {
   for (const option of [256, 288, 2, 16]) {
-    test(`rejects HTTP 200 message ID with failed delivery option ${option} on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+    test(`rejects HTTP 200 message ID with failed delivery option ${option} on ${sellerCentre ? "Seller Centre" : "New Webchat"}`, async () => {
       // Sanitized shape captured from Seller Centre: no error_code despite failure.
       const bridge = createBridge({ sellerCentre, sendBody: {
         id: "provider-rejected-message", type: "text", content: { text: "test" },
@@ -499,7 +500,7 @@ for (const sellerCentre of [false, true]) {
     });
   }
   for (const option of [0, 1, 32, 64, 128, 512, 1024]) {
-    test(`only accepts known normal option ${option} on ${sellerCentre ? "Seller Centre" : "legacy"}`, async () => {
+    test(`only accepts known normal option ${option} on ${sellerCentre ? "Seller Centre" : "New Webchat"}`, async () => {
       const bridge = createBridge({ sellerCentre, sendBody: { id: "accepted", message_option: option } });
       const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "hello" });
       assert.equal(result.ok, option === 0);
@@ -519,7 +520,7 @@ for (const sellerCentre of [false, true]) {
     { id: "id", message_option: 0, conversation_id: "another-chat" },
     { data: { id: "nested", message_option: 0 } },
   ]) {
-    test(`unknown response remains uncertain on ${sellerCentre ? "Seller Centre" : "legacy"}: ${JSON.stringify(sendBody)}`, async () => {
+    test(`unknown response remains uncertain on ${sellerCentre ? "Seller Centre" : "New Webchat"}: ${JSON.stringify(sendBody)}`, async () => {
       const bridge = createBridge({ sellerCentre, sendBody });
       const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "test" });
       assert.equal(result.ok, false);
@@ -534,22 +535,22 @@ for (const sellerCentre of [false, true]) {
 for (const listFailure of [false, true]) {
   test(`sends with a same-shop cached route without consulting ${listFailure ? "unavailable" : "empty"} list`, async () => {
     const bridge = createBridge({ sellerCentre: true,
-      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "101" },
       conversationPages: [{ conversations: [] }], listFailure,
     });
     const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
     assert.equal(result.ok, true);
     assert.deepEqual(bridge.nativeRequests.filter((path) => path.startsWith("/webchat/")), ["/webchat/api/v1.2/mini/messages"]);
     assert.equal(bridge.nativePayloads.length, 1);
-    assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
+    assert.equal(bridge.nativePayloads[0].to_id, 101);
   });
 }
 
 for (const found of [false, true]) {
   test(`a different-shop cached route is ${found ? "replaced by lookup" : "never sent when lookup misses"}`, async () => {
     const bridge = createBridge({ sellerCentre: true,
-      cachedRouting: { conversation_id: "conversation-1", shop_id: "wrong-shop", to_id: "wrong-buyer" },
-      conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: found ? "shop-1" : "wrong-shop", to_id: "buyer-1" }] }],
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "wrong-shop", to_id: "999" },
+      conversationPages: [{ conversations: [{ id: "conversation-1", shop_id: found ? "shop-1" : "wrong-shop", to_id: "101" }] }],
     });
     const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
     assert.ok(bridge.nativeRequests.some((path) => path.endsWith("/mini/conversations")));
@@ -557,7 +558,7 @@ for (const found of [false, true]) {
     if (found) {
       assert.equal(result.ok, true);
       assert.equal(bridge.nativePayloads[0].shop_id, "shop-1");
-      assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
+      assert.equal(bridge.nativePayloads[0].to_id, 101);
     } else {
       assert.equal(result.error_code, "SHOPEE_CONVERSATION_MISSING");
     }
@@ -567,7 +568,7 @@ for (const found of [false, true]) {
 for (const transportFailure of [false, true]) {
   test(`cached-route ${transportFailure ? "transport uncertainty" : "provider rejection"} does not retry`, async () => {
     const bridge = createBridge({ sellerCentre: true,
-      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
+      cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "101" },
       conversationPages: [{ conversations: [] }], transportFailure,
       sendBody: { error_code: "illegal", message: "Message violates Shopee chat rules." },
     });
@@ -599,7 +600,7 @@ test("uses routing discovered while Seller Centre initializes without a list loo
       state.listTemplate = { url: `${origin}/webchat/api/v1.2/mini/conversations`, init: { method: "POST" }, body: new TextEncoder().encode("{}").buffer };
       state.getTemplate = { url: `${origin}/webchat/api/v1.2/mini/user/setting`, init: { method: "GET" } };
       state.routesByShopConversation.set(JSON.stringify(["shop-1", "conversation-1"]), {
-        conversation_id: "conversation-1", shop_id: "shop-1", to_id: "discovered-buyer", biz_id: "0",
+        conversation_id: "conversation-1", shop_id: "shop-1", to_id: "301", biz_id: "0",
       });
     },
   });
@@ -608,13 +609,13 @@ test("uses routing discovered while Seller Centre initializes without a list loo
   assert.equal(result.ok, true);
   assert.equal(bridge.listRequests.length, 0);
   assert.equal(bridge.nativePayloads.length, 1);
-  assert.equal(bridge.nativePayloads[0].to_id, "discovered-buyer");
+  assert.equal(bridge.nativePayloads[0].to_id, 301);
 });
 
 test("partial observations preserve a usable route and explicit zero updates biz_id", async () => {
   const pages = [{ conversations: [] }];
   const bridge = createBridge({ sellerCentre: true, conversationPages: pages,
-    cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1", to_shop_id: "buyer-shop", biz_id: "3" },
+    cachedRouting: { conversation_id: "conversation-1", shop_id: "shop-1", to_id: "101", to_shop_id: "201", biz_id: "3" },
   });
   pages[0] = { conversations: [{ id: "conversation-1", to_id: "", biz_id: 8 }] };
   await bridge.observeList();
@@ -624,15 +625,15 @@ test("partial observations preserve a usable route and explicit zero updates biz
   const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
   assert.equal(result.ok, true);
   assert.equal(bridge.listRequests.length, before);
-  assert.equal(bridge.nativePayloads[0].to_id, "buyer-1");
-  assert.equal(bridge.nativePayloads[0].to_shop_id, "buyer-shop");
+  assert.equal(bridge.nativePayloads[0].to_id, 101);
+  assert.equal(bridge.nativePayloads[0].to_shop_id, 201);
   assert.equal(bridge.nativePayloads[0].biz_id, 0);
 });
 
 test("same conversation ID in two shops keeps independent send routes", async () => {
   const bridge = createBridge({ sellerCentre: true, conversationPages: [{ conversations: [
-    { id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" },
-    { id: "conversation-1", shop_id: "shop-2", to_id: "buyer-2" },
+    { id: "conversation-1", shop_id: "shop-1", to_id: "101" },
+    { id: "conversation-1", shop_id: "shop-2", to_id: "102" },
   ] }] });
   await bridge.observeList();
   const before = bridge.listRequests.length;
@@ -641,7 +642,7 @@ test("same conversation ID in two shops keeps independent send routes", async ()
       provider_account_id: `shop-${shop}`, command_type: "send_text", text: "Hello" });
     assert.equal(result.ok, true);
     assert.equal(bridge.nativePayloads.at(-1).shop_id, `shop-${shop}`);
-    assert.equal(bridge.nativePayloads.at(-1).to_id, `buyer-${shop}`);
+    assert.equal(bridge.nativePayloads.at(-1).to_id, 100 + shop);
     assert.equal(bridge.nativePayloads.at(-1).biz_id, 0);
   }
   assert.equal(bridge.listRequests.length, before);
@@ -652,7 +653,7 @@ test("send lookup restarts a captured later nano page without changing the UI te
   const bridge = createBridge({ sellerCentre: true, conversationPages: [], onList: async request => {
     const body = await request.json();
     return { conversations: body.next_timestamp_nano === "0"
-      ? [{ id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" }] : [] };
+      ? [{ id: "conversation-1", shop_id: "shop-1", to_id: "101" }] : [] };
   } });
   await bridge.observeList({ next_timestamp_nano: cursor, direction: "older", biz_id: 0, filter: "assigned" });
   const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
@@ -697,7 +698,7 @@ test("a shop session switch during lookup prevents sending the old shop route", 
     await new Promise(resolve => setImmediate(resolve));
     bridge.state.currentAccountId = "shop-2";
     bridge.state.routeSessionEpoch = (bridge.state.routeSessionEpoch ?? 0) + 1;
-    return { conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "buyer-1" }] };
+    return { conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "101" }] };
   } });
   bridge.state.currentAccountId = "shop-1";
   const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
@@ -732,15 +733,127 @@ test("param_error diagnostics survive local sanitization and export with exact n
   assert.doesNotMatch(JSON.stringify(saved), /private rejected text|Bearer seller-test|csrf_token/);
 });
 
-test("captured request missing routing fields is visible in local rejection diagnostics", async () => {
+test("captured request missing routing fields is repaired and visible in local rejection diagnostics", async () => {
   const { createLogEntry } = await import("../extension/lib/logs.js");
   const bridge = createBridge({ sendBody: { error_code: "param_error" } });
   await bridge.send({ ...baseCommand, command_type: "send_text", text: "private text" });
   const event = bridge.posts.find(post => post.type === "diagnostic_log" && post.event === "send_failed");
   const saved = createLogEntry({ details: event.details });
   assert.equal(saved.details.template_source, "captured");
-  assert.equal(saved.details.payload_shop_id_state, "absent");
-  assert.equal(saved.details.payload_shop_matches_route, false);
-  assert.equal(saved.details.payload_to_id_state, "absent");
-  assert.equal(saved.details.payload_to_matches_route, false);
+  assert.equal(saved.details.payload_shop_id_state, "string");
+  assert.equal(saved.details.payload_shop_matches_route, true);
+  assert.equal(saved.details.payload_to_id_state, "number");
+  assert.equal(saved.details.payload_to_matches_route, true);
+});
+
+const commandRouting = fields => ({ routing: { version: 1, fields, observed_at: "2026-10-21T03:00:00Z" } });
+
+for (const sellerCentre of [false, true]) {
+  test(`saved command route bypasses empty cache and unavailable lookup on ${sellerCentre ? "mini-chat" : "New Webchat"}`, async () => {
+    const bridge = createBridge({ sellerCentre, conversationPages: [{ conversations: [] }], listFailure: true });
+    bridge.state.currentAccountId = "207459663";
+    const { result } = await bridge.send({ ...baseCommand, provider_account_id: "207459663", command_type: "send_text", text: "Direct route",
+      omnichat: commandRouting({ to_id: "123456789", to_shop_id: "1834183330", biz_id: "3" }) });
+    assert.equal(result.ok, true);
+    assert.equal(bridge.listRequests.length, 0);
+    const payload = sellerCentre ? bridge.nativePayloads[0] : undefined;
+    if (payload) {
+      assert.equal(payload.shop_id, 207459663);
+      assert.equal(payload.to_id, 123456789);
+      assert.equal(payload.to_shop_id, 1834183330);
+      assert.equal(payload.biz_id, 3);
+    }
+    assert.equal(bridge.posts.some(post => post.event === "send_route_fallback"), false);
+  });
+}
+
+test("unsupported command routing warns and falls back to existing cached destination", async () => {
+  const bridge = createBridge({ sellerCentre: true });
+  bridge.state.currentAccountId = "shop-1";
+  const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Fallback",
+    omnichat: { routing: { version: 99, fields: { to_id: "999" }, observed_at: "2026-10-21T03:00:00Z" } } });
+  assert.equal(result.ok, true);
+  assert.equal(bridge.nativePayloads[0].to_id, 101);
+  assert.equal(bridge.listRequests.length, 0);
+  const warning = bridge.posts.find(post => post.event === "send_route_fallback");
+  assert.equal(warning.level, "warn");
+  assert.equal(warning.details.fallback_reason, "invalid");
+});
+
+test("command for another signed-in shop cannot use a cached foreign route", async () => {
+  const bridge = createBridge({ sellerCentre: true, cachedRouting: {
+    conversation_id: "conversation-1", shop_id: "other-shop", to_id: "999", biz_id: "0",
+  }, conversationPages: [{ conversations: [] }] });
+  bridge.state.currentAccountId = "current-shop";
+  const { result } = await bridge.send({ ...baseCommand, provider_account_id: "other-shop", command_type: "send_text", text: "Wrong account",
+    omnichat: commandRouting({ to_id: "123456789" }) });
+  assert.equal(result.ok, false);
+  assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("captured template cannot leak recipient shop or business between command conversations", async () => {
+  const bridge = createBridge({ conversationPages: [{ conversations: [] }] });
+  bridge.state.currentAccountId = "207459663";
+  Object.assign(bridge.state.sendTemplate.payload, { to_shop_id: 999, biz_id: 88, to_id: 777, shop_id: 666 });
+  const first = await bridge.send({ ...baseCommand, provider_account_id: "207459663", command_type: "send_text", text: "First",
+    omnichat: commandRouting({ to_id: "123", to_shop_id: "456", biz_id: "3" }) });
+  assert.equal(first.result.ok, true);
+  assert.equal(first.payload.to_shop_id, 456);
+  assert.equal(first.payload.biz_id, 3);
+  const second = await bridge.send({ ...baseCommand, request_id: "second", conversation_id: "conversation-2", provider_account_id: "207459663",
+    command_type: "send_text", text: "Second", omnichat: commandRouting({ to_id: "789" }) });
+  assert.equal(second.result.ok, true);
+  assert.equal(second.payload.to_id, 789);
+  assert.equal(Object.hasOwn(second.payload, "to_shop_id"), false);
+  assert.equal(second.payload.biz_id, 0);
+  assert.equal(bridge.listRequests.length, 0);
+  assert.equal(bridge.state.sendTemplate.payload.to_shop_id, 999, "the captured template itself stays unchanged");
+});
+
+test("profile routing contains only observed numeric destination fields and preserves explicit zero", async () => {
+  const bridge = createBridge({ sellerCentre: true, conversationPages: [{ conversations: [
+    { id: "conversation-1", shop_id: "shop-1", to_id: "123" },
+    { id: "conversation-2", shop_id: "shop-1", to_id: "456", to_shop_id: 0, biz_id: 0 },
+  ] }] });
+  await bridge.observeList();
+  const profiles = bridge.posts.filter(post => post.type === "profiles_detected").flatMap(post => post.profiles);
+  const first = profiles.find(profile => profile.conversation_id === "conversation-1");
+  const second = profiles.find(profile => profile.conversation_id === "conversation-2");
+  assert.deepEqual(plain(first.omnichat.routing.fields), { to_id: "123" });
+  assert.deepEqual(plain(second.omnichat.routing.fields), { to_id: "456", to_shop_id: "0", biz_id: "0" });
+  assert.ok(Number.isFinite(Date.parse(first.omnichat.routing.observed_at)));
+});
+
+test("partial conversation responses publish merged routing for later message forwarding", async () => {
+  const pages = [{ conversations: [{ id: "conversation-1", shop_id: "shop-1", to_id: "123", to_shop_id: "456", biz_id: "3" }] }];
+  const bridge = createBridge({ sellerCentre: true, conversationPages: pages });
+  await bridge.observeList();
+  pages[0] = { conversations: [{ id: "conversation-1", shop_id: "shop-1", to_shop_id: "789", biz_id: 0 }] };
+  await bridge.observeList();
+  const updated = bridge.posts.filter(post => post.type === "profiles_detected").at(-1).profiles.find(profile => profile.conversation_id === "conversation-1");
+  assert.equal(updated.id, "123");
+  assert.deepEqual(plain(updated.omnichat.routing.fields), { to_id: "123", to_shop_id: "789", biz_id: "0" });
+});
+
+test("video upload failure never dispatches a Shopee chat message or retries", async () => {
+  let uploads = 0;
+  const bridge = createBridge({ videoUploader: async () => { uploads++; throw new Error("transfer failed"); } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4",
+    media_bytes: new Uint8Array([1, 2, 3]).buffer, deadline_at_ms: Date.now() + 5000 });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /transfer failed/);
+  assert.equal(uploads, 1);
+  assert.equal(bridge.sentUrls.length, 0);
+  assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("unverified mini-chat video returns unsupported before uploading or sending", async () => {
+  let uploads = 0;
+  const bridge = createBridge({ sellerCentre: true, videoUploader: async () => { uploads++; return {}; } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4",
+    media_bytes: new Uint8Array([1, 2, 3]).buffer });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /video.*requires initialized New Webchat/i);
+  assert.equal(uploads, 0);
+  assert.equal(bridge.nativePayloads.length, 0);
 });

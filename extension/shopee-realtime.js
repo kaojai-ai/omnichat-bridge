@@ -52,9 +52,9 @@
   const LEGACY_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
   const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
   const SELLER_CENTRE_SURFACE = "seller-centre";
-  const LEGACY_SURFACE = "legacy";
+  const NEW_WEBCHAT_SURFACE = "new-webchat";
   const SURFACE_PROFILES = Object.freeze({
-    [LEGACY_SURFACE]: Object.freeze({
+    [NEW_WEBCHAT_SURFACE]: Object.freeze({
       listPaths: Object.freeze([
         LEGACY_CONVERSATIONS_PATH,
         LEGACY_SUBACCOUNT_CONVERSATIONS_PATH,
@@ -102,7 +102,7 @@
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
     ?? globalThis.OmnichatShopeeUrl?.surfaceForUrl?.(window.location.href)
-    ?? LEGACY_SURFACE;
+    ?? NEW_WEBCHAT_SURFACE;
   const state = window.__omnichatRealtimeState ??= {
     surface: null,
     getTemplate: null,
@@ -234,6 +234,7 @@
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
     send_text: surfaceSendReady(),
     send_image: surfaceSendReady(),
+    send_video: surfaceSendReady() && !isSellerCentreSurface() && Boolean(globalThis.OmnichatShopeeVideo),
     send_product: surfaceSendReady(),
   });
 
@@ -312,7 +313,7 @@
     try { return new URL(url, window.location.href).pathname; }
     catch { return ""; }
   };
-  const surfaceProfile = () => SURFACE_PROFILES[state.surface] ?? SURFACE_PROFILES[LEGACY_SURFACE];
+  const surfaceProfile = () => SURFACE_PROFILES[state.surface] ?? SURFACE_PROFILES[NEW_WEBCHAT_SURFACE];
   const isSellerCentreSurface = () => state.surface === SELLER_CENTRE_SURFACE;
   const isListPath = (path) => surfaceProfile().listPaths.includes(path);
   const isHistoryPath = (path) => surfaceProfile().historyPathPattern.test(path);
@@ -405,10 +406,18 @@
     if (!conversationId || !shopId) return;
     const key = routeKey(shopId, conversationId);
     const previous = state.routesByShopConversation.get(key) ?? {};
-    const route = { biz_id: "0", to_shop_id: "", ...previous, conversation_id: conversationId, shop_id: shopId };
+    const route = { ...previous, conversation_id: conversationId, shop_id: shopId };
+    const observed = { ...(previous.observed_fields ?? {}) };
     for (const field of ["to_id", "to_shop_id", "biz_id"]) {
       const next = value(conversation[field]);
-      if (next !== null) route[field] = next;
+      if (next !== null && /^\d{1,32}$/.test(next) && (field !== "to_id" || !/^0+$/.test(next))) {
+        route[field] = next;
+        observed[field] = next;
+      }
+    }
+    route.observed_fields = observed;
+    if (JSON.stringify(observed) !== JSON.stringify(previous.observed_fields)) {
+      route.observed_at = new Date().toISOString();
     }
     state.routesByShopConversation.set(key, route);
   };
@@ -421,7 +430,7 @@
       .filter((route) => route.conversation_id === conversationId && value(route.to_id));
     return matches.length === 1 ? matches[0] : null;
   };
-  const routeComplete = (route) => Boolean(value(route?.shop_id) && value(route?.to_id));
+  const routeComplete = (route) => Boolean(value(route?.shop_id) && value(route?.to_id) && !/^0+$/.test(value(route?.to_id)));
   const firstValue = (item, keys) => keys.map((key) => value(item?.[key])).find(Boolean) ?? null;
   const postAccounts = (requestId) => {
     const accounts = state.currentAccountId
@@ -657,8 +666,8 @@
     const profiles = [];
     for (const conversation of Array.isArray(conversations) ? conversations : []) {
       const conversationId = String(conversation.id ?? "").trim();
-      const id = String(conversation.to_id ?? "").trim();
       rememberRoute(conversation);
+      const id = value(cachedRoute(conversationId, value(conversation.shop_id))?.to_id);
       if (!conversationId || !id) continue;
       const displayName = String(conversation.to_name ?? "").trim();
       const avatar = String(conversation.to_avatar ?? "").trim();
@@ -670,6 +679,11 @@
       const profile = {
         conversation_id: conversationId,
         id,
+        ...(cachedRoute(conversationId, value(conversation.shop_id))?.observed_at ? {
+          omnichat: { routing: { version: 1,
+            fields: cachedRoute(conversationId, value(conversation.shop_id)).observed_fields,
+            observed_at: cachedRoute(conversationId, value(conversation.shop_id)).observed_at } },
+        } : {}),
         ...(String(conversation.shop_id ?? "").trim()
           ? { provider_account_id: String(conversation.shop_id).trim() }
           : {}),
@@ -933,7 +947,7 @@
     }
     if (!isSellerCentreSurface()) {
       url.searchParams.set("shop_id", routing.shop_id);
-      url.searchParams.set("biz_id", routing.biz_id);
+      url.searchParams.set("biz_id", routing.biz_id ?? "0");
       url.searchParams.set("uuid", clientMessageId);
     }
 
@@ -948,7 +962,7 @@
         conversation_id: routing.conversation_id,
         shop_id: numericId(routing.shop_id),
         to_id: numericId(routing.to_id),
-        biz_id: numericId(routing.biz_id),
+        biz_id: numericId(routing.biz_id ?? "0"),
         ...(routing.to_shop_id ? { to_shop_id: numericId(routing.to_shop_id) } : {}),
         content: { uid: clientMessageId },
         chat_send_option: {
@@ -993,13 +1007,6 @@
     if (!/^\d+$/.test(normalized)) return value;
     const parsed = Number(normalized);
     return Number.isSafeInteger(parsed) ? parsed : value;
-  };
-
-  const updateKnown = (payload, key, value) => {
-    if (!value || !Object.hasOwn(payload, key)) return;
-    payload[key] = ["shop_id", "to_id", "to_shop_id", "biz_id"].includes(key)
-      ? numericId(value)
-      : value;
   };
 
   const shopeeError = (body) => {
@@ -1078,7 +1085,7 @@
       if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
     }
     url.searchParams.set("shop_id", routing.shop_id);
-    url.searchParams.set("biz_id", routing.biz_id);
+    url.searchParams.set("biz_id", routing.biz_id ?? "0");
 
     const type = String(message.image_type ?? "image/jpeg").trim();
     const extension = type.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "jpg";
@@ -1134,6 +1141,11 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
     }
+    if (commandType === "send_video" && (isSellerCentreSurface() || !globalThis.OmnichatShopeeVideo)) {
+      post({ type: "api_send_result", request_id: requestId, ok: false,
+        error: "Shopee video sending requires initialized New Webchat." });
+      return;
+    }
     try {
       await ensureSellerCentreChatOpen();
       if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
@@ -1157,12 +1169,30 @@
       return;
     }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
+    if (state.currentAccountId && accountId !== state.currentAccountId) {
+      post({ type: "api_send_result", request_id: requestId, ok: false,
+        error: "Shopee signed-in shop does not match the reply command." });
+      return;
+    }
     const resolutionDeadline = Math.min(deadlineAt, Date.now() + 15_000);
     const sessionAccountId = state.currentAccountId;
     const sessionEpoch = state.routeSessionEpoch ?? 0;
     const sessionUnchanged = () => state.currentAccountId === sessionAccountId
       && (state.routeSessionEpoch ?? 0) === sessionEpoch;
-    routing = cachedRoute(conversationId, accountId);
+    const supplied = providerAdapter.normalizeRouting?.(message.omnichat?.routing);
+    const commandRouteValid = supplied?.fields.to_id && !/^0+$/.test(supplied.fields.to_id)
+      && accountId && accountId === state.currentAccountId;
+    routing = commandRouteValid
+      ? { ...supplied.fields, shop_id: accountId, conversation_id: conversationId }
+      : cachedRoute(conversationId, accountId);
+    if (!commandRouteValid) {
+      postLog("warn", "send_route_fallback", "Legacy Shopee route resolution is deprecated. Provide omnichat.routing.version and fields.to_id; include to_shop_id and biz_id when known. Falling back to cache/lookup.", {
+        request_id: requestId, conversation_id: conversationId, provider_account_id: accountId,
+        fallback_reason: !message.omnichat?.routing ? "missing" : !supplied ? "invalid" : !supplied.fields.to_id || supplied.fields.to_id === "0" ? "incomplete" : "shop_mismatch",
+        missing_fields: !supplied?.fields.to_id ? "to_id" : "none",
+        warning_code: !message.omnichat?.routing ? "SHOPEE_LEGACY_ROUTE_FALLBACK" : "SHOPEE_ROUTE_INVALID_FALLBACK",
+      });
+    }
     const cacheReason = routeComplete(routing) ? "complete" : routing ? "incomplete"
       : [...state.routesByShopConversation.values()].some((route) => route.conversation_id === conversationId)
         ? accountId ? "shop_mismatch" : "ambiguous_shop" : "absent";
@@ -1190,7 +1220,7 @@
       }
     }
     diagnostics = { ...diagnostics, cache_reason: cacheReason,
-      route_source: lookup ? "lookup" : "cache", route_resolved: routeComplete(routing),
+      route_source: commandRouteValid ? "command" : lookup ? "lookup" : "cache", route_resolved: routeComplete(routing),
       ...(routing && accountId ? { route_shop_matches_account: value(routing.shop_id) === value(accountId) } : {}) };
     postLog("info", "send_route_resolution", "Shopee reply routing checked.", {
       request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, pages: lookup?.pages ?? 0,
@@ -1211,11 +1241,13 @@
       diagnostics.endpoint_path = pathOf(template.url);
       const payload = structuredClone(template.payload);
       payload.request_id = requestId;
-      updateKnown(payload, "conversation_id", conversationId);
-      updateKnown(payload, "shop_id", routing.shop_id);
-      updateKnown(payload, "to_id", routing.to_id);
-      updateKnown(payload, "to_shop_id", routing.to_shop_id);
-      updateKnown(payload, "biz_id", routing.biz_id);
+      payload.conversation_id = conversationId;
+      payload.shop_id = numericId(routing.shop_id);
+      payload.to_id = numericId(routing.to_id);
+      delete payload.to_shop_id;
+      delete payload.biz_id;
+      if (value(routing.to_shop_id) !== null) payload.to_shop_id = numericId(routing.to_shop_id);
+      payload.biz_id = numericId(routing.biz_id ?? "0");
       if (commandType === "send_text") {
         const text = String(message?.text ?? "").trim();
         if (!text) throw new Error("Reply text is invalid.");
@@ -1226,6 +1258,22 @@
         const providerMessageId = quotedMessageId(message);
         payload.type = "image";
         payload.content = withQuotedMessageId(await uploadImage(message, routing), providerMessageId);
+      } else if (commandType === "send_video") {
+        payload.type = "video";
+        const source = new URL(state.getTemplate?.url ?? state.sendTemplate.url);
+        const headers = new Headers(state.getTemplate?.init?.headers ?? state.sendTemplate.headers);
+        headers.set("content-type", "application/json");
+        payload.content = { ...await globalThis.OmnichatShopeeVideo.upload({
+          bytes: message.media_bytes, type: message.media_type,
+          deadline: Math.min(deadlineAt, sendStartedAt + 30_000), fetch: state.nativeFetch,
+          chatRequest: (action, init) => {
+            const url = new URL(`/webchat/api/coreapi/v1.2/video/${action}`, source.origin);
+            for (const key of authQueryKeys) if (source.searchParams.has(key)) url.searchParams.set(key,source.searchParams.get(key));
+            const { vid, ...options } = init;
+            if (vid) url.searchParams.set("vid",vid);
+            return state.nativeFetch(url.toString(),{...options,headers,credentials:"include"});
+          },
+        }), uid: clientMessageId };
       } else {
         const providerProductId = String(message?.provider_product_id ?? "").trim();
         const productName = String(message?.product_name ?? "").trim();
@@ -1241,6 +1289,9 @@
         };
       }
       const url = new URL(template.url);
+      for (const [field, id] of [["shop_id", routing.shop_id], ["biz_id", routing.biz_id ?? "0"]]) {
+        if (url.searchParams.has(field)) url.searchParams.set(field, id);
+      }
       if (isSellerCentreSurface()) url.searchParams.delete("uuid");
       else url.searchParams.set("uuid", clientMessageId);
       if (url.pathname !== surfaceProfile().sendPath) {

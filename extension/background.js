@@ -114,6 +114,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.history_window_completed": "Configured history window was loaded.",
   "provider.history_conversation_skipped": "Configured history conversation was not in the chat list.",
   "provider.list_template_ready": "Provider conversation-list request template captured.",
+  "provider.send_route_fallback": "Legacy Shopee route resolution is deprecated; supply omnichat.routing. Falling back to cache/lookup. See routing diagnostics.",
   "provider.send_route_resolution": "Shopee reply routing checked.",
   "provider.content_unready": "Provider content bridge is not ready. Refresh the provider tab manually before retrying.",
   "provider.seller_centre_messages_observed": "Seller Centre realtime messages observed.",
@@ -1108,11 +1109,24 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
     trackedTab && !tabs.some((tab) => tab.id === trackedTab.id) ? [trackedTab, ...tabs] : tabs,
     trackedTab?.id ?? tabId,
   );
-  if (prepareForSend && adapter.id === "shopee") {
+  let tab = null;
+  for (const candidate of orderedTabs) {
+    if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
+      tab = candidate;
+      break;
+    }
+  }
+  if (!tab && prepareForSend && adapter.id === "shopee") {
     for (const candidate of orderedTabs.filter((tab) => adapter.surfaceForUrl?.(tab.url) === "seller-centre")) {
-      if (await isReadyProviderTab(candidate, adapter)) continue;
+      const status = await providerTabStatus(candidate);
+      if (status?.current_provider_account_id
+        && status.current_provider_account_id !== context.account.provider_account_id) continue;
       try {
         await prepareProviderTab(candidate, adapter);
+        if (providerTabCanSend(await providerTabStatus(candidate), context)) {
+          tab = candidate;
+          break;
+        }
       } catch (error) {
         await recordLog("warn", "provider", "surface_unready", `${label} Seller Centre could not be prepared for an outbound reply.`, {
           provider: adapter.id,
@@ -1120,13 +1134,6 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
           ...diagnosticErrorDetails(error),
         });
       }
-    }
-  }
-  let tab = null;
-  for (const candidate of orderedTabs) {
-    if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
-      tab = candidate;
-      break;
     }
   }
   if (!tab) tab = orderedTabs[0] ?? selectedTab ?? null;
@@ -1193,11 +1200,11 @@ async function sendViaProvider(message) {
     }
     const response = await fetch(parsedUrl, { ...(adapter.id === "line_oa" ? { redirect: "error" } : {}), signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) });
     const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
-    if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/"))) {
+    if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/")) || (adapter.id === "shopee" && commandType === "send_video" && imageType !== "video/mp4")) {
       return { ok: false, error: "Could not load reply image." };
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.byteLength || bytes.byteLength > (adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+    if (!bytes.byteLength || bytes.byteLength > (commandType === "send_video" ? 32 * 1024 * 1024 : adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
       return { ok: false, error: adapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
     }
     let binary = "";
@@ -1438,6 +1445,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id);
   const listedTabs = await providerChatTabs(adapter);
   let trackedTab = await getTab(record?.tab_id);
+  if (trackedTab && !adapter.matchesUrl(trackedTab.url)) trackedTab = null;
 
   if (!trackedTab && record?.tab_id !== null && record?.tab_id !== undefined) {
     record = await updateProviderRecoveryTabState(adapter.id, {
@@ -1447,41 +1455,47 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  // A tracked Shopee tab may have mini-chat closed while another tab is healthy.
-  if (listedTabs.length && (!trackedTab || adapter.id === "shopee")) {
-    const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
-    let selectedHealthy = null;
-    for (const candidate of orderedTabs) {
-      const status = await providerTabStatus(candidate);
-      if (providerTabHealthy(status, adapter)) {
-        selectedHealthy = candidate;
-        break;
-      }
-    }
-    trackedTab = selectedHealthy ?? trackedTab ?? orderedTabs[0] ?? null;
-    if (trackedTab && (allowTabRecovery || selectedHealthy)
-      && (record?.tab_id !== trackedTab.id
-        || (selectedHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready))) {
-      const healthy = trackedTab === selectedHealthy;
+  // Recovery maintains the primary surface; command dispatch can still use a
+  // ready fallback while New Webchat initializes. Never navigate a user tab.
+  const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
+  const candidates = [];
+  for (const tab of orderedTabs) {
+    const status = await providerTabStatus(tab);
+    if (adapter.id === "shopee" && status?.current_provider_account_id
+      && status.current_provider_account_id !== context?.account?.provider_account_id) continue;
+    candidates.push({ tab, status });
+  }
+  const primary = adapter.id === "shopee"
+    ? candidates.find(({ tab }) => adapter.surfaceForUrl?.(tab.url) === "new-webchat")
+    : null;
+  const healthy = candidates.find(({ status }) => providerTabHealthy(status, adapter));
+  const selected = allowTabRecovery && adapter.id === "shopee"
+    ? primary
+    : healthy ?? primary ?? candidates.find(({ tab }) => tab.id === trackedTab?.id) ?? candidates[0];
+  trackedTab = selected?.tab ?? null;
+  if (trackedTab) {
+    const isHealthy = providerTabHealthy(selected.status, adapter);
+    if (record?.tab_id !== trackedTab.id
+      || (isHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready)) {
       record = await updateProviderRecoveryTabState(adapter.id, {
-        state: healthy ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
+        state: isHealthy ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
         tab_id: trackedTab.id,
-        opened_by_extension: false,
+        opened_by_extension: record?.tab_id === trackedTab.id ? record?.opened_by_extension === true : false,
         opened_at: record?.opened_at ?? null,
-        failure_count: healthy ? 0 : record?.failure_count ?? 0,
-        last_failure_at: healthy ? null : record?.last_failure_at ?? null,
-        next_retry_at: healthy ? null : record?.next_retry_at ?? null,
-        reason: healthy ? null : "An existing provider tab needs recovery.",
-      });
-      await recordLog("info", "recovery", "provider_tab_selected", `${providerLabel(adapter)} existing tab selected for recovery.`, {
-        provider: adapter.id,
-        tab_id: trackedTab.id,
-        healthy,
+        failure_count: isHealthy ? 0 : record?.failure_count ?? 0,
+        last_failure_at: isHealthy ? null : record?.last_failure_at ?? null,
+        next_retry_at: isHealthy ? null : record?.next_retry_at ?? null,
+        reason: isHealthy ? null : "An existing provider tab needs recovery.",
       });
     }
+    return { tab: trackedTab, record };
   }
 
-  if (trackedTab) return { tab: trackedTab, record };
+  // A primary tab signed into another shop cannot recover this account. Do
+  // not open duplicate tabs into that same mismatched browser session.
+  if (adapter.id === "shopee" && orderedTabs.some((tab) => adapter.surfaceForUrl?.(tab.url) === "new-webchat")) {
+    return { tab: null, record, reason: "Shopee New Webchat is signed into a different shop. Open the matching shop in this Chrome profile." };
+  }
 
   if (!allowTabRecovery) {
     return {
@@ -2086,7 +2100,9 @@ async function connectionStatusSnapshot(context) {
   });
   const commandCapabilities = adapter?.id === "line_oa"
     ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
-    : providerTabCanSend(providerStatus, context) ? adapter?.sendCommands : [];
+    : providerTabCanSend(providerStatus, context)
+      ? adapter.sendCommands.filter((command) => command !== "send_video" || providerStatus?.capabilities?.send_video === true)
+      : [];
   const ready = ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
     health.checks.some((check) => check.key === key && check.status === "pass")
   ));
@@ -2922,6 +2938,7 @@ async function reinjectProviderBridge(tabId, adapter) {
             ...(mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
             ...(mainStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
+            "lib/shopee-video.js",
             "shopee-realtime.js",
           ];
         await chrome.scripting.executeScript({
@@ -3121,8 +3138,12 @@ async function syncOpenProvider(control, context) {
   const preferredTabId = control.preferredTabId ?? trackedTabId;
   const preferredTab = await providerChatTabById(adapter, preferredTabId);
   let tab = null;
-  if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
-  if (!tab) tab = await findReadyProviderChatTab(adapter);
+  if (adapter.id === "shopee") {
+    for (const candidate of orderProviderTabs(adapter, await providerChatTabs(adapter), preferredTabId)) {
+      if (providerTabCanSend(await providerTabStatus(candidate), context)) { tab = candidate; break; }
+    }
+  } else if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
+  if (!tab && adapter.id !== "shopee") tab = await findReadyProviderChatTab(adapter);
   if (!tab) tab = preferredTab ?? await findProviderChatTab(adapter);
   if (!tab) throw new Error(`Open ${label} to sync messages.`);
   control.tabId = tab.id;
@@ -3770,6 +3791,11 @@ function batchFor(messages, installId) {
       messages: []
     };
     if (!conversation.participants && participant) conversation.participants = [participant];
+    const routing = adapter.normalizeRouting?.(message.omnichat?.routing);
+    if (routing && (!conversation.omnichat?.routing
+      || Date.parse(routing.observed_at) >= Date.parse(conversation.omnichat.routing.observed_at))) {
+      conversation.omnichat = { routing };
+    }
     conversation.messages.push({
       id: message.id,
       event_timestamp: message.event_timestamp,

@@ -18,6 +18,7 @@
   const recoveries = new Map();
   const accountDetections = new Map();
   const profilesByConversation = new Map();
+  const routingByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
   const pendingProviderPreparations = new Map();
@@ -478,6 +479,14 @@
       const conversationId = String(profile?.conversation_id ?? "").trim();
       const id = String(profile?.id ?? "").trim();
       if (!conversationId || !id) continue;
+      const route = providerAdapter.normalizeRouting?.(profile.omnichat?.routing);
+      if (route && profile.provider_account_id) {
+        const key = JSON.stringify([profile.provider_account_id, conversationId]);
+        const previous = routingByConversation.get(key);
+        if (!previous || Date.parse(route.observed_at) >= Date.parse(previous.observed_at)) {
+          routingByConversation.set(key, { ...route, fields: { ...previous?.fields, ...route.fields } });
+        }
+      }
       const normalizedProfile = {
         id,
         ...(typeof profile.provider_account_id === "string" && profile.provider_account_id.trim()
@@ -490,20 +499,26 @@
           ? { avatar_url: profile.avatar_url }
           : {})
       };
-      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(conversationId));
-      if (merged) profilesByConversation.set(conversationId, merged);
+      const key = JSON.stringify([normalizedProfile.provider_account_id ?? "", conversationId]);
+      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(key));
+      if (merged) profilesByConversation.set(key, merged);
     }
   }
 
   function addConversationProfile(messages) {
     return messages.map((message) => {
-      const profile = profilesByConversation.get(message.conversation_id);
+      const accountId = message.provider_account_id ?? message.participant?.provider_account_id
+        ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "");
+      const key = JSON.stringify([accountId, message.conversation_id]);
+      const profile = profilesByConversation.get(key);
       const participant = mergeConversationProfiles(message.participant, profile);
-      if (participant?.display_name) profilesByConversation.set(message.conversation_id, participant);
+      if (participant?.display_name) profilesByConversation.set(key, participant);
+      const routing = routingByConversation.get(JSON.stringify([accountId, message.conversation_id]));
       return participant
         ? {
           ...message,
-          ...(participant.provider_account_id ? { provider_account_id: participant.provider_account_id } : {}),
+          ...(routing ? { omnichat: { routing } } : {}),
+          ...(accountId ? { provider_account_id: accountId } : {}),
           participant,
         }
         : message;
@@ -869,7 +884,7 @@
       let binary;
       try { binary = atob(imageBase64); } catch { return { ok: false, error: "Reply image is invalid." }; }
       const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
-      if (!imageBytes.byteLength || imageBytes.byteLength > (providerAdapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+      if (!imageBytes.byteLength || imageBytes.byteLength > (commandType === "send_video" ? 32 * 1024 * 1024 : providerAdapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
         return { ok: false, error: providerAdapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
       }
       imagePayload = commandType === "send_image"

@@ -39,10 +39,10 @@ export function sanitizeSendDiagnostics(input) {
   if (!input || typeof input !== "object" || Array.isArray(input) || input.diagnostic_version !== 1) return undefined;
   const result = { diagnostic_version: 1 };
   const enums = {
-    surface: ["legacy", "seller-centre"],
+    surface: ["new-webchat", "seller-centre"],
     endpoint_path: ["/webchat/api/v1.2/messages", "/webchat/api/v1.2/mini/messages"],
-    command_type: ["send_text", "send_image", "send_product"],
-    template_source: ["captured", "derived"], route_source: ["cache", "lookup"],
+    command_type: ["send_text", "send_image", "send_video", "send_product"],
+    template_source: ["captured", "derived"], route_source: ["command", "cache", "lookup"],
     cache_reason: ["complete", "incomplete", "shop_mismatch", "ambiguous_shop", "absent"],
     failure_kind: ["provider_rejection", "unrecognized_response", "transport_failure", "pre_dispatch_failure"],
   };

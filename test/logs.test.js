@@ -78,6 +78,19 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   assert.match(exported, /request_id=request-123/);
   assert.match(exported, /payload_shop_matches_route=false/);
   assert.doesNotMatch(exported, /private provider message|private reply|private.example|token=secret/);
+  await new Promise(resolve => listener({ type: "record_log", area: "provider", level: "warn",
+    event: "send_route_fallback", message: "untrusted fallback text",
+    details: { request_id: "fallback-1", fallback_reason: "missing", missing_fields: "to_id",
+      warning_code: "SHOPEE_LEGACY_ROUTE_FALLBACK", cookie: "secret", message_text: "private" },
+  }, {}, resolve));
+  assert.equal(storage.logs[0].level, "warn");
+  assert.equal(storage.logs[0].event, "send_route_fallback");
+  assert.match(storage.logs[0].message, /deprecated/);
+  assert.equal(storage.logs[0].details.warning_code, "SHOPEE_LEGACY_ROUTE_FALLBACK");
+  assert.equal(storage.logs[0].details.fallback_reason, "missing");
+  assert.equal(storage.logs[0].details.missing_fields, "to_id");
+  assert.equal(storage.logs[0].details.cookie, undefined);
+  assert.equal(storage.logs[0].details.message_text, undefined);
 });
 
 test("log entries redact sensitive strings and detail keys", () => {
