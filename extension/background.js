@@ -1204,8 +1204,8 @@ async function sendViaProvider(message) {
       return { ok: false, error: "Could not load reply image." };
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.byteLength || bytes.byteLength > (commandType === "send_video" ? 32 * 1024 * 1024 : adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
-      return { ok: false, error: adapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
+    if (!bytes.byteLength || bytes.byteLength > (commandType === "send_video" && adapter.id === "shopee" ? 5 * 1024 * 1024 : adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+      return { ok: false, error: adapter.id === "shopee" && commandType === "send_video" ? "Shopee video must be 5 MB or smaller." : adapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
     }
     let binary = "";
     for (let offset = 0; offset < bytes.length; offset += 32_768) {

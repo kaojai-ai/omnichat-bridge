@@ -764,6 +764,12 @@ for (const sellerCentre of [false, true]) {
       assert.equal(payload.biz_id, 3);
     }
     assert.equal(bridge.posts.some(post => post.event === "send_route_fallback"), false);
+    const resolution = bridge.posts.find(post => post.event === "send_route_resolution");
+    assert.equal(resolution.details.route_source, "command");
+    assert.equal(resolution.details.stop_reason, "command");
+    assert.equal(resolution.details.lookup_scope, "not_needed");
+    assert.equal(resolution.details.pages, 0);
+    assert.equal(Object.hasOwn(resolution.details, "cache_reason"), false);
   });
 }
 

@@ -884,8 +884,8 @@
       let binary;
       try { binary = atob(imageBase64); } catch { return { ok: false, error: "Reply image is invalid." }; }
       const imageBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
-      if (!imageBytes.byteLength || imageBytes.byteLength > (commandType === "send_video" ? 32 * 1024 * 1024 : providerAdapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
-        return { ok: false, error: providerAdapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
+      if (!imageBytes.byteLength || imageBytes.byteLength > (commandType === "send_video" && providerAdapter.id === "shopee" ? 5 * 1024 * 1024 : providerAdapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
+        return { ok: false, error: providerAdapter.id === "shopee" && commandType === "send_video" ? "Shopee video must be 5 MB or smaller." : providerAdapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
       }
       imagePayload = commandType === "send_image"
         ? { image_bytes: imageBytes, image_type: imageType }

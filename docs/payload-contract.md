@@ -399,7 +399,7 @@ ready. Embedded mini-chat does not advertise video and rejects it before upload.
 Targets must respect advertised capabilities; older installations remain usable
 for their existing message types.
 
-Shopee accepts MP4 up to the bridge limit of 32 MB. The browser obtains a fresh
+Shopee accepts MP4 up to the bridge limit of 5 MB. The browser obtains a fresh
 upload grant, uploads the file, registers it with Seller Chat and waits for processed
 media references before attempting the chat send. Grants stay in page memory. All
 steps share the command deadline. Upload/processing failure sends no chat message;

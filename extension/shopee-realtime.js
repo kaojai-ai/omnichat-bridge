@@ -1223,8 +1223,11 @@
       route_source: commandRouteValid ? "command" : lookup ? "lookup" : "cache", route_resolved: routeComplete(routing),
       ...(routing && accountId ? { route_shop_matches_account: value(routing.shop_id) === value(accountId) } : {}) };
     postLog("info", "send_route_resolution", "Shopee reply routing checked.", {
-      request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, pages: lookup?.pages ?? 0,
-      stop_reason: lookup?.stopReason ?? "cache", lookup_scope: lookup ? "captured_filters" : "cache",
+      request_id: requestId, route_resolution_version: 1,
+      route_source: commandRouteValid ? "command" : lookup ? "lookup" : "cache",
+      ...(!commandRouteValid ? { cache_reason: cacheReason } : {}), pages: lookup?.pages ?? 0,
+      stop_reason: commandRouteValid ? "command" : lookup?.stopReason ?? "cache",
+      lookup_scope: commandRouteValid ? "not_needed" : lookup ? "captured_filters" : "cache",
       route_resolved: routeComplete(routing),
     });
     if (!routeComplete(routing)) {

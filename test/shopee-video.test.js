@@ -1,16 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
+import { createCipheriv, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../extension/lib/shopee-video.js", import.meta.url), "utf8");
-const sandbox = vm.createContext({ ArrayBuffer, Uint8Array, DataView, Blob, FormData, AbortSignal, Date, setTimeout });
+const sandbox = vm.createContext({ ArrayBuffer, Uint8Array, DataView, Blob, FormData, AbortSignal, Date, setTimeout,
+  crypto: webcrypto, atob, TextEncoder, TextDecoder });
 vm.runInContext(source, sandbox);
 const { upload, md5 } = sandbox.OmnichatShopeeVideo;
 const bytes = new TextEncoder().encode("abc").buffer;
 const json = body => ({ ok: true, status: 200, json: async () => body });
+const plaintextToken = vid => `test-access:signature:policy-${vid}`;
+function encryptedToken(text) {
+  const cipher = createCipheriv("aes-128-cbc", Buffer.from("shopee_vod_00120"), Buffer.from("1234567887654321"));
+  return Buffer.concat([cipher.update(text, "utf8"), cipher.final()]).toString("base64");
+}
 const grant = (vid = "sg-test-1", changes = {}) => ({ code: 0, data: { vid, services: [{
-  serviceid: "wscloud", token: `grant-${vid}`, uploaddomain: "https://up-ws-sg.vod.susercontent.com",
+  serviceid: "wscloud", token: encryptedToken(plaintextToken(vid)), uploaddomain: "https://up-ws-sg.vod.susercontent.com",
   domain: "https://down-ws-global.vod.susercontent.com", ...changes,
 }] } });
 
@@ -49,7 +56,8 @@ test("video upload uses a fresh grant per upload and the observed registration p
   assert.equal(preupload.ver, 2);
   assert.equal(preupload.mediatype, 1);
   const transfer = f.requests.find(request => request.url.endsWith("/file/upload"));
-  assert.equal(transfer.init.body.get("token"), "grant-sg-test-1");
+  assert.equal(transfer.init.body.get("token"), plaintextToken("sg-test-1"));
+  assert.notEqual(transfer.init.body.get("token"), grant().data.services[0].token, "opaque encrypted grant must never be uploaded unchanged");
   assert.equal(transfer.init.body.get("key"), "sg-test-1.ori.mp4");
   assert.equal(transfer.init.body.get("file").type, "video/mp4");
   assert.equal(transfer.init.body.get("file").size, bytes.byteLength);
@@ -124,4 +132,18 @@ test("MD5 matches upload-report vectors", () => {
     ["message digest", "f96b697d7cb7938d525a2f31aaf161d0"],
     ["1234567890".repeat(8), "57edf4a22be3c955ac49da2e2107b67a"],
   ]) assert.equal(md5(new TextEncoder().encode(input).buffer), expected);
+});
+
+test("malformed encrypted upload token fails before transmitting any file", async () => {
+  const f = fixture({ initial: grant("sg-test-1", { token: "this-is-not-valid-base64-or-ciphertext" }) });
+  await assert.rejects(upload(f.options));
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.chatRequests.length, 0);
+});
+
+test("videos above the verified single-upload limit fail before requesting a grant", async () => {
+  const f = fixture();
+  await assert.rejects(upload({ ...f.options, bytes: new ArrayBuffer(5 * 1024 * 1024 + 1) }), /5 MB or smaller/);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.chatRequests.length, 0);
 });

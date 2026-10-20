@@ -27,9 +27,27 @@
     return state.map(v => [0,8,16,24].map(n => ((v>>>n)&255).toString(16).padStart(2,'0')).join('')).join('');
   }
 
+  // Native MMS v2 wraps upload grants with a public client-side protocol key.
+  // Decrypt locally; the short-lived result is used only by this upload request.
+  async function uploadToken(encoded) {
+    try {
+      if (typeof encoded !== "string" || !encoded || encoded.length > 4096) throw new Error();
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("shopee_vod_00120"),
+        { name: "AES-CBC" }, false, ["decrypt"]);
+      const ciphertext = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+      const plaintext = await crypto.subtle.decrypt({ name: "AES-CBC",
+        iv: new TextEncoder().encode("1234567887654321") }, key, ciphertext);
+      const token = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
+      if (!token || /[\r\n\0]/.test(token)) throw new Error();
+      return token;
+    } catch {
+      throw new Error("Shopee video upload grant is invalid.");
+    }
+  }
+
   async function upload({ bytes, type, deadline, fetch, chatRequest }) {
-    if (!(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > 32*1024*1024
-      || type !== "video/mp4") throw new Error("Shopee video must be an MP4 file of 32 MB or smaller.");
+    if (!(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > 5*1024*1024
+      || type !== "video/mp4") throw new Error("Shopee video must be an MP4 file of 5 MB or smaller.");
     const remaining = () => {
       const ms = Math.min(20_000, deadline-Date.now());
       if (ms <= 0) throw new Error("Reply deadline expired during video upload.");
@@ -52,10 +70,11 @@
       || service.domain !== "https://down-ws-global.vod.susercontent.com") {
       throw new Error("Shopee video upload service is unsupported.");
     }
+    const token = await uploadToken(service.token);
     const key = `${grant.vid}.ori.mp4`;
     const form = new FormData();
-    form.append("file",new Blob([bytes],{type}),"omnichat-reply.mp4");
-    form.append("token",service.token); form.append("key",key); form.append("mimeType",type);
+    form.append("file",new Blob([bytes],{type}),key);
+    form.append("token",token); form.append("key",key); form.append("mimeType",type);
     const uploaded = await fetch(`${service.uploaddomain}/file/upload`, {
       method:"POST", credentials:"omit", body:form, signal:AbortSignal.timeout(remaining()),
     });

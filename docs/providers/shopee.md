@@ -95,7 +95,7 @@ transfers Shopee cookies, passwords, or login tokens.
 - The bridge uses a short-lived ticket and browser presence. Target-server
   storage and retention are deployment-specific.
 
-New Webchat additionally supports outbound MP4 video (up to 32 MB) through the
+New Webchat additionally supports outbound MP4 video (up to 5 MB) through the
 generic `send_video` command when its advertised capability is ready. Mini-chat
 video remains unsupported. Upload and sending share the command deadline and
 never retry an uncertain send. See [routing and video contracts](../payload-contract.md#shopee-conversation-routing).
