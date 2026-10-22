@@ -49,7 +49,7 @@ test("video upload uses a fresh grant per upload and the observed registration p
   const second = await upload(f.options);
   assert.equal(first.vid, "sg-test-1");
   assert.equal(second.vid, "sg-test-2");
-  assert.equal(first.duration_seconds, 2.5);
+  assert.equal(first.duration_seconds, 3);
   assert.equal(first.thumb_width, 320);
   const preupload = JSON.parse(f.requests[0].init.body);
   assert.equal(preupload.biz, 120);
@@ -70,6 +70,21 @@ test("video upload uses a fresh grant per upload and the observed registration p
     vid: "sg-test-1", video_url: "https://down-ws-global.vod.susercontent.com/sg-test-1.ori.mp4" });
   assert.deepEqual(f.chatRequests.map(request => request.path), ["report_upload", "upload_status", "report_upload", "upload_status"]);
   assert.equal(f.requests.some(request => /messages/.test(request.url)), false, "uploader must never send chat messages");
+});
+
+test("processed durations become positive int32 seconds, including the reported 3079ms failure", async () => {
+  for (const [duration, expected] of [[3079, 4], [3000, 3], [1, 1]]) {
+    const f = fixture({ status: { status: "successful", video: "video", thumbnail: "thumb",
+      width: 320, height: 240, duration } });
+    const content = await upload(f.options);
+    assert.equal(JSON.parse(JSON.stringify(content)).duration_seconds, expected);
+    assert.equal(Number.isInteger(content.duration_seconds), true);
+  }
+  for (const duration of [NaN, Infinity, 0, -1, "3079", 2147483647001]) {
+    const f = fixture({ status: { status: "successful", video: "video", thumbnail: "thumb",
+      width: 320, height: 240, duration } });
+    await assert.rejects(upload(f.options), /metadata is incomplete/);
+  }
 });
 
 test("video transfer failure prevents registration and any later chat action", async () => {
