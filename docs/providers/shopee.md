@@ -1,20 +1,20 @@
 # Shopee provider
 
-Shopee Seller Chat is the first supported provider. The bridge supports both
-Shopee surfaces while Shopee retires the legacy page:
+Shopee Seller Chat supports New Webchat as its primary surface and the
+Seller Centre embedded Chat panel as fallback:
 
-- Seller Centre: every non-Webchat page at `https://seller.shopee.co.th/`,
-  including `/`, `/portal`, and `/portal/*` (such as
-  `/portal/chat-management`), with its Chat panel (the preferred surface)
-- Legacy: `/new-webchat/*` and `/webchat/*` (temporary compatibility)
+- New Webchat: `https://seller.shopee.co.th/new-webchat/conversations`
+- Seller Centre: other seller pages, including `/portal/chat-management`
+
+Retired `/webchat` pages are not supported. The `/webchat/api/...` API paths
+are still used by New Webchat and remain supported.
 
 ## How it works
 
-1. The seller signs in and opens the Seller Centre page (the first manual sync
-   can open its Chat panel) or a legacy Seller Chat page during the
-   compatibility period.
+1. The seller signs in and opens New Webchat. Seller Centre remains a fallback
+   (the first manual sync can open its Chat panel).
 2. On Seller Centre, the extension observes Shopee's authenticated conversation
-   list and realtime sync polling. On legacy pages it reads the existing chat
+   list and realtime sync polling. On New Webchat pages it reads the existing chat
    socket.
 3. For missed messages, it requests recent conversation history using the open
    Seller Chat session.
@@ -33,7 +33,7 @@ configurations remain supported for existing installations.
 
 ```mermaid
 flowchart LR
-    A["Shopee Seller Centre or legacy Seller Chat"] --> B["Realtime polling/socket or history recovery"]
+    A["Shopee New Webchat or Seller Centre"] --> B["Realtime polling/socket or history recovery"]
     B --> C["Parse supported messages"]
     C --> D["Local pending queue"]
     D -->|"HTTPS + HMAC"| E["Configured server"]
@@ -43,7 +43,7 @@ flowchart LR
 The extension **does NOT save or send the seller's Shopee password, cookies, or
 login tokens**. Request headers remain in the Shopee page's memory.
 
-The extension status records the active surface (`seller-centre` or `legacy`),
+The extension status records the active surface (`new-webchat` or `seller-centre`),
 its named capabilities, and the realtime transport (`polling` or `socket`). A
 command is rejected with an explicit initialization error when the selected
 surface has not exposed the required request profile.
@@ -68,7 +68,7 @@ the same tab with capped backoff; it never creates a replacement while the
 tracked tab still exists. Closing the tracked tab allows one replacement on a
 later retry.
 
-Chrome and the Seller Centre or legacy chat tab must remain open for realtime
+Chrome and the New Webchat or Seller Centre chat tab must remain open for realtime
 capture. When the laptop or Chrome is off, nothing is captured or sent.
 Recovery may fetch missed messages after the seller returns. The bridge keeps
 request templates only in page memory; it never persists Shopee cookies,
@@ -81,19 +81,27 @@ Your server can send one text, image, or product reply to a configured seller
 browser Shop ID on either supported surface. Text and image replies may quote
 an existing provider message. The extension uses the authenticated request
 profile of the selected surface: Seller Centre sends through its page-native
-mini-chat request, while legacy Webchat uses its secure sender. It never
-silently sends a Seller Centre command through legacy endpoints and never
+mini-chat request, while New Webchat uses its secure sender. It never
+silently sends a Seller Centre command through standalone endpoints and never
 transfers Shopee cookies, passwords, or login tokens.
 
-- The target conversation must already be available in the selected Shopee chat
-  surface.
+- A complete optional command route can address the conversation directly. Otherwise
+  the bridge resolves it through its shop-scoped cache and conversation lookup.
 - Outbound replies never create or navigate to a Shopee tab. An Admin reply is
-  sent only when an already-open Seller Centre or legacy Shopee chat tab is
+  sent only when an already-open New Webchat or Seller Centre chat tab is
   available; otherwise it fails with an actionable error.
 - If the browser is offline or the target conversation is unavailable, sending
   fails. There is no remote command queue or retry.
 - The bridge uses a short-lived ticket and browser presence. Target-server
   storage and retention are deployment-specific.
+
+New Webchat additionally supports outbound MP4 video (up to 5 MB) through the
+generic `send_video` command when its advertised capability is ready. Mini-chat
+video remains unsupported. Upload and sending share the command deadline and
+never retry an uncertain send. See [routing and video contracts](../payload-contract.md#shopee-conversation-routing).
+
+Ready, shop-matching New Webchat tabs take precedence over mini-chat. Recovery
+maintains the primary New Webchat tab in the background without activating it.
 
 ## Sync and recovery
 

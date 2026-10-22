@@ -39,6 +39,21 @@
       supports(capability) {
         return capabilities.has(capability);
       },
+      normalizeRouting(input) {
+        if (!input || input.version !== 1 || !input.fields || typeof input.fields !== "object"
+          || Array.isArray(input.fields) || typeof input.observed_at !== "string"
+          || !Number.isFinite(Date.parse(input.observed_at))) return null;
+        const fields = {};
+        for (const field of adapter.routingFields ?? []) {
+          const raw = input.fields[field];
+          if (typeof raw !== "string" || !raw.trim() || raw.length > 128) continue;
+          const value = raw.trim();
+          if (adapter.id === "shopee" && (!/^\d{1,32}$/.test(value) || (field === "to_id" && /^0+$/.test(value)))) continue;
+          fields[field] = value;
+        }
+        return Object.keys(fields).length
+          ? { version: 1, fields, observed_at: input.observed_at } : null;
+      },
       supportsSend(command) {
         return sendCommands.has(command);
       },

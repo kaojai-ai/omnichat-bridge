@@ -65,7 +65,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("routes only supported Shopee chat URLs to the adapter", () => {
   const registry = createRegistry();
-  const adapter = registry.forUrl("https://seller.shopee.co.th/webchat/conversations?conversation_id=1");
+  const adapter = registry.forUrl("https://seller.shopee.co.th/new-webchat/conversations?conversation_id=1");
 
   assert.equal(adapter.id, "shopee");
   assert.equal(registry.forPage("https://seller.shopee.co.th/settings").id, "shopee");
@@ -77,8 +77,8 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
     const url = `https://seller.shopee.co.th${path}`;
     assert.equal(registry.forUrl(url).surfaceForUrl(url), "seller-centre");
   }
-  assert.deepEqual(plain(adapter.surfacePriority), ["seller-centre", "legacy"]);
-  assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/portal/chat-management");
+  assert.deepEqual(plain(adapter.surfacePriority), ["new-webchat", "seller-centre"]);
+  assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/new-webchat/conversations");
   assert.equal(adapter.providerStatusReady({ surface_ready: true, capabilities: {
     account_detection: true,
     message_observation: true,

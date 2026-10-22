@@ -300,10 +300,33 @@ are extension-internal messages, not additions to the target server protocol.
 
 ### Shopee conversation routing
 
-Shopee replies initialize the chat surface, then use a complete cached route scoped
-by shop and conversation. Partial observations cannot erase known routing fields;
-explicit valid values (including zero) can update them. An authenticated shop change
-clears cached routes. Existing page caches migrate only entries with an explicit shop.
+Optional provider routing travels in `conversation.omnichat.routing` in existing
+message batches and `command.omnichat.routing` in existing outbound commands:
+
+```json
+{"omnichat":{"routing":{"version":1,"fields":{"to_id":"222","to_shop_id":"1834183330","biz_id":"0"},"observed_at":"2026-10-21T03:00:00Z"}}}
+```
+
+Each provider adapter validates its allowed fields. Shopee observes destination IDs
+before adding native request defaults; IDs remain strings. `to_id` must be positive;
+explicit zero is valid for `to_shop_id` and `biz_id`. LINE omits this optional object.
+No cookies, authentication headers, upload grants or request templates belong here.
+
+Targets may save this object in conversation metadata, scoped by tenant, provider,
+provider account and conversation. Merge valid partial fields atomically, preserve
+unrelated metadata and ignore older observations. Do not write timestamp-only
+changes; set server `received_at` only when routing values change. KaoJai stores it
+as `meta.omnichat.routing` and reads only that JSON once per send job. Missing or
+failed reads continue dispatch without routing. There is no additional API or polling.
+Routing is forwarded only with existing message batches, so untouched conversations
+continue using fallback.
+
+Shopee initializes the browser sender and verifies the signed-in account, then uses
+a complete command route without cache or lookup. Missing, invalid or incomplete
+routing emits a sanitized deprecation warning and uses the existing shop/conversation
+cache, followed by lookup if necessary. Partial observations cannot erase valid cached
+fields. An authenticated shop change clears cached routes. Every send rebuilds its
+destination fields so captured templates cannot retain a previous recipient.
 
 When no complete route is available, lookup has a 15-second budget bounded by the
 command deadline. Mini-chat lookup starts at its known initial nanosecond cursor
@@ -318,7 +341,7 @@ error code with neutral guidance to check Seller Chat for the correct shop. Fail
 Admin must not attribute this code to Chat Distribution: the extension does not
 verify that setting. The Admin wording change can ship independently; release it
 before the extension where practical so older extension failures also get neutral
-wording. No database migration or backend contract change is required.
+wording. This error wording remains independent of optional routing support.
 
 Route diagnostics record the request correlation ID, cache decision, pages searched,
 and lookup stop reason. Existing diagnostic batches include the extension version.
@@ -342,7 +365,7 @@ include numeric IDs from the resolved route and outgoing request/query/nested
 shop identity, field presence/types and consistency booleans. Text diagnostics
 contain length only; quote/UID diagnostics describe type or UUID shape. No message
 text, raw request/response bodies, credentials, headers, cookies or full URLs are
-recorded. The legacy secure poster may expose a response body without HTTP status.
+recorded. The New Webchat secure poster may expose a response body without HTTP status.
 Provider rejection, transport uncertainty, unknown response and pre-dispatch
 failures are distinguished. Shopee may still omit the exact invalid field.
 
@@ -366,3 +389,18 @@ states and `*_matches_route` booleans. A missing or mismatched field is evidence
 to compare against the correct Shopee endpoint contract, not proof that every
 endpoint requires that field. This change improves evidence; it does not repair
 native Shopee parameters or establish a successful live send.
+
+
+### Shopee outbound video
+
+Use the existing generic `send_video` command with `media_url`, a client message ID
+and command deadline. New Webchat advertises `send_video` only after its sender is
+ready. Embedded mini-chat does not advertise video and rejects it before upload.
+Targets must respect advertised capabilities; older installations remain usable
+for their existing message types.
+
+Shopee accepts MP4 up to the bridge limit of 5 MB. The browser obtains a fresh
+upload grant, uploads the file, registers it with Seller Chat and waits for processed
+media references before attempting the chat send. Grants stay in page memory. All
+steps share the command deadline. Upload/processing failure sends no chat message;
+a failed, timed-out or uncertain native send is never retried on another surface.

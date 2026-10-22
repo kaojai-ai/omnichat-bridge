@@ -9,14 +9,18 @@ vm.runInContext(source, context);
 
 const { isShopeePageUrl, isShopeeChatPath, isShopeeChatUrl, surfaceForPath, surfaceForUrl } = context.OmnichatShopeeUrl;
 
-test("routes only old Webchat paths to legacy and Seller Centre pages to Seller Centre", () => {
-  const legacyPaths = ["/new-webchat", "/new-webchat/conversations", "/webchat", "/webchat/conversations"];
+test("routes New Webchat separately and excludes retired Webchat pages", () => {
+  const newWebchatPaths = ["/new-webchat", "/new-webchat/conversations"];
   const sellerCentrePaths = ["/", "/portal", "/portal/", "/portal/chat-management", "/portal/sale/order", "/404"];
-  for (const path of [...legacyPaths, ...sellerCentrePaths]) {
+  for (const path of [...newWebchatPaths, ...sellerCentrePaths]) {
     assert.equal(isShopeeChatPath(path), true);
     assert.equal(isShopeeChatUrl(`https://seller.shopee.co.th${path}?conversation_id=conversation-1`), true);
   }
-  for (const path of legacyPaths) assert.equal(surfaceForPath(path), "legacy");
+  for (const path of newWebchatPaths) assert.equal(surfaceForPath(path), "new-webchat");
+  for (const path of ["/webchat", "/webchat/", "/webchat/conversations", "/webchat/api/v1.2/messages"]) {
+    assert.equal(surfaceForPath(path), null);
+    assert.equal(isShopeeChatUrl(`https://seller.shopee.co.th${path}`), false);
+  }
   for (const path of sellerCentrePaths) {
     assert.equal(surfaceForPath(path), "seller-centre");
     assert.equal(surfaceForUrl(`https://seller.shopee.co.th${path}`), "seller-centre");

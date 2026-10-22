@@ -84,8 +84,8 @@ test("shows a ready Seller Centre chat after its request templates are captured"
   );
 });
 
-test("does not change the legacy connected label", () => {
-  assert.equal(sellerCentreConnectionStatus({ socket: "connected", provider_surface: "legacy" }), null);
+test("keeps the standalone New Webchat connected label", () => {
+  assert.equal(sellerCentreConnectionStatus({ socket: "connected", provider_surface: "new-webchat" }), null);
 });
 
 test("hides a sync error after a later successful activity", () => {

@@ -1,8 +1,7 @@
 const SHOPEE_SELLER_ORIGIN = "https://seller.shopee.co.th";
 const SHOPEE_CHAT_SURFACES = Object.freeze({
-  legacy: Object.freeze([
+  "new-webchat": Object.freeze([
     "/new-webchat",
-    "/webchat",
   ]),
   "seller-centre": Object.freeze([
     "/",
@@ -30,8 +29,9 @@ function pathMatches(path, prefix) {
 function surfaceForPath(pathname) {
   if (typeof pathname !== "string") return null;
   const path = normalizedPath(pathname);
-  if (SHOPEE_CHAT_SURFACES.legacy.some((legacyPath) => pathMatches(path, legacyPath))) {
-    return "legacy";
+  if (pathMatches(path, "/webchat")) return null;
+  if (SHOPEE_CHAT_SURFACES["new-webchat"].some((chatPath) => pathMatches(path, chatPath))) {
+    return "new-webchat";
   }
   return "seller-centre";
 }

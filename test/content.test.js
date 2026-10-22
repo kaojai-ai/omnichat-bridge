@@ -498,7 +498,6 @@ test("ignores best-effort messages after the extension context is invalidated", 
 
 for (const pathname of [
   "/new-webchat/conversations",
-  "/webchat/conversations",
 ]) {
   test(`requests automatic sync when ${pathname} loads`, async () => {
     const bridge = contentBridge(pathname);
@@ -607,4 +606,42 @@ test("preserves missing-conversation codes across the content bridge", async () 
   await bridge.providerEvent({ type: "api_send_result", request_id: "missing-1", ok: false,
     error_code: "SHOPEE_CONVERSATION_MISSING", error: "Shopee conversation is missing." });
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
+});
+
+const routingEnvelope = (fields, observed_at = "2026-10-21T03:00:00Z") => ({ routing: { version: 1, fields, observed_at } });
+
+test("forwards observed routing with messages and keeps it isolated by shop", async () => {
+  const bridge = contentBridge();
+  for (const [shop, buyer] of [["shop-1", "123"], ["shop-2", "456"]]) {
+    await bridge.providerEvent({ type: "profiles_detected", profiles: [{
+      conversation_id: echo.conversation_id, id: buyer, provider_account_id: shop,
+      omnichat: routingEnvelope({ to_id: buyer, to_shop_id: "0", biz_id: "0", cookie: "secret" }),
+    }] });
+  }
+  for (const shop of ["shop-1", "shop-2"]) {
+    await bridge.providerEvent({ type: "realtime_event", body: { messages: [{ ...echo, id: `route-${shop}`, provider_account_id: shop }] } });
+  }
+  const messages = bridge.runtimeMessages.filter(message => message.type === "queue_messages").map(message => message.messages[0]);
+  assert.equal(messages[0].provider_account_id, "shop-1");
+  assert.equal(messages[1].provider_account_id, "shop-2");
+  assert.equal(messages[0].omnichat.routing.fields.to_id, "123");
+  assert.equal(messages[1].omnichat.routing.fields.to_id, "456");
+  assert.equal(messages[0].omnichat.routing.fields.to_shop_id, "0");
+  assert.equal(messages[0].omnichat.routing.fields.cookie, undefined);
+});
+
+test("partial and stale profile observations do not erase complete observed routing", async () => {
+  const bridge = contentBridge();
+  for (const [fields, time] of [
+    [{ to_id: "123", to_shop_id: "456", biz_id: "3" }, "2026-10-21T03:00:00Z"],
+    [{ biz_id: "0" }, "2026-10-21T03:01:00Z"],
+    [{ to_id: "999", to_shop_id: "999" }, "2026-10-21T02:59:00Z"],
+  ]) {
+    await bridge.providerEvent({ type: "profiles_detected", profiles: [{ conversation_id: echo.conversation_id,
+      id: "123", provider_account_id: "shop-1", omnichat: routingEnvelope(fields, time) }] });
+  }
+  await bridge.providerEvent({ type: "realtime_event", body: { messages: [{ ...echo, id: "partial-route", provider_account_id: "shop-1" }] } });
+  const message = bridge.runtimeMessages.find(message => message.type === "queue_messages").messages[0];
+  assert.deepEqual(plain(message.omnichat.routing.fields), { to_id: "123", to_shop_id: "456", biz_id: "0" });
+  assert.equal(message.omnichat.routing.observed_at, "2026-10-21T03:01:00Z");
 });

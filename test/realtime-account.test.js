@@ -35,7 +35,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
+function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
