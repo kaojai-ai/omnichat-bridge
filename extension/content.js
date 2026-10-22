@@ -412,7 +412,10 @@
   }
 
   function normalizedMessages(payload, captureMethod) {
-    return providerAdapter.normalizeMessages(payload, captureMethod).map((message) => ({
+    const accountIds = providerAdapter.id === "shopee" && providerAccountIds.includes(currentProviderAccountId)
+      ? [currentProviderAccountId]
+      : providerAccountIds;
+    return providerAdapter.normalizeMessages(payload, captureMethod, { providerAccountIds: accountIds }).map((message) => ({
       ...message,
       provider: typeof message?.provider === "string" && message.provider.trim()
         ? message.provider.trim()

@@ -363,3 +363,26 @@ test("zero-only shop routing never invents account ownership from participant ID
     assert.equal(message.recipient_account_id, undefined);
   }
 });
+
+test("detected ownership selects either real endpoint without changing route identities", () => {
+  const raw = { id: "owned", conversation_id: "fixture-chat", from_id: "sender-user", to_id: "recipient-user",
+    from_shop_id: "sender-shop", to_shop_id: "recipient-shop", from_user_name: "Fixture sender", to_user_name: "Fixture recipient",
+    type: "text", content: { text: "Fixture" } };
+  for (const owner of ["sender-shop", "recipient-shop"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages(raw, "realtime_socket", { providerAccountIds: [owner] });
+    assert.equal(message.provider_account_id, owner);
+    assert.equal(message.sender_account_id, "sender-shop");
+    assert.equal(message.recipient_account_id, "recipient-shop");
+    assert.equal(message.participant.id, owner === "sender-shop" ? "recipient-user" : "sender-user");
+  }
+  assert.equal(context.OmnichatShopee.parseShopeeMessages(raw, "poll")[0].provider_account_id, "recipient-shop");
+});
+
+test("unrelated or ambiguous detected ownership rejects messages before account fallbacks", () => {
+  const raw = { id: "unowned", conversation_id: "fixture-chat", from_id: "sender-user", to_id: "recipient-user",
+    from_shop_id: "sender-shop", to_shop_id: "recipient-shop", type: "product", content: { product_name: "Fixture", shop_id: "active-shop" } };
+  for (const ids of [["active-shop"], ["sender-shop", "recipient-shop"]]) {
+    assert.equal(context.OmnichatShopee.parseShopeeMessages(raw, "history_recovery", { providerAccountIds: ids }).length, 0);
+  }
+  assert.equal(context.OmnichatShopee.parseShopeeMessages({ ...raw, from_shop_id: 0, to_shop_id: 0 }, "poll", { providerAccountIds: ["active-shop"] }).length, 0);
+});
