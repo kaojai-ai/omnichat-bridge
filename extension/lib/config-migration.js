@@ -28,7 +28,8 @@ export function accountMigration(account, version) {
   }
   return { status: "pending", candidate: { ...account,
     api_url: `${environment.api}/api/${match[1]}/${match[2]}/${match[3]}`,
-    logs_url: environment.logs,
+    // An explicit custom log receiver remains the user's choice in the OSS client.
+    logs_url: account.logs_url || environment.logs,
   } };
 }
 

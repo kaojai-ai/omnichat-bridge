@@ -30,6 +30,8 @@ test("LINE migration uses canonical account while keeping Basic ID", () => {
   assert.ok(result.candidate.api_url.endsWith("/123"));
 });
 test("open-source custom endpoints are never rewritten or sent to KaoJai", () => {
+  const customLogs = "https://diagnostics.example.invalid/logs";
+  assert.equal(accountMigration({ ...old, logs_url: customLogs }, 3).candidate.logs_url, customLogs);
   for (const api_url of ["https://example.invalid/custom", "https://admin.kaojai.ai.example.invalid/api"]) {
     assert.equal(accountMigration({ ...old, api_url }, 3).candidate, undefined);
   }
