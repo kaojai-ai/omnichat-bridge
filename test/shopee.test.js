@@ -309,3 +309,57 @@ test("keeps notification content alongside delivery flags for every capture meth
     assert.equal(message.provider_content.delivery_failed, true);
   }
 });
+
+test("zero recipient shop IDs preserve outgoing seller ownership and buyer profile", () => {
+  for (const zero of [0, "0"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({
+      id: "outgoing-fixture", conversation_id: "conversation-fixture",
+      from_id: "seller-user", to_id: "buyer-user", from_shop_id: "seller-shop", to_shop_id: zero,
+      to_user_name: "Fixture buyer", type: "text", content: { text: "Fixture reply" },
+    }, "network_observer");
+    assert.equal(message.provider_account_id, "seller-shop");
+    assert.equal(message.sender_account_id, "seller-shop");
+    assert.equal(message.recipient_account_id, undefined);
+    assert.equal(message.participant.id, "buyer-user");
+    assert.equal(message.participant.display_name, "Fixture buyer");
+  }
+});
+
+test("zero sender shop IDs preserve incoming seller ownership and buyer profile", () => {
+  for (const zero of [0, "0"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({
+      id: "incoming-fixture", conversation_id: "conversation-fixture",
+      from_id: "buyer-user", to_id: "seller-user", from_shop_id: zero, to_shop_id: "seller-shop",
+      from_user_name: "Fixture buyer", type: "text", content: { text: "Fixture question" },
+    }, "realtime_socket");
+    assert.equal(message.provider_account_id, "seller-shop");
+    assert.equal(message.sender_account_id, undefined);
+    assert.equal(message.recipient_account_id, "seller-shop");
+    assert.equal(message.participant.id, "buyer-user");
+    assert.equal(message.participant.display_name, "Fixture buyer");
+  }
+});
+
+test("real shop-to-shop routing retains both identities and existing recipient precedence", () => {
+  const [message] = context.OmnichatShopee.parseShopeeMessages({
+    id: "dual-shop-fixture", conversation_id: "conversation-fixture",
+    from_id: "sender-user", to_id: "recipient-user", from_shop_id: "sender-shop", to_shop_id: "recipient-shop",
+    type: "text", content: { text: "Fixture message" },
+  }, "history_recovery");
+  assert.equal(message.provider_account_id, "recipient-shop");
+  assert.equal(message.sender_account_id, "sender-shop");
+  assert.equal(message.recipient_account_id, "recipient-shop");
+});
+
+test("zero-only shop routing never invents account ownership from participant IDs", () => {
+  for (const zero of [0, "0"]) {
+    const [message] = context.OmnichatShopee.parseShopeeMessages({
+      id: "unowned-fixture", conversation_id: "conversation-fixture",
+      from_id: "sender-user", to_id: "recipient-user", from_shop_id: zero, to_shop_id: zero, shop_id: zero,
+      type: "text", content: { text: "Fixture message", shop_id: zero },
+    }, "poll");
+    assert.equal(message.provider_account_id, undefined);
+    assert.equal(message.sender_account_id, undefined);
+    assert.equal(message.recipient_account_id, undefined);
+  }
+});

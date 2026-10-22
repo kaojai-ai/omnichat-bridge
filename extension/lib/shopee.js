@@ -8,6 +8,12 @@ function string(value) {
   return null;
 }
 
+function shopAccountId(value) {
+  const id = string(value);
+  // Shopee uses zero for a participant that has no shop (typically a buyer).
+  return id === "0" ? null : id;
+}
+
 function timestamp(value, fallback) {
   if (typeof value === "string" && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
   const numeric = Number(value);
@@ -43,7 +49,7 @@ function profileUrl(value) {
 }
 
 function participantFromMessage(message, senderId, recipientId, senderAccountId, recipientAccountId) {
-  const shopId = string(message.shop_id);
+  const shopId = shopAccountId(message.shop_id);
   const senderIsShop = Boolean(senderAccountId || (shopId && senderId === shopId));
   const recipientIsShop = Boolean(recipientAccountId || (shopId && recipientId === shopId));
   if (senderIsShop === recipientIsShop) return null;
@@ -218,14 +224,14 @@ function parseShopeeMessages(payload, captureMethod) {
     const conversationId = string(message.conversation_id);
     const senderId = string(message.from_id);
     const recipientId = string(message.to_id);
-    const senderAccountId = string(message.from_shop_id);
-    const recipientAccountId = string(message.to_shop_id);
+    const senderAccountId = shopAccountId(message.from_shop_id);
+    const recipientAccountId = shopAccountId(message.to_shop_id);
     const content = contentRecord(message.content);
     const flags = deliveryFlags(message);
     const providerAccountId = recipientAccountId
       ?? senderAccountId
-      ?? string(message.shop_id)
-      ?? string(content?.shop_id);
+      ?? shopAccountId(message.shop_id)
+      ?? shopAccountId(content?.shop_id);
     const parsedType = messageType(message.type ?? message.message_type);
     const storedContent = parsedType.type === "unsupported" ? content : null;
     const providerContent = Object.keys(flags).length ? { ...storedContent, ...flags } : storedContent;
