@@ -8,9 +8,10 @@ const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", impor
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
+const shopeeParserSource = await readFile(new URL("../extension/lib/shopee.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
@@ -83,6 +84,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   window.window = window;
   vm.runInContext(urlSource, context);
   vm.runInContext(adaptersSource, context);
+  if (realShopeeParser) vm.runInContext(shopeeParserSource, context);
   vm.runInContext(shopeeAdapterSource, context);
   vm.runInContext(lineOaSource, context);
   vm.runInContext(source, context);
@@ -148,6 +150,34 @@ for (const command_type of ["send_video", "send_file"]) {
     assert.deepEqual(plain(await result), { ok: true, provider_message_id: "provider-1" });
   });
 }
+
+test("actual Shopee parser keeps session ownership across realtime and historical recovery", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { localConsent: true, realShopeeParser: true });
+  await bridge.providerEvent({ type: "accounts_detected", accounts: [{ provider: "shopee", provider_account_id: "active-shop" }] });
+  const raw = { id: "realtime-owned", conversation_id: "fixture-chat", from_id: "seller-user", to_id: "buyer-user",
+    from_shop_id: "active-shop", to_shop_id: "buyer-shop", type: "text", content: { text: "Fixture reply" } };
+  await bridge.providerEvent({ type: "realtime_event", body: { messages: [raw] } });
+  await bridge.providerEvent({ type: "recovery_batch", request_id: "history:fixture", provider_account_id: "active-shop",
+    body: { messages: [{ ...raw, id: "history-owned" }, { ...raw, id: "history-foreign", from_shop_id: "foreign-shop" }] } });
+  const messages = bridge.runtimeMessages.filter((message) => message.type === "queue_messages").flatMap((message) => message.messages);
+  assert.deepEqual(messages.map((message) => message.id), ["realtime-owned", "history-owned"]);
+  for (const message of messages) {
+    assert.equal(message.provider_account_id, "active-shop");
+    assert.equal(message.sender_account_id, "active-shop");
+    assert.equal(message.recipient_account_id, "buyer-shop");
+  }
+});
+
+test("actual Shopee parser rejects unrelated and ambiguous shops before recovery owner fallback", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { localConsent: true, realShopeeParser: true });
+  await bridge.providerEvent({ type: "accounts_detected", accounts: ["shop-a", "shop-b"].map((id) => ({ provider: "shopee", provider_account_id: id })) });
+  const raw = { id: "ambiguous", conversation_id: "fixture-chat", from_id: "seller-user", to_id: "buyer-user",
+    from_shop_id: "shop-a", to_shop_id: "shop-b", type: "text", content: { text: "Fixture" } };
+  await bridge.providerEvent({ type: "realtime_event", body: { messages: [raw, { ...raw, id: "foreign", from_shop_id: "foreign-a", to_shop_id: "foreign-b" }] } });
+  await bridge.providerEvent({ type: "recovery_batch", request_id: "history:unowned", provider_account_id: "shop-a", body: { messages: [raw] } });
+  const messages = bridge.runtimeMessages.filter((message) => message.type === "queue_messages").flatMap((message) => message.messages);
+  assert.equal(messages.length, 0);
+});
 
 test("routes detected accounts through the background merger", async () => {
   const bridge = contentBridge("/new-webchat/conversations", { localConsent: true });

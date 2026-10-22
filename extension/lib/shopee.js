@@ -48,10 +48,14 @@ function profileUrl(value) {
   }
 }
 
-function participantFromMessage(message, senderId, recipientId, senderAccountId, recipientAccountId) {
+function participantFromMessage(message, senderId, recipientId, senderAccountId, recipientAccountId, ownerAccountId = null) {
   const shopId = shopAccountId(message.shop_id);
-  const senderIsShop = Boolean(senderAccountId || (shopId && senderId === shopId));
-  const recipientIsShop = Boolean(recipientAccountId || (shopId && recipientId === shopId));
+  const senderIsShop = ownerAccountId
+    ? senderAccountId === ownerAccountId || (shopId === ownerAccountId && senderId === shopId)
+    : Boolean(senderAccountId || (shopId && senderId === shopId));
+  const recipientIsShop = ownerAccountId
+    ? recipientAccountId === ownerAccountId || (shopId === ownerAccountId && recipientId === shopId)
+    : Boolean(recipientAccountId || (shopId && recipientId === shopId));
   if (senderIsShop === recipientIsShop) return null;
 
   const incoming = recipientIsShop;
@@ -215,7 +219,8 @@ function deliveryFlags(message) {
   };
 }
 
-function parseShopeeMessages(payload, captureMethod) {
+function parseShopeeMessages(payload, captureMethod, { providerAccountIds = [] } = {}) {
+  const detectedShopIds = new Set(providerAccountIds.map(shopAccountId).filter(Boolean));
   const observedAt = new Date().toISOString();
   const results = [];
   const seen = new Set();
@@ -228,10 +233,18 @@ function parseShopeeMessages(payload, captureMethod) {
     const recipientAccountId = shopAccountId(message.to_shop_id);
     const content = contentRecord(message.content);
     const flags = deliveryFlags(message);
-    const providerAccountId = recipientAccountId
+    let providerAccountId = recipientAccountId
       ?? senderAccountId
       ?? shopAccountId(message.shop_id)
       ?? shopAccountId(content?.shop_id);
+    if (detectedShopIds.size) {
+      const endpoints = [senderAccountId, recipientAccountId].filter(Boolean);
+      const identities = endpoints.length ? endpoints : [shopAccountId(message.shop_id)];
+      const matches = [...new Set(identities.filter((id) => detectedShopIds.has(id)))];
+      // Reject before content/recovery fallbacks can fill an unrelated account.
+      if (matches.length !== 1) continue;
+      [providerAccountId] = matches;
+    }
     const parsedType = messageType(message.type ?? message.message_type);
     const storedContent = parsedType.type === "unsupported" ? content : null;
     const providerContent = Object.keys(flags).length ? { ...storedContent, ...flags } : storedContent;
@@ -253,6 +266,7 @@ function parseShopeeMessages(payload, captureMethod) {
       recipientId,
       senderAccountId,
       recipientAccountId,
+      detectedShopIds.size ? providerAccountId : null,
     );
     if (!id || !conversationId || !senderId || !recipientId || (parsedType.type === "text" && (!text || text.length > 20_000))) continue;
     const key = `${conversationId}:${id}`;

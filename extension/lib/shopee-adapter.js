@@ -185,10 +185,10 @@
     accountsFromPayload,
     conversationItems,
     normalizeAccount,
-    normalizeMessages(payload, captureMethod) {
+    normalizeMessages(payload, captureMethod, context) {
       const normalize = globalThis.OmnichatShopee?.parseShopeeMessages;
       if (typeof normalize !== "function") throw new Error("Shopee message normalizer is unavailable.");
-      return normalize(payload, captureMethod);
+      return normalize(payload, captureMethod, context);
     },
   });
 })();
