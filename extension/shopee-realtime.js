@@ -143,6 +143,7 @@
   if (state.surface !== currentSurface) {
     if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
     state.surface = currentSurface;
+    state.loginRequest = null;
     state.getTemplate = null;
     state.listTemplate = null;
     state.lookupListTemplate = null;
@@ -476,6 +477,7 @@
         state.sellerCentreListInitialized = false;
       }
       state.currentAccountId = nextId;
+      state.loginRequest = null;
       state.accountsById.clear();
       postLog("info", "session_account_changed", "Shopee session account changed; sync follows the open shop.", {
         previous_provider_account_id: previousId,
@@ -486,8 +488,21 @@
     publishSurfaceStatus();
     return account ? [account] : [];
   };
-  const captureAccount = (response) => {
-    void response.clone().json().then(captureSessionAccount)
+  const captureAccount = (response, request = null, sessionEpoch = state.routeSessionEpoch) => {
+    if (state.routeSessionEpoch !== sessionEpoch) return;
+    if (response.status === 401 || response.status === 403) {
+      captureSessionAccount(null);
+      return;
+    }
+    // Provider outages and malformed responses are not evidence of logout.
+    if (!response.ok) return;
+    void response.clone().json().then((body) => {
+      if (state.routeSessionEpoch !== sessionEpoch) return;
+      if (!providerAdapter.currentAccountFromPayload(body)) return;
+      captureSessionAccount(body);
+      // Keep native method, body and security parameters in page memory only.
+      if (request) state.loginRequest = request;
+    })
       .catch((error) => logAsyncError("account_capture", error));
   };
   // Keep browser networking and JSON parsing bounded, including hung responses.
@@ -521,14 +536,37 @@
   };
 
   const detectSessionAccount = async () => {
-    const url = new URL(surfaceProfile().loginPath, window.location.origin);
-    try {
-      const body = await fetchProviderJson(new Request(url, { method: "GET", credentials: "include" }));
-      return captureSessionAccount(body);
-    } catch (error) {
-      if (error.http_status === 401 || error.http_status === 403) captureSessionAccount(null);
-      throw error;
+    const sessionEpoch = state.routeSessionEpoch;
+    // New Webchat uses a native parameterized POST. Keep it in page memory only.
+    // Seller Centre's authenticated session endpoint also works before capture.
+    const requests = [
+      ...(state.loginRequest ? [state.loginRequest.clone()] : []),
+      new Request(new URL("/api/v2/login/", window.location.origin), { method: "GET", credentials: "include" }),
+    ];
+    const deadline = Date.now() + 15_000;
+    let failure;
+    for (const request of requests) {
+      if (Date.now() >= deadline) break;
+      try {
+        const body = await fetchProviderJson(request, undefined, deadline - Date.now());
+        const account = providerAdapter.currentAccountFromPayload(body);
+        if (!account) throw new Error("Shopee session identity is unavailable. Refresh Seller Chat and try again.");
+        if (state.routeSessionEpoch !== sessionEpoch) {
+          // Native login may finish first on cold start; accept only the same shop.
+          if (value(account.provider_account_id) === state.currentAccountId) return [account];
+          throw new Error("Shopee session changed during detection. Try again.");
+        }
+        return captureSessionAccount(body);
+      } catch (error) {
+        if (state.routeSessionEpoch !== sessionEpoch) throw error;
+        if (error.http_status === 401 || error.http_status === 403) {
+          captureSessionAccount(null);
+          throw error;
+        }
+        failure = error;
+      }
     }
+    throw failure ?? new Error("Shopee account detection timed out. Refresh Seller Chat and try again.");
   };
   const captureAccounts = (response) => {
     void response.clone().json().then((body) => {
@@ -1974,6 +2012,8 @@
       if (!isBridgeActive()) return originalFetch(input, init);
       const request = new Request(input, init);
       const path = pathOf(request.url);
+      const loginRequest = path === surfaceProfile().loginPath ? request.clone() : null;
+      const requestSessionEpoch = state.routeSessionEpoch;
       if (isSendPath(path) && request.method === "POST") {
         void observeAsync("send_template_capture", () => captureSendTemplate(request));
       }
@@ -2015,9 +2055,9 @@
           captureAccounts(response);
         }
       } else if (surfaceProfile().loginPath && path === surfaceProfile().loginPath) {
-        captureAccount(response);
+        captureAccount(response, loginRequest, requestSessionEpoch);
       } else if (isSellerCentreSurface() && path === "/webchat/api/workbenchapi/v1.2/mini/shop/setting") {
-        captureAccount(response);
+        captureAccount(response, null, requestSessionEpoch);
       } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
         state.pollingConnected = response.ok;
         if (state.pollingConnected) {

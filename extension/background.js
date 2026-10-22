@@ -3535,7 +3535,9 @@ async function openSessionSyncContexts(contexts, control) {
     || (currentId && context.account.provider_account_id === currentId));
   for (const context of shopee) {
     if (context.account.provider_account_id === currentId) continue;
-    await recordLog("info", "sync", "skipped", "Shopee sync skipped: log in to this shop to sync it.", {
+    await recordLog("info", "sync", "skipped", currentId
+      ? "Shopee sync skipped: a different shop is open."
+      : "Shopee sync skipped: the current shop could not be verified.", {
       provider: "shopee",
       provider_account_id: context.account.provider_account_id,
       current_provider_account_id: currentId,
@@ -3543,7 +3545,8 @@ async function openSessionSyncContexts(contexts, control) {
     });
     await updateScopedState(STORAGE.status, context.key, {
       state: "watching", phase: null, caught_up: false,
-      sync_error: "Log in to this Shopee shop and open Webchat to sync it.",
+      sync_error: currentId ? "Open Webchat for this Shopee shop to sync it."
+        : "Could not verify the current Shopee shop. Refresh Seller Chat and try again.",
       sync_error_at: null,
     });
   }

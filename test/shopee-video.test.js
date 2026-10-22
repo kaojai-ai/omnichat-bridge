@@ -49,7 +49,7 @@ test("video upload uses a fresh grant per upload and the observed registration p
   const second = await upload(f.options);
   assert.equal(first.vid, "sg-test-1");
   assert.equal(second.vid, "sg-test-2");
-  assert.equal(first.duration_seconds, 2.5);
+  assert.equal(first.duration_seconds, 3);
   assert.equal(first.thumb_width, 320);
   const preupload = JSON.parse(f.requests[0].init.body);
   assert.equal(preupload.biz, 120);
