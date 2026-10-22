@@ -394,10 +394,14 @@ async function updateScopedState(storageKey, key, patch) {
 }
 
 let liveStateWriteQueue = Promise.resolve();
-function updateLiveState(context, patch) {
-  const operation = liveStateWriteQueue.then(() => writeLiveState(context, patch));
+function queueLiveStateWrite(write) {
+  const operation = liveStateWriteQueue.then(write);
   liveStateWriteQueue = operation.catch(() => undefined);
   return operation;
+}
+
+function updateLiveState(context, patch) {
+  return queueLiveStateWrite(() => writeLiveState(context, patch));
 }
 
 async function writeLiveState(context, patch) {
@@ -1063,10 +1067,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 });
 
 async function initializeAndStartSync(trigger) {
-  await writeStorage({
+  await queueLiveStateWrite(() => writeStorage({
     [STORAGE.serverInitialized]: true,
     [STORAGE.logUploadEnabled]: true,
-  });
+  }));
   await recordLog(
     "info",
     "sync",
@@ -1450,13 +1454,26 @@ async function updateProviderRecoveryTabState(provider, patch) {
 }
 
 async function clearProviderRecoveryLiveState() {
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = configuredAccountContexts(stored);
-  for (const adapter of providerAdapters.list()) {
-    if (providerRecoveryContexts(contexts, adapter).length) {
-      await updateProviderRecoveryLiveState(contexts, adapter);
+  // Share the readiness write queue with first Sync initialization so cleanup
+  // cannot cross the point where the user enables a new connection.
+  return queueLiveStateWrite(async () => {
+    const stored = await readStorage([
+      STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized,
+    ]);
+    const contexts = configuredAccountContexts(stored);
+    if (contexts.length && hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])) {
+      return false;
     }
-  }
+    for (const context of contexts) {
+      await writeLiveState(context, {
+        provider_recovery_state: null,
+        provider_recovery_reason: null,
+        provider_recovery_tab_id: null,
+      });
+    }
+    stopLiveConnection();
+    return true;
+  });
 }
 
 async function getTab(tabId) {
@@ -1776,7 +1793,7 @@ async function runProviderHealthWatchdogOnce() {
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
   if (!enabled) {
-    await clearProviderRecoveryLiveState();
+    if (await clearProviderRecoveryLiveState() === false) return runProviderHealthWatchdogOnce();
     await ensureProviderHealthAlarm(false);
     return;
   }
@@ -2208,13 +2225,14 @@ function sendKeepalive(socket) {
 }
 
 async function ensureLiveConnection() {
-  const stored = await readStorage([
+  const stateKeys = [
     STORAGE.config,
     STORAGE.consent,
     STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
     STORAGE.unattendedRecovery,
-  ]);
+  ];
+  const stored = await readStorage(stateKeys);
   const configuredContexts = configuredAccountContexts(stored);
 
   const contexts = hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])
@@ -2228,14 +2246,20 @@ async function ensureLiveConnection() {
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
   await ensureProviderHealthAlarm(canWatch);
-  if (!canWatch) await clearProviderRecoveryLiveState();
+  // First Sync can initialize the extension while the alarm/status checks
+  // above are pending. Never clean up sockets or readiness from that old view.
+  const current = await readStorage(stateKeys);
+  if (stateKeys.some((key) => JSON.stringify(current[key]) !== JSON.stringify(stored[key]))) {
+    return ensureLiveConnection();
+  }
+  if (!canWatch && await clearProviderRecoveryLiveState() === false) return ensureLiveConnection();
   if (canPing) {
     ensureApiPings(pingContexts);
   }
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
     || !contexts.length) {
-    stopLiveConnection();
+    if (canWatch) stopLiveConnection();
     void recordLog("debug", "live", "not_started", "Live connection is not ready.", {
       consented: hasLocalConsent(stored[STORAGE.consent]),
       configured: configuredContexts.length > 0,
