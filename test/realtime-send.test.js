@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null } = {}) {
+function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -65,6 +65,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
           const page = Number(new URL(request.url).searchParams.get("page") ?? "0");
           return jsonResponse(conversationPages[page] ?? { conversations: [] });
         }
+        if (path.endsWith("/images") && imageFailure) return { ok: false, status: 400, json: async () => imageFailure };
         if (path === "/webchat/api/v1.2/mini/messages") {
           nativePayloads.push(await request.clone().json());
           if (transportFailure) throw new Error("connection reset");
@@ -286,7 +287,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
   });
 
   assert.equal(payload, undefined);
-  assert.deepEqual(plain(result), {
+  assert.deepEqual(plain({ ...result, diagnostics: undefined }), {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "request-invalid-1",
@@ -715,7 +716,7 @@ test("param_error diagnostics survive local sanitization and export with exact n
   const command = { ...baseCommand, provider_account_id: "207459663", command_type: "send_text", text: "private rejected text" };
   const { result } = await bridge.send(command);
   assert.equal(result.ok, false);
-  assert.equal(result.diagnostics, undefined); // No target-server protocol change.
+  assert.equal(result.diagnostics.native_error_code, "param_error"); // Local bridge context; server ACK remains unchanged.
   const event = bridge.posts.find(post => post.type === "diagnostic_log" && post.event === "send_failed");
   const saved = createLogEntry({ level: event.level, area: "provider", event: event.event, message: event.message, details: event.details });
   assert.equal(saved.details.native_error_code, "param_error");
@@ -862,4 +863,19 @@ test("unverified mini-chat video returns unsupported before uploading or sending
   assert.match(result.error, /video.*requires initialized New Webchat/i);
   assert.equal(uploads, 0);
   assert.equal(bridge.nativePayloads.length, 0);
+});
+
+
+test("Shopee image rejection retains upload stage and status without provider description or chat send", async () => {
+  const bridge = createBridge({ sellerCentre: true, imageFailure: { error_code: "param_error", message: "private customer echo token=secret" } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_image", image_bytes: new Uint8Array([1,2,3]).buffer, image_type: "image/jpeg" });
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.operation, "upload");
+  assert.equal(result.diagnostics.stage, "upload_transfer");
+  assert.equal(result.diagnostics.failure_kind, "provider_rejection");
+  assert.equal(result.diagnostics.http_status, 400);
+  assert.equal(result.diagnostics.native_error_code, "param_error");
+  assert.equal(result.diagnostics.native_attempted, false);
+  assert.equal(bridge.nativePayloads.length, 0);
+  assert.doesNotMatch(JSON.stringify(result), /private customer|token=secret/);
 });

@@ -645,3 +645,43 @@ test("partial and stale profile observations do not erase complete observed rout
   assert.deepEqual(plain(message.omnichat.routing.fields), { to_id: "123", to_shop_id: "456", biz_id: "0" });
   assert.equal(message.omnichat.routing.observed_at, "2026-10-21T03:01:00Z");
 });
+
+
+test("LINE rejection diagnostics survive the content response without changing uncertainty", async () => {
+  const bridge = contentBridge("/account/bot/chat", { provider: "line_oa" });
+  const pending = bridge.sendCommand({ ...command, request_id: "line-diagnostic", provider: "line_oa" });
+  const diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "send",
+    http_status: 400, native_error_code: "INVALID_REQUEST", native_attempted: true,
+    delivery_uncertain: false, validation_fields: ["clientMessageId"] };
+  await bridge.providerEvent({ type: "api_send_result", request_id: "line-diagnostic", ok: false,
+    error: "LINE OA send failed (400).", diagnostics });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, undefined);
+  assert.deepEqual(plain(result.diagnostics), diagnostics);
+});
+
+
+test("LINE recovery and account failure logs retain structured evidence without page error descriptions", async () => {
+  const bridge = contentBridge("/account/bot/chat", { provider: "line_oa" });
+  const diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "recovery", http_status: 403,
+    failure_kind: "provider_rejection", native_error_code: "FORBIDDEN",
+    body: "private response", error_message: "private response", stack: "private stack" };
+  await bridge.providerEvent({ type: "recovery_complete", request_id: "recover-error", ok: false,
+    error: "private response", diagnostics });
+  const detection = bridge.sendCommand({ type: "detect_account_v3", provider: "line_oa" });
+  await new Promise(resolve => setImmediate(resolve));
+  const request = bridge.runtimeMessages.findLast(message => message.type === "detect_account_v3");
+  assert.ok(request);
+  await bridge.providerEvent({ type: "account_detection_failed", request_id: request.request_id,
+    error: "private response", diagnostics: { ...diagnostics, operation: "initialize" } });
+  await detection;
+  for (const event of ["recovery_failed", "account_detection_failed"]) {
+    const log = bridge.runtimeMessages.find(message => message.type === "record_log" && message.event === event);
+    assert.ok(log);
+    assert.equal(log.details.http_status, 403);
+    assert.equal(log.details.native_error_code, "FORBIDDEN");
+    assert.equal(log.details.operation, event === "recovery_failed" ? "recovery" : "initialize");
+    assert.doesNotMatch(JSON.stringify(log), /private response|private stack|error_message/);
+  }
+});

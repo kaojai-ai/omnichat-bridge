@@ -18,9 +18,9 @@ per conversation, 500 messages total, and a 1 MiB body. Delivery failures retry
 queued items without requiring another provider scan.
 
 Chrome local storage holds configuration, consent, installation/device IDs,
-queues, checkpoints, recovery state, and operational logs (100 entries, 48
-hours). Clearing it loses pending work. Provider login credentials stay in
-page memory and are not stored or forwarded by the extension.
+queues, checkpoints, recovery state, and operational logs (up to 4 MiB, 48
+hours, with Chrome storage headroom). Clearing it loses pending work. Provider
+login credentials stay in page memory and are not stored or forwarded by the extension.
 
 ## Live replies
 

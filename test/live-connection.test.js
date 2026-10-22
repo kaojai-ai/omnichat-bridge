@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { sanitizeSendDiagnostics, createLogEntry, logEntryForUpload, diagnosticErrorDetails } from "../extension/lib/logs.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 
@@ -211,4 +212,59 @@ test("duplicate commands share one provider operation and replay its acknowledge
   assert.equal(sends, 1);
   assert.equal(socket.sent.length, 3);
   assert.equal(JSON.stringify(socket.sent).includes("secret message"), false);
+});
+
+
+test("failed LINE commands retain safe provider evidence locally and in upload without changing server acknowledgements", async () => {
+  const logs = [];
+  const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+  const command = { provider: "line_oa", provider_account_id: "oa", request_id: "request-line", type: "send_text", text: "private message" };
+  const start = source.indexOf("async function handleLiveCommand(");
+  const end = source.indexOf("\nchrome.storage.onChanged", start);
+  const diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "send", http_status: 400,
+    native_error_code: "INVALID_REQUEST", native_attempted: true, delivery_uncertain: false,
+    body: "private message", cookie: "secret", access_token: "secret" };
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+    providerAdapterForCommand: () => ({ id: "line_oa", supportsSend: () => true }),
+    messageProviderAccountId: value => value.provider_account_id, canonicalProviderAccountId: () => "oa",
+    replyQueue: { run: (_account, action) => action() },
+    sendViaProvider: async () => ({ ok: false, error: "LINE OA send failed (400).", diagnostics }),
+    sanitizeSendDiagnostics,
+    recordUnexpected: async (_scope, _error, details) => logs.push(createLogEntry({ level: "error", area: "live_command", event: "failed", details })),
+    sendConnectionStatus: async () => {}, installationId: async () => "installation",
+  });
+  await run(JSON.stringify(command), { key: "line_oa:oa", account: { provider: "line_oa", provider_account_id: "oa" } }, socket);
+  assert.equal(logs.length, 1);
+  for (const entry of [logs[0], logEntryForUpload(logs[0])]) {
+    assert.equal(entry.details.request_id, "request-line");
+    assert.equal(entry.details.command_type, "send_text");
+    assert.equal(entry.details.provider, "line_oa");
+    assert.equal(entry.details.http_status, 400);
+    assert.equal(entry.details.native_error_code, "INVALID_REQUEST");
+    assert.doesNotMatch(JSON.stringify(entry), /private message|secret|access_token|cookie/);
+  }
+  assert.deepEqual(socket.sent, [{ type: "send_result", request_id: "request-line", ok: false, error: "LINE OA send failed (400)." }]);
+});
+
+
+test("unexpected errors classify structured provider status and timeout while preserving stack and cause", async () => {
+  const entries = [];
+  const start = source.indexOf("async function recordUnexpected(");
+  const end = source.indexOf("\nfunction registerGlobalErrorHandlers", start);
+  const record = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    sanitizeSendDiagnostics, diagnosticErrorDetails,
+    recordLog: async (_level, _area, _event, _message, details) => entries.push(details),
+  });
+  await record("live_command", "LINE OA request failed.", {
+    diagnostic_version: 1, provider: "line_oa", operation: "send", http_status: 400,
+  });
+  assert.equal(entries[0].category, "invalid_request");
+  const error = new Error("LINE OA request failed.", { cause: new Error("Transport failed.") });
+  await record("live_command", error, {
+    diagnostic_version: 1, provider: "line_oa", operation: "send", timed_out: true,
+  });
+  assert.equal(entries[1].category, "timeout");
+  assert.equal(entries[1].error_stack, error.stack);
+  assert.equal(entries[1].cause_message, "Transport failed.");
 });

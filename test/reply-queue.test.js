@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { sanitizeSendDiagnostics } from "../extension/lib/logs.js";
 import { createReplyQueue } from "../extension/lib/reply-queue.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
@@ -17,7 +18,7 @@ function harness(sendViaProvider) {
   const background = deferred();
   const events = [];
   const sandbox = {
-    replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
+    sanitizeSendDiagnostics, replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
     scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     providerAdapterForCommand: (command) => ({ id: command.provider, supportsSend: () => true }),
     messageProviderAccountId: (command) => command.provider_account_id,

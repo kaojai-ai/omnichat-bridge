@@ -172,7 +172,13 @@
         headers: { accept: "application/json" },
         ...(controller ? { signal: controller.signal } : {}),
       });
-      if (!response.ok) throw new Error(`LINE OA request failed (${response.status}).`);
+      if (!response.ok) {
+        let format = "json";
+        const body = await response.json().catch(() => { format = "non_json"; return null; });
+        const error = new Error(`LINE OA request failed (${response.status}).`);
+        error.providerDiagnostics = { http_status: response.status, response_format: format, ...providerErrorDetails(body) };
+        throw error;
+      }
       const body = await response.json();
       lastProviderCheckAt = new Date().toISOString();
       return body;
@@ -638,7 +644,7 @@
           provider_account_id,
           bot_id: account.botId,
         })));
-        post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: String(error) });
+        post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
       }
     }
   }
@@ -726,74 +732,127 @@
     return value(payload?.id ?? payload?.message?.id ?? payload?.data?.id ?? payload?.data?.messageId);
   }
 
+  // Provider response text can echo customer content or credentials. Extract only
+  // fixed protocol codes and known payload field names, never arbitrary strings.
+  function providerErrorDetails(body) {
+    const codes = new Set(["BAD_REQUEST", "INVALID_ARGUMENT", "INVALID_REQUEST", "INVALID_PARAMETER", "VALIDATION_ERROR", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND", "bad_request", "invalid_request", "invalid_argument", "validation_error", "invalid_parameter", "param_error", "unauthorized", "forbidden", "not_found", "conflict", "rate_limited", "too_many_requests", "internal_error", "service_unavailable", "unknown_error"]);
+    const fields = new Set(["sendId", "type", "text", "substitution", "mention", "emojis", "packageId", "stickerId", "imageUrl", "contentMessageToken", "items", "file"]);
+    const result = {};
+    const candidates = [body?.code, body?.errorCode, body?.error?.code];
+    result.provider_code_present = candidates.some((candidate) => candidate !== undefined && candidate !== null);
+    for (const candidate of [body?.code, body?.errorCode, body?.error?.code]) {
+      if ((typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0 && candidate <= 999999)
+        || (typeof candidate === "string" && (/^\d{1,6}$/.test(candidate) || codes.has(candidate)))) {
+        result.native_error_code = String(candidate);
+        break;
+      }
+    }
+    const details = [body?.details, body?.errors, body?.error?.details].flatMap((entries) => Array.isArray(entries) ? entries.slice(0, 20) : []);
+    const validationFields = [...new Set(details.map((entry) => entry?.property ?? entry?.field ?? entry?.path).filter((field) => fields.has(field)))];
+    if (validationFields.length) result.validation_fields = validationFields;
+    return result;
+  }
+
+  function failedOperationDiagnostics(error, operation) {
+    const details = error?.providerDiagnostics ?? {};
+    const timedOut = ["AbortError", "TimeoutError"].includes(error?.name)
+      || error?.message === "LINE OA request timed out.";
+    return {
+      diagnostic_version: 1, provider: "line_oa", operation,
+      native_attempted: false, delivery_uncertain: false,
+      failure_kind: timedOut ? "transport_failure" : details.http_status >= 400 ? "provider_rejection" : "pre_dispatch_failure",
+      timed_out: timedOut,
+      ...(["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name) ? { error_name: error.name } : {}),
+      ...details,
+    };
+  }
+
   async function sendBrowserMessage(command) {
     const commandType = value(command?.command_type ?? command?.type);
     const browserAccountId = normalizeBasicId(command?.browser_provider_account_id ?? command?.provider_account_id);
     const conversationId = value(command?.conversation_id);
     const requestId = value(command?.request_id);
+    const startedAt = Date.now();
+    let operation = "initialize";
+    let sendStarted = false;
+    let httpStatus;
+    let providerDetails = {};
+    let responseFormat;
+    let templateSource = "derived";
+    const diagnostics = (failureKind, uncertain = false) => ({
+      diagnostic_version: 1, provider: "line_oa", operation,
+      command_type: ["send_text", "send_image", "send_video", "send_file", "send_sticker"].includes(commandType) ? commandType : "unknown",
+      ...(httpStatus ? { http_status: httpStatus } : {}),
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+      native_attempted: sendStarted, delivery_uncertain: uncertain,
+      failure_kind: failureKind, provider_duration_ms: Math.max(0, Date.now() - startedAt),
+      client_id_is_uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value(command?.client_message_id)),
+      template_source: templateSource, ...providerDetails,
+    });
+    const reject = (error) => post({ type: "api_send_result", request_id: requestId, ok: false, error, diagnostics: diagnostics("validation_failure") });
     if (!requestId || !browserAccountId || !conversationId) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA reply command is invalid." });
+      reject("LINE OA reply command is invalid.");
       return;
     }
-    const botId = await resolveBotId(browserAccountId, "");
-    const expectedType = commandType === "send_text" ? "text"
-      : commandType === "send_sticker" ? "sticker"
-        : commandType === "send_image" ? "image"
-          : commandType === "send_video" ? "video"
-            : commandType === "send_file" ? "file"
-              : "";
-    const profile = botId && expectedType ? profileFor(botId, expectedType) : null;
-    if (!botId || !profile) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA sender is not initialized for this reply type." });
-      return;
-    }
-    const payload = clone(profile.payload);
-    const requestedSendId = value(command?.client_message_id);
-    const confirmationSendId = requestedSendId || sendId(conversationId);
-    payload.sendId = confirmationSendId;
-    if (expectedType === "text") {
-      const textValue = value(command?.text);
-      if (!textValue || textValue.length > 2_000) {
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA reply text is invalid." });
+    try {
+      const botId = await resolveBotId(browserAccountId, "");
+      const expectedType = commandType === "send_text" ? "text"
+        : commandType === "send_sticker" ? "sticker"
+          : commandType === "send_image" ? "image"
+            : commandType === "send_video" ? "video"
+              : commandType === "send_file" ? "file"
+                : "";
+      const profile = botId && expectedType ? profileFor(botId, expectedType) : null;
+      templateSource = sendProfilesByBot.get(botId)?.has(expectedType) ? "captured" : "derived";
+      if (!botId || !profile) {
+        reject("LINE OA sender is not initialized for this reply type.");
         return;
       }
-      // Learned profiles may contain mentions from a previous human reply.
-      delete payload.mention;
-      delete payload.emojis;
-      delete payload.substitution;
-      payload.type = "text";
-      payload.text = textValue;
-      if (command.text_v2 !== undefined) {
-        const native = command.text_v2;
-        const entries = native?.substitution && typeof native.substitution === "object"
-          && !Array.isArray(native.substitution) ? Object.entries(native.substitution) : [];
-        const valid = typeof native?.text === "string" && native.text.length > 0
-          && native.text.length <= 5_000 && entries.length > 0 && entries.length <= 20
-          && entries.every(([key, entry]) => /^[A-Za-z0-9_]{1,20}$/.test(key)
-            && entry?.type === "mention" && (entry.mentionee?.type === "all"
-              || (entry.mentionee?.type === "user" && typeof entry.mentionee.userId === "string"
-                && entry.mentionee.userId.length > 0)));
-        if (!valid) {
-          post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA mention reply is invalid." });
+      const payload = clone(profile.payload);
+      const requestedSendId = value(command?.client_message_id);
+      const confirmationSendId = requestedSendId || sendId(conversationId);
+      payload.sendId = confirmationSendId;
+      if (expectedType === "text") {
+        const textValue = value(command?.text);
+        if (!textValue || textValue.length > 2_000) {
+          reject("LINE OA reply text is invalid.");
           return;
         }
-        payload.type = "textV2";
-        payload.text = native.text;
-        payload.substitution = clone(native.substitution);
+        // Learned profiles may contain mentions from a previous human reply.
+        delete payload.mention;
+        delete payload.emojis;
+        delete payload.substitution;
+        payload.type = "text";
+        payload.text = textValue;
+        if (command.text_v2 !== undefined) {
+          const native = command.text_v2;
+          const entries = native?.substitution && typeof native.substitution === "object"
+            && !Array.isArray(native.substitution) ? Object.entries(native.substitution) : [];
+          const valid = typeof native?.text === "string" && native.text.length > 0
+            && native.text.length <= 5_000 && entries.length > 0 && entries.length <= 20
+            && entries.every(([key, entry]) => /^[A-Za-z0-9_]{1,20}$/.test(key)
+              && entry?.type === "mention" && (entry.mentionee?.type === "all"
+                || (entry.mentionee?.type === "user" && typeof entry.mentionee.userId === "string"
+                  && entry.mentionee.userId.length > 0)));
+          if (!valid) {
+            reject("LINE OA mention reply is invalid.");
+            return;
+          }
+          payload.type = "textV2";
+          payload.text = native.text;
+          payload.substitution = clone(native.substitution);
+        }
+      } else if (expectedType === "sticker") {
+        const packageId = value(command?.package_id);
+        const stickerId = value(command?.sticker_id);
+        if (!packageId || !stickerId) {
+          reject("LINE OA sticker is invalid.");
+          return;
+        }
+        payload.packageId = packageId;
+        payload.stickerId = stickerId;
       }
-    } else if (expectedType === "sticker") {
-      const packageId = value(command?.package_id);
-      const stickerId = value(command?.sticker_id);
-      if (!packageId || !stickerId) {
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: "LINE OA sticker is invalid." });
-        return;
-      }
-      payload.packageId = packageId;
-      payload.stickerId = stickerId;
-    }
 
-    let sendStarted = false;
-    try {
       const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, Date.now() + 25_000);
       const remaining = () => deadlineAt - Date.now();
       const requestSignal = () => {
@@ -820,17 +879,25 @@
         form.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
         const uploadHeaders = { ...profile.headers };
         delete uploadHeaders["content-type"];
+        operation = "upload";
         const upload = await nativeFetch(`${apiBase}/v1/bots/${encodeURIComponent(botId)}/messages/${encodeURIComponent(conversationId)}/uploadFile`, {
           method: "POST", credentials: "include", headers: uploadHeaders, body: form, signal: requestSignal(),
         });
-        if (!upload.ok) throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
-        const uploaded = await upload.json();
+        httpStatus = upload.status;
+        const uploaded = await upload.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
+        if (!upload.ok) {
+          providerDetails = providerErrorDetails(uploaded);
+          throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
+        }
         const token = value(uploaded?.contentMessageToken);
         if (!token) throw new Error("LINE OA attachment upload returned no content token.");
         endpoint = `${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/bulkSendFiles`;
         body = JSON.stringify({ items: [{ sendId: confirmationSendId, contentMessageToken: token }] });
       }
       const signal = requestSignal();
+      operation = "send";
+      httpStatus = undefined;
+      responseFormat = undefined;
       sendStarted = true;
       const response = await nativeFetch(endpoint, {
         method: "POST",
@@ -839,12 +906,17 @@
         body,
         signal,
       });
-      const responseBody = await response.json().catch(() => null);
+      httpStatus = response.status;
+      const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
       if (!response.ok) {
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).` });
+        providerDetails = providerErrorDetails(responseBody);
+        post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
       }
       const responseMessageIdValue = responseMessageId(responseBody);
+      operation = "confirm";
+      httpStatus = undefined;
+      responseFormat = undefined;
       const confirmedMessageId = await waitForSentMessage({
         botId,
         conversationId,
@@ -859,10 +931,21 @@
         ...(confirmedMessageId ? { confirmed: true } : { uncertain: true }),
         send_id: confirmationSendId,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
-        ...(!confirmedMessageId ? { error: "LINE OA send was accepted but could not be confirmed in message history." } : {}),
+        ...(!confirmedMessageId ? { error: "LINE OA send was accepted but could not be confirmed in message history.", diagnostics: diagnostics("confirmation_failure", true) } : {}),
       });
     } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: sendStarted, error: `LINE OA send was not acknowledged: ${String(error)}` });
+      if (error?.providerDiagnostics) {
+        httpStatus = error.providerDiagnostics.http_status;
+        responseFormat = error.providerDiagnostics.response_format;
+        providerDetails = error.providerDiagnostics;
+      }
+      providerDetails.timed_out = ["AbortError", "TimeoutError"].includes(error?.name)
+        || error?.message === "LINE OA reply deadline expired." || error?.message === "LINE OA request timed out.";
+      if (["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name)) providerDetails.error_name = error.name;
+      const failureKind = providerDetails.timed_out ? "transport_failure"
+        : httpStatus >= 400 ? "provider_rejection" : operation === "initialize" ? "pre_dispatch_failure" : "transport_failure";
+      post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: sendStarted,
+        error: "LINE OA send was not acknowledged.", diagnostics: diagnostics(failureKind, sendStarted) });
     }
   }
 
@@ -879,6 +962,7 @@
             type: "account_detection_failed",
             request_id: event.data.request_id,
             error: "No LINE OA accounts were found for the signed-in user.",
+            diagnostics: failedOperationDiagnostics(null, "initialize"),
           });
           return;
         }
@@ -892,7 +976,8 @@
         post({
           type: "account_detection_failed",
           request_id: event.data.request_id,
-          error: String(error),
+          error: "LINE OA account detection failed.",
+          diagnostics: failedOperationDiagnostics(error, "initialize"),
         });
       });
     } else if (event.data.type === "sync_v3") {
