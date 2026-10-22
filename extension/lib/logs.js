@@ -44,7 +44,7 @@ export function sanitizeSendDiagnostics(input) {
     stage: ["media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
     response_format: ["json", "non_json", "empty", "unreadable"],
-    surface: ["new-webchat", "seller-centre"],
+    surface: ["new-webchat", "webchat", "seller-centre"],
     endpoint_path: ["/webchat/api/v1.2/messages", "/webchat/api/v1.2/mini/messages"],
     command_type: ["send_text", "send_image", "send_video", "send_product", "send_file", "send_sticker"],
     template_source: ["captured", "derived"], route_source: ["command", "cache", "lookup"],

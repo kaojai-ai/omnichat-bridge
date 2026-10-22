@@ -6,9 +6,9 @@ import { readFile } from "node:fs/promises";
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const extract = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const adapter = {
-  id: "shopee", surfacePriority: ["new-webchat", "seller-centre"],
-  surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre",
-  matchesUrl: url => !url.includes("/webchat/"),
+  id: "shopee", surfacePriority: ["new-webchat", "webchat", "seller-centre"],
+  surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : url.includes("/webchat/") ? "webchat" : "seller-centre",
+  matchesUrl: url => url.startsWith("https://seller.shopee.co.th/"),
 };
 const mini = { id: 1, url: "https://seller.shopee.co.th/portal", active: true };
 const primary = { id: 2, url: "https://seller.shopee.co.th/new-webchat/conversations", active: false };
@@ -97,4 +97,31 @@ test("recovery off uses healthy mini-chat while primary is initializing", async 
   assert.equal(selected.tab.id, mini.id);
   assert.equal(selected.record.state, "ready");
   assert.equal(created.length, 0);
+});
+
+const redirected = { id: 2, url: "https://seller.shopee.co.th/webchat/conversations", active: false };
+
+test("repeated recovery accepts a tracked redirected Webchat without opening replacement tabs", async () => {
+  const h = sandbox([redirected], { 2: { ...healthy, ready: false } });
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await h.context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, redirected.id);
+  }
+  assert.equal(h.created.length, 0);
+});
+
+test("healthy New Webchat wins over redirected Webchat; healthy Webchat covers primary initialization", async () => {
+  const legacy = { ...redirected, id: 4, active: true };
+  const h = sandbox([legacy, primary], { 2: healthy, 4: healthy });
+  assert.equal((await h.context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, primary.id);
+  const initializing = sandbox([legacy, primary], { 2: { ...healthy, ready: false }, 4: healthy });
+  assert.equal((await initializing.context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, legacy.id);
+  assert.equal(initializing.created.length, 0);
+});
+
+test("wrong-shop redirected Webchat cannot recover a different account or spawn duplicate tabs", async () => {
+  const h = sandbox([redirected], { 2: { ...healthy, current_provider_account_id: "other" } });
+  const result = await h.context.resolveProviderRecoveryTab(adapter, shop, true);
+  assert.equal(result.tab, null);
+  assert.match(result.reason, /different shop/);
+  assert.equal(h.created.length, 0);
 });

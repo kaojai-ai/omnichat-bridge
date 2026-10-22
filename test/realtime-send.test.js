@@ -10,7 +10,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
+function createBridge({ pathname = null, sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -27,7 +27,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
     json: async () => body,
   });
   const window = {
-    location: { origin, href: `${origin}${sellerCentre ? "/portal/chat-management" : "/new-webchat/conversations"}` },
+    location: { origin, href: `${origin}${pathname ?? (sellerCentre ? "/portal/chat-management" : "/new-webchat/conversations")}` },
     fetch: async () => ({ ok: true }),
     addEventListener(type, listener) {
       if (type === "message") listeners.push(listener);
@@ -79,7 +79,7 @@ function createBridge({ sellerCentre = false, ready = true, secureSender = true,
           thumbnail: "https://cdn.example.com/reply-thumb.jpg",
         });
       },
-      surface: sellerCentre ? "seller-centre" : "new-webchat",
+      surface: pathname?.startsWith("/webchat") ? "webchat" : sellerCentre ? "seller-centre" : "new-webchat",
       listTemplate: sellerCentre && ready ? {
         url: `${origin}/webchat/api/v1.2/mini/conversations?csrf_token=test${conversationPages ? "&page=0&limit=1" : ""}`,
         init: { method: "POST", headers: { "content-type": "application/json" } },
@@ -878,4 +878,33 @@ test("Shopee image rejection retains upload stage and status without provider de
   assert.equal(result.diagnostics.native_attempted, false);
   assert.equal(bridge.nativePayloads.length, 0);
   assert.doesNotMatch(JSON.stringify(result), /private customer|token=secret/);
+});
+
+for (const commandType of ["send_text", "send_image"]) {
+  test(`redirected Webchat sends ${commandType} from supplied routing without lookup`, async () => {
+    const bridge = createBridge({ pathname: "/webchat/conversations", conversationPages: [{ conversations: [] }], listFailure: true });
+    bridge.state.currentAccountId = "207459663";
+    const { result, payload } = await bridge.send({ ...baseCommand, provider_account_id: "207459663", command_type: commandType,
+      text: "Legacy compatibility fixture", image_bytes: new Uint8Array([1,2,3]).buffer, image_type: "image/jpeg",
+      omnichat: commandRouting({ to_id: "123456789", to_shop_id: "1834183330", biz_id: "0" }) });
+    assert.equal(result.ok, true);
+    assert.equal(bridge.state.surface, "webchat");
+    assert.equal(new URL(bridge.sentUrls[0]).pathname, "/webchat/api/v1.2/messages");
+    assert.equal(payload.to_id, 123456789);
+    assert.equal(payload.shop_id, 207459663);
+    assert.equal(bridge.listRequests.length, 0);
+    assert.equal(bridge.posts.find(post => post.event === "send_route_resolution").details.pages, 0);
+    assert.equal(bridge.posts.some(post => post.event === "send_route_fallback"), false);
+  });
+}
+
+test("redirected Webchat video is rejected before upload or native send", async () => {
+  let uploads = 0;
+  const bridge = createBridge({ pathname: "/webchat/conversations", videoUploader: async () => { uploads++; return {}; } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4", video_bytes: new Uint8Array([1]).buffer });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /video.*requires initialized New Webchat/i);
+  assert.equal(uploads, 0);
+  assert.equal(bridge.sentUrls.length, 0);
+  assert.equal(bridge.nativePayloads.length, 0);
 });
