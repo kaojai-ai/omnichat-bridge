@@ -72,7 +72,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   const popup = readFileSync(new URL("../extension/popup.js", import.meta.url), "utf8");
   const formatStart = popup.indexOf("function formatLogDetails(");
   const formatEnd = popup.indexOf("function safeFilenamePart(", formatStart);
-  const exported = vm.runInNewContext(popup.slice(formatStart, formatEnd) + "\nformatVisibleLogs()", { visibleLogs: () => storage.logs });
+  const exported = vm.runInNewContext(popup.slice(formatStart, formatEnd) + "\nformatSupportLogs()", { logs: storage.logs, logLevel: { value: "error" }, chrome: { runtime: { getManifest: () => ({ version: "0.6.64" }) } } });
   assert.match(exported, /native_error_code=param_error/);
   assert.match(exported, /request_recipient_id=123456789/);
   assert.match(exported, /request_id=request-123/);
@@ -257,4 +257,54 @@ test("invalid routing IDs cannot bypass the diagnostic allowlist through generic
   const entry = createLogEntry({ details: { diagnostic_version: 1, request_shop_id: "private-text",
     query_shop_id: { token: "secret" }, route_recipient_id: "123456789" } });
   assert.deepEqual(entry.details, { diagnostic_version: 1, route_recipient_id: "123456789" });
+});
+
+
+test("provider diagnostics retain bounded error context and classify status without response descriptions", () => {
+  const error = new Error("private provider echo customer text");
+  error.diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "send", command_type: "send_text",
+    http_status: 400, failure_kind: "provider_rejection", native_error_code: "INVALID_ARGUMENT",
+    validation_fields: ["text", "sendId", "private-input", "text"], response_format: "json", native_attempted: true,
+    delivery_uncertain: false, payload: { token: "private-credential" }, response: "private response" };
+  const entry = createLogEntry({ level: "error", details: diagnosticErrorDetails(error) });
+  assert.equal(entry.details.category, "invalid_request");
+  assert.equal(entry.details.native_error_code, "INVALID_ARGUMENT");
+  assert.equal(entry.details.validation_fields, "text,sendId");
+  assert.deepEqual(sanitizeSendDiagnostics(entry.details), sanitizeSendDiagnostics(error.diagnostics));
+  assert.equal(entry.details.operation, "send");
+  assert.equal(entry.details.delivery_uncertain, false);
+  assert.doesNotMatch(JSON.stringify(logEntryForUpload(entry)), /private|customer text/);
+  error.diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "send", timed_out: true, failure_kind: "transport_failure" };
+  assert.equal(diagnosticErrorDetails(error).category, "timeout");
+});
+
+test("diagnostic-only fields cannot bypass typed validation through generic details", () => {
+  const entry = createLogEntry({ details: { diagnostic_version: 1, operation: "customer-secret", stage: "private-url",
+    response_format: "private-body", validation_fields: ["secret"], provider_code_present: "secret" } });
+  for (const key of ["operation", "stage", "response_format", "validation_fields", "provider_code_present"]) assert.equal(entry.details[key], undefined);
+});
+
+
+test("structured provider rate limits and HTTP200 rejections have useful categories", () => {
+  const error = { message: "private provider description", diagnostics: { diagnostic_version: 1, failure_kind: "provider_rejection", http_status: 429 } };
+  assert.equal(diagnosticErrorDetails(error).category, "rate_limited");
+  error.diagnostics.http_status = 200;
+  assert.equal(diagnosticErrorDetails(error).category, "provider_rejection");
+});
+
+
+test("unreadable provider response diagnostics do not store parser excerpts", () => {
+  const error = new SyntaxError("Unexpected token in private-provider-body");
+  error.diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "upload", error_name: "SyntaxError", failure_kind: "unrecognized_response", http_status: 200 };
+  const entry = createLogEntry({ details: diagnosticErrorDetails(error) });
+  assert.equal(entry.details.error_name, "SyntaxError");
+  assert.doesNotMatch(JSON.stringify(entry), /private-provider-body/);
+});
+
+
+test("unrecognized native codes cannot carry arbitrary provider strings into support logs", () => {
+  const entry = createLogEntry({ details: { diagnostic_version: 1, native_error_code: "privateCustomerValue123" } });
+  assert.equal(entry.details.native_error_code, undefined);
+  assert.equal(entry.details.provider_code_present, true);
+  assert.doesNotMatch(JSON.stringify(entry), /privateCustomerValue123/);
 });

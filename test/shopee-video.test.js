@@ -147,3 +147,35 @@ test("videos above the verified single-upload limit fail before requesting a gra
   assert.equal(f.requests.length, 0);
   assert.equal(f.chatRequests.length, 0);
 });
+
+test("video failures retain upload stage and HTTP status without upload grants", async () => {
+  for (const [stage, fetch, chatRequest, status] of [
+    ["upload_grant", async () => ({ ok: false, status: 429 }), undefined, 429],
+    ["upload_transfer", undefined, undefined, 503],
+    ["upload_report", undefined, async () => ({ ok: false, status: 403 }), 403],
+    ["upload_processing", undefined, async path => path === "report_upload" ? { ok: true, status: 200 }
+      : { ...json({ status: "error", token: "private-provider-token" }), ok: false, status: 502 }, 502],
+  ]) {
+    const f = fixture({ transferStatus: stage === "upload_transfer" ? status : 200 });
+    await assert.rejects(upload({ ...f.options, ...(fetch ? { fetch } : {}), ...(chatRequest ? { chatRequest } : {}) }), error => {
+      assert.equal(error.diagnostics.stage, stage);
+      assert.equal(error.diagnostics.http_status, status);
+      assert.equal(error.diagnostics.operation, "upload");
+      assert.equal(error.diagnostics.failure_kind, "provider_rejection");
+      assert.doesNotMatch(JSON.stringify(error.diagnostics), /private-provider-token|https:|signature|policy/);
+      return true;
+    });
+  }
+});
+
+test("video provider code rejection retains the bounded code and no response body", async () => {
+  const f = fixture({ initial: { code: 1002, message: "private message", token: "private token" } });
+  await assert.rejects(upload(f.options), error => {
+    assert.equal(error.diagnostics.native_error_code, "1002");
+    assert.equal(error.diagnostics.stage, "upload_grant");
+    assert.equal(error.diagnostics.http_status, 200);
+    assert.doesNotMatch(JSON.stringify(error.diagnostics), /private/);
+    return true;
+  });
+  assert.equal(f.requests.length, 1, "rejection must not retry or transfer");
+});

@@ -16,6 +16,7 @@ import {
   availableLogBudget,
   createRoutineLogFilter,
   diagnosticErrorDetails,
+  sanitizeSendDiagnostics,
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
@@ -223,8 +224,18 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
 }
 
 async function recordUnexpected(scope, error, details = {}) {
+  const diagnostics = sanitizeSendDiagnostics(details) ?? sanitizeSendDiagnostics(error?.diagnostics);
+  const structuredError = diagnostics ? {
+    message: typeof error?.message === "string" ? error.message : String(error ?? "Unknown error."),
+    name: error?.name,
+    stack: error?.stack,
+    cause: error?.cause,
+    server_error_code: error?.server_error_code,
+    http_status: error?.http_status,
+    diagnostics,
+  } : error;
   await recordLog("error", scope, "failed", "Extension operation failed.", {
-    ...diagnosticErrorDetails(error),
+    ...diagnosticErrorDetails(structuredError),
     ...details,
   });
 }
@@ -1004,6 +1015,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       (result) => respond(result),
       async (error) => {
         await recordUnexpected("send_message", error, {
+          provider: providerAdapterForCommand(message)?.id,
+          command_type: message.type,
+          request_id: message.request_id,
           provider_account_id: messageProviderAccountId(message),
         });
         respond({ ok: false, error: String(error) });
@@ -1201,7 +1215,11 @@ async function sendViaProvider(message) {
     const response = await fetch(parsedUrl, { ...(adapter.id === "line_oa" ? { redirect: "error" } : {}), signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) });
     const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
     if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/")) || (adapter.id === "shopee" && commandType === "send_video" && imageType !== "video/mp4")) {
-      return { ok: false, error: "Could not load reply image." };
+      return { ok: false, error: "Could not load reply image.", diagnostics: {
+        diagnostic_version: 1, provider: adapter.id, operation: "upload", stage: "media_download", command_type: commandType,
+        http_status: response.status, native_attempted: false, delivery_uncertain: false,
+        failure_kind: "pre_dispatch_failure",
+      } };
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (!bytes.byteLength || bytes.byteLength > (commandType === "send_video" && adapter.id === "shopee" ? 5 * 1024 * 1024 : adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
@@ -1215,7 +1233,7 @@ async function sendViaProvider(message) {
       ? { image_base64: btoa(binary), image_type: imageType }
       : { media_base64: btoa(binary), media_type: imageType };
   }
-  return chrome.tabs.sendMessage(tab.id, {
+  const result = await chrome.tabs.sendMessage(tab.id, {
     ...message,
     ...imagePayload,
     provider: adapter.id,
@@ -1226,6 +1244,10 @@ async function sendViaProvider(message) {
     ...(adapter.id === "line_oa" ? { browser_provider_account_id: context.account.provider_account_id } : {}),
     ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
   });
+  if (!result || typeof result !== "object") return result;
+  const { diagnostics, ...reply } = result;
+  const safeDiagnostics = sanitizeSendDiagnostics(diagnostics);
+  return { ...reply, ...(safeDiagnostics ? { diagnostics: safeDiagnostics } : {}) };
 }
 
 async function selectCommandTab(context, tabId) {
@@ -2395,6 +2417,7 @@ async function handleLiveCommand(raw, context, socket) {
         return sent;
       }).catch((error) => ({
         ok: false, error: error instanceof Error ? error.message : String(error),
+        ...(sanitizeSendDiagnostics(error?.diagnostics) ? { diagnostics: sanitizeSendDiagnostics(error.diagnostics) } : {}),
       })),
     };
     cached.result = cached.result.then((result) => {
@@ -2410,6 +2433,9 @@ async function handleLiveCommand(raw, context, socket) {
   }
   if (!result?.ok) {
     await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
+      ...sanitizeSendDiagnostics(result?.diagnostics),
+      provider: adapter.id,
+      command_type: command.type,
       provider_account_id: context.account.provider_account_id,
       request_id: command.request_id,
       installation_id: await installationId(),

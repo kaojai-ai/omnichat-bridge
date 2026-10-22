@@ -39,12 +39,17 @@ export function sanitizeSendDiagnostics(input) {
   if (!input || typeof input !== "object" || Array.isArray(input) || input.diagnostic_version !== 1) return undefined;
   const result = { diagnostic_version: 1 };
   const enums = {
+    provider: ["shopee", "line_oa"],
+    operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
+    stage: ["media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation"],
+    error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
+    response_format: ["json", "non_json", "empty", "unreadable"],
     surface: ["new-webchat", "seller-centre"],
     endpoint_path: ["/webchat/api/v1.2/messages", "/webchat/api/v1.2/mini/messages"],
-    command_type: ["send_text", "send_image", "send_video", "send_product"],
+    command_type: ["send_text", "send_image", "send_video", "send_product", "send_file", "send_sticker"],
     template_source: ["captured", "derived"], route_source: ["command", "cache", "lookup"],
     cache_reason: ["complete", "incomplete", "shop_mismatch", "ambiguous_shop", "absent"],
-    failure_kind: ["provider_rejection", "unrecognized_response", "transport_failure", "pre_dispatch_failure"],
+    failure_kind: ["provider_rejection", "unrecognized_response", "transport_failure", "pre_dispatch_failure", "validation_failure", "confirmation_failure"],
   };
   for (const key of ["payload_conversation_id_state", "payload_shop_id_state", "payload_to_id_state", "payload_to_shop_id_state", "payload_biz_id_state", "quoted_message_id_state"]) {
     enums[key] = ["absent", "number", "string", "other"];
@@ -53,12 +58,22 @@ export function sanitizeSendDiagnostics(input) {
     if (allowed.includes(input[key])) result[key] = input[key];
   }
   for (const key of ["route_resolved", "route_shop_matches_account", "payload_conversation_matches_route", "payload_to_shop_matches_route", "payload_biz_matches_route", "payload_shop_matches_route", "payload_to_matches_route",
-    "url_shop_matches_route", "url_biz_matches_route", "choice_shop_matches_route", "native_attempted", "delivery_uncertain", "client_id_is_uuid"]) {
+    "url_shop_matches_route", "url_biz_matches_route", "choice_shop_matches_route", "native_attempted", "delivery_uncertain", "client_id_is_uuid", "provider_code_present", "timed_out"]) {
     if (typeof input[key] === "boolean") result[key] = input[key];
   }
-  if (typeof input.native_error_code === "string" && /^[a-zA-Z0-9_]{1,64}$/.test(input.native_error_code)) {
-    result.native_error_code = input.native_error_code;
+  const nativeCodes = new Set(["bad_request", "invalid_request", "invalid_argument", "validation_error", "invalid_parameter", "invalid_params", "param_error", "illegal", "unauthorized", "forbidden", "not_found", "conflict", "rate_limited", "too_many_requests", "internal_error", "service_unavailable", "unknown_error"]);
+  if (typeof input.native_error_code === "string") {
+    if (/^-?\d{1,12}$/.test(input.native_error_code) || nativeCodes.has(input.native_error_code.toLowerCase())) {
+      result.native_error_code = input.native_error_code;
+    } else {
+      result.provider_code_present = true;
+    }
   }
+  const validationFields = new Set(["sendId", "type", "text", "textV2", "substitution", "mention", "emojis", "packageId", "stickerId", "imageUrl", "contentMessageToken", "items", "file", "chatId", "botId", "conversation_id", "media_url"]);
+  const inputFields = Array.isArray(input.validation_fields) ? input.validation_fields
+    : typeof input.validation_fields === "string" && input.validation_fields.length <= 300 ? input.validation_fields.split(",") : [];
+  const fields = [...new Set(inputFields.filter(field => validationFields.has(field)))].slice(0, 12);
+  if (fields.length) result.validation_fields = fields.join(",");
   if (Number.isInteger(input.http_status) && input.http_status >= 100 && input.http_status <= 599) result.http_status = input.http_status;
   if (Number.isFinite(input.provider_duration_ms) && input.provider_duration_ms >= 0 && input.provider_duration_ms <= 300_000) {
     result.provider_duration_ms = input.provider_duration_ms;
@@ -104,7 +119,13 @@ function errorCode(error, text) {
 function errorCategory(text, status) {
   if (/not configured|setup is required/i.test(text)) return "not_configured";
   if (/timed out|timeout/i.test(text)) return "timeout";
-  if (/429|rate limit/i.test(text)) return "rate_limited";
+  if (status === 429 || /429|rate limit/i.test(text)) return "rate_limited";
+  if (status === 400 || status === 422) return "invalid_request";
+  if (status === 404 || status === 410) return "resource_unavailable";
+  if (status === 409) return "conflict";
+  if (status === 413) return "attachment_too_large";
+  if (status === 415) return "unsupported_type";
+  if (status >= 500) return "provider_unavailable";
   if (status === 401 || status === 403 || /unauthorized|forbidden/i.test(text)) return "unauthorized";
   if (/acknowledgement is invalid/i.test(text)) return "invalid_acknowledgement";
   if (/refresh|loading|initializ/i.test(text)) return "provider_not_ready";
@@ -118,17 +139,24 @@ function sanitizeIdentifier(value) {
 }
 
 export function diagnosticErrorDetails(error) {
-  const text = errorText(error);
-  const status = Number(error?.http_status) || Number(text.match(/\b([1-5]\d{2})\b/)?.[1]) || null;
+  const diagnostics = sanitizeSendDiagnostics(error?.diagnostics) ?? {};
+  // Rejections may originate in provider descriptions that echo private input.
+  // Keep structured codes and status; never persist that description or stack.
+  const providerRejection = diagnostics.failure_kind === "provider_rejection";
+  const unreadableResponse = diagnostics.error_name === "SyntaxError";
+  const text = providerRejection ? "Provider rejected the request." : unreadableResponse ? "Provider returned an unreadable response." : errorText(error);
+  const status = Number(diagnostics.http_status) || Number(error?.http_status) || Number(text.match(/\b([1-5]\d{2})\b/)?.[1]) || null;
   const code = errorCode(error, text);
+  const category = errorCategory(text, status);
   return {
-    category: errorCategory(text, status),
+    ...diagnostics,
+    category: diagnostics.timed_out ? "timeout" : (category === "unknown" && providerRejection ? "provider_rejection" : category),
     ...(status ? { http_status: status } : {}),
     error_type: typeof error?.name === "string" && error.name.trim() ? error.name : "Error",
     error_message: text,
-    ...(typeof error?.stack === "string" && error.stack.trim() ? { error_stack: error.stack } : {}),
+    ...(!providerRejection && !unreadableResponse && typeof error?.stack === "string" && error.stack.trim() ? { error_stack: error.stack } : {}),
     ...(code ? { server_error_code: code } : {}),
-    ...(error?.cause && typeof error.cause?.message === "string"
+    ...(!providerRejection && !unreadableResponse && error?.cause && typeof error.cause?.message === "string"
       ? { cause_message: error.cause.message }
       : {}),
   };
@@ -143,7 +171,7 @@ export function sanitizeLogDetails(value) {
     if (Object.hasOwn(sendDiagnostics, key)) {
       continue;
     }
-    if (!key || SEND_DIAGNOSTIC_ID_KEYS.includes(key) || BLOCKED_DETAIL_KEY.test(key)) continue;
+    if (!key || ["validation_fields", "diagnostics", "provider_code_present", "native_error_code", "response_format", "operation", "stage"].includes(key) || SEND_DIAGNOSTIC_ID_KEYS.includes(key) || BLOCKED_DETAIL_KEY.test(key)) continue;
     if (IDENTIFIER_DETAIL_KEYS.has(key) && typeof rawValue === "string") {
       details[key] = sanitizeIdentifier(rawValue);
       continue;

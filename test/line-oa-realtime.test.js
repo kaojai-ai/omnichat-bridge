@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -69,9 +69,11 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
       }
       if (["/api/v1/bots/bot-1/chats/chat-1/messages/send", "/api/v1/bots/bot-1/chats/chat-1/messages/bulkSendFiles"].includes(url.pathname)) {
         sentPayloads.push({ headers: init.headers, body: init.body });
-        return { ok: true, json: async () => sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody };
+        if (sendError) throw sendError;
+        return { ok: sendStatus === 200, status: sendStatus, json: async () => { if (sendNonJson) throw new SyntaxError("secret provider HTML"); return sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody; } };
       }
       if (url.pathname === "/api/v1/bots") {
+        if (accountError) throw accountError;
         return {
           ok: true,
           json: async () => ({
@@ -80,6 +82,7 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
         };
       }
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
+        if (chatError) throw chatError;
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
         const chatId = chatIds[pageIndex];
@@ -97,6 +100,7 @@ function createBridge({ sendResponseBody, uploadStatus = 200, uploadDelayMs = 0,
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
+        if (sentPayloads.length && confirmError) throw confirmError;
         if (sentPayloads.length && sendResponseBody === undefined) {
           const body = JSON.parse(sentPayloads.at(-1).body);
           return { ok: true, json: async () => ({ list: [{ source: { chatId: "chat-1" },
@@ -326,6 +330,8 @@ test("LINE OA rejects a session without an accessible account", async () => {
     type: "account_detection_failed",
     request_id: "detect-1",
     error: "No LINE OA accounts were found for the signed-in user.",
+    diagnostics: { diagnostic_version: 1, provider: "line_oa", operation: "initialize", native_attempted: false,
+      delivery_uncertain: false, failure_kind: "pre_dispatch_failure", timed_out: false },
   });
 });
 
@@ -895,4 +901,105 @@ test("LINE OA reconnect includes two-day-old messages within the five-day maximu
   const messages = bridge.posts.filter(post => post.type === "recovery_batch")
     .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
   assert.deepEqual(messages.map(message => message.id), ["message-1", "message-2"]);
+});
+
+
+test("LINE OA 400 diagnostics preserve only safe codes and payload field names", async () => {
+  const bridge = createBridge({ sendStatus: 400, sendResponseBody: {
+    code: "INVALID_ARGUMENT", message: "secret customer message https://private.invalid?token=secret",
+    details: [{ property: "sendId", message: "secret token" }, { field: "customer-secret" }],
+  } });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "private text", client_message_id: "12345678-1234-1234-1234-123456789abc" });
+  assert.equal(result.ok, false);
+  assert.deepEqual(plain(result.diagnostics), {
+    diagnostic_version: 1, provider: "line_oa", operation: "send", command_type: "send_text",
+    http_status: 400, response_format: "json", native_attempted: true, delivery_uncertain: false,
+    failure_kind: "provider_rejection", provider_duration_ms: result.diagnostics.provider_duration_ms,
+    client_id_is_uuid: true, template_source: "derived", provider_code_present: true,
+    native_error_code: "INVALID_ARGUMENT", validation_fields: ["sendId"],
+  });
+  assert.doesNotMatch(JSON.stringify(result), /secret|private|customer/);
+  assert.equal(bridge.sentPayloads.length, 1);
+});
+
+test("LINE OA non-JSON failure has status and format without exposing the response", async () => {
+  const bridge = createBridge({ sendStatus: 502, sendNonJson: true });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "private text" });
+  assert.equal(result.diagnostics.http_status, 502);
+  assert.equal(result.diagnostics.response_format, "non_json");
+  assert.equal(result.diagnostics.native_attempted, true);
+  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
+  assert.equal(bridge.sentPayloads.length, 1);
+});
+
+test("LINE OA upload rejection records safe diagnostics and never attempts a send", async () => {
+  const bridge = createBridge({ uploadStatus: 400, uploadBody: { errorCode: "secret-token-123", errors: [{ field: "file", message: "private upload" }] } });
+  const result = await bridge.sendCommand({ command_type: "send_video", media_bytes: new ArrayBuffer(4), media_type: "video/mp4" });
+  assert.equal(result.diagnostics.operation, "upload");
+  assert.equal(result.diagnostics.http_status, 400);
+  assert.equal(result.diagnostics.native_attempted, false);
+  assert.equal(result.diagnostics.delivery_uncertain, false);
+  assert.equal(result.diagnostics.provider_code_present, true);
+  assert.equal(result.diagnostics.native_error_code, undefined);
+  assert.deepEqual(plain(result.diagnostics.validation_fields), ["file"]);
+  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
+  assert.equal(bridge.sentPayloads.length, 0);
+});
+
+
+test("LINE OA send timeout records uncertainty and never retries", async () => {
+  const error = new Error("secret transport details");
+  error.name = "TimeoutError";
+  const bridge = createBridge({ sendError: error });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "private text" });
+  assert.equal(result.uncertain, true);
+  assert.equal(result.diagnostics.timed_out, true);
+  assert.equal(result.diagnostics.error_name, "TimeoutError");
+  assert.equal(result.diagnostics.failure_kind, "transport_failure");
+  assert.equal(result.diagnostics.native_attempted, true);
+  assert.equal(bridge.sentPayloads.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
+});
+
+test("LINE OA account resolution failure returns diagnostics instead of an unhandled rejection", async () => {
+  const bridge = createBridge({ basicId: "", accountError: new TypeError("secret account request") });
+  const result = await bridge.sendCommand({ command_type: "send_text", browser_provider_account_id: "@otheroa", text: "private text" });
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.operation, "initialize");
+  assert.equal(result.diagnostics.failure_kind, "pre_dispatch_failure");
+  assert.equal(result.diagnostics.timed_out, false);
+  assert.equal(result.diagnostics.error_name, "TypeError");
+  assert.equal(result.diagnostics.native_attempted, false);
+  assert.equal(bridge.sentPayloads.length, 0);
+  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
+});
+
+
+test("LINE OA detection failures publish safe initialization diagnostics", async () => {
+  const bridge = createBridge({ accountError: new TypeError("private account token") });
+  const result = await bridge.detect();
+  assert.equal(result.type, "account_detection_failed");
+  assert.equal(result.diagnostics.operation, "initialize");
+  assert.equal(result.diagnostics.error_name, "TypeError");
+  assert.doesNotMatch(JSON.stringify(result), /private|token/);
+});
+
+test("LINE OA recovery failures publish safe recovery diagnostics", async () => {
+  const bridge = createBridge({ chatError: new TypeError("private chat token") });
+  const result = await bridge.sync();
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.operation, "recovery");
+  assert.equal(result.diagnostics.error_name, "TypeError");
+  assert.doesNotMatch(JSON.stringify(result), /private|token/);
+});
+
+test("LINE OA confirmation errors do not report the successful send HTTP status", async () => {
+  const bridge = createBridge({ confirmError: new TypeError("private history token") });
+  const result = await bridge.sendCommand({ command_type: "send_text", text: "private text" });
+  assert.equal(result.diagnostics.operation, "confirm");
+  assert.equal(result.diagnostics.http_status, undefined);
+  assert.equal(result.diagnostics.response_format, undefined);
+  assert.equal(result.diagnostics.delivery_uncertain, true);
+  assert.equal(bridge.sentPayloads.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /private|token/);
 });

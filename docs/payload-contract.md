@@ -236,8 +236,11 @@ remote-log outbox so logs are never carried to a newly configured target.
 Any `2xx` response accepts the log batch. Log records contain fixed event
 names, bounded sanitized messages, and scalar operational metadata only.
 Sensitive detail keys and values are removed before local storage and upload.
-The extension retains local logs for up to 48 hours, capped at 100 records
-to stay within Chrome storage limits.
+The extension retains local logs for up to 48 hours within a 4 MiB budget,
+reduced when Chrome storage needs headroom. Warnings and errors have reserved
+space; routine repeated account observations are sampled. Support downloads
+include all retained severities, regardless of the on-screen severity filter,
+and identify extension version, export time and global provider/account scope.
 
 ## Limits
 
@@ -404,3 +407,22 @@ upload grant, uploads the file, registers it with Seller Chat and waits for proc
 media references before attempting the chat send. Grants stay in page memory. All
 steps share the command deadline. Upload/processing failure sends no chat message;
 a failed, timed-out or uncertain native send is never retried on another surface.
+
+
+### Provider failure diagnostics (0.6.64, planned)
+
+LINE and Shopee send failures preserve safe operation context across the page,
+content script and background log boundary. `diagnostic_version: 1` adds provider,
+command type, operation (initialize/upload/send/confirm), upload stage, HTTP status,
+response format, template source, bounded duration, timeout, native-send attempt
+and delivery uncertainty when known. LINE extracts only known protocol codes or
+bounded numeric codes and fixed validation field names. Stored validation fields
+are a comma-separated scalar, preserving the existing log upload contract.
+Unknown provider codes are omitted; `provider_code_present` indicates their presence.
+
+Provider rejection descriptions and parser response excerpts are excluded from
+stored error messages/stacks. No raw request/response body, message content,
+credentials, cookies, media URLs or upload grants are added. Sender initialization,
+route selection and single-attempt delivery are unchanged; these diagnostics do
+not resolve or automatically retry a rejected LINE message. Target server command
+acknowledgments are unchanged. No database or server release is required.

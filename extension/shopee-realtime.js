@@ -1103,10 +1103,19 @@
       credentials: "include",
       headers,
     });
-    const body = await response.json().catch(() => null);
+    let responseFormat = "json";
+    const body = await response.json().catch(() => { responseFormat = "non_json"; return null; });
     const providerReason = shopeeError(body);
     if (!response.ok || providerReason || !body?.url) {
-      throw new Error(providerReason ?? `Shopee image upload returned ${response.status}.`);
+      const error = new Error(`Shopee image upload failed (${response.status}).`);
+      const code = [body?.error_code, body?.error].map(String)
+        .find(value => /^-?\d{1,6}$/.test(value) || ["param_error", "illegal", "unauthorized", "forbidden", "invalid_parameter"].includes(value));
+      error.diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "upload", stage: "upload_transfer",
+        http_status: response.status, response_format: responseFormat,
+        failure_kind: !response.ok || providerReason ? "provider_rejection" : "unrecognized_response",
+        ...(code ? { native_error_code: code } : {}),
+      };
+      throw error;
     }
     return {
       uid: String(message.client_message_id ?? message.request_id),
@@ -1374,15 +1383,15 @@
       diagnostics.provider_duration_ms = Math.min(300_000, Math.max(0, Date.now() - sendStartedAt));
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
-      diagnostics = { ...diagnostics, native_attempted: nativeAttempted,
+      diagnostics = { ...diagnostics, ...error?.diagnostics, provider: "shopee", native_attempted: nativeAttempted,
         delivery_uncertain: nativeAttempted && !providerRejected && !providerReason,
-        failure_kind: providerRejected || providerReason ? "provider_rejection"
-          : !nativeAttempted ? "pre_dispatch_failure" : nativeResponseReceived ? "unrecognized_response" : "transport_failure" };
+        failure_kind: error?.diagnostics?.failure_kind ?? (providerRejected || providerReason ? "provider_rejection"
+          : !nativeAttempted ? "pre_dispatch_failure" : nativeResponseReceived ? "unrecognized_response" : "transport_failure") };
       postLog("error", "send_failed", "Provider reply failed. See routing diagnostics.", {
         scope: "send_api", request_id: requestId, conversation_id: conversationId, provider_account_id: accountId,
         ...diagnostics,
       });
-      post({ type: "api_send_result", request_id: requestId, ok: false, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
+      post({ type: "api_send_result", request_id: requestId, ok: false, diagnostics, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
     }
   };
   const captureActiveConversation = (request) => {

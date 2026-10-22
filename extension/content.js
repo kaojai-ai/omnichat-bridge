@@ -190,7 +190,9 @@
         if (pendingApiSends.get(requestId) !== pending) return;
         pendingApiSends.delete(requestId);
         clearTimeout(pending.timeout);
-        pending.resolve({ ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.` });
+        pending.resolve({ ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.`,
+          diagnostics: { diagnostic_version: 1, provider: providerAdapter.id, operation: "confirm",
+            command_type: pending.commandType, delivery_uncertain: true, failure_kind: "unrecognized_response" } });
       }, 5_000);
       return;
     }
@@ -201,6 +203,7 @@
       ok: false,
       ...(pending.result.uncertain === true ? { uncertain: true } : {}),
       ...(pending.result.error_code ? { error_code: pending.result.error_code } : {}),
+      ...(pending.result.diagnostics ? { diagnostics: pending.result.diagnostics } : {}),
       error: pending.result.error
         ? `${providerLabel} API error: ${pending.result.error}`
         : `${providerLabel} API reply failed.`
@@ -444,12 +447,26 @@
     pending.resolve({ ok: true, accounts });
   }
 
+  // Only carry structured provider evidence to the background sanitizer. Never
+  // promote page error descriptions, response bodies or stacks into log fields.
+  function providerFailureDiagnostics(message) {
+    const input = message?.diagnostics;
+    if (!input || input.diagnostic_version !== 1) return {};
+    const keys = ["diagnostic_version", "provider", "operation", "stage", "http_status", "native_error_code",
+      "provider_code_present", "response_format", "failure_kind", "timed_out", "error_name", "provider_duration_ms",
+      "native_attempted", "delivery_uncertain", "validation_fields"];
+    return Object.fromEntries(keys.filter(key => Object.hasOwn(input, key)).map(key => [key, input[key]]));
+  }
+
   function handleAccountDetectionFailed(message) {
     const pending = accountDetections.get(message.request_id);
     if (!pending) return;
     accountDetections.delete(message.request_id);
     clearTimeout(pending.timeout);
-    log("warn", "account_detection_failed", message.error ?? `${providerLabel} account was not found.`);
+    log("warn", "account_detection_failed", `${providerLabel} account detection failed.`, {
+      ...providerFailureDiagnostics(message),
+      request_id: message.request_id,
+    });
     pending.resolve({ ok: false, error: message.error ?? `${providerLabel} account ID was not found.` });
   }
 
@@ -782,10 +799,10 @@
     }
     const pending = recoveries.get(message.request_id);
     if (!message.ok) {
-      log("error", "recovery_failed", message.error ?? "Provider recovery failed.", {
+      log("error", "recovery_failed", "Provider recovery failed.", {
+        ...providerFailureDiagnostics(message),
         request_id: message.request_id,
         provider_account_id: message.provider_account_id,
-        error_message: message.error ?? "Provider recovery failed.",
       });
       if (pending) {
         recoveries.delete(message.request_id);
@@ -906,13 +923,16 @@
           resolve({ ok: true, provider_message_id: pending.echo.id });
           return;
         }
-        resolve({ ok: false, uncertain: true, error: `${providerLabel} API reply timed out.` });
+        resolve({ ok: false, uncertain: true, error: `${providerLabel} API reply timed out.`,
+          diagnostics: { diagnostic_version: 1, provider: providerAdapter.id, operation: "send",
+            command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure" } });
       }, Math.max(1, Math.min(30_000, (message.deadline_at_ms ?? Date.now() + 30_000) - Date.now())));
       pendingApiSends.set(requestId, {
         resolve,
         timeout,
         conversationId,
         clientMessageId,
+        commandType,
         echo: null,
         result: null,
         providerIdTimeout: null,
