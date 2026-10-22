@@ -35,7 +35,7 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
-function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, requestTimeoutMs = 15_000 } = {}) {
+function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, socket = null, requestTimeoutMs = 15_000 } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
@@ -98,7 +98,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     postMessage(message) {
       posts.push(message);
     },
-    __CHAT_GLOBAL__: {},
+    __CHAT_GLOBAL__: socket ? { socket } : {},
   };
   const clockStartedAt = Date.now();
   const context = vm.createContext({
@@ -1059,4 +1059,22 @@ test("initial Shopee sync uses one day while reconnect can recover within five d
   };
   assert.deepEqual(await recovered({}), ["today"]);
   assert.deepEqual(await recovered({ watermark: "2026-08-01T00:00:00Z" }), ["today", "two-days-old"]);
+});
+
+test("redirected Webchat discovers its shop, captures routing, and observes the standalone socket", async () => {
+  const handlers = new Map();
+  const bridge = createBridge({ pathname: "/webchat/conversations", socket: { connected: true, on: (event, handler) => handlers.set(event, handler), off: () => {} } });
+  try {
+    await bridge.fetch("/webchat/api/coreapi/v1.2/login", { shop: { id: 100000001, name: "Fixture Shop" } });
+    assert.equal(bridge.state.surface, "webchat");
+    assert.equal(bridge.posts.findLast(post => post.type === "accounts_detected").accounts[0].provider_account_id, "100000001");
+    await bridge.fetch("/webchat/api/v1.2/conversations", { conversations: [{ id: "456", shop_id: 100000001, to_id: 123, to_shop_id: 789, biz_id: 0 }] });
+    const profile = bridge.posts.findLast(post => post.type === "profiles_detected").profiles[0];
+    assert.deepEqual(JSON.parse(JSON.stringify(profile.omnichat.routing.fields)), { to_id: "123", to_shop_id: "789", biz_id: "0" });
+    assert.equal(typeof handlers.get("message"), "function");
+    handlers.get("message")({ message_type: "message", message_content: JSON.stringify({ id: "incoming-1", conversation_id: "456", shop_id: 100000001, created_timestamp: Date.parse("2026-08-20T12:00:00Z"), content: { text: "Fixture inbound" } }) });
+    const inbound = bridge.posts.findLast(post => post.type === "realtime_event");
+    assert.equal(inbound.capture_method, "realtime_socket");
+    assert.equal(inbound.body.messages[0].id, "incoming-1");
+  } finally { bridge.dispose(); }
 });

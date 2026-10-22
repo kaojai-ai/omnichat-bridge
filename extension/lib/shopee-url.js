@@ -3,6 +3,9 @@ const SHOPEE_CHAT_SURFACES = Object.freeze({
   "new-webchat": Object.freeze([
     "/new-webchat",
   ]),
+  "webchat": Object.freeze([
+    "/webchat",
+  ]),
   "seller-centre": Object.freeze([
     "/",
     "/portal",
@@ -29,7 +32,8 @@ function pathMatches(path, prefix) {
 function surfaceForPath(pathname) {
   if (typeof pathname !== "string") return null;
   const path = normalizedPath(pathname);
-  if (pathMatches(path, "/webchat")) return null;
+  if (pathMatches(path, "/webchat/api")) return null;
+  if (SHOPEE_CHAT_SURFACES.webchat.some(chatPath => pathMatches(path, chatPath))) return "webchat";
   if (SHOPEE_CHAT_SURFACES["new-webchat"].some((chatPath) => pathMatches(path, chatPath))) {
     return "new-webchat";
   }

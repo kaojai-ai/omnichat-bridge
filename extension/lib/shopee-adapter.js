@@ -167,7 +167,7 @@
     routingFields: ["to_id", "to_shop_id", "biz_id"],
     chatUrl: "https://seller.shopee.co.th/new-webchat/conversations",
     tabQueryPattern: "https://seller.shopee.co.th/*",
-    surfacePriority: ["new-webchat", "seller-centre"],
+    surfacePriority: ["new-webchat", "webchat", "seller-centre"],
     capabilities: ["account_detection", "message_observation", "message_recovery"],
     sendCommands: ["send_text", "send_image", "send_product", "send_video"],
     matchesPage: (url) => globalThis.OmnichatShopeeUrl?.isShopeePageUrl(url) === true,

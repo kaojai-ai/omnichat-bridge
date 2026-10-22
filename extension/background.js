@@ -1477,8 +1477,8 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  // Recovery maintains the primary surface; command dispatch can still use a
-  // ready fallback while New Webchat initializes. Never navigate a user tab.
+  // Prefer New Webchat, but keep a provider-redirected standalone chat usable.
+  // Never navigate an existing user tab back to a surface Shopee rejected.
   const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
   const candidates = [];
   for (const tab of orderedTabs) {
@@ -1487,9 +1487,10 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
       && status.current_provider_account_id !== context?.account?.provider_account_id) continue;
     candidates.push({ tab, status });
   }
-  const primary = adapter.id === "shopee"
-    ? candidates.find(({ tab }) => adapter.surfaceForUrl?.(tab.url) === "new-webchat")
-    : null;
+  const standalone = adapter.id === "shopee"
+    ? candidates.filter(({ tab }) => ["new-webchat", "webchat"].includes(adapter.surfaceForUrl?.(tab.url)))
+    : [];
+  const primary = standalone.find(({ status }) => providerTabHealthy(status, adapter)) ?? standalone[0];
   const healthy = candidates.find(({ status }) => providerTabHealthy(status, adapter));
   const selected = allowTabRecovery && adapter.id === "shopee"
     ? primary
@@ -1513,10 +1514,10 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     return { tab: trackedTab, record };
   }
 
-  // A primary tab signed into another shop cannot recover this account. Do
+  // A standalone chat signed into another shop cannot recover this account. Do
   // not open duplicate tabs into that same mismatched browser session.
-  if (adapter.id === "shopee" && orderedTabs.some((tab) => adapter.surfaceForUrl?.(tab.url) === "new-webchat")) {
-    return { tab: null, record, reason: "Shopee New Webchat is signed into a different shop. Open the matching shop in this Chrome profile." };
+  if (adapter.id === "shopee" && orderedTabs.some((tab) => ["new-webchat", "webchat"].includes(adapter.surfaceForUrl?.(tab.url)))) {
+    return { tab: null, record, reason: "Shopee Webchat is signed into a different shop. Open the matching shop in this Chrome profile." };
   }
 
   if (!allowTabRecovery) {

@@ -1,13 +1,19 @@
 # Shopee provider
 
 Shopee Seller Chat supports New Webchat as its primary surface and the
-Seller Centre embedded Chat panel as fallback:
+legacy standalone Webchat and Seller Centre embedded Chat panel as fallbacks:
 
 - New Webchat: `https://seller.shopee.co.th/new-webchat/conversations`
+- Legacy Webchat: `https://seller.shopee.co.th/webchat/conversations`
 - Seller Centre: other seller pages, including `/portal/chat-management`
 
-Retired `/webchat` pages are not supported. The `/webchat/api/...` API paths
-are still used by New Webchat and remain supported.
+In 0.6.67 (planned), Shopee redirects to `/webchat` are accepted. Both standalone
+pages share the existing `/webchat/api/...` request profile. New Webchat remains
+preferred; recovery retains a matching legacy tab, including while it initializes,
+instead of repeatedly creating a New Webchat replacement. User tabs are not navigated.
+Legacy compatibility has automated fixture coverage; live legacy receiving and
+sending remain unverified on an affected account. Legacy outbound video is not
+advertised and is rejected before uploading; video remains New Webchat only.
 
 ## How it works
 
@@ -43,7 +49,7 @@ flowchart LR
 The extension **does NOT save or send the seller's Shopee password, cookies, or
 login tokens**. Request headers remain in the Shopee page's memory.
 
-The extension status records the active surface (`new-webchat` or `seller-centre`),
+The extension status records the active surface (`new-webchat`, `webchat` or `seller-centre`),
 its named capabilities, and the realtime transport (`polling` or `socket`). A
 command is rejected with an explicit initialization error when the selected
 surface has not exposed the required request profile.
@@ -100,8 +106,9 @@ generic `send_video` command when its advertised capability is ready. Mini-chat
 video remains unsupported. Upload and sending share the command deadline and
 never retry an uncertain send. See [routing and video contracts](../payload-contract.md#shopee-conversation-routing).
 
-Ready, shop-matching New Webchat tabs take precedence over mini-chat. Recovery
-maintains the primary New Webchat tab in the background without activating it.
+Ready, shop-matching New Webchat tabs take precedence over legacy Webchat, then
+mini-chat. Recovery opens New Webchat by default and accepts a matching legacy
+standalone tab when Shopee redirects, without activating or navigating user tabs.
 
 ## Sync and recovery
 

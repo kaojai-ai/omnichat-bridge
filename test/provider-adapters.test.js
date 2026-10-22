@@ -77,7 +77,7 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
     const url = `https://seller.shopee.co.th${path}`;
     assert.equal(registry.forUrl(url).surfaceForUrl(url), "seller-centre");
   }
-  assert.deepEqual(plain(adapter.surfacePriority), ["new-webchat", "seller-centre"]);
+  assert.deepEqual(plain(adapter.surfacePriority), ["new-webchat", "webchat", "seller-centre"]);
   assert.equal(adapter.chatUrl, "https://seller.shopee.co.th/new-webchat/conversations");
   assert.equal(adapter.providerStatusReady({ surface_ready: true, capabilities: {
     account_detection: true,

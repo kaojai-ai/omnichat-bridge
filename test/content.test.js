@@ -498,6 +498,7 @@ test("ignores best-effort messages after the extension context is invalidated", 
 
 for (const pathname of [
   "/new-webchat/conversations",
+  "/webchat/conversations",
 ]) {
   test(`requests automatic sync when ${pathname} loads`, async () => {
     const bridge = contentBridge(pathname);

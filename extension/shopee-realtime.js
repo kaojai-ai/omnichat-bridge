@@ -53,20 +53,24 @@
   const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
   const SELLER_CENTRE_SURFACE = "seller-centre";
   const NEW_WEBCHAT_SURFACE = "new-webchat";
+  // Both standalone pages use the existing Webchat API; only the preferred
+  // page has verified outbound video support. Keep one request profile.
+  const STANDALONE_PROFILE = Object.freeze({
+    listPaths: Object.freeze([
+      LEGACY_CONVERSATIONS_PATH,
+      LEGACY_SUBACCOUNT_CONVERSATIONS_PATH,
+    ]),
+    loginPath: LEGACY_LOGIN_PATH,
+    sendPath: LEGACY_SEND_PATH,
+    imagePath: LEGACY_IMAGE_PATH,
+    historyPath: (conversationId) => `/webchat/api/v1.2/conversations/${encodeURIComponent(conversationId)}/messages`,
+    historyPathPattern: /^\/webchat\/api\/v1\.2\/conversations\/[^/]+\/messages$/,
+    syncPath: null,
+    sendSource: null,
+  });
   const SURFACE_PROFILES = Object.freeze({
-    [NEW_WEBCHAT_SURFACE]: Object.freeze({
-      listPaths: Object.freeze([
-        LEGACY_CONVERSATIONS_PATH,
-        LEGACY_SUBACCOUNT_CONVERSATIONS_PATH,
-      ]),
-      loginPath: LEGACY_LOGIN_PATH,
-      sendPath: LEGACY_SEND_PATH,
-      imagePath: LEGACY_IMAGE_PATH,
-      historyPath: (conversationId) => `/webchat/api/v1.2/conversations/${encodeURIComponent(conversationId)}/messages`,
-      historyPathPattern: /^\/webchat\/api\/v1\.2\/conversations\/[^/]+\/messages$/,
-      syncPath: null,
-      sendSource: null,
-    }),
+    [NEW_WEBCHAT_SURFACE]: STANDALONE_PROFILE,
+    webchat: STANDALONE_PROFILE,
     [SELLER_CENTRE_SURFACE]: Object.freeze({
       listPaths: Object.freeze([
         SELLER_CENTRE_CONVERSATIONS_PATH,
@@ -235,7 +239,7 @@
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
     send_text: surfaceSendReady(),
     send_image: surfaceSendReady(),
-    send_video: surfaceSendReady() && !isSellerCentreSurface() && Boolean(globalThis.OmnichatShopeeVideo),
+    send_video: surfaceSendReady() && state.surface === NEW_WEBCHAT_SURFACE && Boolean(globalThis.OmnichatShopeeVideo),
     send_product: surfaceSendReady(),
   });
 
@@ -1188,7 +1192,7 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
       return;
     }
-    if (commandType === "send_video" && (isSellerCentreSurface() || !globalThis.OmnichatShopeeVideo)) {
+    if (commandType === "send_video" && (state.surface !== NEW_WEBCHAT_SURFACE || !globalThis.OmnichatShopeeVideo)) {
       post({ type: "api_send_result", request_id: requestId, ok: false,
         error: "Shopee video sending requires initialized New Webchat." });
       return;
