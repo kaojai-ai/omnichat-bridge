@@ -96,11 +96,15 @@
       const status = await response.json();
       if (!response.ok) throw new Error("Shopee video processing check failed.");
       if (status.status === "successful") {
-        if (!status.video || !status.thumbnail || !(status.width>0) || !(status.height>0) || !(status.duration>0)) {
+        // Processing reports milliseconds; chat requires positive int32 seconds.
+        const durationSeconds = Math.ceil(status.duration / 1000);
+        if (!status.video || !status.thumbnail || !(status.width>0) || !(status.height>0)
+          || !Number.isFinite(status.duration) || !(status.duration>0)
+          || !Number.isSafeInteger(durationSeconds) || durationSeconds > 2147483647) {
           throw new Error("Shopee processed video metadata is incomplete.");
         }
         return {vid:grant.vid,video_url:status.video,thumb_url:status.thumbnail,
-          thumb_width:status.width,thumb_height:status.height,duration_seconds:status.duration/1000};
+          thumb_width:status.width,thumb_height:status.height,duration_seconds:durationSeconds};
       }
       if (["failed","error"].includes(status.status)) throw new Error("Shopee video processing failed.");
       await new Promise(resolve => setTimeout(resolve,Math.min(500,remaining())));
