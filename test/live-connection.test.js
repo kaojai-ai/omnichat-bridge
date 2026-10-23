@@ -379,3 +379,101 @@ test("unexpected errors classify structured provider status and timeout while pr
   assert.equal(entries[1].error_stack, error.stack);
   assert.equal(entries[1].cause_message, "Transport failed.");
 });
+
+
+test("approved permissions clear persisted warnings without replacing a healthy legacy socket", async () => {
+  for (const warning of [
+    { migration_error: "Open configuration and save it to approve the new server access." },
+    { migration_error: "Server access needed", migration_error_code: "server_permission_required" },
+  ]) {
+    const states = [];
+    const retries = new Map([[account.key, { attempt: 4, nextAt: 3600000 }]]);
+    const candidate = { api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs" };
+    const h = harness({
+      migrationRetries: retries,
+      readAccountState: () => ({ ...warning, migration_pending: true, migration_retry_at: 3600000 }),
+      accountMigration: () => ({ status: "pending", candidate }),
+      chrome: { permissions: { contains: async ({ origins }) => {
+        assert.deepEqual(Array.from(origins), ["https://new.invalid/*", "https://logs.invalid/*"]);
+        return true;
+      } } },
+      updateScopedState: async (_storage, _key, state) => states.push(state),
+    });
+    const socket = { readyState: 1 };
+    h.liveConnections.set(account.key, { socket, config: account.config });
+    await h.ensureAccountLiveConnection(account);
+    assert.equal(h.liveConnections.get(account.key).socket, socket);
+    assert.equal(h.calls(), 0);
+    assert.equal(retries.size, 0);
+    assert.equal(states.length, 1);
+    assert.equal(states[0].migration_error, null);
+    assert.equal(states[0].migration_retry_at, 0);
+    assert.equal(states[0].migration_pending, true);
+  }
+});
+
+test("denied permissions and unrelated migration failures retain their warning", async () => {
+  for (const migration_error of [
+    "Open configuration and save it to approve the new server access.",
+    "API ping failed",
+  ]) {
+    const states = [];
+    const h = harness({
+      readAccountState: () => ({ migration_error, migration_pending: true }),
+      accountMigration: () => ({ status: "pending", candidate: {
+        api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs",
+      } }),
+      chrome: { permissions: { contains: async () => migration_error === "API ping failed" } },
+      updateScopedState: async (_storage, _key, state) => states.push(state),
+    });
+    h.liveConnections.set(account.key, { socket: { readyState: 1 }, config: account.config });
+    await h.ensureAccountLiveConnection(account);
+    assert.equal(states.length, 0);
+  }
+});
+
+test("importing current configuration removes obsolete migration failure state", async () => {
+  const states = [];
+  const h = harness({
+    readAccountState: () => ({ migration_pending: true, migration_error: "API ping failed" }),
+    updateScopedState: async (_storage, _key, state) => states.push(state),
+  });
+  h.liveConnections.set(account.key, { socket: { readyState: 1 }, config: account.config });
+  await h.ensureAccountLiveConnection(account);
+  assert.equal(states[0].migration_pending, false);
+  assert.equal(states[0].migration_error, null);
+});
+
+
+test("granting browser permissions triggers live-state reconciliation", async () => {
+  let listener;
+  let calls = 0;
+  const start = source.indexOf("chrome.permissions.onAdded.addListener(");
+  const end = source.indexOf("async function reconnectProviderTab(", start);
+  vm.runInNewContext(source.slice(start, end), {
+    chrome: { permissions: { onAdded: { addListener: (callback) => { listener = callback; } } } },
+    ensureLiveConnection: async () => { calls++; },
+    recordUnexpected: () => assert.fail("unexpected reconciliation failure"),
+  });
+  listener();
+  assert.equal(calls, 1);
+});
+
+
+test("approval bypasses permission backoff when a natural reconnect is available", async () => {
+  const calls = [];
+  const candidate = { api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs" };
+  const h = harness({
+    readAccountState: () => ({ migration_pending: true, migration_retry_at: 3600000,
+      migration_error: "Open configuration and save it to approve the new server access." }),
+    accountMigration: () => ({ status: "pending", candidate }),
+    chrome: { permissions: { contains: async () => true } },
+    updateScopedState: async () => {},
+    signedApiPing: async () => calls.push("ping"),
+    signedLeaderRequest: async () => calls.push("status"),
+  });
+  h.resolveTicket();
+  await h.ensureAccountLiveConnection(account);
+  assert.deepEqual(calls, ["ping", "status"]);
+  assert.equal(h.liveConnections.get(account.key).config, candidate);
+});
