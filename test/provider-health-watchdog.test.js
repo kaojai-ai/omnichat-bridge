@@ -61,6 +61,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     activeLiveCommandContexts: async () => [],
     stopLiveConnection: () => {},
     chrome: { tabs: {
+      query: async () => tabOpen ? [tab] : [],
       create: async () => { calls.created++; tabOpen = true; return tab; },
       reload: async () => { calls.reloaded++; },
     } },
@@ -168,13 +169,13 @@ for (const provider of ["shopee", "line_oa"]) {
 
 
 for (const recoveryEnabled of [false, true]) {
-  test(`Shopee selects healthy New Webchat instead of tracked closed mini-chat (recovery ${recoveryEnabled})`, async () => {
+  test(`Shopee keeps tracked closed mini-chat despite another healthy tab (recovery ${recoveryEnabled})`, async () => {
     const { run, calls } = harness({ provider: "shopee", recoveryEnabled, healthy: false, chatOpen: false,
       alternativeHealthyTab: true, record: { tab_id: 42, state: "needs_attention" } });
     await run();
-    assert.equal(calls.live.state, "ready");
-    assert.equal(calls.live.tabId, 43);
-    assert.equal(calls.live.reason, null);
+    assert.equal(calls.live.state, "needs_attention");
+    assert.equal(calls.live.tabId, 42);
+    assert.match(calls.live.reason, /Open Shopee mini-chat/);
     assert.equal(calls.reloaded, 0);
     assert.equal(calls.created, 0);
   });
@@ -210,7 +211,7 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(calls.reloaded, 0);
     assert.equal(calls.live.tabId, 42);
     assert.equal(calls.live.state, "needs_attention");
-    assert.match(calls.live.reason, /Sign in using the existing tab/);
+    assert.match(calls.live.reason, /sign in using the existing tab/);
   });
 }
 

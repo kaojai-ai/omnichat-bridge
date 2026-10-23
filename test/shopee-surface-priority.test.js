@@ -24,7 +24,7 @@ function sandbox(tabs, statuses) {
     providerTabStatus: async tab => statuses[tab.id], providerTabHealthy: status => status?.ready === true,
     updateProviderRecoveryTabState: async (_, patch) => (record = { ...record, ...patch }),
     recoveryRetryDue: () => true, providerRecoveryUrl: () => primary.url,
-    chrome: { tabs: { create: async options => { created.push(options); return { ...options, id: 3 }; } } },
+    chrome: { tabs: { query: async () => tabs, create: async options => { created.push(options); return { ...options, id: 3 }; } } },
     recordLog: async () => {}, providerLabel: () => "Shopee",
   });
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
@@ -34,17 +34,16 @@ function sandbox(tabs, statuses) {
 const shop = { account: { provider_account_id: "shop" } };
 const healthy = { ready: true, current_provider_account_id: "shop" };
 
-test("primary surface beats active previously tracked mini-chat, including recovery while initializing", async () => {
+test("recovery keeps the tracked mini-chat even when a preferred primary exists", async () => {
   const { context } = sandbox([mini, primary], { 1: healthy, 2: { ...healthy, ready: false } });
   assert.equal(context.orderProviderTabs(adapter, [mini, primary], 1)[0].id, 2);
-  assert.equal((await context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, 2);
+  assert.equal((await context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, mini.id);
 });
 
-test("enabled recovery opens missing primary inactive; disabled recovery keeps healthy fallback", async () => {
+test("both recovery settings reuse mini-chat instead of opening a missing primary", async () => {
   const enabled = sandbox([mini], { 1: healthy });
-  assert.equal((await enabled.context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, 3);
-  assert.equal(enabled.created[0].url, primary.url);
-  assert.equal(enabled.created[0].active, false);
+  assert.equal((await enabled.context.resolveProviderRecoveryTab(adapter, shop, true)).tab.id, mini.id);
+  assert.equal(enabled.created.length, 0);
   const disabled = sandbox([mini], { 1: healthy });
   assert.equal((await disabled.context.resolveProviderRecoveryTab(adapter, shop, false)).tab.id, 1);
   assert.equal(disabled.created.length, 0);
