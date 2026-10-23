@@ -94,3 +94,28 @@ for (const failureAt of ["tab_lookup", "detection", "status"]) {
     assert.equal(errors[0].details.provider, "shopee");
   });
 }
+
+for (const outcome of ["superseded", "failure", "recorded_failure"]) {
+  const superseded = outcome === "superseded";
+  const recorded = outcome === "recorded_failure";
+  test(`sync outcome preserves failure state and logs ${superseded ? "typed supersession as INFO" : "a genuine failure according to its recorded boundary"}`, async () => {
+    const control = { controller: new AbortController() };
+    const logs = [];
+    const states = [];
+    const run = vm.runInNewContext(source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts")) + "\nrunAccountSync", {
+      activeSyncControl: control, STORAGE: {}, RESUME_SYNC_COOLDOWN_MS: 0,
+      exclusive: async () => ({ context: context("shopee", "A") }),
+      throwIfSyncCancelled: () => {},
+      recordLog: async (level, area, event) => logs.push({ level, area, event }),
+      recordUnexpected: async () => logs.push({ level: "error", event: "failed" }),
+      updateScopedState: async (_key, _account, value) => states.push(value),
+      attemptDelivery: async () => { throw Object.assign(new Error("Provider recovery ended."), superseded ? { reason_code: "superseded" } : { recovery_diagnostic_recorded: recorded }); },
+      readStorage: async () => ({}), readAccountState: (_stored, _key, fallback) => fallback,
+    });
+    const result = await run("manual", control, context("shopee", "A"));
+    assert.ok(result.error);
+    assert.equal(states.at(-1).state, "error");
+    assert.equal(logs.filter(log => log.level === "error").length, superseded || recorded ? 0 : 1);
+    assert.equal(logs.some(log => log.event === "superseded" && log.level === "info"), superseded);
+  });
+}

@@ -716,3 +716,35 @@ test("LINE recovery and account failure logs retain structured evidence without 
     assert.doesNotMatch(JSON.stringify(log), /private response|private stack|error_message/);
   }
 });
+
+
+test("typed recovery supersession is informational while an untyped abort remains failure", async () => {
+  const bridge = contentBridge();
+  await bridge.providerEvent({ type: "recovery_complete", request_id: "replaced", ok: false,
+    reason_code: "superseded", error: "private provider response" });
+  await bridge.providerEvent({ type: "recovery_complete", request_id: "failed", ok: false,
+    error: "Recovery was superseded by a bridge reconnect.",
+    diagnostics: { diagnostic_version: 1, operation: "recovery", error_name: "AbortError" } });
+  const logs = bridge.runtimeMessages.filter(message => message.type === "record_log");
+  const superseded = logs.find(log => log.event === "recovery_superseded");
+  assert.equal(superseded.level, "info");
+  assert.equal(superseded.details.reason_code, "superseded");
+  assert.equal(logs.find(log => log.event === "recovery_failed").level, "error");
+  assert.doesNotMatch(JSON.stringify(logs), /private provider response/);
+});
+
+for (const persisted of [true, false]) {
+  test(`manual recovery suppresses fallback ERROR only after logging acknowledgement ${persisted}`, async () => {
+    const account = { provider: "shopee", provider_account_id: "shop-1" };
+    const bridge = contentBridge("/new-webchat/conversations", {
+      localConsent: true, storage: { config: { accounts: [account] }, detected_accounts: [account] },
+      runtimeHandler: message => ({ ok: message.type === "record_log" ? persisted : true }),
+    });
+    const running = bridge.sendCommand({ type: "sync_now_v3", provider_account_id: "shop-1", request_id: "failed" });
+    await new Promise(resolve => setImmediate(resolve));
+    await bridge.providerEvent({ type: "recovery_complete", request_id: "failed", ok: false, error: "Failed." });
+    const result = await running;
+    assert.equal(result.ok, false);
+    assert.equal(result.recovery_diagnostic_recorded, persisted);
+  });
+}

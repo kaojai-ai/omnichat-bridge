@@ -105,6 +105,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.realtime_processed": "Realtime provider event processed.",
   "provider.recovery_failed": "Provider recovery failed.",
   "provider.recovery_timeout": "Provider recovery stopped responding.",
+  "provider.recovery_superseded": "Provider recovery superseded by reconnect.",
   "provider.recovery_completed": "Provider recovery completed.",
   "provider.socket_observed": "Provider realtime socket detected.",
   "provider.recovery_started": "Provider recovery started.",
@@ -180,8 +181,8 @@ const filterRoutineLog = createRoutineLogFilter();
 async function recordLog(level, area, event, message, details = {}, { remote = true } = {}) {
   try {
     details = filterRoutineLog(level, area, event, details);
-    if (details === null) return;
-    await mutateLogs(async () => {
+    if (details === null) return false;
+    return await mutateLogs(async () => {
       const stored = await readStorage([
         STORAGE.logs,
         STORAGE.logOutbox,
@@ -209,6 +210,7 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
       const outbox = (Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : [])
         .filter((id) => retainedIds.has(id));
       const shouldUpload = remote
+        && entry.level !== "debug"
         && hasServerInitialized(stored)
         && stored[STORAGE.logUploadEnabled] === true
         && Boolean(context?.config.logs_url);
@@ -218,9 +220,11 @@ async function recordLog(level, area, event, message, details = {}, { remote = t
         [STORAGE.logOutbox]: outbox,
       });
       if (shouldUpload) void scheduleLogUpload();
+      return retainedIds.has(entry.id);
     });
   } catch {
     // Logging must never interrupt bridge behavior.
+    return false;
   }
 }
 
@@ -779,7 +783,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       message.event,
       safeMessage,
       message.details,
-    ).then(() => respond({ ok: true }));
+    ).then((recorded) => respond({ ok: recorded === true }));
     return true;
   }
   if (message?.type === "clear_logs") {
@@ -2414,7 +2418,7 @@ async function ensureMigratedAccountLiveConnection(context) {
   const attemptStartedAt = Date.now();
   try {
     await updateLiveState(context, { socket: "connecting" });
-    await recordLog("info", "live", "connecting", "Connecting live command channel.", {
+    await recordLog("debug", "live", "connecting", "Connecting live command channel.", {
       provider_account_id: context.account.provider_account_id,
       reconnect_attempt: existing.reconnectAttempt,
     });
@@ -2432,9 +2436,13 @@ async function ensureMigratedAccountLiveConnection(context) {
     const socket = new WebSocket(socketUrl);
     existing.socket = socket;
     existing.handshakeTimer = setTimeout(() => {
-      if (liveConnections.get(context.key)?.socket === socket && socket.readyState === WebSocket.CONNECTING) socket.close();
+      if (liveConnections.get(context.key)?.socket === socket && socket.readyState === WebSocket.CONNECTING) {
+        disconnectReason = "handshake_timeout";
+        socket.close();
+      }
     }, 10_000);
     let openedAt = null;
+    let disconnectReason = "connection_closed";
     socket.addEventListener("open", () => {
       if (liveConnections.get(context.key)?.socket !== socket) {
         socket.close();
@@ -2480,6 +2488,7 @@ async function ensureMigratedAccountLiveConnection(context) {
         void recordLog("warn", "live", "disconnected", "Live command channel disconnected.", {
           provider_account_id: context.account.provider_account_id,
           reconnect_attempt: existing.reconnectAttempt + 1,
+          reason_code: disconnectReason,
           close_code: event.code,
           was_clean: event.wasClean,
           open_duration_ms: openedAt === null ? null : Date.now() - openedAt,
@@ -2494,7 +2503,10 @@ async function ensureMigratedAccountLiveConnection(context) {
         scheduleLiveReconnect(existing.context);
       }
     });
-    socket.addEventListener("error", () => socket.close());
+    socket.addEventListener("error", () => {
+      disconnectReason = "transport_error";
+      socket.close();
+    });
   } catch (error) {
     if (liveConnections.get(context.key) !== existing) return;
     await updateLiveState(context, {
@@ -3385,7 +3397,9 @@ async function syncOpenProvider(control, context) {
     });
     throwIfSyncCancelled(signal);
   }
-  if (!result?.ok) throw new Error(result?.error ?? `${label} recovery failed.`);
+  if (!result?.ok) throw Object.assign(new Error(result?.error ?? `${label} recovery failed.`),
+    { ...(result?.reason_code === "superseded" ? { reason_code: "superseded" } : {}),
+      recovery_diagnostic_recorded: result?.recovery_diagnostic_recorded === true });
   return result;
 }
 
@@ -3659,9 +3673,13 @@ async function runAccountSync(trigger, control, context) {
       });
       throw syncCancelledError();
     }
-    await recordUnexpected("message_sync", error, {
-      provider_account_id: providerAccountId,
-    });
+    if (error?.reason_code === "superseded") {
+      await recordLog("info", "sync", "superseded", "Sync superseded by provider reconnect.", {
+        provider_account_id: providerAccountId, reason_code: "superseded",
+      });
+    } else if (error?.recovery_diagnostic_recorded !== true) {
+      await recordUnexpected("message_sync", error, { provider_account_id: providerAccountId });
+    }
     return {
       provider: context.account.provider,
       provider_account_id: providerAccountId,
