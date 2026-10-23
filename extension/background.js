@@ -2288,7 +2288,7 @@ async function persistAccountMigration(context, source) {
     accounts[index] = context.config;
     await writeStorage({ [STORAGE.config]: { ...config, accounts } });
     migrationRetries.delete(context.key);
-    await updateScopedState(STORAGE.status, context.key, { migration_pending: false, migration_error: null,
+    await updateScopedState(STORAGE.status, context.key, { migration_pending: false, migration_error: null, migration_error_code: null,
       migration_attempt: 0, migration_retry_at: 0 });
   });
   migrationWrites = write.catch(() => {});
@@ -2309,15 +2309,29 @@ async function markMigrationPending(context, error) {
   const nextAt = Date.now() + Math.min(3600000, 30000 * 2 ** Math.min(attempt, 7));
   migrationRetries.set(context.key, { attempt, nextAt });
   await updateScopedState(STORAGE.status, context.key, { migration_pending: true,
-    migration_error: error.message, migration_attempt: attempt, migration_retry_at: nextAt });
+    migration_error: error.message, migration_error_code: error.code ?? null, migration_attempt: attempt, migration_retry_at: nextAt });
 }
 
 async function ensureMigratedAccountLiveConnection(context) {
   const migrationStored = await readStorage([STORAGE.config, STORAGE.status]);
   const storedConfig = migrationStored[STORAGE.config];
   const persistedRetry = readAccountState(migrationStored[STORAGE.status], context.key, {});
-  const retryAt = migrationRetries.get(context.key)?.nextAt ?? persistedRetry.migration_retry_at ?? 0;
+  let retryAt = migrationRetries.get(context.key)?.nextAt ?? persistedRetry.migration_retry_at ?? 0;
   const migration = accountMigration(context.config, storedConfig?.version);
+  // Permission approval can arrive while a healthy legacy socket keeps migration
+  // deferred. Reconcile the warning independently of the transport handover.
+  const permissionWarning = persistedRetry.migration_error_code === "server_permission_required"
+    || persistedRetry.migration_error === "Open configuration and save it to approve the new server access.";
+  const migrationOrigins = migration.candidate
+    ? [...new Set([migration.candidate.api_url, migration.candidate.logs_url].map((value) => `${new URL(value).origin}/*`))]
+    : [];
+  if ((permissionWarning && migration.candidate && await chrome.permissions.contains({ origins: migrationOrigins }))
+    || (!migration.candidate && migration.status !== "invalid" && persistedRetry.migration_pending)) {
+    migrationRetries.delete(context.key);
+    retryAt = 0;
+    await updateScopedState(STORAGE.status, context.key, { migration_pending: Boolean(migration.candidate),
+      migration_error: null, migration_error_code: null, migration_attempt: 0, migration_retry_at: 0 });
+  }
   const handover = liveConnections.get(context.key);
   if (handover?.migrationSource
     && JSON.stringify(handover.migrationSource) === JSON.stringify(context.config)) {
@@ -2339,8 +2353,11 @@ async function ensureMigratedAccountLiveConnection(context) {
     && ![...liveCommandResults].some(([key, command]) => key.startsWith(`${context.key}:`) && command.expiresAt === Infinity)) {
     const candidate = { ...context, config: migration.candidate };
     try {
-      const origins = [candidate.config.api_url, candidate.config.logs_url].map((value) => `${new URL(value).origin}/*`);
-      if (!await chrome.permissions.contains({ origins })) throw new Error("Open configuration and save it to approve the new server access.");
+      if (!await chrome.permissions.contains({ origins: migrationOrigins })) {
+        const error = new Error("Open configuration and save it to approve the new server access.");
+        error.code = "server_permission_required";
+        throw error;
+      }
       await signedApiPing(candidate);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
@@ -2586,6 +2603,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (connectionKeys.some((key) => changes[key])) {
     void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
   }
+});
+
+chrome.permissions.onAdded.addListener(() => {
+  void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
 });
 
 async function reconnectProviderTab(tab) {
