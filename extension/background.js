@@ -1490,7 +1490,11 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id);
   const listedTabs = await providerChatTabs(adapter);
   let trackedTab = await getTab(record?.tab_id);
-  if (trackedTab && !adapter.matchesUrl(trackedTab.url)) trackedTab = null;
+  // A failed lookup alone does not prove closure. If Chrome cannot enumerate
+  // tabs either, fail this check instead of creating a speculative replacement.
+  if (!trackedTab && Number.isInteger(record?.tab_id)) {
+    trackedTab = (await chrome.tabs.query({})).find((tab) => tab.id === record.tab_id) ?? null;
+  }
 
   if (!trackedTab && record?.tab_id !== null && record?.tab_id !== undefined) {
     record = await updateProviderRecoveryTabState(adapter.id, {
@@ -1500,24 +1504,34 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  // Prefer New Webchat, but keep a provider-redirected standalone chat usable.
-  // Never navigate an existing user tab back to a surface Shopee rejected.
+  // Recovery owns one stable tab per provider. A loading, redirected, failed,
+  // or different-account tab remains the recovery tab until it is closed.
+  // Surface preference is used only when adopting a tab for the first time.
   const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
   const candidates = [];
-  for (const tab of orderedTabs) {
+  for (const tab of trackedTab ? [trackedTab] : orderedTabs) {
+    if (!adapter.matchesUrl(tab.url)) {
+      const reason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
+      record = await updateProviderRecoveryTabState(adapter.id, {
+        state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
+      });
+      return { tab: null, record, reason };
+    }
     const status = await providerTabStatus(tab);
     if (adapter.id === "shopee" && status?.current_provider_account_id
-      && status.current_provider_account_id !== context?.account?.provider_account_id) continue;
+      && status.current_provider_account_id !== context?.account?.provider_account_id) {
+      if (trackedTab) {
+        const reason = `${providerLabel(adapter)} recovery tab is signed into a different account. Open the matching account in the existing tab.`;
+        record = await updateProviderRecoveryTabState(adapter.id, {
+          state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
+        });
+        return { tab: null, record, reason };
+      }
+      continue;
+    }
     candidates.push({ tab, status });
   }
-  const standalone = adapter.id === "shopee"
-    ? candidates.filter(({ tab }) => ["new-webchat", "webchat"].includes(adapter.surfaceForUrl?.(tab.url)))
-    : [];
-  const primary = standalone.find(({ status }) => providerTabHealthy(status, adapter)) ?? standalone[0];
-  const healthy = candidates.find(({ status }) => providerTabHealthy(status, adapter));
-  const selected = allowTabRecovery && adapter.id === "shopee"
-    ? primary
-    : healthy ?? primary ?? candidates.find(({ tab }) => tab.id === trackedTab?.id) ?? candidates[0];
+  const selected = candidates.find(({ status }) => providerTabHealthy(status, adapter)) ?? candidates[0];
   trackedTab = selected?.tab ?? null;
   if (trackedTab) {
     const isHealthy = providerTabHealthy(selected.status, adapter);
@@ -1537,10 +1551,10 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     return { tab: trackedTab, record };
   }
 
-  // A standalone chat signed into another shop cannot recover this account. Do
-  // not open duplicate tabs into that same mismatched browser session.
-  if (adapter.id === "shopee" && orderedTabs.some((tab) => ["new-webchat", "webchat"].includes(adapter.surfaceForUrl?.(tab.url)))) {
-    return { tab: null, record, reason: "Shopee Webchat is signed into a different shop. Open the matching shop in this Chrome profile." };
+  // An existing provider session for another account cannot be fixed by
+  // opening more tabs into the same session.
+  if (orderedTabs.length) {
+    return { tab: null, record, reason: `${providerLabel(adapter)} is signed into a different shop or account. Open the matching account in the existing tab.` };
   }
 
   if (!allowTabRecovery) {
@@ -1845,7 +1859,6 @@ async function runProviderHealthWatchdogOnce() {
         await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
           provider: adapter.id,
           tab_id: tab.id,
-          url: typeof tab.url === "string" ? tab.url.slice(0, 240) : null,
         });
         throw new Error(`${providerLabel(adapter)} tab is on a redirect or sign-in page.`);
       }
