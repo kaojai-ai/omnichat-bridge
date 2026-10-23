@@ -70,7 +70,7 @@
   }
 
   const log = (level, event, message, details = {}) => {
-    void sendRuntimeMessage({
+    return sendRuntimeMessage({
       type: "record_log",
       level,
       area: "provider",
@@ -802,14 +802,21 @@
     }
     const pending = recoveries.get(message.request_id);
     if (!message.ok) {
-      log("error", "recovery_failed", "Provider recovery failed.", {
+      const superseded = message.reason_code === "superseded";
+      const recorded = await log(superseded ? "info" : "error", superseded ? "recovery_superseded" : "recovery_failed",
+        superseded ? "Provider recovery superseded by reconnect." : "Provider recovery failed.", {
+        ...(["superseded", "provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list",
+          "history_not_ready", "session_changed", "persistence_failed", "recovery_failed"].includes(message.reason_code)
+          ? { reason_code: message.reason_code } : {}),
+        conversations_checked: message.conversations_checked,
+        duration_ms: message.duration_ms,
         ...providerFailureDiagnostics(message),
         request_id: message.request_id,
         provider_account_id: message.provider_account_id,
       });
       if (pending) {
         recoveries.delete(message.request_id);
-        pending.resolve(message);
+        pending.resolve({ ...message, recovery_diagnostic_recorded: !superseded && recorded?.ok === true });
       }
       return;
     }
@@ -829,7 +836,9 @@
       recoveries.delete(message.request_id);
       pending.resolve(result);
     }
-    log("info", "recovery_completed", "Provider recovery completed.", {
+    log(automaticPoll ? "debug" : "info", "recovery_completed", "Provider recovery completed.", {
+      conversations_checked: message.conversations_checked,
+      duration_ms: message.duration_ms,
       provider_account_id: message.provider_account_id,
       recovered: result.recovered,
       queued: result.queued,

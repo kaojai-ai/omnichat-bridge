@@ -520,7 +520,7 @@
       signal?.addEventListener("abort", onAbort, { once: true });
       timer = setTimeout(() => {
         controller.abort();
-        reject(new Error("Shopee provider request timed out."));
+        reject(Object.assign(new Error("Shopee provider request timed out."), { name: "TimeoutError", reason_code: "provider_timeout" }));
       }, Math.max(1, Math.min(15_000, timeoutMs)));
     });
     try {
@@ -528,7 +528,7 @@
       return await Promise.race([
         (async () => {
           const response = await state.nativeFetch(request, { signal: controller.signal });
-          if (!response.ok) throw Object.assign(new Error(`Shopee provider request returned ${response.status}.`), { http_status: response.status });
+          if (!response.ok) throw Object.assign(new Error(`Shopee provider request returned ${response.status}.`), { http_status: response.status, reason_code: "provider_rejected" });
           return response.json();
         })(),
         timeout,
@@ -674,7 +674,7 @@
   const waitForAcknowledgement = (requestId) => new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       state.acknowledgements.delete(requestId);
-      reject(new Error("Local message queue acknowledgement timed out."));
+      reject(Object.assign(new Error("Local message queue acknowledgement timed out."), { name: "TimeoutError", reason_code: "queue_ack_timeout" }));
     }, 20_000);
     state.acknowledgements.set(requestId, (message) => {
       clearTimeout(timeout);
@@ -1522,7 +1522,7 @@
     if (sendLookup && (!Array.isArray(body) && ![
       body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
     ].some(Array.isArray) || shopeeError(body))) {
-      throw new Error("Shopee returned an invalid conversation list.");
+      throw Object.assign(new Error("Shopee returned an invalid conversation list."), { reason_code: "invalid_conversation_list" });
     }
     const allItems = conversationItems(body);
     mergeAccounts(accountsFromPayload(body), null, publish);
@@ -1617,7 +1617,7 @@
     let latestCursor = null;
     for (let page = 0; ; page += 1) {
       const historyTemplate = state.historyTemplate ?? state.getTemplate;
-      if (!historyTemplate) throw new Error("Shopee message history is still initializing. Refresh Seller Chat.");
+      if (!historyTemplate) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
       const sourceUrl = new URL(historyTemplate.url);
       const url = new URL(surfaceProfile().historyPath(conversation.id), sourceUrl.origin);
       for (const key of authQueryKeys) {
@@ -1677,7 +1677,7 @@
     const assertSessionUnchanged = () => {
       if (state.recoveryEpoch !== recoveryEpoch
         || (state.currentAccountId && state.currentAccountId !== accountId)) {
-        throw new Error("Shopee session changed. Retry sync for the open shop.");
+        throw Object.assign(new Error("Shopee session changed. Retry sync for the open shop."), { reason_code: "session_changed" });
       }
     };
     state.recoveryInFlight = true;
@@ -1754,7 +1754,7 @@
         });
         const acknowledgement = await waitForAcknowledgement(bootstrapRequestId);
         if (!acknowledgement.ok) {
-          throw new Error(acknowledgement.error ?? "Could not save bootstrap state.");
+          throw Object.assign(new Error(acknowledgement.error ?? "Could not save bootstrap state."), { reason_code: "persistence_failed" });
         }
       } else {
         recoveryConversations = sorted;
@@ -1868,7 +1868,7 @@
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
             const acknowledgement = await waitForAcknowledgement(batchRequestId);
             if (!acknowledgement.ok) {
-              throw new Error(acknowledgement.error ?? "Could not queue recovered messages.");
+              throw Object.assign(new Error(acknowledgement.error ?? "Could not queue recovered messages."), { reason_code: "persistence_failed" });
             }
             return acknowledgement;
           },
@@ -1885,7 +1885,7 @@
           });
           const backfillAcknowledgement = await waitForAcknowledgement(backfillRequestId);
           if (!backfillAcknowledgement.ok) {
-            throw new Error(backfillAcknowledgement.error ?? "Could not save history backfill.");
+            throw Object.assign(new Error(backfillAcknowledgement.error ?? "Could not save history backfill."), { reason_code: "persistence_failed" });
           }
           checkpoint.history_backfill = {
             ...(checkpoint.history_backfill ?? {}),
@@ -1917,7 +1917,7 @@
           });
           const acknowledgement = await waitForAcknowledgement(cursorRequestId);
           if (!acknowledgement.ok) {
-            throw new Error(acknowledgement.error ?? "Could not save sync cursor.");
+            throw Object.assign(new Error(acknowledgement.error ?? "Could not save sync cursor."), { reason_code: "persistence_failed" });
           }
         }
         completedConversations += 1;
@@ -1946,7 +1946,7 @@
         });
         const windowAcknowledgement = await waitForAcknowledgement(windowRequestId);
         if (!windowAcknowledgement.ok) {
-          throw new Error(windowAcknowledgement.error ?? "Could not save history window.");
+          throw Object.assign(new Error(windowAcknowledgement.error ?? "Could not save history window."), { reason_code: "persistence_failed" });
         }
         checkpoint.history_window_days = historyDays;
         postLog("info", "history_window_completed", "Configured history window was loaded.", {
@@ -1970,16 +1970,10 @@
         recovered: parsed,
         queued,
         conversations_checked: checked,
+        duration_ms: Date.now() - startedAt,
         watermark: Number.isFinite(nextWatermarkMs)
           ? new Date(nextWatermarkMs).toISOString()
           : checkpoint?.watermark ?? null,
-      });
-      postLog("info", "recovery_completed", "Shopee recovery completed.", {
-        provider_account_id: accountId,
-        parsed,
-        queued,
-        conversations_checked: checked,
-        duration_ms: Date.now() - startedAt,
       });
     } catch (error) {
       if (state.recoveryEpoch !== recoveryEpoch) {
@@ -1988,18 +1982,24 @@
           request_id: requestId,
           provider_account_id: accountId,
           ok: false,
+          reason_code: "superseded",
           error: "Recovery was superseded by a bridge reconnect.",
         });
         return;
       }
-      postLog("error", "recovery_failed", error instanceof Error ? error.message : String(error), {
-        provider_account_id: accountId,
-        current_provider_account_id: state.currentAccountId ?? null,
-        conversations_checked: checked,
+      // Content owns the recovery outcome log. Keep diagnostic fields bounded;
+      // preserve the existing UI error separately.
+      const status = error?.http_status;
+      const reasonCode = ["provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list",
+        "history_not_ready", "session_changed", "persistence_failed"].includes(error?.reason_code) ? error.reason_code : "recovery_failed";
+      post({ type: "recovery_complete", request_id: requestId, provider_account_id: accountId,
+        ok: false, error: String(error), reason_code: reasonCode, conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
-        ...errorDetails(error),
-      });
-      post({ type: "recovery_complete", request_id: requestId, ok: false, error: String(error) });
+        diagnostics: { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+          ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { http_status: status } : {}),
+          timed_out: error?.name === "TimeoutError",
+          error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name) ? error.name : "Error",
+        } });
     } finally {
       if (state.recoveryEpoch === recoveryEpoch && state.recoveryRequestId === requestId) {
         state.recoveryInFlight = false;

@@ -308,3 +308,33 @@ test("unrecognized native codes cannot carry arbitrary provider strings into sup
   assert.equal(entry.details.provider_code_present, true);
   assert.doesNotMatch(JSON.stringify(entry), /privateCustomerValue123/);
 });
+
+test("DEBUG stays available locally without consuming the remote outbox", async () => {
+  const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
+  const storage = { upload: true };
+  const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
+    STORAGE: { logs: "logs", logOutbox: "outbox", logUploadEnabled: "upload" },
+    chrome: { storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
+    filterRoutineLog: (_level, _area, _event, details) => details,
+    mutateLogs: fn => fn(), readStorage: async () => storage,
+    writeStorage: async value => Object.assign(storage, value),
+    accountContextFor: () => ({ config: { logs_url: "https://example.invalid" } }),
+    hasServerInitialized: () => true, createLogEntry, pruneLogs, availableLogBudget,
+    scheduleLogUpload: () => {},
+  });
+  await record("debug", "live", "connecting", "Connecting.");
+  assert.equal(storage.logs.length, 1);
+  assert.equal(storage.outbox.length, 0);
+  await record("error", "provider", "recovery_failed", "Failed.");
+  assert.equal(storage.logs.length, 2);
+  assert.equal(storage.outbox.length, 1);
+});
+
+test("log storage failure is nonthrowing and does not acknowledge persistence", async () => {
+  const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
+  const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
+    filterRoutineLog: (_level, _area, _event, details) => details,
+    mutateLogs: async () => { throw new Error("Storage unavailable"); },
+  });
+  assert.equal(await record("error", "provider", "recovery_failed", "Failed."), false);
+});

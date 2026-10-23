@@ -41,7 +41,7 @@ function harness(overrides = {}) {
     Date: { now: () => now },
     liveEndpoint: () => true,
     updateLiveState: async () => {},
-    recordLog: async (_level, _area, event, _message, details) => logs.push({ event, details }),
+    recordLog: async (level, _area, event, _message, details) => logs.push({ level, event, details }),
     recordUnexpected: async () => {},
     signedLiveTicket: async () => { ticketCalls++; return ticket.promise; },
     sendConnectionStatus: async () => {},
@@ -260,7 +260,7 @@ test("readiness diagnostics publish changed states once without recording messag
     liveConnections: new Map([[account.key, connection]]),
     WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
     scheduleLeaderStatusRefresh: () => {}, scheduleKeepalive: () => {},
-    recordLog: async (_level, _area, event, _message, details) => logs.push({ event, details }),
+    recordLog: async (level, _area, event, _message, details) => logs.push({ level, event, details }),
   });
   await send(socket, account);
   await send(socket, account);
@@ -476,4 +476,25 @@ test("approval bypasses permission backoff when a natural reconnect is available
   await h.ensureAccountLiveConnection(account);
   assert.deepEqual(calls, ["ping", "status"]);
   assert.equal(h.liveConnections.get(account.key).config, candidate);
+});
+
+
+test("intentional stop is silent but clean remote closure remains a warning", async () => {
+  const h = harness();
+  h.resolveTicket();
+  await h.ensureAccountLiveConnection(account);
+  h.sockets[0].open();
+  h.stopLiveConnection();
+  assert.equal(h.logs.some(log => log.event === "disconnected"), false);
+  await h.ensureAccountLiveConnection(account);
+  h.sockets[1].open();
+  h.advance(1200);
+  h.sockets[1].close();
+  const disconnected = h.logs.find(log => log.event === "disconnected");
+  assert.equal(disconnected.level, "warn");
+  assert.equal(disconnected.details.reason_code, "connection_closed");
+  assert.equal(disconnected.details.close_code, 1000);
+  assert.equal(disconnected.details.was_clean, true);
+  assert.equal(disconnected.details.open_duration_ms, 1200);
+  assert.equal(disconnected.details.reconnect_attempt, 1);
 });

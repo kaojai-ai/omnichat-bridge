@@ -987,6 +987,9 @@ for (const hangBody of [false, true]) {
     const failed = await bridge.sync("100000001", "hung-initial");
     assert.equal(failed.ok, false);
     assert.match(failed.error, /timed out/);
+    assert.equal(failed.reason_code, "provider_timeout");
+    assert.equal(failed.diagnostics.timed_out, true);
+    assert.equal(failed.diagnostics.error_name, "TimeoutError");
     assert.equal(bridge.state.recoveryInFlight, false);
     bridge.setResponse(retryListPath, []);
     const retried = await bridge.sync("100000001", "fresh-initial");
