@@ -14,8 +14,8 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false } = {}) {
-  const adapter = { id: provider, matchesUrl: () => true,
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false } = {}) {
+  const adapter = { id: provider, matchesUrl: () => !redirected,
     surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre" };
   const context = { key: `${provider}:account`, adapter, account: { provider_account_id: "account" } };
   const primaryUrl = "https://seller.shopee.co.th/new-webchat/conversations";
@@ -32,7 +32,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerAdapters: { list: () => [adapter] },
     providerRecoveryContexts: (contexts) => contexts,
     providerRecoveryRecord: () => record,
-    providerChatTabs: async () => tabOpen ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
+    providerChatTabs: async () => tabOpen && !redirected ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
     providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
@@ -61,7 +61,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     activeLiveCommandContexts: async () => [],
     stopLiveConnection: () => {},
     chrome: { tabs: {
-      create: async () => { calls.created++; return tab; },
+      create: async () => { calls.created++; tabOpen = true; return tab; },
       reload: async () => { calls.reloaded++; },
     } },
   };
@@ -117,9 +117,9 @@ test("turning recovery off still checks a recovered tab during an old retry back
   assert.ok(calls.checked > 0);
 });
 
-test("automatic recovery still opens one missing provider tab", async () => {
+test("automatic recovery opens one missing provider tab and reuses its replacement", async () => {
   const { run, calls } = harness({ recoveryEnabled: true, tabOpen: false });
-  await run();
+  for (let tick = 0; tick < 4; tick++) await run();
   assert.equal(calls.created, 1);
   assert.equal(calls.live.state, "ready");
 });
@@ -199,4 +199,26 @@ test("fresh matching provider health clears stale attention without hiding unhea
       assert.equal(Object.hasOwn(patch, "provider_recovery_state"), false);
     }
   }
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: repeated signed-out checks retain the existing login tab`, async () => {
+    const { run, calls } = harness({ provider, recoveryEnabled: true, redirected: true,
+      healthy: false, record: { tab_id: 42, opened_by_extension: true } });
+    for (let tick = 0; tick < 4; tick++) await run();
+    assert.equal(calls.created, 0);
+    assert.equal(calls.reloaded, 0);
+    assert.equal(calls.live.tabId, 42);
+    assert.equal(calls.live.state, "needs_attention");
+    assert.match(calls.live.reason, /Sign in using the existing tab/);
+  });
+}
+
+test("Shopee: a tracked same-origin sign-in page does not open another chat", async () => {
+  const { run, calls } = harness({ provider: "shopee", recoveryEnabled: true,
+    healthy: false, chatOpen: false, record: { tab_id: 42 } });
+  for (let tick = 0; tick < 4; tick++) await run();
+  assert.equal(calls.created, 0);
+  assert.equal(calls.reloaded, 0);
+  assert.equal(calls.live.tabId, 42);
 });

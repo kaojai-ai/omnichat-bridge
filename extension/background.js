@@ -1490,7 +1490,6 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id);
   const listedTabs = await providerChatTabs(adapter);
   let trackedTab = await getTab(record?.tab_id);
-  if (trackedTab && !adapter.matchesUrl(trackedTab.url)) trackedTab = null;
 
   if (!trackedTab && record?.tab_id !== null && record?.tab_id !== undefined) {
     record = await updateProviderRecoveryTabState(adapter.id, {
@@ -1518,6 +1517,18 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   const selected = allowTabRecovery && adapter.id === "shopee"
     ? primary
     : healthy ?? primary ?? candidates.find(({ tab }) => tab.id === trackedTab?.id) ?? candidates[0];
+  // A sign-out can redirect outside the chat URL patterns (including LINE's
+  // identity host). Keep the live tab ID so each watchdog tick does not create
+  // another login tab. Do not navigate or reload it while sign-in is in progress.
+  const trackedStatus = candidates.find(({ tab }) => tab.id === trackedTab?.id)?.status;
+  if (!selected && trackedTab && (!adapter.matchesUrl(trackedTab.url)
+    || (!trackedStatus?.current_provider_account_id && !providerTabHealthy(trackedStatus, adapter)))) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention,
+      reason: `${providerLabel(adapter)} tab is on a redirect or sign-in page. Sign in using the existing tab.`,
+    });
+    return { tab: null, record, reason: record.reason };
+  }
   trackedTab = selected?.tab ?? null;
   if (trackedTab) {
     const isHealthy = providerTabHealthy(selected.status, adapter);
@@ -1845,7 +1856,6 @@ async function runProviderHealthWatchdogOnce() {
         await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
           provider: adapter.id,
           tab_id: tab.id,
-          url: typeof tab.url === "string" ? tab.url.slice(0, 240) : null,
         });
         throw new Error(`${providerLabel(adapter)} tab is on a redirect or sign-in page.`);
       }
