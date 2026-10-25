@@ -9,7 +9,7 @@ const start = source.indexOf("async function resolveProviderRecoveryTab(");
 const end = source.indexOf("function providerRecoveryFailureReason(", start);
 
 function harness(provider, { tracked = true, url = "https://provider.example/chat", status = null,
-  lookupFails = false, queryFails = false, tabs = null } = {}) {
+  lookupFails = false, queryFails = false, tabs = null, alternativeStatus = { healthy: true, current_provider_account_id: "account" } } = {}) {
   const original = { id: 42, url, status: "complete" };
   const alternative = { id: 43, url: "https://provider.example/chat" };
   const openTabs = tabs ?? [original, alternative];
@@ -24,7 +24,7 @@ function harness(provider, { tracked = true, url = "https://provider.example/cha
     getTab: async id => lookupFails ? null : openTabs.find(tab => tab.id === id),
     providerChatTabs: async () => openTabs.filter(tab => adapter.matchesUrl(tab.url)),
     orderProviderTabs: (_, tabs) => tabs,
-    providerTabStatus: async tab => { calls.status.push(tab.id); return tab.id === 43 ? { healthy: true } : status; },
+    providerTabStatus: async tab => { calls.status.push(tab.id); return tab.id === 43 ? alternativeStatus : status; },
     providerTabHealthy: status => status?.healthy === true,
     providerLabel: () => provider,
     updateProviderRecoveryTabState: async (_, patch) => (record = { ...record, ...patch }),
@@ -48,21 +48,18 @@ for (const provider of ["shopee", "line_oa"]) {
     "unhealthy provider": { status: { healthy: false } },
     "wrong account": { status: { healthy: true, current_provider_account_id: "other" } },
   })) {
-    test(`${provider}: ${scenario} retains tracked ID despite a healthy alternative`, async () => {
+    test(`${provider}: ${scenario} uses a healthy existing matching tab without creating another`, async () => {
       const h = harness(provider, options);
       for (let tick = 0; tick < 3; tick++) await h.run();
       assert.equal(h.calls.created, 0);
-      assert.equal(h.record().tab_id, 42);
-      assert.ok(!h.calls.status.includes(43));
-      if (scenario === "wrong account") {
-        // LINE may be on another configured OA; its existing sync path resolves
-        // that account. The resolver's shop mismatch guard is Shopee-specific.
-        assert.equal(h.record().state, provider === "shopee" ? "needs_attention" : "ready");
-      }
+      const keepHealthyLineTab = provider === "line_oa" && scenario === "wrong account";
+      assert.equal(h.record().tab_id, keepHealthyLineTab ? 42 : 43);
+      assert.equal(h.calls.status.includes(43), !keepHealthyLineTab);
+      assert.equal(h.record().state, "ready");
     });
   }
   test(`${provider}: lookup failure does not replace a tab still in Chrome's tab list`, async () => {
-    const h = harness(provider, { lookupFails: true });
+    const h = harness(provider, { lookupFails: true, status: { healthy: true, current_provider_account_id: "account" } });
     await h.run();
     assert.equal(h.record().tab_id, 42);
     assert.equal(h.calls.created, 0);
@@ -86,3 +83,21 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(h.record().tab_id, 43);
   });
 }
+
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: retains a signed-out tab when no healthy alternative exists`, async () => {
+    const h = harness(provider, { url: "https://access.line.me/", alternativeStatus: { healthy: false } });
+    const result = await h.run();
+    assert.equal(result.tab, null);
+    assert.equal(h.record().tab_id, 42);
+    assert.equal(h.calls.created, 0);
+  });
+}
+
+test("Shopee never adopts a healthy alternative signed into another shop", async () => {
+  const h = harness("shopee", { alternativeStatus: { healthy: true, current_provider_account_id: "other" } });
+  await h.run();
+  assert.equal(h.record().tab_id, 42);
+  assert.equal(h.calls.created, 0);
+});

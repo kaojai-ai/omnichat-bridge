@@ -748,3 +748,37 @@ for (const persisted of [true, false]) {
     assert.equal(result.recovery_diagnostic_recorded, persisted);
   });
 }
+
+test("LINE account reset during checkpoint loading leaves other OA recovery running", async () => {
+  const accounts = ["oa-a", "oa-b"].map(id => ({ provider: "line_oa", provider_account_id: id, bot_id: `bot-${id}` }));
+  const checkpoints = new Map();
+  const bridge = contentBridge("/bot-oa-a/chats", {
+    provider: "line_oa", localConsent: true,
+    storage: { config: { accounts }, detected_accounts: accounts },
+    runtimeHandler: message => message.type === "get_sync_state"
+      ? new Promise(resolve => checkpoints.set(message.provider_account_id, resolve)) : { ok: true },
+  });
+  const a = bridge.sendCommand({ type: "sync_now_v3", provider_account_id: "oa-a", bot_id: "bot-oa-a", request_id: "a" });
+  const b = bridge.sendCommand({ type: "sync_now_v3", provider_account_id: "oa-b", bot_id: "bot-oa-b", request_id: "b" });
+  await new Promise(resolve => setImmediate(resolve));
+  await bridge.requestMessage({ type: "cancel_sync_v3", provider_account_id: "oa-a" });
+  for (const resolve of checkpoints.values()) resolve({ ok: true, checkpoint: {} });
+  assert.equal((await a).ok, false);
+  await new Promise(resolve => setImmediate(resolve));
+  const requests = bridge.runtimeMessages.filter(message => message.type === "sync_v3");
+  assert.deepEqual(requests.map(message => message.provider_account_id), ["oa-b"]);
+  await bridge.providerEvent({ type: "recovery_complete", request_id: "b", provider_account_id: "oa-b", ok: true, recovered: 0 });
+  assert.equal((await b).ok, true);
+});
+
+test("LINE reset after recovery completes forwards its account and retains per-account polling status", async () => {
+  const bridge = contentBridge("/bot-1/chats", { provider: "line_oa" });
+  await bridge.providerEvent({ type: "provider_status", provider_polling_active: true,
+    provider_polling_account_ids: ["oa-b"], surface_ready: true, realtime_connected: true });
+  const status = await bridge.requestMessage({ type: "get_provider_status_v3" });
+  assert.deepEqual(plain(status.provider_polling_account_ids), ["oa-b"]);
+  await bridge.requestMessage({ type: "cancel_sync_v3", provider_account_id: "oa-a" });
+  const cancellation = bridge.runtimeMessages.find(message => message.type === "cancel_sync_v3");
+  assert.equal(cancellation.provider_account_id, "oa-a");
+  assert.equal(cancellation.request_id, undefined);
+});

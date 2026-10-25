@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {} } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -56,6 +56,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
   const requests = [];
   const sentPayloads = [];
   const uploads = [];
+  const intervals = new Map();
+  let nextIntervalId = 1;
   const chatIds = Array.from({ length: chatCount }, (_value, index) => `chat-${index + 1}`);
   const window = {
     location: { origin, pathname: "/bot-1/chats" },
@@ -82,6 +84,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         };
       }
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
+        if (beforeChatRequest) await beforeChatRequest(url);
         if (chatError) throw chatError;
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
@@ -195,8 +198,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       basicIdFromHtml: () => basicId,
     },
     crypto: { randomUUID: () => "poll-id" },
-    setInterval: () => 1,
-    clearInterval() {},
+    setInterval(callback) { const id = nextIntervalId++; intervals.set(id, callback); return id; },
+    clearInterval(id) { intervals.delete(id); },
     setTimeout,
     clearTimeout,
     queueMicrotask,
@@ -209,6 +212,11 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     requests,
     sentPayloads,
     uploads,
+    dispatch(data) {
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", ...data } });
+    },
+    tick() { for (const callback of [...intervals.values()]) callback(); },
+    get intervalCount() { return intervals.size; },
     async captureManualSend(payload) {
       await context.window.fetch(`${origin}/api/v1/bots/bot-1/chats/chat-1/messages/send`, {
         method: "POST",
@@ -1002,4 +1010,113 @@ test("LINE OA confirmation errors do not report the successful send HTTP status"
   assert.equal(result.diagnostics.delivery_uncertain, true);
   assert.equal(bridge.sentPayloads.length, 1);
   assert.doesNotMatch(JSON.stringify(result), /private|token/);
+});
+
+
+async function settleBridge() {
+  for (let index = 0; index < 12; index += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+function startAccount(bridge, account, requestId = `sync-${account}`) {
+  bridge.dispatch({ type: "sync_v3", request_id: requestId, provider_account_id: account, bot_id: "bot-1" });
+}
+
+function lastPollingStatus(bridge) {
+  return plain(bridge.posts.filter((post) => post.type === "provider_status").at(-1));
+}
+
+test("LINE OA restores and continuously polls three accounts from one tab", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
+  await settleBridge();
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@second", "@third"]);
+  assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete" && post.ok).length, 3);
+  assert.equal(bridge.intervalCount, 1);
+  bridge.tick();
+  await settleBridge();
+  const periodic = bridge.posts.filter((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:"));
+  assert.deepEqual(periodic.map((post) => post.provider_account_id), ["@first", "@second", "@third"]);
+  bridge.dispose();
+});
+
+test("LINE OA scoped cancellation preserves other active and queued account polling", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let blockNext = true;
+  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  startAccount(bridge, "@first");
+  startAccount(bridge, "@second");
+  startAccount(bridge, "@third");
+  await settleBridge();
+  bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@second", request_id: "sync-@second" });
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@third"]);
+  bridge.dispatch({ type: "cancel_sync_v3", request_id: "sync-@first" });
+  await settleBridge();
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@third"]);
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.provider_account_id === "@third" && post.ok));
+  release();
+  await settleBridge();
+  assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && ["@first", "@second"].includes(post.provider_account_id)), false);
+  bridge.tick();
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:") && post.provider_account_id === "@third"));
+  bridge.dispose();
+});
+
+test("LINE OA stale cancellation cannot stop a replacement request or completed account polling", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let blockNext = true;
+  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  startAccount(bridge, "@first", "old");
+  await settleBridge();
+  bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@first", request_id: "old" });
+  startAccount(bridge, "@first", "replacement");
+  bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@first", request_id: "old" });
+  bridge.dispatch({ type: "cancel_sync_v3", request_id: "unknown" });
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "replacement" && post.ok));
+  bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@first", request_id: "replacement" });
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first"]);
+  assert.equal(bridge.intervalCount, 1);
+  release();
+  await settleBridge();
+  assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "old"), false);
+  bridge.dispose();
+});
+
+test("LINE OA global stop clears every polling registration and reports inactive", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
+  await settleBridge();
+  bridge.dispatch({ type: "cancel_sync_v3" });
+  assert.equal(lastPollingStatus(bridge).provider_polling_active, false);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
+  assert.equal(bridge.intervalCount, 0);
+  const count = bridge.requests.length;
+  bridge.tick();
+  await settleBridge();
+  assert.equal(bridge.requests.length, count);
+  bridge.dispose();
+});
+
+
+test("LINE OA queued recoveries stay active without masking a stalled active request", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let blockNext = true;
+  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  startAccount(bridge, "@first", "active");
+  startAccount(bridge, "@second", "queued");
+  startAccount(bridge, "@third", "poll:periodic");
+  await settleBridge();
+  bridge.posts.length = 0;
+  for (let tick = 0; tick < 5; tick += 1) bridge.tick();
+  const activity = bridge.posts.filter((post) => post.type === "recovery_activity");
+  assert.equal(activity.length, 5);
+  assert.deepEqual(activity.map((post) => [post.request_id, post.provider_account_id]), Array.from({ length: 5 }, () => ["queued", "@second"]));
+  release();
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
+  bridge.dispose();
 });

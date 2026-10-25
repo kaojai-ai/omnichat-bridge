@@ -57,7 +57,7 @@ const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 1;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -886,7 +886,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_activity") {
-    const control = activeSyncControl;
+    const control = syncControlForMessage(message, _sender?.tab?.id);
     if (control && control.tabId === _sender?.tab?.id && control.providerRequestId === message.request_id) {
       control.touchRecovery?.();
     }
@@ -894,14 +894,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return false;
   }
   if (message?.type === "sync_progress") {
-    const attempt = activeSyncControl;
+    const attempt = syncControlForMessage(message, _sender?.tab?.id);
     if (!attempt || attempt.tabId !== _sender?.tab?.id
       || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
       respond({ ok: true, skipped: "superseded" });
       return false;
     }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
+      if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -927,14 +927,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_phase") {
-    const attempt = activeSyncControl;
+    const attempt = syncControlForMessage(message, _sender?.tab?.id);
     if (!attempt || attempt.tabId !== _sender?.tab?.id
       || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
       respond({ ok: true, skipped: "superseded" });
       return false;
     }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
+      if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -1069,6 +1069,18 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   return undefined;
 });
+
+function isCurrentSyncControl(control) {
+  return Boolean(control && (activeSyncControl === control
+    || providerAutomaticRecoveries.get(control.accountKey) === control));
+}
+
+function syncControlForMessage(message, tabId) {
+  const requestId = String(message.request_id ?? "").split(":")[0];
+  return [activeSyncControl, ...providerAutomaticRecoveries.values()].find((control) => control
+    && !control.controller.signal.aborted
+    && control.tabId === tabId && control.providerRequestId === requestId);
+}
 
 async function initializeAndStartSync(trigger) {
   await queueLiveStateWrite(() => writeStorage({
@@ -1508,37 +1520,46 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  // Recovery owns one stable tab per provider. A loading, redirected, failed,
-  // or different-account tab remains the recovery tab until it is closed.
-  // Surface preference is used only when adopting a tab for the first time.
+  // Prefer the tracked tab, but adopt an already-open healthy matching tab
+  // when it cannot recover. Never create another tab while the tracked one exists.
   const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
+  const tabs = trackedTab
+    ? [trackedTab, ...orderedTabs.filter((tab) => tab.id !== trackedTab.id)]
+    : orderedTabs;
   const candidates = [];
-  for (const tab of trackedTab ? [trackedTab] : orderedTabs) {
+  const healthyCandidate = ({ status }) => providerTabHealthy(status, adapter)
+    && (adapter.id !== "shopee"
+      || status?.current_provider_account_id === context?.account?.provider_account_id);
+  let blockedReason = null;
+  for (const tab of tabs) {
     if (!adapter.matchesUrl(tab.url)) {
-      const reason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
-      record = await updateProviderRecoveryTabState(adapter.id, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
-      });
-      return { tab: null, record, reason };
+      if (tab.id === trackedTab?.id) {
+        blockedReason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
+      }
+      continue;
     }
     const status = await providerTabStatus(tab);
     if (adapter.id === "shopee" && status?.current_provider_account_id
       && status.current_provider_account_id !== context?.account?.provider_account_id) {
-      if (trackedTab) {
-        const reason = `${providerLabel(adapter)} recovery tab is signed into a different account. Open the matching account in the existing tab.`;
-        record = await updateProviderRecoveryTabState(adapter.id, {
-          state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
-        });
-        return { tab: null, record, reason };
+      if (tab.id === trackedTab?.id) {
+        blockedReason = `${providerLabel(adapter)} recovery tab is signed into a different account. Open the matching account in the existing tab.`;
       }
       continue;
     }
     candidates.push({ tab, status });
+    if (healthyCandidate({ status })) break;
   }
-  const selected = candidates.find(({ status }) => providerTabHealthy(status, adapter)) ?? candidates[0];
+  const selected = candidates.find(healthyCandidate)
+    ?? (trackedTab ? candidates.find(({ tab }) => tab.id === trackedTab.id) : candidates[0]);
+  if (!selected && trackedTab) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention, reason: blockedReason,
+    });
+    return { tab: null, record, reason: blockedReason };
+  }
   trackedTab = selected?.tab ?? null;
   if (trackedTab) {
-    const isHealthy = providerTabHealthy(selected.status, adapter);
+    const isHealthy = healthyCandidate(selected);
     if (record?.tab_id !== trackedTab.id
       || (isHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready)) {
       record = await updateProviderRecoveryTabState(adapter.id, {
@@ -1772,8 +1793,10 @@ function startUnattendedProviderSync(tab, context) {
     tabId,
     adapter,
     preferredTabId: tabId,
+    restorePolling: true,
+    accountKey: recoveryKey,
   };
-  const request = runAccountSync("automatic", control, context).then((result) => {
+  void runAccountSync("automatic", control, context).then((result) => {
     if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
     providerAutomaticRetryAt.delete(recoveryKey);
@@ -1789,9 +1812,9 @@ function startUnattendedProviderSync(tab, context) {
       recovery_attempt: attempts,
     });
   }).finally(() => {
-    if (providerAutomaticRecoveries.get(recoveryKey) === request) providerAutomaticRecoveries.delete(recoveryKey);
+    if (providerAutomaticRecoveries.get(recoveryKey) === control) providerAutomaticRecoveries.delete(recoveryKey);
   });
-  providerAutomaticRecoveries.set(recoveryKey, request);
+  providerAutomaticRecoveries.set(recoveryKey, control);
   void recordLog("info", "recovery", "provider_sync_started", `${providerLabel(adapter)} unattended recovery sync started.`, {
     provider: adapter.id,
     provider_account_id: context.account.provider_account_id,
@@ -1871,9 +1894,6 @@ async function runProviderHealthWatchdogOnce() {
       if (!providerTabHealthy(status, adapter)) {
         throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
       }
-      if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
-        startUnattendedProviderSync(tab, context);
-      }
       const record = recovery.record?.tab_id === tab.id
         ? await updateProviderRecoveryTabState(adapter.id, {
           state: PROVIDER_RECOVERY_STATES.ready,
@@ -1884,11 +1904,17 @@ async function runProviderHealthWatchdogOnce() {
           last_reload_at: recovery.record?.last_reload_at ?? null,
         })
         : recovery.record;
-      await updateProviderRecoveryLiveState(contexts, adapter, {
-        state: PROVIDER_RECOVERY_STATES.ready,
-        reason: null,
-        tabId: record?.tab_id ?? tab.id,
-      });
+      for (const item of matchingContexts) {
+        const polling = adapter.id !== "line_oa" || (status.provider_polling_active === true
+          && Array.isArray(status.provider_polling_account_ids)
+          && status.provider_polling_account_ids.includes(item.account.provider_account_id));
+        if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
+        await updateProviderRecoveryLiveState([item], adapter, {
+          state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
+          reason: polling ? null : "LINE OA polling is not running for this account. Sync this account to resume.",
+          tabId: record?.tab_id ?? tab.id,
+        });
+      }
     } catch (error) {
       await recordUnexpected("provider_watchdog", error, {
         provider: adapter.id,
@@ -3359,7 +3385,10 @@ async function syncOpenProvider(control, context) {
   }
   throwIfSyncCancelled(signal);
   if (control.manualRestart) {
-    await sendProviderMessage(tab.id, { type: "cancel_sync_v3", provider: adapter.id }, {
+    await sendProviderMessage(tab.id, {
+      type: "cancel_sync_v3", provider: adapter.id,
+      provider_account_id: context.account.provider_account_id,
+    }, {
       label, operation: "reset recovery", signal, timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
     });
     if (adapter.id === "shopee") {
@@ -3412,7 +3441,11 @@ function restartSync() {
       activeSyncControl = null;
       activeSync = null;
       if (previous?.tabId) {
-        await sendProviderMessage(previous.tabId, { type: "cancel_sync_v3" }, {
+        await sendProviderMessage(previous.tabId, {
+          type: "cancel_sync_v3",
+          ...(previous.providerAccountId ? { provider_account_id: previous.providerAccountId } : {}),
+          ...(previous.providerRequestId ? { request_id: previous.providerRequestId } : {}),
+        }, {
           label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
         }).catch(() => undefined);
       }
@@ -3520,6 +3553,7 @@ async function clearPersistedSync() {
 async function runAccountSync(trigger, control, context) {
   const { signal } = control.controller;
   control.adapter = context.adapter;
+  control.providerAccountId = context.account.provider_account_id;
   const automatic = trigger === "automatic";
   const providerAccountId = context.account.provider_account_id;
   const prepared = await exclusive(async () => {
@@ -3535,6 +3569,7 @@ async function runAccountSync(trigger, control, context) {
       Number.isFinite(lastSyncAt) ? lastSyncAt : 0,
     );
     if (automatic
+      && !control.restorePolling
       && !state.in_progress
       && lastCompletedAt > 0
       && Date.now() - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS) {
@@ -3640,7 +3675,7 @@ async function runAccountSync(trigger, control, context) {
     }
     return result;
   } catch (error) {
-    if (activeSyncControl !== control) throw syncCancelledError();
+    if (!isCurrentSyncControl(control)) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
     const message = cancelled
       ? "Sync cancelled."
