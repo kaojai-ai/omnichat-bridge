@@ -33,7 +33,7 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   });
   vm.runInContext(source, context);
   const status = () => context.providerMainBridgeStatus(1, { id: "line_oa" });
-  assert.equal((await status()).ready, true, "legacy scripts default to compatibility v1");
+  assert.equal((await status()).ready, false, "legacy scripts must be replaced for account-scoped recovery");
   control.compatibility_version = Number(actual[1]);
   control.bridge_version = "line-oa-poll-999";
   assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");

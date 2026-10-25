@@ -57,7 +57,7 @@ const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 1;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -386,14 +386,25 @@ function hasServerInitialized(stored) {
   return stored[STORAGE.serverInitialized] === true;
 }
 
+// Account containers share storage keys. Keep their read/modify/write operations
+// ordered independently of the workflow queue, without holding this queue over provider or delivery requests.
+let accountStorageQueue = Promise.resolve();
+function serializeAccountStorage(task) {
+  const operation = accountStorageQueue.then(task);
+  accountStorageQueue = operation.catch(() => undefined);
+  return operation;
+}
+
 async function updateScopedState(storageKey, key, patch) {
-  const stored = await readStorage([storageKey]);
-  const current = readAccountState(stored[storageKey], key, {});
-  await writeStorage({
-    [storageKey]: writeAccountState(stored[storageKey], key, {
-      ...current,
-      ...patch,
-    }),
+  return serializeAccountStorage(async () => {
+    const stored = await readStorage([storageKey]);
+    const current = readAccountState(stored[storageKey], key, {});
+    await writeStorage({
+      [storageKey]: writeAccountState(stored[storageKey], key, {
+        ...current,
+        ...(typeof patch === "function" ? patch(current) : patch),
+      }),
+    });
   });
 }
 
@@ -444,38 +455,40 @@ async function persistProviderSurfaceState(context, adapter, providerStatus, tab
 }
 
 async function getAccountScanState(providerAccountId, provider = "") {
-  const stored = await readStorage([
-    STORAGE.config,
-    STORAGE.consent,
-    STORAGE.detectedAccounts,
-    STORAGE.pending,
-    STORAGE.scanState,
-    STORAGE.status,
-    STORAGE.targetCursor,
-    STORAGE.lastResumeSyncAt,
-  ]);
-  const context = accountContextFor(stored, providerAccountId, provider);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
-    throw new Error("Provider browser bridge is not configured.");
-  }
-  const existing = readAccountState(stored[STORAGE.scanState], context.key, null);
-  if (existing?.version === 1) return { context, state: existing, stored };
-  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
-  const legacyCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
-  const legacyLastAutoAt = readAccountState(
-    stored[STORAGE.lastResumeSyncAt],
-    context.key,
-    null,
-  );
-  const state = migrateScanState(legacyCursor, pending, legacyLastAutoAt);
-  const scanState = writeAccountState(
-    stored[STORAGE.scanState],
-    context.key,
-    state,
-  );
-  await writeStorage({ [STORAGE.scanState]: scanState });
-  stored[STORAGE.scanState] = scanState;
-  return { context, state, stored };
+  return serializeAccountStorage(async () => {
+    const stored = await readStorage([
+      STORAGE.config,
+      STORAGE.consent,
+      STORAGE.detectedAccounts,
+      STORAGE.pending,
+      STORAGE.scanState,
+      STORAGE.status,
+      STORAGE.targetCursor,
+      STORAGE.lastResumeSyncAt,
+    ]);
+    const context = accountContextFor(stored, providerAccountId, provider);
+    if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+      throw new Error("Provider browser bridge is not configured.");
+    }
+    const existing = readAccountState(stored[STORAGE.scanState], context.key, null);
+    if (existing?.version === 1) return { context, state: existing, stored };
+    const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+    const legacyCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
+    const legacyLastAutoAt = readAccountState(
+      stored[STORAGE.lastResumeSyncAt],
+      context.key,
+      null,
+    );
+    const state = migrateScanState(legacyCursor, pending, legacyLastAutoAt);
+    const scanState = writeAccountState(
+      stored[STORAGE.scanState],
+      context.key,
+      state,
+    );
+    await writeStorage({ [STORAGE.scanState]: scanState });
+    stored[STORAGE.scanState] = scanState;
+    return { context, state, stored };
+  });
 }
 
 async function clearDeliveryRetryAlarmIfIdle() {
@@ -491,81 +504,84 @@ async function clearDeliveryRetryAlarmIfIdle() {
 }
 
 async function discardPending(providerAccountId, provider = "") {
-  const stored = await readStorage([
-    STORAGE.config,
-    STORAGE.consent,
-    STORAGE.detectedAccounts,
-    STORAGE.pending,
-    STORAGE.scanState,
-    STORAGE.status,
-    STORAGE.deliveryRetry,
-  ]);
-  const context = accountContextFor(stored, providerAccountId, provider);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
-    throw new Error("Provider browser bridge is not configured.");
-  }
-  const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
-  const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
-  if (scanState?.in_progress === true || ["discovering", "syncing"].includes(currentStatus.state)) {
-    throw new Error("Cancel sync before discarding pending messages.");
-  }
-  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
-  const discarded = pending.length;
-  const discardedAt = new Date().toISOString();
-  const discardedAtMs = Date.parse(discardedAt);
-  const currentWatermarkMs = Date.parse(scanState?.watermark ?? "");
-  const discardWatermark = discarded > 0
-    ? Number.isFinite(currentWatermarkMs) && currentWatermarkMs > discardedAtMs
-      ? scanState.watermark
-      : discardedAt
-    : scanState?.watermark ?? null;
-  const nextScanState = discarded > 0
-    ? {
-      ...(scanState && typeof scanState === "object" ? scanState : {}),
-      version: 1,
-      watermark: discardWatermark,
-      conversations: scanState?.conversations ?? {},
-      bootstrap: null,
-      in_progress: false,
-      last_auto_at: scanState?.last_auto_at ?? null,
-      updated_at: discardedAt,
+  const { context, discarded, discardWatermark } = await serializeAccountStorage(async () => {
+    const stored = await readStorage([
+      STORAGE.config,
+      STORAGE.consent,
+      STORAGE.detectedAccounts,
+      STORAGE.pending,
+      STORAGE.scanState,
+      STORAGE.status,
+      STORAGE.deliveryRetry,
+    ]);
+    const context = accountContextFor(stored, providerAccountId, provider);
+    if (!hasLocalConsent(stored[STORAGE.consent]) || !context) {
+      throw new Error("Provider browser bridge is not configured.");
     }
-    : scanState;
-  const nextStatus = {
-    ...currentStatus,
-    ...(discarded > 0
+    const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+    const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+    if (scanState?.in_progress === true || ["discovering", "syncing"].includes(currentStatus.state)) {
+      throw new Error("Cancel sync before discarding pending messages.");
+    }
+    const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+    const discarded = pending.length;
+    const discardedAt = new Date().toISOString();
+    const discardedAtMs = Date.parse(discardedAt);
+    const currentWatermarkMs = Date.parse(scanState?.watermark ?? "");
+    const discardWatermark = discarded > 0
+      ? Number.isFinite(currentWatermarkMs) && currentWatermarkMs > discardedAtMs
+        ? scanState.watermark
+        : discardedAt
+      : scanState?.watermark ?? null;
+    const nextScanState = discarded > 0
       ? {
-        state: "watching",
-        phase: null,
-        caught_up: true,
-        sync_error: null,
-        sync_error_at: null,
+        ...(scanState && typeof scanState === "object" ? scanState : {}),
+        version: 1,
+        watermark: discardWatermark,
+        conversations: scanState?.conversations ?? {},
+        bootstrap: null,
+        in_progress: false,
+        last_auto_at: scanState?.last_auto_at ?? null,
+        updated_at: discardedAt,
       }
-      : {}),
-    delivery_error: null,
-    delivery_error_at: null,
-    pending: 0,
-    ...(currentStatus.last_result
-      ? { last_result: { ...currentStatus.last_result, pending: 0 } }
-      : {}),
-  };
-  const writes = {
-    [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, []),
-    [STORAGE.deliveryRetry]: writeAccountState(
-      stored[STORAGE.deliveryRetry],
-      context.key,
-      { attempt: 0, next_at: null },
-    ),
-    [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, nextStatus),
-  };
-  if (nextScanState) {
-    writes[STORAGE.scanState] = writeAccountState(
-      stored[STORAGE.scanState],
-      context.key,
-      nextScanState,
-    );
-  }
-  await writeStorage(writes);
+      : scanState;
+    const nextStatus = {
+      ...currentStatus,
+      ...(discarded > 0
+        ? {
+          state: "watching",
+          phase: null,
+          caught_up: true,
+          sync_error: null,
+          sync_error_at: null,
+        }
+        : {}),
+      delivery_error: null,
+      delivery_error_at: null,
+      pending: 0,
+      ...(currentStatus.last_result
+        ? { last_result: { ...currentStatus.last_result, pending: 0 } }
+        : {}),
+    };
+    const writes = {
+      [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, []),
+      [STORAGE.deliveryRetry]: writeAccountState(
+        stored[STORAGE.deliveryRetry],
+        context.key,
+        { attempt: 0, next_at: null },
+      ),
+      [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, nextStatus),
+    };
+    if (nextScanState) {
+      writes[STORAGE.scanState] = writeAccountState(
+        stored[STORAGE.scanState],
+        context.key,
+        nextScanState,
+      );
+    }
+    await writeStorage(writes);
+    return { context, discarded, discardWatermark };
+  });
   await clearDeliveryRetryAlarmIfIdle();
   if (discarded) {
     await recordLog("warn", "delivery", "discarded", "Pending messages discarded by user; sync watermark advanced.", {
@@ -579,15 +595,12 @@ async function discardPending(providerAccountId, provider = "") {
   return { discarded, pending: 0, watermark: discardWatermark };
 }
 
-async function writeAccountScanState(context, state, container = null) {
-  const currentContainer = container ?? (await readStorage([STORAGE.scanState]))[STORAGE.scanState];
-  await writeStorage({
-    [STORAGE.scanState]: writeAccountState(
-      currentContainer,
-      context.key,
-      { ...state, version: 1, updated_at: new Date().toISOString() },
-    ),
-  });
+async function writeAccountScanState(context, patch) {
+  return updateScopedState(STORAGE.scanState, context.key, (current) => ({
+    ...(typeof patch === "function" ? patch(current) : patch),
+    version: 1,
+    updated_at: new Date().toISOString(),
+  }));
 }
 
 function bootstrapConversation(value) {
@@ -607,7 +620,7 @@ function bootstrapConversation(value) {
 }
 
 async function saveBootstrapSelection(providerAccountId, conversations, provider = "") {
-  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
+  const { context, state } = await getAccountScanState(providerAccountId, provider);
   if (state.watermark || state.bootstrap?.conversations?.length) return;
   const selected = (Array.isArray(conversations) ? conversations : [])
     .map(bootstrapConversation)
@@ -615,60 +628,50 @@ async function saveBootstrapSelection(providerAccountId, conversations, provider
     .slice(0, 10);
   if (!selected.length) return;
   await writeAccountScanState(context, {
-    ...state,
     bootstrap: { conversations: selected },
     in_progress: true,
-  }, stored[STORAGE.scanState]);
+  });
 }
 
 async function recordHistoryWindow(providerAccountId, historyDays, provider = "") {
   const days = Number(historyDays);
   if (!Number.isInteger(days) || days < 1) return;
-  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
+  const { context, state } = await getAccountScanState(providerAccountId, provider);
   const previous = Number(state.history_window_days) || 0;
   if (previous >= days) return;
   await writeAccountScanState(context, {
-    ...state,
     history_window_days: days,
-  }, stored[STORAGE.scanState]);
+  });
 }
 
 async function recordHistoryBackfill(providerAccountId, conversationId, historyDays, provider = "") {
   const id = String(conversationId ?? "").trim();
   const days = Number(historyDays);
   if (!id || !Number.isInteger(days) || days < 1) return;
-  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
+  const { context, state } = await getAccountScanState(providerAccountId, provider);
   const previous = Number(state.history_backfill?.[id]) || 0;
   if (previous >= days) return;
-  await writeAccountScanState(context, {
-    ...state,
+  await writeAccountScanState(context, (current) => ({
     history_backfill: {
-      ...(state.history_backfill ?? {}),
+      ...(current.history_backfill ?? {}),
       [id]: days,
     },
-  }, stored[STORAGE.scanState]);
+  }));
 }
 
 async function advanceScanCursor(providerAccountId, conversationId, cursor, provider = "") {
   const id = String(conversationId ?? "").trim();
   if (!id) return;
-  const { context, state, stored } = await getAccountScanState(providerAccountId, provider);
-  const previous = state.conversations?.[id];
-  const next = cursor && compareMessageCursor(cursor, previous) > 0
-    ? {
-      event_timestamp: cursor.event_timestamp,
-      message_id: cursor.message_id,
-    }
-    : { ...(previous ?? {}) };
-  delete next.summary_token;
-  if (!next.event_timestamp) return;
-  await writeAccountScanState(context, {
-    ...state,
-    conversations: {
-      ...(state.conversations ?? {}),
-      [id]: next,
-    },
-  }, stored[STORAGE.scanState]);
+  const { context } = await getAccountScanState(providerAccountId, provider);
+  await writeAccountScanState(context, (current) => {
+    const previous = current.conversations?.[id];
+    const next = cursor && compareMessageCursor(cursor, previous) > 0
+      ? { event_timestamp: cursor.event_timestamp, message_id: cursor.message_id }
+      : { ...(previous ?? {}) };
+    delete next.summary_token;
+    if (!next.event_timestamp) return {};
+    return { conversations: { ...(current.conversations ?? {}), [id]: next } };
+  });
 }
 
 function exclusive(task) {
@@ -886,22 +889,21 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_activity") {
-    const control = activeSyncControl;
-    if (control && control.tabId === _sender?.tab?.id && control.providerRequestId === message.request_id) {
+    const control = syncControlForMessage(message, _sender?.tab?.id);
+    if (control) {
       control.touchRecovery?.();
     }
     respond({ ok: true });
     return false;
   }
   if (message?.type === "sync_progress") {
-    const attempt = activeSyncControl;
-    if (!attempt || attempt.tabId !== _sender?.tab?.id
-      || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
+    const attempt = syncControlForMessage(message, _sender?.tab?.id);
+    if (!attempt) {
       respond({ ok: true, skipped: "superseded" });
       return false;
     }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
+      if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -927,14 +929,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_phase") {
-    const attempt = activeSyncControl;
-    if (!attempt || attempt.tabId !== _sender?.tab?.id
-      || attempt.providerRequestId !== String(message.request_id ?? "").split(":")[0]) {
+    const attempt = syncControlForMessage(message, _sender?.tab?.id);
+    if (!attempt) {
       respond({ ok: true, skipped: "superseded" });
       return false;
     }
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      if (activeSyncControl !== attempt || attempt.controller.signal.aborted) return;
+      if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
       const key = context?.key;
       if (!key) throw new Error("Provider account is not detected.");
@@ -1069,6 +1070,18 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   return undefined;
 });
+
+function isCurrentSyncControl(control) {
+  return Boolean(control && (activeSyncControl === control
+    || providerAutomaticRecoveries.get(control.accountKey) === control));
+}
+
+function syncControlForMessage(message, tabId) {
+  const requestId = String(message.request_id ?? "").split(":")[0];
+  return [activeSyncControl, ...providerAutomaticRecoveries.values()].find((control) => control
+    && !control.controller.signal.aborted
+    && control.tabId === tabId && control.providerRequestId === requestId);
+}
 
 async function initializeAndStartSync(trigger) {
   await queueLiveStateWrite(() => writeStorage({
@@ -1508,37 +1521,46 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
   }
 
-  // Recovery owns one stable tab per provider. A loading, redirected, failed,
-  // or different-account tab remains the recovery tab until it is closed.
-  // Surface preference is used only when adopting a tab for the first time.
+  // Prefer the tracked tab, but adopt an already-open healthy matching tab
+  // when it cannot recover. Never create another tab while the tracked one exists.
   const orderedTabs = orderProviderTabs(adapter, listedTabs, record?.tab_id);
+  const tabs = trackedTab
+    ? [trackedTab, ...orderedTabs.filter((tab) => tab.id !== trackedTab.id)]
+    : orderedTabs;
   const candidates = [];
-  for (const tab of trackedTab ? [trackedTab] : orderedTabs) {
+  const healthyCandidate = ({ status }) => providerTabHealthy(status, adapter)
+    && (adapter.id !== "shopee"
+      || status?.current_provider_account_id === context?.account?.provider_account_id);
+  let blockedReason = null;
+  for (const tab of tabs) {
     if (!adapter.matchesUrl(tab.url)) {
-      const reason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
-      record = await updateProviderRecoveryTabState(adapter.id, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
-      });
-      return { tab: null, record, reason };
+      if (tab.id === trackedTab?.id) {
+        blockedReason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
+      }
+      continue;
     }
     const status = await providerTabStatus(tab);
     if (adapter.id === "shopee" && status?.current_provider_account_id
       && status.current_provider_account_id !== context?.account?.provider_account_id) {
-      if (trackedTab) {
-        const reason = `${providerLabel(adapter)} recovery tab is signed into a different account. Open the matching account in the existing tab.`;
-        record = await updateProviderRecoveryTabState(adapter.id, {
-          state: PROVIDER_RECOVERY_STATES.needsAttention, reason,
-        });
-        return { tab: null, record, reason };
+      if (tab.id === trackedTab?.id) {
+        blockedReason = `${providerLabel(adapter)} recovery tab is signed into a different account. Open the matching account in the existing tab.`;
       }
       continue;
     }
     candidates.push({ tab, status });
+    if (healthyCandidate({ status })) break;
   }
-  const selected = candidates.find(({ status }) => providerTabHealthy(status, adapter)) ?? candidates[0];
+  const selected = candidates.find(healthyCandidate)
+    ?? (trackedTab ? candidates.find(({ tab }) => tab.id === trackedTab.id) : candidates[0]);
+  if (!selected && trackedTab) {
+    record = await updateProviderRecoveryTabState(adapter.id, {
+      state: PROVIDER_RECOVERY_STATES.needsAttention, reason: blockedReason,
+    });
+    return { tab: null, record, reason: blockedReason };
+  }
   trackedTab = selected?.tab ?? null;
   if (trackedTab) {
-    const isHealthy = providerTabHealthy(selected.status, adapter);
+    const isHealthy = healthyCandidate(selected);
     if (record?.tab_id !== trackedTab.id
       || (isHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready)) {
       record = await updateProviderRecoveryTabState(adapter.id, {
@@ -1772,8 +1794,10 @@ function startUnattendedProviderSync(tab, context) {
     tabId,
     adapter,
     preferredTabId: tabId,
+    restorePolling: true,
+    accountKey: recoveryKey,
   };
-  const request = runAccountSync("automatic", control, context).then((result) => {
+  void runAccountSync("automatic", control, context).then((result) => {
     if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
     providerAutomaticRetryAt.delete(recoveryKey);
@@ -1789,9 +1813,9 @@ function startUnattendedProviderSync(tab, context) {
       recovery_attempt: attempts,
     });
   }).finally(() => {
-    if (providerAutomaticRecoveries.get(recoveryKey) === request) providerAutomaticRecoveries.delete(recoveryKey);
+    if (providerAutomaticRecoveries.get(recoveryKey) === control) providerAutomaticRecoveries.delete(recoveryKey);
   });
-  providerAutomaticRecoveries.set(recoveryKey, request);
+  providerAutomaticRecoveries.set(recoveryKey, control);
   void recordLog("info", "recovery", "provider_sync_started", `${providerLabel(adapter)} unattended recovery sync started.`, {
     provider: adapter.id,
     provider_account_id: context.account.provider_account_id,
@@ -1871,9 +1895,6 @@ async function runProviderHealthWatchdogOnce() {
       if (!providerTabHealthy(status, adapter)) {
         throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
       }
-      if (allowTabRecovery && adapter.id === "line_oa" && status?.provider_polling_active !== true) {
-        startUnattendedProviderSync(tab, context);
-      }
       const record = recovery.record?.tab_id === tab.id
         ? await updateProviderRecoveryTabState(adapter.id, {
           state: PROVIDER_RECOVERY_STATES.ready,
@@ -1884,11 +1905,17 @@ async function runProviderHealthWatchdogOnce() {
           last_reload_at: recovery.record?.last_reload_at ?? null,
         })
         : recovery.record;
-      await updateProviderRecoveryLiveState(contexts, adapter, {
-        state: PROVIDER_RECOVERY_STATES.ready,
-        reason: null,
-        tabId: record?.tab_id ?? tab.id,
-      });
+      for (const item of matchingContexts) {
+        const polling = adapter.id !== "line_oa" || (status.provider_polling_active === true
+          && Array.isArray(status.provider_polling_account_ids)
+          && status.provider_polling_account_ids.includes(item.account.provider_account_id));
+        if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
+        await updateProviderRecoveryLiveState([item], adapter, {
+          state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
+          reason: polling ? null : "LINE OA polling is not running for this account. Sync this account to resume.",
+          tabId: record?.tab_id ?? tab.id,
+        });
+      }
     } catch (error) {
       await recordUnexpected("provider_watchdog", error, {
         provider: adapter.id,
@@ -3359,7 +3386,10 @@ async function syncOpenProvider(control, context) {
   }
   throwIfSyncCancelled(signal);
   if (control.manualRestart) {
-    await sendProviderMessage(tab.id, { type: "cancel_sync_v3", provider: adapter.id }, {
+    await sendProviderMessage(tab.id, {
+      type: "cancel_sync_v3", provider: adapter.id,
+      provider_account_id: context.account.provider_account_id,
+    }, {
       label, operation: "reset recovery", signal, timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
     });
     if (adapter.id === "shopee") {
@@ -3412,7 +3442,11 @@ function restartSync() {
       activeSyncControl = null;
       activeSync = null;
       if (previous?.tabId) {
-        await sendProviderMessage(previous.tabId, { type: "cancel_sync_v3" }, {
+        await sendProviderMessage(previous.tabId, {
+          type: "cancel_sync_v3",
+          ...(previous.providerAccountId ? { provider_account_id: previous.providerAccountId } : {}),
+          ...(previous.providerRequestId ? { request_id: previous.providerRequestId } : {}),
+        }, {
           label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
         }).catch(() => undefined);
       }
@@ -3466,7 +3500,7 @@ async function cancelActiveSync() {
 }
 
 async function clearPersistedSync() {
-  return exclusive(async () => {
+  return exclusive(() => serializeAccountStorage(async () => {
     const stored = await readStorage([
       STORAGE.config,
       STORAGE.consent,
@@ -3514,12 +3548,13 @@ async function clearPersistedSync() {
     if (!cancelled) return false;
     await writeStorage(writes);
     return true;
-  });
+  }));
 }
 
 async function runAccountSync(trigger, control, context) {
   const { signal } = control.controller;
   control.adapter = context.adapter;
+  control.providerAccountId = context.account.provider_account_id;
   const automatic = trigger === "automatic";
   const providerAccountId = context.account.provider_account_id;
   const prepared = await exclusive(async () => {
@@ -3535,6 +3570,7 @@ async function runAccountSync(trigger, control, context) {
       Number.isFinite(lastSyncAt) ? lastSyncAt : 0,
     );
     if (automatic
+      && !control.restorePolling
       && !state.in_progress
       && lastCompletedAt > 0
       && Date.now() - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS) {
@@ -3542,11 +3578,10 @@ async function runAccountSync(trigger, control, context) {
     }
     const startedAt = new Date().toISOString();
     await writeAccountScanState(context, {
-      ...state,
       in_progress: true,
       started_at: startedAt,
       ...(automatic ? { last_auto_at: startedAt } : {}),
-    }, stored[STORAGE.scanState]);
+    });
     await updateScopedState(STORAGE.status, context.key, {
       state: "discovering",
       phase: "preparing",
@@ -3594,15 +3629,14 @@ async function runAccountSync(trigger, control, context) {
     throwIfSyncCancelled(signal);
     await exclusive(async () => {
       throwIfSyncCancelled(signal);
-      const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
+      const { state } = await getAccountScanState(providerAccountId, context.account.provider);
       throwIfSyncCancelled(signal);
       await writeAccountScanState(context, {
-        ...state,
         watermark: recovered.watermark ?? state.watermark,
         bootstrap: null,
         in_progress: false,
         completed_at: new Date().toISOString(),
-      }, stored[STORAGE.scanState]);
+      });
     });
     await updateScopedState(STORAGE.status, context.key, {
       state: "discovering",
@@ -3640,7 +3674,7 @@ async function runAccountSync(trigger, control, context) {
     }
     return result;
   } catch (error) {
-    if (activeSyncControl !== control) throw syncCancelledError();
+    if (!isCurrentSyncControl(control)) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
     const message = cancelled
       ? "Sync cancelled."
@@ -3650,12 +3684,11 @@ async function runAccountSync(trigger, control, context) {
     const state = readAccountState(stored[STORAGE.scanState], context.key, null);
     if (state) {
       await writeAccountScanState(context, {
-        ...state,
         in_progress: false,
         ...(cancelled
           ? { cancelled_at: new Date().toISOString() }
           : { failed_at: new Date().toISOString() }),
-      }, stored[STORAGE.scanState]);
+      });
     }
     await updateScopedState(STORAGE.status, context.key, {
       state: cancelled ? "watching" : "error",
@@ -3804,87 +3837,92 @@ function messageKey(message) {
 }
 
 async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
-  const stored = await readStorage([
-    STORAGE.consent,
-    STORAGE.pending,
-    STORAGE.scanState,
-    STORAGE.targetCursor,
-    STORAGE.lastResumeSyncAt,
-    STORAGE.serverInitialized,
-    STORAGE.status,
-  ]);
-  if (!hasLocalConsent(stored[STORAGE.consent])) {
+  const captured = await serializeAccountStorage(async () => {
+    const stored = await readStorage([
+      STORAGE.consent,
+      STORAGE.pending,
+      STORAGE.scanState,
+      STORAGE.targetCursor,
+      STORAGE.lastResumeSyncAt,
+      STORAGE.serverInitialized,
+      STORAGE.status,
+    ]);
+    if (!hasLocalConsent(stored[STORAGE.consent])) return null;
+    const scopedMessages = Array.isArray(messages) ? messages : [];
+    let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
+    const pending = readAccountState(stored[STORAGE.pending], context.key, []);
+    const migrated = scanState?.version !== 1;
+    if (scanState?.version !== 1) {
+      scanState = migrateScanState(
+        readAccountState(stored[STORAGE.targetCursor], context.key, null),
+        pending,
+        readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, null),
+      );
+    }
+    const deferCursorAdvance = advanceCursor && hasScanBacklog(scanState);
+    const known = new Set(pending.map(messageKey));
+    const eligible = [];
+    const added = [];
+    for (const message of scopedMessages) {
+      const cursor = scanState.conversations?.[message?.conversation_id];
+      if (messageProvider(message) !== context.account.provider
+        || !isAfterMessageCursor(message, cursor)) continue;
+      eligible.push(message);
+      if (known.has(messageKey(message))) continue;
+      known.add(messageKey(message));
+      added.push(message);
+    }
+    const writes = {};
+    if (added.length) {
+      writes[STORAGE.pending] = writeAccountState(
+        stored[STORAGE.pending],
+        context.key,
+        [...pending, ...added],
+      );
+    }
+    if (eligible.length) {
+      const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
+      writes[STORAGE.status] = writeAccountState(
+        stored[STORAGE.status],
+        context.key,
+        {
+          ...currentStatus,
+          last_capture_at: new Date().toISOString(),
+          pending: pending.length + added.length,
+        },
+      );
+    }
+    if (!deferCursorAdvance && advanceCursor && added.length) {
+      writes[STORAGE.scanState] = writeAccountState(
+        stored[STORAGE.scanState],
+        context.key,
+        {
+          ...scanState,
+          conversations: advanceConversationCursors(scanState, added),
+          updated_at: new Date().toISOString(),
+        },
+      );
+    } else if (migrated) {
+      writes[STORAGE.scanState] = writeAccountState(
+        stored[STORAGE.scanState],
+        context.key,
+        scanState,
+      );
+    }
+    if (Object.keys(writes).length) await writeStorage(writes);
+    const pendingCount = pending.length + added.length;
+    const latestCursor = latestMessageCursor(eligible);
+    return { scopedMessages, added, pendingCount, latestCursor, deferCursorAdvance, initialized: hasServerInitialized(stored) };
+  });
+  if (!captured) {
     await recordLog("debug", "queue", "ignored", "Captured messages were ignored because setup is incomplete.", {
-      consented: hasLocalConsent(stored[STORAGE.consent]),
+      consented: false,
       provider_account_id: context.account.provider_account_id,
     });
     return { queued: 0, sent: 0, pending: 0 };
   }
-  const scopedMessages = Array.isArray(messages) ? messages : [];
-  let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
-  const pending = readAccountState(stored[STORAGE.pending], context.key, []);
-  const migrated = scanState?.version !== 1;
-  if (scanState?.version !== 1) {
-    scanState = migrateScanState(
-      readAccountState(stored[STORAGE.targetCursor], context.key, null),
-      pending,
-      readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, null),
-    );
-  }
-  const deferCursorAdvance = advanceCursor && hasScanBacklog(scanState);
-  const known = new Set(pending.map(messageKey));
-  const eligible = [];
-  const added = [];
-  for (const message of scopedMessages) {
-    const cursor = scanState.conversations?.[message?.conversation_id];
-    if (messageProvider(message) !== context.account.provider
-      || !isAfterMessageCursor(message, cursor)) continue;
-    eligible.push(message);
-    if (known.has(messageKey(message))) continue;
-    known.add(messageKey(message));
-    added.push(message);
-  }
-  const writes = {};
-  if (added.length) {
-    writes[STORAGE.pending] = writeAccountState(
-      stored[STORAGE.pending],
-      context.key,
-      [...pending, ...added],
-    );
-  }
-  if (eligible.length) {
-    const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
-    writes[STORAGE.status] = writeAccountState(
-      stored[STORAGE.status],
-      context.key,
-      {
-        ...currentStatus,
-        last_capture_at: new Date().toISOString(),
-        pending: pending.length + added.length,
-      },
-    );
-  }
-  if (!deferCursorAdvance && advanceCursor && added.length) {
-    writes[STORAGE.scanState] = writeAccountState(
-      stored[STORAGE.scanState],
-      context.key,
-      {
-        ...scanState,
-        conversations: advanceConversationCursors(scanState, added),
-        updated_at: new Date().toISOString(),
-      },
-    );
-  } else if (migrated) {
-    writes[STORAGE.scanState] = writeAccountState(
-      stored[STORAGE.scanState],
-      context.key,
-      scanState,
-    );
-  }
-  if (Object.keys(writes).length) await writeStorage(writes);
-  const pendingCount = pending.length + added.length;
-  const latestCursor = latestMessageCursor(eligible);
-  if (!shouldFlush || !hasServerInitialized(stored)) {
+  const { scopedMessages, added, pendingCount, latestCursor, deferCursorAdvance, initialized } = captured;
+  if (!shouldFlush || !initialized) {
     await recordLog("info", "queue", "stored", "Recovered messages stored for delivery.", {
       provider_account_id: context.account.provider_account_id,
       received: scopedMessages.length,
@@ -4342,23 +4380,26 @@ async function flushBatch(context, signal) {
   );
   const deliveredKeys = new Set(outcome.delivered.map(messageKey));
   for (const message of outcome.skipped) deliveredKeys.add(messageKey(message));
-  const remaining = pending.filter((message) => !deliveredKeys.has(messageKey(message)));
-  const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
   const failure = outcome.failed[0]?.error ?? outcome.blocked?.error ?? null;
   const failureMessage = failure instanceof Error ? failure.message : String(failure ?? "");
   const now = new Date().toISOString();
-  await writeStorage({
-    [STORAGE.pending]: writeAccountState(stored[STORAGE.pending], context.key, remaining),
-    [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, {
-      ...currentStatus,
-      state: ["discovering", "syncing"].includes(currentStatus.state)
-        ? currentStatus.state
-        : "watching",
-      delivery_error: failureMessage || null,
-      delivery_error_at: failureMessage ? now : null,
-      ...(outcome.delivered.length ? { last_delivery_at: now } : {}),
-      pending: remaining.length,
-    }),
+  const remaining = await serializeAccountStorage(async () => {
+    const current = await readStorage([STORAGE.pending, STORAGE.status]);
+    const remaining = readAccountState(current[STORAGE.pending], context.key, [])
+      .filter((message) => !deliveredKeys.has(messageKey(message)));
+    const currentStatus = readAccountState(current[STORAGE.status], context.key, {});
+    await writeStorage({
+      [STORAGE.pending]: writeAccountState(current[STORAGE.pending], context.key, remaining),
+      [STORAGE.status]: writeAccountState(current[STORAGE.status], context.key, {
+        ...currentStatus,
+        state: ["discovering", "syncing"].includes(currentStatus.state) ? currentStatus.state : "watching",
+        delivery_error: failureMessage || null,
+        delivery_error_at: failureMessage ? now : null,
+        ...(outcome.delivered.length ? { last_delivery_at: now } : {}),
+        pending: remaining.length,
+      }),
+    });
+    return remaining;
   });
   for (const failed of outcome.failed) {
     await recordLog("error", "message_delivery", "failed", "A queued message could not be delivered.", {
@@ -4451,14 +4492,7 @@ async function flushAll(context, signal) {
 }
 
 async function resetDeliveryRetry(context) {
-  const stored = await readStorage([STORAGE.deliveryRetry]);
-  await writeStorage({
-    [STORAGE.deliveryRetry]: writeAccountState(
-      stored[STORAGE.deliveryRetry],
-      context.key,
-      { attempt: 0, next_at: null },
-    ),
-  });
+  await updateScopedState(STORAGE.deliveryRetry, context.key, { attempt: 0, next_at: null });
 }
 
 async function clearDeliveryRetryAlarm() {
@@ -4466,28 +4500,28 @@ async function clearDeliveryRetryAlarm() {
 }
 
 async function clearDeliveryRetry(context) {
-  await resetDeliveryRetry(context);
-  await updateScopedState(STORAGE.status, context.key, {
-    delivery_error: null,
-    delivery_error_at: null,
-    pending: 0,
+  await serializeAccountStorage(async () => {
+    const stored = await readStorage([STORAGE.pending, STORAGE.status, STORAGE.deliveryRetry]);
+    const current = readAccountState(stored[STORAGE.status], context.key, {});
+    await writeStorage({
+      [STORAGE.deliveryRetry]: writeAccountState(stored[STORAGE.deliveryRetry], context.key, { attempt: 0, next_at: null }),
+      [STORAGE.status]: writeAccountState(stored[STORAGE.status], context.key, {
+        ...current,
+        delivery_error: null,
+        delivery_error_at: null,
+        pending: readAccountState(stored[STORAGE.pending], context.key, []).length,
+      }),
+    });
   });
 }
 
 async function scheduleDeliveryRetry(context) {
-  const stored = await readStorage([STORAGE.deliveryRetry]);
-  const current = readAccountState(stored[STORAGE.deliveryRetry], context.key, {});
-  const attempt = Number(current?.attempt) || 0;
-  const nextAt = Date.now() + deliveryRetryDelay(attempt);
-  await writeStorage({
-    [STORAGE.deliveryRetry]: writeAccountState(
-      stored[STORAGE.deliveryRetry],
-      context.key,
-      {
-        attempt: attempt + 1,
-        next_at: new Date(nextAt).toISOString(),
-      },
-    ),
+  let attempt;
+  let nextAt;
+  await updateScopedState(STORAGE.deliveryRetry, context.key, (current) => {
+    attempt = Number(current?.attempt) || 0;
+    nextAt = Date.now() + deliveryRetryDelay(attempt);
+    return { attempt: attempt + 1, next_at: new Date(nextAt).toISOString() };
   });
   const existingAlarm = await chrome.alarms.get(DELIVERY_RETRY_ALARM);
   if (!existingAlarm || Number(existingAlarm.scheduledTime) > nextAt) {
@@ -4500,7 +4534,19 @@ async function scheduleDeliveryRetry(context) {
   });
 }
 
-async function attemptDelivery(context, { resetBackoff, signal }) {
+const accountDeliveries = new Map();
+function attemptDelivery(context, options) {
+  const key = context?.key;
+  const previous = accountDeliveries.get(key) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => deliverPendingForAccount(context, options));
+  accountDeliveries.set(key, operation);
+  void operation.finally(() => {
+    if (accountDeliveries.get(key) === operation) accountDeliveries.delete(key);
+  }).catch(() => undefined);
+  return operation;
+}
+
+async function deliverPendingForAccount(context, { resetBackoff, signal }) {
   const stored = await readStorage([
     STORAGE.consent,
     STORAGE.pending,
@@ -4528,7 +4574,6 @@ async function attemptDelivery(context, { resetBackoff, signal }) {
     const result = await flushAll(context, signal);
     if (result.pending) await scheduleDeliveryRetry(context);
     else await clearDeliveryRetry(context);
-    await updateScopedState(STORAGE.status, context.key, { pending: result.pending });
     return result;
   } catch (error) {
     if (signal?.aborted) throw syncCancelledError();

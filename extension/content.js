@@ -35,6 +35,7 @@
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
   let providerPollingActive = false;
+  let providerPollingAccountIds = [];
   let lastProviderCheckAt = null;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -317,67 +318,85 @@
       && (detected || configuredLineBot));
   }
 
-  let recoveryGeneration = 0;
+  const preparingRecoveries = new Map();
   async function requestRecovery(providerAccountId, botId = "", attemptId = "") {
-    const generation = recoveryGeneration;
     if (!providerAdapter.supports("message_recovery")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
     }
     const accountId = String(providerAccountId ?? "").trim();
-    if (!await isConfigured(accountId, botId)) {
-      log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
+    const requestId = attemptId || crypto.randomUUID();
+    const preparation = { accountId, cancelled: false };
+    preparingRecoveries.set(requestId, preparation);
+    try {
+      if (!await isConfigured(accountId, botId)) {
+        log("warn", "recovery_not_configured", "Provider recovery could not start because setup is incomplete.", {
+          provider_account_id: accountId,
+        });
+        return { ok: false, error: "Extension setup is required." };
+      }
+      if (preparation.cancelled || !isBridgeActive()) return { ok: false, error: "Sync cancelled." };
+      const syncState = await sendRuntimeMessage({
+        type: "get_sync_state",
+        provider: providerAdapter.id,
         provider_account_id: accountId,
       });
-      return { ok: false, error: "Extension setup is required." };
+      if (preparation.cancelled || !isBridgeActive()) return { ok: false, error: "Sync cancelled." };
+      if (!syncState?.ok) {
+        log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
+        return syncState;
+      }
+      const result = new Promise((resolve) => {
+        recoveries.set(requestId, { resolve, accountId });
+        touchRecovery(requestId);
+      });
+      post({
+        type: "sync_v3",
+        request_id: requestId,
+        checkpoint: syncState.checkpoint,
+        provider: providerAdapter.id,
+        provider_account_id: accountId,
+        ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
+        ...(Number.isInteger(syncState.history_days) ? {
+          history_days: syncState.history_days,
+          history_since_ms: syncState.history_since_ms,
+          ...(Array.isArray(syncState.history_conversation_ids)
+            ? { history_conversation_ids: syncState.history_conversation_ids }
+            : {}),
+        } : {}),
+      });
+      log("info", "recovery_requested", "Provider recovery request sent.", {
+        provider_account_id: accountId,
+        checkpoint_present: Boolean(syncState.checkpoint?.watermark),
+      });
+      return result;
+    } finally {
+      preparingRecoveries.delete(requestId);
     }
-    if (generation !== recoveryGeneration) return { ok: false, error: "Sync cancelled." };
-    const syncState = await sendRuntimeMessage({
-      type: "get_sync_state",
-      provider: providerAdapter.id,
-      provider_account_id: accountId,
-    });
-    if (generation !== recoveryGeneration) return { ok: false, error: "Sync cancelled." };
-    if (!syncState?.ok) {
-      log("error", "checkpoint_failed", syncState?.error ?? "Could not load sync checkpoint.");
-      return syncState;
-    }
-    const requestId = attemptId || crypto.randomUUID();
-    const result = new Promise((resolve) => {
-      recoveries.set(requestId, { resolve });
-      touchRecovery(requestId);
-    });
-    post({
-      type: "sync_v3",
-      request_id: requestId,
-      checkpoint: syncState.checkpoint,
-      provider: providerAdapter.id,
-      provider_account_id: accountId,
-      ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
-      ...(Number.isInteger(syncState.history_days) ? {
-        history_days: syncState.history_days,
-        history_since_ms: syncState.history_since_ms,
-        ...(Array.isArray(syncState.history_conversation_ids)
-          ? { history_conversation_ids: syncState.history_conversation_ids }
-          : {}),
-      } : {}),
-    });
-    log("info", "recovery_requested", "Provider recovery request sent.", {
-      provider_account_id: accountId,
-      checkpoint_present: Boolean(syncState.checkpoint?.watermark),
-    });
-    return result;
   }
 
-  function cancelRecovery(onlyRequestId = null) {
-    recoveryGeneration++;
+  function cancelRecovery(onlyRequestId = null, providerAccountId = "") {
+    const accountId = String(providerAccountId ?? "").trim();
     let cancelled = 0;
+    for (const [requestId, pending] of preparingRecoveries) {
+      if (onlyRequestId && requestId !== onlyRequestId) continue;
+      if (accountId && pending.accountId !== accountId) continue;
+      pending.cancelled = true;
+      cancelled += 1;
+    }
     for (const [requestId, pending] of recoveries) {
       if (onlyRequestId && requestId !== onlyRequestId) continue;
+      if (accountId && pending.accountId !== accountId) continue;
       recoveries.delete(requestId);
-      post({ type: "cancel_sync_v3", request_id: requestId });
       pending.resolve({ ok: false, error: "Sync cancelled." });
       cancelled += 1;
     }
+    // Account/global resets also stop ongoing page polling after recovery completes.
+    // A stale attempt must never cancel its replacement.
+    if (onlyRequestId && !cancelled) return { ok: true, cancelled: false };
+    post({ type: "cancel_sync_v3",
+      ...(onlyRequestId ? { request_id: onlyRequestId } : {}),
+      ...(accountId ? { provider_account_id: accountId } : {}),
+    });
     return { ok: true, cancelled: cancelled > 0 };
   }
 
@@ -1009,6 +1028,9 @@
         ? event.data.chat_open
         : providerChatOpen;
       providerPollingActive = event.data.provider_polling_active === true;
+      providerPollingAccountIds = Array.isArray(event.data.provider_polling_account_ids)
+        ? event.data.provider_polling_account_ids.filter((id) => typeof id === "string")
+        : [];
       lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
         ? event.data.last_provider_check_at
         : lastProviderCheckAt;
@@ -1102,6 +1124,7 @@
         chat_open: providerChatOpen,
         realtime_connected: realtimeConnected,
         provider_polling_active: providerPollingActive,
+        provider_polling_account_ids: [...providerPollingAccountIds],
         last_realtime_connected_at: lastRealtimeConnectedAt,
         last_provider_check_at: lastProviderCheckAt,
         page_visible: document.visibilityState === "visible",
@@ -1119,7 +1142,7 @@
       return true;
     }
     if (message?.type === "cancel_sync_v3") {
-      respond(cancelRecovery(message.request_id));
+      respond(cancelRecovery(message.request_id, message.provider_account_id));
       return false;
     }
     if (message?.type === "detect_account_v3") {

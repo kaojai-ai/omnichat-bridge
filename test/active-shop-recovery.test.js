@@ -57,7 +57,7 @@ test("automatic delivery respects retry time while explicit retry bypasses it", 
     flushAll: async () => { flushes++; return { sent: 1, pending: 0 }; },
     updateScopedState: async () => {},
   });
-  vm.runInContext(extract("async function attemptDelivery(", "async function attemptAllDeliveries("), sandbox);
+  vm.runInContext(extract("const accountDeliveries =", "async function attemptAllDeliveries("), sandbox);
   assert.equal((await sandbox.attemptDelivery(context, { resetBackoff: false })).skipped, "backoff");
   assert.equal(flushes, 0);
   assert.equal((await sandbox.attemptDelivery(context, { resetBackoff: true })).sent, 1);

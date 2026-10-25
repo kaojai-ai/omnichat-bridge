@@ -103,7 +103,8 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
     const logs = [];
     const states = [];
     const run = vm.runInNewContext(source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts")) + "\nrunAccountSync", {
-      activeSyncControl: control, STORAGE: {}, RESUME_SYNC_COOLDOWN_MS: 0,
+      activeSyncControl: control, isCurrentSyncControl: candidate => candidate === control,
+      STORAGE: {}, RESUME_SYNC_COOLDOWN_MS: 0,
       exclusive: async () => ({ context: context("shopee", "A") }),
       throwIfSyncCancelled: () => {},
       recordLog: async (level, area, event) => logs.push({ level, area, event }),

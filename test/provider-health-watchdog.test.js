@@ -14,19 +14,19 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false } = {}) {
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false, accounts = ["account"], pollingAccounts = accounts } = {}) {
   const adapter = { id: provider, matchesUrl: () => !redirected,
     surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre" };
-  const context = { key: `${provider}:account`, adapter, account: { provider_account_id: "account" } };
+  const contexts = accounts.map(id => ({ key: `${provider}:${id}`, adapter, account: { provider_account_id: id } }));
   const primaryUrl = "https://seller.shopee.co.th/new-webchat/conversations";
   const tab = { id: 42, url: provider === "shopee" ? (chatOpen === null ? primaryUrl : "https://seller.shopee.co.th/portal") : "https://provider.example/chat", status: "complete" };
   const alternative = { ...tab, id: 43, url: primaryUrl };
-  const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: 0, alarm: null, live: null };
+  const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: [], alarm: null, live: null, lives: {} };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
     STORAGE: { config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
     readStorage: async () => stored,
-    configuredAccountContexts: () => [context],
+    configuredAccountContexts: () => contexts,
     hasServerInitialized: () => true,
     hasLocalConsent: (value) => value === true,
     providerAdapters: { list: () => [adapter] },
@@ -35,11 +35,14 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerChatTabs: async () => tabOpen && !redirected ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: true, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: "account", surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: "account", ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => {},
     persistProviderSurfaceState: async () => {},
-    updateProviderRecoveryLiveState: async (_contexts, _adapter, state) => { calls.live = state; },
+    updateProviderRecoveryLiveState: async (contexts, _adapter, state) => {
+      calls.live = state;
+      for (const context of contexts) calls.lives[context.account.provider_account_id] = state;
+    },
     updateProviderRecoveryTabState: async (_provider, patch) => (record = { ...record, ...patch }),
     clearProviderRecoveryLiveState: async () => { calls.cleared++; },
     ensureProviderHealthAlarm: async (enabled) => { calls.alarm = enabled; },
@@ -52,7 +55,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerLabel: () => provider,
     recordLog: async () => {},
     recordUnexpected: async () => {},
-    startUnattendedProviderSync: () => { calls.polling++; },
+    startUnattendedProviderSync: (_tab, context) => { calls.polling.push(context.account.provider_account_id); },
     exclusive: async (operation) => operation(),
     attemptAllDeliveries: async () => {},
     apiPingContexts: () => [],
@@ -88,7 +91,7 @@ for (const provider of ["line_oa", "shopee"]) {
     assert.equal(calls.cleared, 0);
     assert.equal(calls.created, 0);
     assert.equal(calls.reloaded, 0);
-    assert.equal(calls.polling, 0);
+    assert.equal(calls.polling.length, 0);
   });
 }
 
@@ -169,13 +172,13 @@ for (const provider of ["shopee", "line_oa"]) {
 
 
 for (const recoveryEnabled of [false, true]) {
-  test(`Shopee keeps tracked closed mini-chat despite another healthy tab (recovery ${recoveryEnabled})`, async () => {
+  test(`Shopee adopts an existing healthy matching tab over a tracked closed mini-chat (recovery ${recoveryEnabled})`, async () => {
     const { run, calls } = harness({ provider: "shopee", recoveryEnabled, healthy: false, chatOpen: false,
       alternativeHealthyTab: true, record: { tab_id: 42, state: "needs_attention" } });
     await run();
-    assert.equal(calls.live.state, "needs_attention");
-    assert.equal(calls.live.tabId, 42);
-    assert.match(calls.live.reason, /Open Shopee mini-chat/);
+    assert.equal(calls.live.state, "ready");
+    assert.equal(calls.live.tabId, 43);
+    assert.equal(calls.live.reason, null);
     assert.equal(calls.reloaded, 0);
     assert.equal(calls.created, 0);
   });
@@ -222,4 +225,72 @@ test("Shopee: a tracked same-origin sign-in page does not open another chat", as
   assert.equal(calls.created, 0);
   assert.equal(calls.reloaded, 0);
   assert.equal(calls.live.tabId, 42);
+});
+
+
+test("LINE watchdog restores every missing OA without marking them ready from another account's polling", async () => {
+  const { run, calls } = harness({ recoveryEnabled: true,
+    accounts: ["oa-a", "oa-b", "oa-c"], pollingAccounts: ["oa-a"] });
+  await run();
+  assert.deepEqual(calls.polling, ["oa-b", "oa-c"]);
+  assert.equal(calls.lives["oa-a"].state, "ready");
+  assert.equal(calls.lives["oa-b"].state, "needs_attention");
+  assert.equal(calls.lives["oa-c"].state, "needs_attention");
+});
+
+test("LINE watchdog leaves missing OA polling stopped when automatic recovery is disabled", async () => {
+  const { run, calls } = harness({ accounts: ["oa-a", "oa-b"], pollingAccounts: ["oa-a"] });
+  await run();
+  assert.equal(calls.polling.length, 0);
+  assert.equal(calls.lives["oa-a"].state, "ready");
+  assert.equal(calls.lives["oa-b"].state, "needs_attention");
+});
+
+for (const restorePolling of [false, true]) {
+  test(`recent successful sync ${restorePolling ? "still restores missing polling" : "keeps normal automatic cooldown"}`, async () => {
+    const context = { key: "line_oa:oa-a", account: { provider: "line_oa", provider_account_id: "oa-a" }, adapter: { id: "line_oa" } };
+    const control = { controller: new AbortController(), restorePolling };
+    const state = { in_progress: false, last_auto_at: new Date().toISOString() };
+    let recoveries = 0;
+    const runtime = vm.createContext({ STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+      exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
+      getAccountScanState: async () => ({ state, stored: {} }),
+      readAccountState: (_stored, _key, fallback) => fallback,
+      writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+      updateScopedState: async () => {}, recordLog: async () => {},
+      attemptDelivery: async () => ({ sent: 0, pending: 0 }),
+      providerLabel: () => "LINE OA", liveConnections: new Map(),
+      syncOpenProvider: async () => { recoveries++; return { recovered: 0 }; },
+    });
+    vm.runInContext(functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
+    const result = await runtime.runAccountSync("automatic", control, context);
+    assert.equal(recoveries, restorePolling ? 1 : 0);
+    assert.equal(result.skipped, restorePolling ? undefined : "cooldown");
+    assert.equal(state.in_progress, false);
+  });
+}
+
+test("unattended failure clears in-progress scan state instead of treating its own control as superseded", async () => {
+  const context = { key: "line_oa:oa-a", account: { provider: "line_oa", provider_account_id: "oa-a" }, adapter: { id: "line_oa" } };
+  const control = { accountKey: context.key, controller: new AbortController(), restorePolling: true };
+  const state = {};
+  let status;
+  const runtime = vm.createContext({ activeSyncControl: null, providerAutomaticRecoveries: new Map([[context.key, control]]),
+    STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+    exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
+    getAccountScanState: async () => ({ state, stored: {} }),
+    readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
+    writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+    updateScopedState: async (_key, _context, patch) => { status = patch; },
+    recordLog: async () => {}, recordUnexpected: async () => {},
+    readStorage: async () => ({ scan: { [context.key]: state } }), providerLabel: () => "LINE OA",
+    attemptDelivery: async () => ({ sent: 0, pending: 0 }),
+    syncOpenProvider: async () => { throw new Error("Provider unavailable"); },
+  });
+  const helpers = source.slice(source.indexOf("function isCurrentSyncControl("), source.indexOf("async function initializeAndStartSync("));
+  vm.runInContext(helpers + functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
+  const result = await runtime.runAccountSync("automatic", control, context);
+  assert.match(result.error, /Provider unavailable/);
+  assert.equal(state.in_progress, false);
+  assert.equal(status.state, "error");
 });

@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-9";
+  const BRIDGE_VERSION = "line-oa-poll-10";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 1;
+  const COMPATIBILITY_VERSION = 2;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -80,6 +80,11 @@
     return botId ? ["send_text", "send_image", "send_video", "send_file", "send_sticker"] : [];
   }
 
+  function pollingAccountIds() {
+    if (timer) return [...pollingAccounts.keys()];
+    return [...new Set([...(activePoll ? [activePoll.providerAccountId] : []), ...queuedSyncs.map((request) => request.providerAccountId)])];
+  }
+
   function postProviderStatus(accounts) {
     const commandCapabilitiesByAccount = Object.fromEntries(accounts.map((account) => [
       account.provider_account_id,
@@ -97,7 +102,8 @@
       connected_at: new Date().toISOString(),
       chat_open: true,
       last_provider_check_at: lastProviderCheckAt,
-      provider_polling_active: Boolean(timer || activePoll || pollingAccounts.size),
+      provider_polling_active: Boolean(timer || activePoll || queuedSyncs.length),
+      provider_polling_account_ids: pollingAccountIds(),
     });
   }
 
@@ -254,8 +260,9 @@
     });
   }
 
-  function cancelAcknowledgements(error) {
+  function cancelAcknowledgements(error, recoveryRequestId = null) {
     for (const [requestId, acknowledge] of acknowledgements) {
+      if (recoveryRequestId && !requestId.startsWith(`${recoveryRequestId}:`)) continue;
       acknowledgements.delete(requestId);
       acknowledge({ ok: false, error });
     }
@@ -302,7 +309,7 @@
   }
 
   function pollIsActive(generation) {
-    return !disposed && generation === pollGeneration;
+    return !disposed && generation.epoch === pollGeneration && !generation.cancelled;
   }
 
   async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0 }) {
@@ -355,6 +362,7 @@
         continue;
       }
       const result = await queueMessagePage({ requestId, providerAccountId, chat, messages, page });
+      if (!pollIsActive(generation)) return { parsed, queued };
       parsed += result.parsed;
       queued += result.queued;
       accepted += messages.length;
@@ -365,6 +373,7 @@
         page,
         latestCursor: result.latestCursor,
       });
+      if (!pollIsActive(generation)) return { parsed, queued };
       for (const message of messages) {
         const id = messageId(message);
         if (id) knownMessageIds.add(id);
@@ -464,6 +473,7 @@
   async function poll(requestId, providerAccountId, botId, checkpoint, generation, history) {
     try {
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
+      if (!pollIsActive(generation)) return;
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
       const knownChatIds = knownChatIdsByAccount.get(providerAccountId) ?? new Set();
       const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
@@ -663,8 +673,8 @@
   }
 
   function startPoll({ requestId, providerAccountId, botId, checkpoint, history }) {
-    const generation = pollGeneration;
-    const current = { requestId, providerAccountId, task: null };
+    const generation = { epoch: pollGeneration, cancelled: false };
+    const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
     const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history);
     current.task = task;
@@ -685,6 +695,12 @@
     if (activePoll) queuedSyncs.push(request);
     else startPoll(request);
     timer = setInterval(() => {
+      // Waiting behind another OA is expected work, not a silent provider request.
+      // The active poll must still prove progress through its own responses.
+      for (const request of queuedSyncs) {
+        if (String(request.requestId).startsWith("poll:")) continue;
+        post({ type: "recovery_activity", request_id: request.requestId, provider_account_id: request.providerAccountId });
+      }
       if (activePoll || queuedSyncs.length || disposed || !pollingAccounts.size) return;
       const requests = [...pollingAccounts].map(([id, state]) => ({
         requestId: `poll:${crypto.randomUUID()}`,
@@ -695,18 +711,55 @@
       queuedSyncs.push(...requests);
       if (next) startPoll(next);
     }, 15_000);
+    postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
+      provider_account_id,
+      bot_id: account.botId,
+    })));
   }
 
-  function cancelPolling(reason, { notifyRequests = true } = {}) {
-    stopTimer();
-    pollGeneration += 1;
-    const interrupted = [
-      ...(activePoll ? [activePoll] : []),
-      ...queuedSyncs,
-    ];
-    activePoll = null;
-    queuedSyncs.length = 0;
-    cancelAcknowledgements(reason);
+  function cancelPolling(reason, { notifyRequests = true, providerAccountId = "", requestId = "" } = {}) {
+    const accountId = value(providerAccountId);
+    const selectedRequestId = value(requestId);
+    const globalCancellation = !accountId && !selectedRequestId;
+    const matches = (request) => request
+      && (!accountId || request.providerAccountId === accountId)
+      && (!selectedRequestId || request.requestId === selectedRequestId);
+    const interrupted = [];
+    // Late cancellation must never stop a replacement attempt or its polling timer.
+    if (selectedRequestId && !matches(activePoll) && !queuedSyncs.some(matches)) return;
+    if (activePoll && matches(activePoll)) {
+      activePoll.generation.cancelled = true;
+      interrupted.push(activePoll);
+      activePoll = null;
+    }
+    for (let index = queuedSyncs.length - 1; index >= 0; index -= 1) {
+      if (matches(queuedSyncs[index])) {
+        interrupted.push(...queuedSyncs.splice(index, 1));
+      }
+    }
+    if (globalCancellation) {
+      stopTimer();
+      pollGeneration += 1;
+      pollingAccounts.clear();
+      cancelAcknowledgements(reason);
+    } else {
+      const affectedAccounts = accountId ? [accountId] : interrupted.map((request) => request.providerAccountId);
+      for (const id of affectedAccounts) {
+        const hasReplacement = activePoll?.providerAccountId === id
+          || queuedSyncs.some((request) => request.providerAccountId === id);
+        if (!hasReplacement) pollingAccounts.delete(id);
+      }
+      if (!pollingAccounts.size) stopTimer();
+      for (const request of interrupted) cancelAcknowledgements(reason, request.requestId);
+    }
+    if (!disposed && !activePoll) {
+      const next = queuedSyncs.shift();
+      if (next) startPoll(next);
+    }
+    postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
+      provider_account_id,
+      bot_id: account.botId,
+    })));
     if (!notifyRequests) return;
     for (const request of interrupted) {
       if (String(request.requestId).startsWith("poll:")) continue;
@@ -989,7 +1042,11 @@
         historySelection(event.data),
       );
     } else if (event.data.type === "cancel_sync_v3") {
-      cancelPolling("LINE OA recovery was cancelled.", { notifyRequests: false });
+      cancelPolling("LINE OA recovery was cancelled.", {
+        notifyRequests: false,
+        providerAccountId: event.data.provider_account_id,
+        requestId: event.data.request_id,
+      });
     } else if (event.data.type === "send_api_v3") {
       void sendBrowserMessage(event.data);
     } else if (event.data.type === "recovery_ack_v3") {
@@ -1012,5 +1069,5 @@
       window.removeEventListener("message", listener);
     },
   };
-  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true, last_provider_check_at: lastProviderCheckAt, provider_polling_active: false });
+  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true, last_provider_check_at: lastProviderCheckAt, provider_polling_active: false, provider_polling_account_ids: [] });
 })();

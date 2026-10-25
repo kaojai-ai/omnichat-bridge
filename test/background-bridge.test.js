@@ -23,7 +23,7 @@ test("persists the acknowledged recovery cursor and clears unused summary state"
     compareMessageCursor,
     STORAGE: { scanState: "scanState" },
     getAccountScanState: async () => ({ context: {}, state, stored: { scanState: {} } }),
-    writeAccountScanState: async (_context, next) => { state = next; },
+    writeAccountScanState: async (_context, patch) => { state = { ...state, ...(typeof patch === "function" ? patch(state) : patch) }; },
   });
 
   await advanceScanCursor("shop-1", "conversation-1", {
