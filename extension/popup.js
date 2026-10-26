@@ -112,6 +112,7 @@ let language = defaultLanguage();
 function renderExtensionUpdate(update) {
   const installedVersion = chrome.runtime.getManifest().version;
   const version = document.querySelector("#version");
+  const updateLabel = updateExtensionButton.querySelector("span");
   version.textContent = `v${installedVersion}`;
   version.removeAttribute("title");
   updateExtensionButton.hidden = true;
@@ -125,13 +126,15 @@ function renderExtensionUpdate(update) {
     version.title = `${t("upToDate")} · ${checkedAt}`;
   } else if (update.status === "available") {
     updateExtensionButton.hidden = false;
-    updateExtensionButton.textContent = `! ${t("updateNow")}`;
+    updateExtensionButton.setAttribute("data-state", "available");
+    updateLabel.textContent = t("updateNow");
     updateExtensionButton.setAttribute("aria-label", t("updateNow"));
     updateExtensionButton.title = update.available_version ? `${t("updateNow")} v${update.available_version}` : t("updateNow");
   } else if (update.status === "updating") {
     updateExtensionButton.hidden = false;
     updateExtensionButton.disabled = true;
-    updateExtensionButton.textContent = t("updatingExtension");
+    updateExtensionButton.setAttribute("data-state", "updating");
+    updateLabel.textContent = t("updatingExtension");
     updateExtensionButton.setAttribute("aria-label", t("updatingExtension"));
   }
 }

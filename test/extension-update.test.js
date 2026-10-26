@@ -34,6 +34,8 @@ function fakeElement() {
 test("node update action follows the installed version and clears stale state", () => {
   const version = fakeElement();
   const button = fakeElement();
+  const label = fakeElement();
+  button.querySelector = () => label;
   const installed = JSON.parse(manifest).version;
   const scope = vm.createContext({
     chrome: { runtime: { getManifest: () => ({ version: installed }) } },
@@ -47,13 +49,15 @@ test("node update action follows the installed version and clears stale state", 
   assert.equal(version.textContent, `v${installed}`);
   assert.equal(button.hidden, false);
   assert.equal(button.disabled, false);
-  assert.equal(button.textContent, "! Update now");
+  assert.equal(label.textContent, "Update now");
+  assert.equal(button["data-state"], "available");
   assert.match(button.title, /v99\.0\.0/);
   assert.equal(button["aria-label"], "Update now");
   render({ status: "updating" });
   assert.equal(button.hidden, false);
   assert.equal(button.disabled, true);
-  assert.equal(button.textContent, "Updating…");
+  assert.equal(label.textContent, "Updating…");
+  assert.equal(button["data-state"], "updating");
   render({ status: "current", checked_at: "2026-10-26T01:00:00Z" });
   assert.equal(button.hidden, true, "current installs have no redundant update action");
   assert.match(version.title, /Up to date/);

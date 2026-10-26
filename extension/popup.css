@@ -501,6 +501,8 @@ input[type="checkbox"] {
 .node-summary-row { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-width: 0; }
 .node-summary-row .leader-status { flex-shrink: 0; margin-left: auto; }
 .node-summary-row .device-name-badge { max-width: 160px; min-width: 0; }
+.node-summary-row #version { color: var(--muted); flex-shrink: 0; font-size: 10px; text-decoration: none; white-space: nowrap; }
+.node-summary-row #version:hover { text-decoration: underline; }
 
 .account-section h2 {
   color: #475467;
@@ -1068,6 +1070,9 @@ footer a:hover,
 }
 
 .update-extension {
+  align-items: center;
+  display: inline-flex;
+  gap: 3px;
   background: transparent;
   border: 0;
   color: #b54708;
@@ -1079,7 +1084,11 @@ footer a:hover,
   padding: 0 2px;
   white-space: nowrap;
 }
-.update-extension:hover { background: transparent; color: #93370d; text-decoration: underline; }
+.update-extension span { text-decoration: underline; text-underline-offset: 2px; }
+.update-extension:hover { background: transparent; color: #93370d; }
+.update-extension:hover span { text-decoration-thickness: 2px; }
+.update-warning { fill: none; flex-shrink: 0; height: 12px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; width: 12px; }
+.update-extension[data-state="updating"] .update-warning { display: none; }
 .update-extension:focus-visible { outline: 2px solid #b54708; outline-offset: 2px; }
 .update-extension:disabled { color: #b07024; cursor: wait; }
 
