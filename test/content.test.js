@@ -794,3 +794,21 @@ test("replacing a content bridge preserves uncertainty for an outstanding send",
   assert.equal(outcome.uncertain, true);
   assert.equal(bridge.runtimeListenerCount, 1);
 });
+
+test("LINE verified empty detection settles and clears access without persisting empty accounts", async () => {
+  const bridge = contentBridge("/bot-1/chats", { provider: "line_oa", localConsent: true });
+  await bridge.providerEvent({ type: "provider_status", account_access_verified: true,
+    accessible_account_ids: ["@one"], surface_ready: true });
+  const detection = bridge.requestMessage({ type: "detect_account_v3", provider: "line_oa" });
+  await new Promise(resolve => setImmediate(resolve));
+  const request = bridge.runtimeMessages.findLast(message => message.type === "detect_account_v3");
+  await bridge.providerEvent({ type: "provider_status", account_access_verified: true,
+    accessible_account_ids: [], surface_ready: true });
+  await bridge.providerEvent({ type: "accounts_detected", request_id: request.request_id, accounts: [] });
+  assert.deepEqual(plain(await detection), { ok: true, accounts: [] });
+  const status = await bridge.requestMessage({ type: "get_provider_status_v3" });
+  assert.equal(status.account_access_verified, true);
+  assert.deepEqual(plain(status.accessible_account_ids), []);
+  assert.deepEqual(plain(status.provider_account_ids), []);
+  assert.equal(bridge.runtimeMessages.some(message => message.type === "accounts_detected"), false);
+});

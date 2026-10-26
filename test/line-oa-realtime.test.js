@@ -209,6 +209,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
 
   return {
     posts,
+    setAccounts(accounts) { availableAccounts = accounts; },
+    setAccountError(error) { accountError = error; },
     requests,
     sentPayloads,
     uploads,
@@ -276,7 +278,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     },
     async sync({
       requestId = "sync-1",
-      providerAccountId = "line-oa-account-1",
+      providerAccountId = "@exampleoa",
       botId = "bot-1",
       checkpoint = null,
       history_days = null,
@@ -330,16 +332,14 @@ test("LINE OA discovers and persists the page Basic ID with its bot ID", async (
   });
 });
 
-test("LINE OA rejects a session without an accessible account", async () => {
-  const bridge = createBridge({ basicId: "" });
+test("LINE OA reports verified empty access without trusting the page or configuration", async () => {
+  const bridge = createBridge({ availableAccounts: [] });
 
   assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@exampleoa" }])), {
     source: "omnichat-realtime-bridge-v3",
-    type: "account_detection_failed",
+    type: "accounts_detected",
     request_id: "detect-1",
-    error: "No LINE OA accounts were found for the signed-in user.",
-    diagnostics: { diagnostic_version: 1, provider: "line_oa", operation: "initialize", native_attempted: false,
-      delivery_uncertain: false, failure_kind: "pre_dispatch_failure", timed_out: false },
+    accounts: [],
   });
 });
 
@@ -427,7 +427,7 @@ test("LINE OA recovers every chat and message page only after each page is ackno
     source: "omnichat-realtime-bridge-v3",
     type: "recovery_complete",
     request_id: "sync-1",
-    provider_account_id: "line-oa-account-1",
+    provider_account_id: "@exampleoa",
     ok: true,
     recovered: 3,
     queued: 3,
@@ -440,13 +440,14 @@ test("LINE OA recovers every chat and message page only after each page is ackno
     source: "omnichat-realtime-bridge-v3",
     type: "recovery_progress",
     request_id: "sync-1",
-    provider_account_id: "line-oa-account-1",
+    provider_account_id: "@exampleoa",
     completed_conversations: 0,
     total_conversations: 0,
   });
   assert.deepEqual(
     bridge.requests.map((url) => `${url.pathname}?${url.searchParams}`).sort(),
     [
+      "/api/v1/bots?noFilter=true&limit=1000",
       "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true",
       "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true&next=chat-page-2",
       "/api/v3/bots/bot-1/chats/chat-1/messages?limit=25",
@@ -682,23 +683,23 @@ test("LINE OA fetches when latestEvent timestamp equals the saved watermark", as
 });
 
 test("LINE OA queues a sync request that arrives during an active recovery", async () => {
-  const bridge = createBridge();
+  const bridge = createBridge({ availableAccounts: ["@exampleoa", "@second"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })) });
 
   const first = bridge.sync({ requestId: "sync-1" });
   const second = bridge.sync({
     requestId: "sync-2",
-    providerAccountId: "line-oa-account-2",
+    providerAccountId: "@second",
     botId: "bot-1",
   });
   const [firstComplete, secondComplete] = await Promise.all([first, second]);
 
   assert.equal(firstComplete.ok, true);
   assert.equal(secondComplete.ok, true);
-  assert.equal(secondComplete.provider_account_id, "line-oa-account-2");
+  assert.equal(secondComplete.provider_account_id, "@second");
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete").length, 2);
 });
 
-test("LINE OA uses an explicit bot ID to poll another configured account from one tab", async () => {
+test("LINE OA cannot use a configured bot ID to bypass current access", async () => {
   const bridge = createBridge();
 
   const complete = await bridge.sync({
@@ -707,9 +708,9 @@ test("LINE OA uses an explicit bot ID to poll another configured account from on
     botId: "bot-1",
   });
 
-  assert.equal(complete.ok, true);
+  assert.equal(complete.ok, false);
   assert.equal(complete.provider_account_id, "line-oa-account-2");
-  assert.ok(bridge.requests.some((url) => url.pathname === "/api/v2/bots/bot-1/chats"));
+  assert.equal(bridge.requests.some((url) => url.pathname === "/api/v2/bots/bot-1/chats"), false);
 });
 
 test("LINE OA completes a pending request when the page bridge is replaced", async () => {
@@ -723,7 +724,7 @@ test("LINE OA completes a pending request when the page bridge is replaced", asy
     source: "omnichat-realtime-bridge-v3",
     type: "recovery_complete",
     request_id: "sync-1",
-    provider_account_id: "line-oa-account-1",
+    provider_account_id: "@exampleoa",
     ok: false,
     error: "LINE OA bridge was replaced.",
   });
@@ -1026,7 +1027,7 @@ function lastPollingStatus(bridge) {
 }
 
 test("LINE OA restores and continuously polls three accounts from one tab", async () => {
-  const bridge = createBridge({ chatCount: 0 });
+  const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0 });
   for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
   await settleBridge();
   assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@second", "@third"]);
@@ -1043,7 +1044,7 @@ test("LINE OA scoped cancellation preserves other active and queued account poll
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   let blockNext = true;
-  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
   startAccount(bridge, "@first");
   startAccount(bridge, "@second");
   startAccount(bridge, "@third");
@@ -1067,7 +1068,7 @@ test("LINE OA stale cancellation cannot stop a replacement request or completed 
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   let blockNext = true;
-  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
   startAccount(bridge, "@first", "old");
   await settleBridge();
   bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@first", request_id: "old" });
@@ -1086,7 +1087,7 @@ test("LINE OA stale cancellation cannot stop a replacement request or completed 
 });
 
 test("LINE OA global stop clears every polling registration and reports inactive", async () => {
-  const bridge = createBridge({ chatCount: 0 });
+  const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0 });
   for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
   await settleBridge();
   bridge.dispatch({ type: "cancel_sync_v3" });
@@ -1105,7 +1106,7 @@ test("LINE OA queued recoveries stay active without masking a stalled active req
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   let blockNext = true;
-  const bridge = createBridge({ chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
+  const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0, beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } } });
   startAccount(bridge, "@first", "active");
   startAccount(bridge, "@second", "queued");
   startAccount(bridge, "@third", "poll:periodic");
@@ -1118,5 +1119,56 @@ test("LINE OA queued recoveries stay active without masking a stalled active req
   release();
   await settleBridge();
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
+  bridge.dispose();
+});
+
+
+test("LINE access refresh removes revoked polling but preserves another account", async () => {
+  const accounts = ["@first", "@second"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" }));
+  const bridge = createBridge({ availableAccounts: accounts, chatCount: 0 });
+  startAccount(bridge, "@first");
+  startAccount(bridge, "@second");
+  await settleBridge();
+  bridge.setAccounts([accounts[0]]);
+  await bridge.detect();
+  assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@first"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first"]);
+  bridge.tick();
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:") && post.provider_account_id === "@first" && post.ok));
+  bridge.dispose();
+});
+
+test("LINE account-list failure marks access unknown without revoking known accounts", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  await bridge.sync();
+  bridge.setAccountError(new Error("network unavailable"));
+  await bridge.detect();
+  assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+  assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@exampleoa"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@exampleoa"]);
+  bridge.setAccountError(null);
+  bridge.setAccounts([]);
+  await bridge.detect();
+  assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+  assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, []);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
+  bridge.dispose();
+});
+
+test("LINE sync failure does not revoke access or block a second accessible account", async () => {
+  let requests = 0;
+  const bridge = createBridge({
+    availableAccounts: ["@first", "@second"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })),
+    chatCount: 0,
+    beforeChatRequest: () => { if (++requests === 1) throw new Error("temporary failure"); },
+  });
+  startAccount(bridge, "@first");
+  startAccount(bridge, "@second");
+  await settleBridge();
+  assert.equal(bridge.posts.find((post) => post.type === "recovery_complete" && post.provider_account_id === "@first").ok, false);
+  assert.equal(bridge.posts.find((post) => post.type === "recovery_complete" && post.provider_account_id === "@second").ok, true);
+  assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@first", "@second"]);
+  assert.equal(lastPollingStatus(bridge).account_access_verified, true);
   bridge.dispose();
 });

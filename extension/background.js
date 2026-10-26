@@ -57,7 +57,7 @@ const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
 // Bump when an open Shopee page must replace its main-world bridge.
 const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
@@ -346,10 +346,42 @@ function liveCommandContexts(contexts) {
   return contexts.filter((context) => (context?.adapter?.sendCommands?.length ?? 0) > 0);
 }
 
+// Access is local to this browser session, never inferred from shared config.
+async function lineSessionContexts(contexts, { refresh = false } = {}) {
+  const line = contexts.filter((context) => context.adapter.id === "line_oa");
+  if (!line.length) return contexts;
+  const adapter = line[0].adapter;
+  const tabs = await providerChatTabs(adapter);
+  const statuses = await Promise.all(tabs.map(async (tab) => {
+    if (refresh) {
+      try {
+        await ensureProviderBridge(tab.id, adapter);
+        const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: adapter.id }, {
+          label: "LINE OA", operation: "access check", timeoutMs: 25_000,
+        });
+        if (!result?.ok) return null;
+      } catch { return null; }
+    }
+    return providerTabStatus(tab);
+  }));
+  const verified = statuses.filter((status) => status?.account_access_verified === true);
+  const ids = new Set(verified.flatMap((status) => status.accessible_account_ids ?? []));
+  for (const context of line) {
+    const active = ids.has(context.account.provider_account_id);
+    await updateLiveState(context, {
+      active_in_profile: active,
+      provider_session_reason_code: active ? null : verified.length ? "account_unavailable" : "session_unverified",
+      ...(!active ? { socket: "inactive", leader: false, leader_installation_id: null,
+        provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
+    });
+  }
+  return contexts.filter((context) => context.adapter.id !== "line_oa" || ids.has(context.account.provider_account_id));
+}
+
 let activeShopeeStatusPromise = null;
 const shopeeSessionStates = new Map();
 async function activeLiveCommandContexts(contexts) {
-  const candidates = liveCommandContexts(contexts);
+  const candidates = await lineSessionContexts(liveCommandContexts(contexts));
   if (!candidates.some((context) => context.adapter.id === "shopee")) return candidates;
   if (!activeShopeeStatusPromise) {
     activeShopeeStatusPromise = providerChatTabs(shopeeAdapter)
@@ -901,6 +933,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     void cancelActiveSync().then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
+    );
+    return true;
+  }
+  if (message?.type === "sync_account") {
+    void retryLineAccount(message).then(
+      (result) => respond({ ok: true, ...result }),
+      (error) => respond({ ok: false, error: String(error) }),
     );
     return true;
   }
@@ -1755,7 +1794,7 @@ async function markClosedProviderRecoveryTab(tabId) {
     const adapter = providerAdapters.get(provider);
     if (!adapter) continue;
     const record = providerRecoveryRecord((await readStorage([STORAGE.providerRecoveryTabs]))[STORAGE.providerRecoveryTabs], provider);
-    const affected = adapter.id === "shopee" ? await activeLiveCommandContexts(contexts) : contexts;
+    const affected = await activeLiveCommandContexts(contexts);
     await updateProviderRecoveryLiveState(affected, adapter, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: record?.reason,
@@ -1885,8 +1924,9 @@ async function runProviderHealthWatchdogOnce() {
   const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
   for (const adapter of providerAdapters.list()) {
     const providerContexts = providerRecoveryContexts(contexts, adapter);
-    let matchingContexts = adapter.id === "shopee"
-      ? await activeLiveCommandContexts(providerContexts) : providerContexts;
+    let matchingContexts = adapter.id === "line_oa"
+      ? await lineSessionContexts(providerContexts, { refresh: true })
+      : await activeLiveCommandContexts(providerContexts);
     if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
       // A missing content bridge is not an account conflict. Repair it before
       // deciding which shop can recover; never infer identity from configuration.
@@ -1905,7 +1945,7 @@ async function runProviderHealthWatchdogOnce() {
     if (!matchingContexts.length) {
       // Missing tabs may still be restored by the existing opt-in recovery.
       // Opening a generic chat page does not make any configured shop ready.
-      if (adapter.id === "shopee" && providerContexts.length && allowTabRecovery
+      if (["shopee", "line_oa"].includes(adapter.id) && providerContexts.length && allowTabRecovery
         && !(await providerChatTabs(adapter)).length) {
         await ensureProviderRecoveryTab(adapter, providerContexts[0], true);
       }
@@ -2938,7 +2978,9 @@ function providerTabCanSend(status, context) {
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
   return providerTabIsReady(status, adapter)
     && (adapter?.id !== "shopee"
-      || status?.current_provider_account_id === context.account.provider_account_id);
+      || status?.current_provider_account_id === context.account.provider_account_id)
+    && (adapter?.id !== "line_oa" || (status?.account_access_verified === true
+      && status.accessible_account_ids?.includes(context.account.provider_account_id)));
 }
 
 function providerTabHealthy(status, adapter) {
@@ -3461,6 +3503,9 @@ async function syncOpenProvider(control, context) {
       throw new Error("Shopee login changed. Retry sync for the currently open shop.");
     }
   }
+  if (adapter.id === "line_oa" && !providerTabCanSend(await providerTabStatus(tab), context)) {
+    throw new Error("This LINE account is not available to the current login. Check access and retry.");
+  }
   throwIfSyncCancelled(signal);
   if (control.manualRestart) {
     await sendProviderMessage(tab.id, {
@@ -3508,6 +3553,29 @@ async function syncOpenProvider(control, context) {
     { ...(result?.reason_code === "superseded" ? { reason_code: "superseded" } : {}),
       recovery_diagnostic_recorded: result?.recovery_diagnostic_recorded === true });
   return result;
+}
+
+async function retryLineAccount(message) {
+  if (message.provider !== "line_oa") throw new Error("Account retry is only supported for LINE OA.");
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Accept local consent before syncing.");
+  const contexts = await lineSessionContexts(configuredAccountContexts(stored), { refresh: true });
+  const context = contexts.find((item) => item.adapter.id === "line_oa"
+    && item.account.provider_account_id === message.provider_account_id);
+  if (!context) throw new Error("This LINE account is not available to the current login. Check access and retry.");
+  if ((activeSyncControl?.providerAccountId === context.account.provider_account_id
+      && activeSyncControl?.adapter?.id === "line_oa") || providerAutomaticRecoveries.has(context.key)) {
+    return { skipped: "already_syncing" };
+  }
+  const control = { controller: new AbortController(), manualRestart: true, accountKey: context.key };
+  providerAutomaticRecoveries.set(context.key, control);
+  try {
+    await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));
+    return await runAccountSync("manual", control, context);
+  } finally {
+    if (providerAutomaticRecoveries.get(context.key) === control) providerAutomaticRecoveries.delete(context.key);
+    void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
+  }
 }
 
 function restartSync() {
@@ -3803,6 +3871,7 @@ async function runAccountSync(trigger, control, context) {
 }
 
 async function openSessionSyncContexts(contexts, control) {
+  contexts = await lineSessionContexts(contexts, { refresh: true });
   const shopee = contexts.filter((context) => context.adapter.id === "shopee");
   if (!shopee.length) return contexts;
   let tab = null;
@@ -3817,7 +3886,8 @@ async function openSessionSyncContexts(contexts, control) {
   }
   // Reload configuration after detection: the owner may have switched shop since the last sync.
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const currentContexts = configuredAccountContexts(stored);
+  const currentContexts = configuredAccountContexts(stored).filter((context) => context.adapter.id !== "line_oa"
+    || contexts.some((selected) => selected.key === context.key));
   throwIfSyncCancelled(control.controller.signal);
   const selected = currentContexts.filter((context) => context.adapter.id !== "shopee"
     || (currentId && context.account.provider_account_id === currentId));
@@ -3852,6 +3922,7 @@ async function runUnifiedSync(trigger, control) {
   const accounts = [];
   for (const context of contexts) {
     throwIfSyncCancelled(control.controller.signal);
+    if (providerAutomaticRecoveries.has(context.key)) continue;
     accounts.push(await runAccountSync(trigger, control, context));
   }
   const errors = accounts.filter((account) => account.error);

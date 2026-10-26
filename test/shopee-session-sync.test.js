@@ -12,6 +12,8 @@ for (const currentId of ["A", "B", null]) {
     const skipped = [];
     const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
+      lineSessionContexts: async (contexts) => contexts,
+      providerAutomaticRecoveries: new Map(),
       shopeeAdapter: { id: "shopee" }, STORAGE: {},
       findReadyProviderChatTab: async () => ({ id: 42 }), findProviderChatTab: async () => null,
       detectOpenProviderAccount: async () => ({ ok: Boolean(currentId) }),
@@ -27,7 +29,9 @@ for (const currentId of ["A", "B", null]) {
 }
 test("LINE-only sync does not inspect a Shopee session", async () => {
   const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
-      throwIfSyncCancelled: () => {},});
+      throwIfSyncCancelled: () => {},
+      lineSessionContexts: async (contexts) => contexts,
+      providerAutomaticRecoveries: new Map(),});
   const contexts = [context("line_oa", "L1"), context("line_oa", "L2")];
   assert.equal(await select(contexts, { controller: { signal: {} } }), contexts);
 });
@@ -36,6 +40,8 @@ test("a failed fresh lookup cannot reuse the previous shop ID", async () => {
   const contexts = [context("shopee", "A"), context("line_oa", "L1")];
   const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
+      lineSessionContexts: async (contexts) => contexts,
+      providerAutomaticRecoveries: new Map(),
     shopeeAdapter: {}, STORAGE: {}, findReadyProviderChatTab: async () => ({ id: 42 }),
     detectOpenProviderAccount: async () => ({ ok: false }),
     providerTabStatus: async () => assert.fail("stale status must not be read"),
@@ -81,6 +87,8 @@ for (const failureAt of ["tab_lookup", "detection", "status"]) {
       recordUnexpected: async (area, error, details) => errors.push({ area, error, details }),
       recordLog: async () => {}, updateScopedState: async () => {},
       hasLocalConsent: () => true, throwIfSyncCancelled: () => {},
+      lineSessionContexts: async (contexts) => contexts,
+      providerAutomaticRecoveries: new Map(),
       runAccountSync: async (_trigger, _control, account) => {
         synced.push(account.key);
         return { sent: 1 };
@@ -107,6 +115,8 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
       STORAGE: {}, RESUME_SYNC_COOLDOWN_MS: 0,
       exclusive: async () => ({ context: context("shopee", "A") }),
       throwIfSyncCancelled: () => {},
+      lineSessionContexts: async (contexts) => contexts,
+      providerAutomaticRecoveries: new Map(),
       recordLog: async (level, area, event) => logs.push({ level, area, event }),
       recordUnexpected: async () => logs.push({ level: "error", event: "failed" }),
       updateScopedState: async (_key, _account, value) => states.push(value),

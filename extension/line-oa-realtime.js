@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-10";
+  const BRIDGE_VERSION = "line-oa-poll-11";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 2;
+  const COMPATIBILITY_VERSION = 3;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -20,6 +20,9 @@
   let activePoll = null;
   let lastProviderCheckAt = null;
   const pollingAccounts = new Map();
+  let accessibleAccounts = [];
+  let accountAccessVerified = false;
+  let accountAccessRequest = null;
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
@@ -28,8 +31,6 @@
   const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
-  const botIdFromUrl = () => String(window.location.pathname.split("/").filter(Boolean)[0] ?? "").trim();
-  const basicIdFromPage = () => globalThis.OmnichatLineOA?.basicIdFromHtml?.() ?? "";
   const apiBase = "https://chat.line.biz/api";
   const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
@@ -85,8 +86,8 @@
     return [...new Set([...(activePoll ? [activePoll.providerAccountId] : []), ...queuedSyncs.map((request) => request.providerAccountId)])];
   }
 
-  function postProviderStatus(accounts) {
-    const commandCapabilitiesByAccount = Object.fromEntries(accounts.map((account) => [
+  function postProviderStatus() {
+    const commandCapabilitiesByAccount = Object.fromEntries((accountAccessVerified ? accessibleAccounts : []).map((account) => [
       account.provider_account_id,
       commandCapabilities(value(account.bot_id)),
     ]));
@@ -97,6 +98,8 @@
       surface_ready: true,
       capabilities: { account_detection: true, message_observation: true, message_recovery: true },
       command_capabilities_by_account: commandCapabilitiesByAccount,
+      accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
+      account_access_verified: accountAccessVerified,
       realtime_transport: "authenticated_polling",
       realtime_connected: !lastProviderCheckAt || Date.now() - Date.parse(lastProviderCheckAt) < 45_000,
       connected_at: new Date().toISOString(),
@@ -107,9 +110,9 @@
     });
   }
 
-  async function publishProviderStatus(detectedAccounts) {
-    const accounts = detectedAccounts ?? await availableAccounts().catch(() => []);
-    postProviderStatus(accounts);
+  async function publishProviderStatus() {
+    await availableAccounts().catch(() => undefined);
+    postProviderStatus();
   }
 
   window.fetch = async (input, init) => {
@@ -130,19 +133,36 @@
   };
 
   async function availableAccounts() {
-    const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
-    return (Array.isArray(body?.list) ? body.list : []).map((bot) => ({
-      provider_account_id: normalizeBasicId(bot?.basicSearchId ?? bot?.basicId),
-      bot_id: value(bot?.botId ?? bot?.id),
-      display_name: value(bot?.name ?? bot?.displayName),
-    })).filter((account) => account.provider_account_id && account.bot_id);
+    if (accountAccessRequest) return accountAccessRequest;
+    accountAccessRequest = (async () => {
+      try {
+        const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
+        if (!Array.isArray(body?.list)) throw new Error("LINE OA account list was invalid.");
+        const accounts = body.list.map((bot) => ({
+          provider_account_id: normalizeBasicId(bot?.basicSearchId ?? bot?.basicId),
+          bot_id: value(bot?.botId ?? bot?.id),
+          display_name: value(bot?.name ?? bot?.displayName),
+        })).filter((account) => account.provider_account_id && account.bot_id);
+        if (disposed) return [];
+        accessibleAccounts = accounts;
+        accountAccessVerified = true;
+        const ids = new Set(accounts.map((account) => account.provider_account_id));
+        for (const id of pollingAccounts.keys()) {
+          if (!ids.has(id)) cancelPolling("This LINE OA is not accessible to the signed-in user.", { providerAccountId: id });
+        }
+        postProviderStatus();
+        return accounts;
+      } catch (error) {
+        // A failed request cannot prove that access was revoked.
+        accountAccessVerified = false;
+        postProviderStatus();
+        throw error;
+      }
+    })().finally(() => { accountAccessRequest = null; });
+    return accountAccessRequest;
   }
 
-  async function resolveBotId(providerAccountId, configuredBotId) {
-    const explicit = value(configuredBotId);
-    if (explicit) return explicit;
-    const pageAccountId = normalizeBasicId(basicIdFromPage());
-    if (pageAccountId === normalizeBasicId(providerAccountId)) return botIdFromUrl();
+  async function resolveBotId(providerAccountId) {
     const account = (await availableAccounts()).find(
       (candidate) => candidate.provider_account_id === normalizeBasicId(providerAccountId),
     );
@@ -643,17 +663,14 @@
           ...(checkpoint?.history_window_days ? { history_window_days: checkpoint.history_window_days } : {}),
         };
       }
-      postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
-        provider_account_id,
-        bot_id: account.botId,
-      })));
+      postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
     } catch (error) {
+      if ([401, 403].includes(error?.providerDiagnostics?.http_status)) {
+        await availableAccounts().catch(() => undefined);
+      }
       if (pollIsActive(generation)) {
-        postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
-          provider_account_id,
-          bot_id: account.botId,
-        })));
+        postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
       }
     }
@@ -711,10 +728,7 @@
       queuedSyncs.push(...requests);
       if (next) startPoll(next);
     }, 15_000);
-    postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
-      provider_account_id,
-      bot_id: account.botId,
-    })));
+    postProviderStatus();
   }
 
   function cancelPolling(reason, { notifyRequests = true, providerAccountId = "", requestId = "" } = {}) {
@@ -756,10 +770,7 @@
       const next = queuedSyncs.shift();
       if (next) startPoll(next);
     }
-    postProviderStatus([...pollingAccounts].map(([provider_account_id, account]) => ({
-      provider_account_id,
-      bot_id: account.botId,
-    })));
+    postProviderStatus();
     if (!notifyRequests) return;
     for (const request of interrupted) {
       if (String(request.requestId).startsWith("poll:")) continue;
@@ -771,10 +782,6 @@
         error: reason,
       });
     }
-  }
-
-  function configuredAccountForPage(basicId) {
-    return basicId ? { provider_account_id: basicId } : null;
   }
 
   function sendId(conversationId) {
@@ -962,6 +969,7 @@
       httpStatus = response.status;
       const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
       if (!response.ok) {
+        if ([401, 403].includes(response.status)) void availableAccounts().catch(() => undefined);
         providerDetails = providerErrorDetails(responseBody);
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
@@ -1006,20 +1014,7 @@
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
       void availableAccounts().then((accounts) => {
-        if (!accounts.length) {
-          const account = configuredAccountForPage(basicIdFromPage());
-          if (account) accounts.push({ ...account, bot_id: botIdFromUrl() });
-        }
-        if (!accounts.length) {
-          post({
-            type: "account_detection_failed",
-            request_id: event.data.request_id,
-            error: "No LINE OA accounts were found for the signed-in user.",
-            diagnostics: failedOperationDiagnostics(null, "initialize"),
-          });
-          return;
-        }
-        void publishProviderStatus(accounts);
+        postProviderStatus();
         post({
           type: "accounts_detected",
           request_id: event.data.request_id,
@@ -1069,5 +1064,5 @@
       window.removeEventListener("message", listener);
     },
   };
-  post({ type: "provider_status", surface: "line-oa", bridge_version: BRIDGE_VERSION, surface_ready: true, capabilities: { account_detection: true, message_observation: true, message_recovery: true }, command_capabilities_by_account: {}, realtime_transport: "authenticated_polling", realtime_connected: true, connected_at: new Date().toISOString(), chat_open: true, last_provider_check_at: lastProviderCheckAt, provider_polling_active: false, provider_polling_account_ids: [] });
+  postProviderStatus();
 })();

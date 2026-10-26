@@ -31,6 +31,8 @@
   let providerCapabilities = {};
   let providerCommandCapabilitiesByAccount = {};
   let providerAccountIds = [];
+  let accessibleAccountIds = [];
+  let accountAccessVerified = false;
   let currentProviderAccountId = null;
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
@@ -446,15 +448,15 @@
     const accounts = (Array.isArray(message?.accounts) ? message.accounts : [message])
       .map(normalizedAccount)
       .filter(Boolean);
-    if (!accounts.length) return;
+    if (!accounts.length && providerAdapter.id !== "line_oa") return;
     providerAccountIds = accounts.map((account) => account.provider_account_id);
     const stored = await chrome.storage.local.get(["local_consent"]);
     if (!stored.local_consent?.accepted_at) return;
-    const persisted = await sendRuntimeMessage({
+    const persisted = accounts.length ? await sendRuntimeMessage({
       type: "accounts_detected",
       provider: providerAdapter.id,
       accounts,
-    });
+    }) : { ok: true };
     if (!persisted?.ok) {
       throw new Error(persisted?.error ?? "Could not save detected provider accounts.");
     }
@@ -1009,6 +1011,12 @@
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
       const wasSurfaceReady = providerSurfaceReady;
+      if (providerAdapter.id === "line_oa") {
+        accountAccessVerified = event.data.account_access_verified === true;
+        accessibleAccountIds = Array.isArray(event.data.accessible_account_ids)
+          ? event.data.accessible_account_ids.filter((id) => typeof id === "string") : [];
+        providerAccountIds = accountAccessVerified ? [...accessibleAccountIds] : [];
+      }
       if (providerAdapter.id === "shopee") {
         currentProviderAccountId = event.data.current_provider_account_id ?? null;
       }
@@ -1116,6 +1124,8 @@
         ok: true,
         surface: providerSurface,
         provider_account_ids: providerAccountIds,
+        accessible_account_ids: [...accessibleAccountIds],
+        account_access_verified: accountAccessVerified,
         current_provider_account_id: currentProviderAccountId,
         surface_ready: providerSurfaceReady,
         capabilities: { ...providerCapabilities },
