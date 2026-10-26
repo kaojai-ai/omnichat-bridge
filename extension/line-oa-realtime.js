@@ -32,7 +32,19 @@
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
   const apiBase = "https://chat.line.biz/api";
-  const post = (data) => window.postMessage({ source: SOURCE, ...data }, window.location.origin);
+  const post = (data) => {
+    window.postMessage({ source: SOURCE, ...data }, window.location.origin);
+    // Waiting accounts inherit real progress from the work ahead of them, not
+    // timer ticks. A stalled active request must still let every deadline expire.
+    if (!activePoll || data.provider_account_id !== activePoll.providerAccountId
+      || !(data.request_id === activePoll.requestId || String(data.request_id).startsWith(`${activePoll.requestId}:`))
+      || !["recovery_phase", "recovery_progress", "recovery_batch", "recovery_cursor", "history_window", "history_backfill"].includes(data.type)) return;
+    for (const request of queuedSyncs) {
+      if (String(request.requestId).startsWith("poll:")) continue;
+      window.postMessage({ source: SOURCE, type: "recovery_activity", request_id: request.requestId,
+        provider_account_id: request.providerAccountId }, window.location.origin);
+    }
+  };
   const value = (input) => typeof input === "string" || typeof input === "number" ? String(input).trim() : "";
   const cursor = (input) => value(input) || null;
   const normalizeBasicId = (input) => {
@@ -693,6 +705,9 @@
     const generation = { epoch: pollGeneration, cancelled: false };
     const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
+    if (!String(requestId).startsWith("poll:")) {
+      post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase: "loading_conversations" });
+    }
     const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
@@ -709,15 +724,15 @@
     };
     pollingAccounts.set(accountId, account);
     const request = { requestId, providerAccountId: accountId, ...account };
-    if (activePoll) queuedSyncs.push(request);
-    else startPoll(request);
-    timer = setInterval(() => {
-      // Waiting behind another OA is expected work, not a silent provider request.
-      // The active poll must still prove progress through its own responses.
-      for (const request of queuedSyncs) {
-        if (String(request.requestId).startsWith("poll:")) continue;
-        post({ type: "recovery_activity", request_id: request.requestId, provider_account_id: request.providerAccountId });
+    if (activePoll) {
+      queuedSyncs.push(request);
+      if (!String(requestId).startsWith("poll:")) {
+        post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId, phase: "waiting_recovery" });
       }
+    } else startPoll(request);
+    timer = setInterval(() => {
+      // Queue residence is not progress. Only actual phase/data events renew
+      // recovery deadlines; scoped cancellation releases the next account.
       if (activePoll || queuedSyncs.length || disposed || !pollingAccounts.size) return;
       const requests = [...pollingAccounts].map(([id, state]) => ({
         requestId: `poll:${crypto.randomUUID()}`,

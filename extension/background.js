@@ -930,7 +930,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "cancel_sync") {
-    void cancelActiveSync().then(
+    void cancelActiveSync(message.provider).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -944,7 +944,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_now") {
-    void initializeAndStartSync("manual").then(
+    void initializeAndStartSync("manual", message.provider).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -1164,7 +1164,7 @@ function syncControlForMessage(message, tabId) {
     && control.tabId === tabId && control.providerRequestId === requestId);
 }
 
-async function initializeAndStartSync(trigger) {
+async function initializeAndStartSync(trigger, provider = null) {
   await queueLiveStateWrite(() => writeStorage({
     [STORAGE.serverInitialized]: true,
     [STORAGE.logUploadEnabled]: true,
@@ -1186,7 +1186,8 @@ async function initializeAndStartSync(trigger) {
   }
   // Ticket/reconnect backoff must not hold up a user-requested retry.
   void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
-  return trigger === "manual" ? restartSync() : startSync(trigger);
+  return trigger === "manual" && provider !== "line_oa"
+    ? restartSync() : startSync(trigger, false, provider);
 }
 
 async function startUnattendedSellerCentreSync(provider) {
@@ -3436,8 +3437,9 @@ function sendProviderMessage(tabId, message, {
       clearTimeout(timeout);
       timeout = setTimeout(() => {
         if (recoveryControl) {
-          void Promise.resolve(chrome.tabs.sendMessage(tabId, {
+          void Promise.resolve().then(() => chrome.tabs.sendMessage(tabId, {
             type: "cancel_sync_v3", request_id: message.request_id,
+            ...(message.provider_account_id ? { provider_account_id: message.provider_account_id } : {}),
           })).catch(() => undefined);
         }
         reject(providerMessageTimeout(label ?? "Provider", operation ?? "request"));
@@ -3470,6 +3472,9 @@ function throwIfSyncCancelled(signal) {
 }
 
 async function syncOpenProvider(control, context) {
+  if (context?.adapter?.id === "line_oa") {
+    await updateScopedState(STORAGE.status, context.key, { phase: "connecting_provider" });
+  }
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   const label = providerLabel(adapter);
   if (!adapter?.supports("message_recovery")) {
@@ -3518,6 +3523,9 @@ async function syncOpenProvider(control, context) {
       await withRequestTimeout(() => resetProviderRecovery(tab.id), PROVIDER_STATUS_RESPONSE_TIMEOUT_MS, signal);
     }
     throwIfSyncCancelled(signal);
+  }
+  if (adapter.id === "line_oa") {
+    await updateScopedState(STORAGE.status, context.key, { phase: "waiting_recovery" });
   }
   control.providerRequestId = crypto.randomUUID();
   const syncMessage = {
@@ -3601,12 +3609,13 @@ function restartSync() {
   return syncRestart.then((result) => result.sync);
 }
 
-function startSync(trigger = "manual", restarting = false) {
+function startSync(trigger = "manual", restarting = false, provider = null) {
   if (syncRestart && !restarting) return syncRestart.then((result) => result.sync);
   if (activeSync) return activeSync;
   const control = {
     controller: new AbortController(),
     manualRestart: restarting,
+    providerScope: provider === "line_oa" ? provider : null,
     tabId: null,
   };
   activeSyncControl = control;
@@ -3620,7 +3629,19 @@ function startSync(trigger = "manual", restarting = false) {
   return activeSync;
 }
 
-async function cancelActiveSync() {
+async function cancelActiveSync(provider = null) {
+  if (provider === "line_oa") {
+    const controls = [activeSyncControl, ...providerAutomaticRecoveries.values()].filter((control) => control
+      && (control.adapter?.id === "line_oa" || control.providerScope === "line_oa"
+        || control.accountKey?.startsWith("line_oa:")));
+    for (const control of controls) control.controller.abort();
+    await Promise.allSettled(controls.filter((control) => control.tabId).map((control) => sendProviderMessage(control.tabId, {
+      type: "cancel_sync_v3", provider: "line_oa",
+      ...(control.providerAccountId ? { provider_account_id: control.providerAccountId } : {}),
+      ...(control.providerRequestId ? { request_id: control.providerRequestId } : {}),
+    }, { label: "LINE OA", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS })));
+    return { cancelled: controls.length > 0 };
+  }
   const control = activeSyncControl;
   const running = activeSync;
   control?.controller.abort();
@@ -3762,7 +3783,7 @@ async function runAccountSync(trigger, control, context) {
     throwIfSyncCancelled(signal);
     await updateScopedState(STORAGE.status, context.key, {
       state: "syncing",
-      phase: "checking_conversations",
+      phase: context.adapter.id === "line_oa" ? "connecting_provider" : "checking_conversations",
       completed_conversations: 0,
       total_conversations: 0,
     });
@@ -3917,7 +3938,9 @@ async function runUnifiedSync(trigger, control) {
   if (!hasLocalConsent(stored[STORAGE.consent])) {
     throw new Error("Provider browser bridge is not configured.");
   }
-  const contexts = await openSessionSyncContexts(configuredAccountContexts(stored), control);
+  const candidates = configuredAccountContexts(stored).filter((context) => !control.providerScope
+    || context.adapter.id === control.providerScope);
+  const contexts = await openSessionSyncContexts(candidates, control);
   if (!contexts.length) throw new Error("Log in to a configured provider account and open its chat to sync.");
   const accounts = [];
   for (const context of contexts) {

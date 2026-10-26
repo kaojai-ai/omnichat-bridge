@@ -1102,7 +1102,7 @@ test("LINE OA global stop clears every polling registration and reports inactive
 });
 
 
-test("LINE OA queued recoveries stay active without masking a stalled active request", async () => {
+test("LINE OA stalled recovery emits no synthetic activity and scoped cancellation releases the next account", async () => {
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   let blockNext = true;
@@ -1111,14 +1111,22 @@ test("LINE OA queued recoveries stay active without masking a stalled active req
   startAccount(bridge, "@second", "queued");
   startAccount(bridge, "@third", "poll:periodic");
   await settleBridge();
-  bridge.posts.length = 0;
+  assert.deepEqual(bridge.posts.filter((post) => post.type === "recovery_phase").map((post) => [post.request_id, post.phase]), [
+    ["active", "loading_conversations"], ["queued", "waiting_recovery"],
+  ]);
+  const before = bridge.posts.length;
   for (let tick = 0; tick < 5; tick += 1) bridge.tick();
-  const activity = bridge.posts.filter((post) => post.type === "recovery_activity");
-  assert.equal(activity.length, 5);
-  assert.deepEqual(activity.map((post) => [post.request_id, post.provider_account_id]), Array.from({ length: 5 }, () => ["queued", "@second"]));
+  assert.equal(bridge.posts.slice(before).some((post) => ["recovery_activity", "recovery_phase"].includes(post.type)), false);
+  // The content/background idle deadline sends this scoped cancellation.
+  bridge.dispatch({ type: "cancel_sync_v3", request_id: "active", provider_account_id: "@first" });
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_phase" && post.request_id === "queued" && post.phase === "loading_conversations"));
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "poll:periodic" && post.ok));
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@second", "@third"]);
   release();
   await settleBridge();
-  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
+  assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "active"), false);
   bridge.dispose();
 });
 
@@ -1170,5 +1178,39 @@ test("LINE sync failure does not revoke access or block a second accessible acco
   assert.equal(bridge.posts.find((post) => post.type === "recovery_complete" && post.provider_account_id === "@second").ok, true);
   assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@first", "@second"]);
   assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+  bridge.dispose();
+});
+
+
+test("LINE queued deadlines renew only while the active account makes real progress", async () => {
+  let releaseFirst;
+  let releaseSecond;
+  const firstPage = new Promise((resolve) => { releaseFirst = resolve; });
+  const secondPage = new Promise((resolve) => { releaseSecond = resolve; });
+  let requests = 0;
+  const bridge = createBridge({
+    availableAccounts: ["@first", "@second"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })),
+    beforeChatRequest: async () => {
+      requests += 1;
+      if (requests === 1) await firstPage;
+      if (requests === 2) await secondPage;
+    },
+  });
+  startAccount(bridge, "@first", "active");
+  startAccount(bridge, "@second", "queued");
+  await settleBridge();
+  bridge.posts.length = 0;
+  releaseFirst();
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_phase" && post.provider_account_id === "@first" && post.phase === "fetching_messages"));
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_activity" && post.request_id === "queued"));
+  assert.equal(bridge.posts.some((post) => post.type === "recovery_activity" && post.request_id === "active"), false);
+  const before = bridge.posts.length;
+  for (let tick = 0; tick < 5; tick += 1) bridge.tick();
+  assert.equal(bridge.posts.slice(before).some((post) => post.type === "recovery_activity"), false);
+  releaseSecond();
+  await settleBridge();
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "active" && post.ok));
+  assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
   bridge.dispose();
 });

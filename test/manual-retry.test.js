@@ -135,3 +135,78 @@ test("a healthy content ping cannot hide an old Shopee main bridge after upgrade
   await ensure(42, { id: "shopee" });
   assert.equal(replacements, 1, "compatible page bridges remain attached");
 });
+
+
+test("repeated LINE Sync reuses the running operation without cancellation", async () => {
+  const runs = [], result = deferred();
+  const runtime = vm.createContext({
+    AbortController, STORAGE: {}, liveConnections: new Map(), clearTimeout() {},
+    queueLiveStateWrite: async fn => fn(), writeStorage: async () => {}, recordLog: async () => {},
+    ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
+    runUnifiedSync: (_trigger, control) => { runs.push(control); return result.promise; },
+    sendProviderMessage: () => assert.fail("LINE Sync must not cancel recovery"),
+  });
+  vm.runInContext('let activeSync = null, activeSyncControl = null, syncRestart = null;\n'
+    + section('function restartSync(', 'async function cancelActiveSync(')
+    + section('async function initializeAndStartSync(', 'async function startUnattendedSellerCentreSync('), runtime);
+  const first = runtime.initializeAndStartSync("manual", "line_oa");
+  await new Promise(resolve => setImmediate(resolve));
+  const second = runtime.initializeAndStartSync("manual", "line_oa");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].providerScope, "line_oa");
+  assert.equal(runs[0].controller.signal.aborted, false);
+  result.resolve({ accounts: ["A"] });
+  assert.deepEqual(await first, await second);
+});
+
+test("idle LINE recovery settles error and releases only its own account slot", async () => {
+  const h = messageHarness();
+  const recoveries = new Map([["line_oa:B", { healthy: true }]]), updates = [];
+  const account = { key: "line_oa:A", account: { provider: "line_oa", provider_account_id: "A" }, adapter: { id: "line_oa" } };
+  Object.assign(h.runtime, {
+    AbortController, STORAGE: {}, activeSyncControl: null, providerAutomaticRecoveries: recoveries,
+    readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
+    lineSessionContexts: async c => c, queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
+    ensureLiveConnection: async () => {}, recordUnexpected: async () => {}, recordLog: async () => {},
+    exclusive: async () => ({ context: account }), throwIfSyncCancelled() {},
+    updateScopedState: async (_storage, key, patch) => updates.push({ key, ...patch }),
+    attemptDelivery: async () => ({ sent: 0, pending: 0 }), providerLabel: () => "LINE OA",
+    readAccountState: (_storage, _key, fallback) => fallback,
+    isCurrentSyncControl: control => recoveries.get(control.accountKey) === control,
+    syncOpenProvider: control => { control.providerRequestId = "attempt-A"; return h.runtime.sendProviderMessage(42,
+      { type: "sync_now_v3", request_id: "attempt-A", provider_account_id: "A" },
+      { recoveryControl: control, timeoutMs: 60_000 }); },
+  });
+  vm.runInContext(section('async function runAccountSync(', 'async function openSessionSyncContexts(')
+    + section('async function retryLineAccount(', 'function restartSync('), h.runtime);
+  const result = h.runtime.retryLineAccount({ provider: "line_oa", provider_account_id: "A" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(recoveries.has("line_oa:A"), true);
+  h.advance(60_000);
+  assert.match((await result).error, /silent/);
+  assert.equal(recoveries.has("line_oa:A"), false);
+  assert.equal(recoveries.get("line_oa:B").healthy, true);
+  assert.equal(updates.at(-1).state, "error");
+  assert.equal(updates.at(-1).phase, null);
+  const cancellation = h.calls.find(call => call.type === "cancel_sync_v3");
+  assert.equal(cancellation.provider_account_id, "A");
+  assert.equal(cancellation.request_id, "attempt-A");
+});
+
+
+test("explicit LINE Cancel reaches scoped retries without aborting another provider", async () => {
+  const line = { controller: new AbortController(), accountKey: "line_oa:A", providerAccountId: "A", providerRequestId: "run-A", tabId: 42 };
+  const shopee = { controller: new AbortController(), adapter: { id: "shopee" } };
+  const calls = [];
+  const cancel = vm.runInNewContext(`(${section('async function cancelActiveSync(', 'async function clearPersistedSync(')})`, {
+    activeSyncControl: shopee, providerAutomaticRecoveries: new Map([[line.accountKey, line]]),
+    sendProviderMessage: async (_tab, message) => { calls.push(message); return { ok: true }; },
+    PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000,
+  });
+  assert.equal((await cancel("line_oa")).cancelled, true);
+  assert.equal(line.controller.signal.aborted, true);
+  assert.equal(shopee.controller.signal.aborted, false);
+  assert.equal(calls[0].provider_account_id, "A");
+  assert.equal(calls[0].request_id, "run-A");
+});

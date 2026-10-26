@@ -504,7 +504,10 @@ function accountRowStatus(account) {
   const retryError = accountRetryErrors.get(key);
   if (retryError && Date.parse(syncState?.last_sync_at ?? "") > retryError.at) accountRetryErrors.delete(key);
   else if (retryError) return { label: t("failed"), state: "error", hint: retryError.message, action: "logs" };
-  if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) return { label: t("syncing"), state: "neutral", loading: true };
+  if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) return {
+    label: account.provider === "line_oa" ? syncProgressPresentation(syncState)?.text || t("syncing") : t("syncing"),
+    state: "neutral", loading: true,
+  };
   if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
   const failure = currentAccountSyncFailure(syncState, live);
   if (failure) return { label: t("failed"), state: "error", hint: failure, action: "logs" };
@@ -813,7 +816,7 @@ function renderDashboard(message = "", isError = false) {
 
   status.classList.toggle("error", isError);
   setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
-  syncButton.disabled = false;
+  syncButton.disabled = activeProviderAdapter?.id === "line_oa" && Boolean(pendingAction);
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
     ? t("openWebchat")
@@ -1237,11 +1240,14 @@ syncButton.addEventListener("click", async () => {
   progressArea.hidden = false;
   syncProgress.hidden = true;
   status.classList.remove("error");
-  pendingAction = "restarting";
+  pendingAction = activeProviderAdapter?.id === "line_oa" ? "checking" : "restarting";
   renderDashboard();
   try {
     await requestTargetPermission(accountOrigins(storedConfig));
-    const result = await chrome.runtime.sendMessage({ type: "sync_now" });
+    const result = await chrome.runtime.sendMessage({
+      type: "sync_now",
+      ...(activeProviderAdapter?.id === "line_oa" ? { provider: "line_oa" } : {}),
+    });
     if (actionId === syncActionId) {
       pendingAction = "";
       await showSyncResult(result);
@@ -1278,7 +1284,10 @@ cancelSyncButton.addEventListener("click", async () => {
   status.textContent = t("cancellingSync");
   setStatusAppearance("neutral", true);
   try {
-    const result = await chrome.runtime.sendMessage({ type: "cancel_sync" });
+    const result = await chrome.runtime.sendMessage({
+      type: "cancel_sync",
+      ...(activeProviderAdapter?.id === "line_oa" ? { provider: "line_oa" } : {}),
+    });
     await refreshStoredState();
     renderDashboard(
       result?.ok && result.cancelled ? t("syncCancelled") : result?.error ?? t("noSyncInProgress"),
