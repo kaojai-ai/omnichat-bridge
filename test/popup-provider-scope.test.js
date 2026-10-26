@@ -59,21 +59,7 @@ test("hydrates saved accounts and sync status before live detection returns", ()
   assert.match(popupSource, /STORAGE\.detectedAccounts,/);
   assert.match(popupSource, /detectedAccounts = bestEffortAccounts\(stored\[STORAGE\.detectedAccounts\], activeTab\?\.url\);/);
   assert.match(popupSource, /from "\.\/lib\/popup-sync-progress\.js"/);
-  assert.match(popupSource, /syncProgressPresentation\(progressAccount \?/);
-});
-
-test("shows provider badges and account names separately", () => {
-  assert.match(html, /<h2 id="account-title">Provider<\/h2>/);
-  assert.match(html, /id="provider-badges" class="provider-badges"/);
-  assert.match(popupSource, /badge\.dataset\.provider = provider/);
-  assert.match(popupSource, /function providerBadgeLabel\(provider, adapter\)/);
-  assert.match(popupSource, /if \(provider === "line_oa"\) return "LINE"/);
-  assert.match(popupSource, /if \(provider === "shopee"\) return "Shopee"/);
-  assert.match(css, /\.provider-badge\[data-provider="line_oa"\] \{ background: #06c755; \}/);
-  assert.match(css, /\.provider-badge\[data-provider="shopee"\] \{ background: var\(--shopee\); \}/);
-  assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
-  assert.match(popupSource, /return `Shop: \$\{displayName\}`/);
-  assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
+  assert.match(popupSource, /syncProgressPresentation\(readAccountState\(storedStatus/);
 });
 
 test("links a detected LINE account name to its LINE Chat page", () => {
@@ -89,7 +75,6 @@ test("offers an account-scoped discard action beside pending messages", () => {
   assert.match(popupSource, /type: "discard_pending"/);
   assert.match(popupSource, /provider_account_id: providerAccountId/);
   assert.match(popupSource, /skips older messages for this account and cannot be undone/);
-  assert.match(css, /\.discard-pending-link/);
 });
 
 test("offers to open Shopee Webchat mini before sync", () => {

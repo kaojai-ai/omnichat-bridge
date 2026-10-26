@@ -47,3 +47,10 @@ test("row retry failure settles loading and records an error only for that accou
   assert.equal(context.accountRetryErrors.get("line_oa:@failed").message, "Access check timed out");
   assert.equal(context.accountRetryErrors.has("line_oa:@healthy"), false);
 });
+
+test("row retry surfaces recovery errors even when the runtime envelope succeeded", async () => {
+  const { context, account } = harness({ ok: true, error: "Recovery failed" });
+  await context.retryAccount(account);
+  assert.equal(context.accountRetryErrors.get("line_oa:@failed").message, "Recovery failed");
+  assert.equal(context.retryingAccounts.size, 0);
+});

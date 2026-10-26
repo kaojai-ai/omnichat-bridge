@@ -24,7 +24,7 @@ test("separates a connected server from a provider that needs attention", () => 
       provider_recovery_reason: "The tracked provider tab was closed.",
     }),
     {
-      label: "CONNECTED · ACTION REQUIRED",
+      label: "Needs attention",
       state: "error",
       hint: "The tracked provider tab was closed.",
       action: "logs",
@@ -35,11 +35,11 @@ test("separates a connected server from a provider that needs attention", () => 
 test("shows provider readiness independently from the live server socket", () => {
   assert.equal(
     providerConnectionStatus({ socket: "connected", provider_recovery_state: "ready" }).label,
-    "CONNECTED · PROVIDER READY",
+    "Ready",
   );
   assert.equal(
     providerConnectionStatus({ socket: "connected" }).label,
-    "CONNECTED · CHECKING PROVIDER",
+    "Checking provider…",
   );
 });
 
@@ -47,7 +47,7 @@ test("distinguishes a connected Seller Centre bridge before mini-chat is open", 
   assert.deepEqual(
     sellerCentreConnectionStatus({ ...connected, provider_surface_ready: false, provider_chat_open: false }),
     {
-      label: "CONNECTED · OPEN CHAT",
+      label: "Open chat",
       state: "neutral",
       hint: "Connected to your server. Open Seller Centre Chat to start syncing.",
     },
@@ -57,7 +57,7 @@ test("distinguishes a connected Seller Centre bridge before mini-chat is open", 
 test("shows Seller Centre initialization separately after mini-chat opens", () => {
   assert.equal(
     sellerCentreConnectionStatus({ ...connected, provider_surface_ready: false, provider_chat_open: true }).label,
-    "CONNECTED · INITIALIZING",
+    "Initializing chat…",
   );
 });
 
@@ -70,7 +70,7 @@ test("lets an unhealthy Seller Centre recovery state override a stale surface la
       provider_surface_ready: false,
       provider_chat_open: true,
     }).label,
-    "CONNECTED · ACTION REQUIRED",
+    "Needs attention",
   );
 });
 
@@ -78,7 +78,7 @@ test("shows a ready Seller Centre chat after its request templates are captured"
   assert.deepEqual(
     sellerCentreConnectionStatus({ ...connected, provider_surface_ready: true, provider_chat_open: true }),
     {
-      label: "CONNECTED · CHAT READY",
+      label: "Ready",
       state: "ready",
       hint: "Seller Centre Chat is ready and syncing can continue automatically.",
     },
@@ -112,7 +112,7 @@ test("scopes the latest sync error to its provider account", () => {
 });
 
 test("connection recovery is visible independently from provider readiness", () => {
-  assert.equal(transportConnectionStatus({ socket: "connecting" }).label, "CONNECTING");
+  assert.equal(transportConnectionStatus({ socket: "connecting" }).label, "Connecting…");
   assert.equal(transportConnectionStatus({ socket: "reconnecting", provider_recovery_state: "ready" }).state, "neutral");
   assert.equal(transportConnectionStatus({ socket: "disconnected" }).action, "logs");
   assert.equal(transportConnectionStatus({ socket: "connected" }), null);
@@ -128,16 +128,16 @@ test("account discovery never claims missing configuration while still running",
 });
 
 test("chat recovery is visible before the target socket connects", () => {
-  assert.equal(accountConnectionStatus({ provider_recovery_state: "opening" }).label, "OPENING PROVIDER CHAT");
+  assert.equal(accountConnectionStatus({ provider_recovery_state: "opening" }).label, "Opening chat…");
   assert.equal(accountConnectionStatus({ provider_recovery_state: "needs_attention" }).action, "logs");
 });
 
 test("captured request templates do not imply a healthy Shopee realtime connection", () => {
   const live = { ...connected, provider_surface_ready: true, provider_chat_open: true,
     provider_recovery_state: "ready", provider_realtime_connected: false };
-  assert.equal(accountConnectionStatus(live).label, "WAITING FOR SHOPEE CONNECTION");
+  assert.equal(accountConnectionStatus(live).label, "Waiting for Shopee…");
   assert.equal(accountConnectionStatus({ ...live, provider_realtime_connected: true }).state, "ready");
-  assert.equal(accountConnectionStatus({ ...live, socket: "reconnecting" }).label, "RECOVERING CONNECTION");
+  assert.equal(accountConnectionStatus({ ...live, socket: "reconnecting" }).label, "Reconnecting…");
 });
 
 test("server 404 takes precedence over Shopee login guidance and clears on connection", () => {
@@ -170,10 +170,10 @@ test("inactive account does not turn another shop's dashboard into retry state",
 
 test("session uncertainty and revoked access never appear ready because a socket remains open", () => {
   const cases = {
-    waiting_for_tab: ["OPEN PROVIDER CHAT", /Open this account's provider chat/],
-    checking_session: ["CHECKING SESSION", /Commands are paused/],
-    wrong_account: ["ACCOUNT NOT AVAILABLE", /current provider login/],
-    needs_attention: ["SESSION NEEDS ATTENTION", /could not be verified/],
+    waiting_for_tab: ["Open chat", /Open this account's provider chat/],
+    checking_session: ["Checking access…", /Commands are paused/],
+    wrong_account: ["Account unavailable", /current provider login/],
+    needs_attention: ["Check session", /could not be verified/],
   };
   for (const [reason, [label, hint]] of Object.entries(cases)) {
     const view = accountConnectionStatus({ socket: "connected", provider_recovery_state: "ready", eligibility_reason_code: reason });
@@ -182,4 +182,30 @@ test("session uncertainty and revoked access never appear ready because a socket
     assert.notEqual(view.state, "ready");
   }
   assert.equal(accountConnectionStatus({ socket: "connected", provider_recovery_state: "ready", eligibility_reason_code: "ready" }).state, "ready");
+});
+
+
+test("short account labels retain severity, activity, guidance and recovery actions", () => {
+  const cases = [
+    [{ socket: "connecting" }, "Connecting…", "neutral", true, undefined, /Connecting/],
+    [{ socket: "reconnecting" }, "Reconnecting…", "neutral", true, undefined, /recover/i],
+    [{ socket: "disconnected" }, "Connection failed", "error", false, "logs", /network/i],
+    [{ endpoint_not_found: true }, "Server unavailable", "error", false, "logs", /404/],
+    [{ provider_recovery_state: "opening" }, "Opening chat…", "neutral", true, undefined, /opening/i],
+    [{ provider_recovery_state: "needs_attention", provider_recovery_reason: "Provider tab closed." }, "Needs attention", "error", false, "logs", /Provider tab closed/],
+    [{ socket: "connected" }, "Checking provider…", "neutral", true, undefined, /readiness/i],
+    [{ socket: "connected", provider_recovery_state: "ready" }, "Ready", "ready", false, undefined, /ready/i],
+    [{ eligibility_reason_code: "checking_session", socket: "connected" }, "Checking access…", "neutral", true, undefined, /Commands are paused/],
+    [{ eligibility_reason_code: "wrong_account", socket: "connected" }, "Account unavailable", "neutral", false, undefined, /matching account/],
+    [{ eligibility_reason_code: "needs_attention" }, "Check session", "error", false, undefined, /could not be verified/],
+    [{}, "Waiting for connection", "neutral", false, undefined, /waiting/i],
+  ];
+  for (const [live, label, state, loading, action, hint] of cases) {
+    const view = accountConnectionStatus(live);
+    assert.equal(view.label, label);
+    assert.equal(view.state, state, label);
+    assert.equal(view.loading === true, loading, label);
+    assert.equal(view.action, action, label);
+    assert.match(view.hint, hint, label);
+  }
 });

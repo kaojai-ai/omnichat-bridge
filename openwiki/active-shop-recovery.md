@@ -160,3 +160,7 @@ refreshes are coalesced; the visible log list shows at most 200 rows while
 exports contain all retained entries.
 
 [CTO proposal](https://omnichat-reliability-plan.kjteam.chatgpt.site)
+
+After a successful readiness acknowledgement on the current socket, refresh the
+server leader result again. Sync completion and acknowledgement alone never
+establish leadership; the compatible server release remains required.

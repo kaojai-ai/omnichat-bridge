@@ -157,13 +157,19 @@ Developed and maintained by [KaoJai.ai](https://kaojai.ai).
 
 [MIT](LICENSE)
 
-### LINE account access isolation (0.7.9)
+### Account access and recovery
 
 The popup and sync select only configured accounts accessible to the current LINE
 login. Multiple accessible accounts remain supported. An account sync failure stays
-on that account; its Retry action does not restart other accounts. Loading rows also
-offer Retry to recover an interrupted run, while duplicate active runs are ignored.
+on that account; LINE and Shopee share a compact per-account progress row and a
+neutral Retry icon that does not restart other accounts. Pending messages use a
+separate Discard icon with confirmation. Detailed counts remain in the status
+tooltip. Loading rows also offer Retry to recover an interrupted run, while duplicate active runs are ignored.
 Repeated LINE Sync requests reuse the active operation. Idle recovery times out per
 account, and rows show whether LINE is connecting, waiting, or checking conversations.
 Access checks distinguish a verified empty account list from a failed request. Shared
 configuration and existing sync history are retained when browser access changes.
+
+Access-check status belongs to its sync attempt. Cooldown skips and cancellation
+settle that attempt without overwriting newer work; verified accounts waiting for
+sequential recovery display “Waiting…” rather than “Checking access…”.

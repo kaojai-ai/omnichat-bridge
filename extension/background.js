@@ -984,7 +984,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_account") {
-    void retryLineAccount(message).then(
+    void retryProviderAccount(message).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) }),
     );
@@ -2769,7 +2769,11 @@ async function handleLiveCommand(raw, context, socket) {
   try { command = JSON.parse(raw); } catch { return; }
   if (command?.type === "connection_status_ack") {
     const current = liveConnections.get(context.key);
-    if (current?.socket === socket) current.statusReporter?.acknowledge(command);
+    if (current?.socket === socket && current.statusReporter?.acknowledge(command) === true && command.ok === true) {
+      // Persistence may succeed after the initial leader probes have finished.
+      // Refresh the server's actual election result, never infer leadership from ACK.
+      scheduleLeaderStatusRefresh(context, socket);
+    }
     return;
   }
   const adapter = providerAdapterForCommand(command);
@@ -3662,20 +3666,24 @@ async function syncOpenProvider(control, context) {
   return result;
 }
 
-async function retryLineAccount(message) {
-  if (message.provider !== "line_oa") throw new Error("Account retry is only supported for LINE OA.");
+async function retryProviderAccount(message) {
+  if (!["line_oa", "shopee"].includes(message.provider)) throw new Error("Account retry is not supported for this provider.");
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized]);
   if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Accept local consent before syncing.");
-  const contexts = await lineSessionContexts(configuredAccountContexts(stored), { refresh: true });
-  const context = contexts.find((item) => item.adapter.id === "line_oa"
+  const requested = configuredAccountContexts(stored).find((item) => item.adapter.id === message.provider
     && item.account.provider_account_id === message.provider_account_id);
-  if (!context) throw new Error("This LINE account is not available to the current login. Check access and retry.");
-  if ((activeSyncControl?.providerAccountId === context.account.provider_account_id
-      && activeSyncControl?.adapter?.id === "line_oa") || providerAutomaticRecoveries.has(context.key)) {
-    return { skipped: "already_syncing" };
-  }
-  const control = { controller: new AbortController(), manualRestart: true, accountKey: context.key,
-    sessionGeneration: sessionEligibility.generation(context.key) };
+  if (!requested) throw new Error("This provider account is not configured.");
+  const alreadySyncing = () => (activeSyncControl?.providerAccountId === requested.account.provider_account_id
+    && activeSyncControl?.adapter?.id === requested.adapter.id) || providerAutomaticRecoveries.has(requested.key);
+  if (alreadySyncing()) return { skipped: "already_syncing" };
+  const control = { controller: new AbortController(), manualRestart: true, accountKey: requested.key };
+  // Reuse provider-specific access verification, restricted to the requested
+  // account. A different signed-in Shopee shop must never replace this target.
+  const contexts = await openSessionSyncContexts([requested], control);
+  const context = contexts.find((item) => item.key === requested.key);
+  if (!context) throw new Error("This account is not available to the current login. Open its provider chat and retry.");
+  if (alreadySyncing()) return { skipped: "already_syncing" };
+  control.sessionGeneration = sessionEligibility.generation(context.key);
   providerAutomaticRecoveries.set(context.key, control);
   try {
     await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));
@@ -3851,6 +3859,7 @@ async function runAccountSync(trigger, control, context) {
     await updateScopedState(STORAGE.status, context.key, {
       state: "discovering",
       phase: "preparing",
+      sync_attempt_id: null,
       caught_up: false,
       sync_error: null,
       sync_error_at: null,
@@ -4050,59 +4059,70 @@ async function runUnifiedSync(trigger, control) {
   const candidates = configuredAccountContexts(stored).filter((context) => !control.providerScope
     || context.adapter.id === control.providerScope);
   const accounts = [];
+  const attemptId = control.syncAttemptId ??= crypto.randomUUID();
+  const preflight = new Map();
+  const settlePreflight = async (context) => {
+    const previous = preflight.get(context.key);
+    if (!previous) return;
+    await updateScopedState(STORAGE.status, context.key, (current) => {
+      if (current.sync_attempt_id !== attemptId) return {};
+      if (!["checking_session", "queued"].includes(current.phase)) return { sync_attempt_id: null };
+      return { state: ["discovering", "syncing"].includes(previous.state) ? "watching" : previous.state ?? "watching",
+        phase: ["discovering", "syncing"].includes(previous.state) ? null : previous.phase ?? null,
+        sync_attempt_id: null };
+    });
+    preflight.delete(context.key);
+  };
   const providers = [...new Set(candidates.map((item) => item.adapter.id))]
     .sort((left, right) => (left === "shopee" ? -1 : right === "shopee" ? 1 : 0));
-  for (const provider of providers) {
-    const providerCandidates = candidates.filter((item) => item.adapter.id === provider
-      && !providerAutomaticRecoveries.has(item.key));
-    if (!providerCandidates.length) continue;
-    for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
-      state: "discovering", phase: "checking_session",
-      completed_conversations: null, total_conversations: null,
-      pages_fetched: 0, messages_captured: 0, last_progress_at: null,
+  try {
+    for (const provider of providers) {
+      const providerCandidates = candidates.filter((item) => item.adapter.id === provider
+        && !providerAutomaticRecoveries.has(item.key));
+      if (!providerCandidates.length) continue;
+      for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, (current) => {
+        preflight.set(context.key, { context, state: current.state, phase: current.phase });
+        return { state: "discovering", phase: "checking_session", sync_attempt_id: attemptId };
+      });
+      const contexts = await openSessionSyncContexts(providerCandidates, control);
+      for (const context of providerCandidates) {
+        if (!contexts.some((selected) => selected.key === context.key)) await settlePreflight(context);
+        else await updateScopedState(STORAGE.status, context.key, (current) =>
+          current.sync_attempt_id === attemptId && current.phase === "checking_session"
+            ? { phase: "queued" } : {});
+      }
+      for (const context of contexts) {
+        throwIfSyncCancelled(control.controller.signal);
+        if (providerAutomaticRecoveries.has(context.key)) continue;
+        control.sessionGeneration = sessionEligibility.generation(context.key);
+        accounts.push(await runAccountSync(trigger, control, context));
+        await settlePreflight(context);
+      }
+    }
+    if (!accounts.length && !candidates.some((item) => providerAutomaticRecoveries.has(item.key))) {
+      throw new Error("Log in to a configured provider account and open its chat to sync.");
+    }
+    const errors = accounts.filter((account) => account.error);
+    const result = {
+      recovered: accounts.reduce((total, account) => total + (Number(account.recovered) || 0), 0),
+      queued: accounts.reduce((total, account) => total + (Number(account.queued) || 0), 0),
+      sent: accounts.reduce((total, account) => total + (Number(account.sent) || 0), 0),
+      pending: accounts.reduce((total, account) => total + (Number(account.pending) || 0), 0),
+      accounts,
+      ...(errors.length ? { errors } : {}),
+    };
+    await recordLog("info", "sync", "all_completed", "All configured provider account syncs completed.", {
+      accounts: accounts.length,
+      errors: errors.length,
+      recovered: result.recovered,
+      queued: result.queued,
+      sent: result.sent,
+      pending: result.pending,
     });
-    let contexts;
-    try {
-      contexts = await openSessionSyncContexts(providerCandidates, control);
-    } catch (error) {
-      for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
-        state: "watching", phase: null,
-      });
-      throw error;
-    }
-    for (const context of providerCandidates) {
-      if (!contexts.some((selected) => selected.key === context.key)) await updateScopedState(STORAGE.status, context.key, {
-        state: "watching", phase: null,
-      });
-    }
-    for (const context of contexts) {
-      throwIfSyncCancelled(control.controller.signal);
-      if (providerAutomaticRecoveries.has(context.key)) continue;
-      control.sessionGeneration = sessionEligibility.generation(context.key);
-      accounts.push(await runAccountSync(trigger, control, context));
-    }
+    return result;
+  } finally {
+    for (const { context } of preflight.values()) await settlePreflight(context);
   }
-  if (!accounts.length && !candidates.some((item) => providerAutomaticRecoveries.has(item.key))) {
-    throw new Error("Log in to a configured provider account and open its chat to sync.");
-  }
-  const errors = accounts.filter((account) => account.error);
-  const result = {
-    recovered: accounts.reduce((total, account) => total + (Number(account.recovered) || 0), 0),
-    queued: accounts.reduce((total, account) => total + (Number(account.queued) || 0), 0),
-    sent: accounts.reduce((total, account) => total + (Number(account.sent) || 0), 0),
-    pending: accounts.reduce((total, account) => total + (Number(account.pending) || 0), 0),
-    accounts,
-    ...(errors.length ? { errors } : {}),
-  };
-  await recordLog("info", "sync", "all_completed", "All configured provider account syncs completed.", {
-    accounts: accounts.length,
-    errors: errors.length,
-    recovered: result.recovered,
-    queued: result.queued,
-    sent: result.sent,
-    pending: result.pending,
-  });
-  return result;
 }
 
 async function resumeSync() {

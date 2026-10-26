@@ -170,7 +170,7 @@ test("idle LINE recovery settles error and releases only its own account slot", 
   Object.assign(h.runtime, {
     AbortController, STORAGE: {}, activeSyncControl: null, providerAutomaticRecoveries: recoveries,
     readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
-    lineSessionContexts: async c => c, queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
+    openSessionSyncContexts: async c => c, queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {}, recordLog: async () => {},
     exclusive: async () => ({ context: account }), throwIfSyncCancelled() {},
     updateScopedState: async (_storage, key, patch) => updates.push({ key, ...patch }),
@@ -182,8 +182,8 @@ test("idle LINE recovery settles error and releases only its own account slot", 
       { recoveryControl: control, timeoutMs: 60_000 }); },
   });
   vm.runInContext(section('async function runAccountSync(', 'async function openSessionSyncContexts(')
-    + section('async function retryLineAccount(', 'function restartSync('), h.runtime);
-  const result = h.runtime.retryLineAccount({ provider: "line_oa", provider_account_id: "A" });
+    + section('async function retryProviderAccount(', 'function restartSync('), h.runtime);
+  const result = h.runtime.retryProviderAccount({ provider: "line_oa", provider_account_id: "A" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(recoveries.has("line_oa:A"), true);
   h.advance(60_000);

@@ -99,3 +99,43 @@ test("coalesces bursts, limits starts to once per second, and retains changes du
   finish(); await secondRun;
   assert.equal(timers.length, 0);
 });
+
+test("compact progress omits zero metadata and never invents a percent for unknown work", () => {
+  for (const total of [undefined, null, 0]) {
+    const state = { state: "syncing", phase: "fetching_messages", total_conversations: total,
+      completed_conversations: 4, pages_fetched: 0, messages_captured: 0, pending: 0 };
+    const compact = syncProgressPresentation(state, { compact: true });
+    assert.equal(compact.value, null);
+    assert.equal(compact.showBar, true);
+    assert.doesNotMatch(compact.text, /\d|%|pages|pending|Last progress|ETA/);
+    assert.equal(compact.detail, syncProgressPresentation(state).text, "full diagnostics remain available outside the compact label");
+    const captured = syncProgressPresentation({ ...state, messages_captured: 12 }, { compact: true });
+    assert.match(captured.text, /12 captured/);
+    assert.doesNotMatch(captured.text, /%|ETA/);
+  }
+});
+
+test("compact percentages require a measured total in a counted phase", () => {
+  const counted = syncProgressPresentation({ state: "syncing", phase: "fetching_messages",
+    completed_conversations: 2, total_conversations: 8, pages_fetched: 3, messages_captured: 12,
+  }, { compact: true });
+  assert.equal(counted.value, 25);
+  assert.match(counted.text, /25%/);
+  assert.match(counted.detail, /2 of 8 conversations/);
+  assert.match(counted.detail, /3 pages fetched · 12 messages captured/);
+  const preflight = syncProgressPresentation({ state: "discovering", phase: "checking_session",
+    completed_conversations: 2, total_conversations: 8,
+  }, { compact: true });
+  assert.equal(preflight.value, null);
+  assert.doesNotMatch(preflight.text, /%/);
+});
+
+
+test("verified queued accounts wait without claiming an active access check or percentage", () => {
+  const state = { state: "discovering", phase: "queued", total_conversations: 10, completed_conversations: 5 };
+  const view = syncProgressPresentation(state, { compact: true });
+  assert.equal(view.text, "Waiting…");
+  assert.equal(view.value, null);
+  assert.equal(view.showBar, false);
+  assert.doesNotMatch(view.detail, /Checking|%/);
+});
