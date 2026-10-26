@@ -31,7 +31,7 @@ function fakeElement() {
   };
 }
 
-test("node update action follows the installed version and clears stale state", () => {
+test("footer update action follows the installed version and clears stale state", () => {
   const version = fakeElement();
   const button = fakeElement();
   const label = fakeElement();
@@ -66,9 +66,10 @@ test("node update action follows the installed version and clears stale state", 
   assert.equal(button.hidden, true, "cached results for an older install cannot offer an update");
   assert.equal(version.title, undefined);
   assert.equal(version.textContent, `v${installed}`);
-  const nodeSection = html.match(/<section class="node-summary"[\s\S]*?<\/section>/)?.[0];
-  assert.ok(nodeSection);
-  assert.match(nodeSection, /id="update-extension"/);
+  const footer = html.match(/<footer>[\s\S]*?<\/footer>/)?.[0];
+  assert.ok(footer);
+  assert.match(footer, /id="version"/);
+  assert.match(footer, /id="update-extension"/);
   assert.equal((html.match(/id="update-extension"/g) || []).length, 1);
 });
 
