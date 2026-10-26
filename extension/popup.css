@@ -501,8 +501,11 @@ input[type="checkbox"] {
 .node-summary-row { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-width: 0; }
 .node-summary-row .leader-status { flex-shrink: 0; margin-left: auto; }
 .node-summary-row .device-name-badge { max-width: 160px; min-width: 0; }
-#version, #node-version { color: var(--muted); flex-shrink: 0; font-size: 10px; font-weight: 400; text-decoration: none; white-space: nowrap; }
+#version, #node-version { flex-shrink: 0; text-decoration: none; white-space: nowrap; }
+#version { color: inherit; font-size: 10px; font-weight: 400; }
+#node-version { color: var(--muted); font-size: 12px; font-weight: 500; }
 #version:hover, #node-version:hover { text-decoration: underline; }
+#version:hover { color: var(--shopee-hover); }
 
 .account-section h2 {
   color: #475467;
