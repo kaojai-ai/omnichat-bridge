@@ -497,18 +497,14 @@ input[type="checkbox"] {
   gap: 10px;
 }
 
-.account-columns {
-  align-items: start;
-  display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.account-column {
-  display: grid;
+.account-heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  min-width: 0;
+  justify-content: space-between;
 }
+.account-heading h2 { margin: 0; }
 
 .node-status-column {
   align-items: center;
@@ -526,21 +522,8 @@ input[type="checkbox"] {
   text-transform: uppercase;
 }
 
-.account-identifiers {
-  align-items: center;
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 6px 8px;
-}
-
-.provider-badges {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
 .provider-badge {
+  background: var(--muted);
   border-radius: 999px;
   color: #fff;
   font-size: 10px;
@@ -551,32 +534,6 @@ input[type="checkbox"] {
 
 .provider-badge[data-provider="line_oa"] { background: #06c755; }
 .provider-badge[data-provider="shopee"] { background: var(--shopee); }
-
-.account-identifier {
-  align-items: center;
-  color: var(--muted);
-  display: inline-flex;
-  font-size: 11px;
-  gap: 5px;
-  white-space: nowrap;
-}
-
-.user-id-badges {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.user-id-badge {
-  border: 1px solid #d0d5dd;
-  border-radius: 999px;
-  color: #475467;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
-  line-height: 1.2;
-  padding: 3px 7px;
-}
 
 .account-list {
   border-top: 1px solid var(--line);
@@ -597,11 +554,24 @@ input[type="checkbox"] {
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto;
   min-height: 56px;
-  padding: 10px 0;
+  padding: 10px 0 10px 10px;
   position: relative;
   text-align: left;
   width: 100%;
 }
+
+.account-row::before {
+  background: #98a2b3;
+  border-radius: 2px;
+  bottom: 10px;
+  content: "";
+  left: 0;
+  position: absolute;
+  top: 10px;
+  width: 3px;
+}
+.account-row[data-state="ready"]::before { background: #789989; }
+.account-row[data-state="error"]::before { background: #bc776f; }
 
 .account-row:hover {
   background: transparent;
@@ -641,8 +611,12 @@ input[type="checkbox"] {
   width: 100%;
 }
 
-.account-row-copy strong {
+.account-row-heading { align-items: center; display: flex; gap: 6px; min-width: 0; }
+.account-row-heading .provider-badge { flex-shrink: 0; font-size: 9px; padding: 2px 5px; }
+.account-row-name {
   font-size: 12px;
+  font-weight: 700;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -651,8 +625,6 @@ input[type="checkbox"] {
 
 .account-row-line-link {
   color: inherit;
-  font: inherit;
-  font-weight: 700;
   text-decoration: none;
 }
 

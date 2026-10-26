@@ -63,33 +63,16 @@
       </section>
 
       <section id="dashboard-screen" class="screen" hidden>
-        <section class="account-section" aria-labelledby="account-title">
-          <div class="account-columns">
-            <div class="account-column">
-              <h2 id="account-title">Provider</h2>
-              <div class="account-identifiers" aria-live="polite">
-                <span id="provider-badges" class="provider-badges" hidden></span>
-                <div class="account-identifier" hidden>
-                  <span>UID:</span>
-                  <span id="provider-user-id" class="user-id-badges" hidden></span>
-                </div>
-                <div class="account-identifier" hidden>
-                  <span>SUID:</span>
-                  <span id="shop-user-id" class="user-id-badges" hidden></span>
-                </div>
-              </div>
-            </div>
-            <div class="account-column node-status-column">
+        <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
+          <div class="account-heading">
+            <h2 id="detected-shops-title">Detected accounts</h2>
+            <div class="node-status-column">
               <span id="device-name-badge" class="device-name-badge" aria-label="Node name" hidden></span>
               <button id="leader-status" class="leader-status" type="button" aria-live="polite">
                 <i></i><span class="leader-current">NEED CONFIG</span>
               </button>
             </div>
           </div>
-        </section>
-
-        <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
-          <h2 id="detected-shops-title">Detected accounts</h2>
           <div id="account-list" class="account-list" aria-live="polite"></div>
           <p id="account-list-empty" class="account-list-empty" hidden>No provider accounts detected yet.</p>
         </section>

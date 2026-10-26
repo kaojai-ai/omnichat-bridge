@@ -53,9 +53,6 @@ const brandHeader = document.querySelector(".brand");
 const clearButton = document.querySelector("#clear");
 const settingsButton = document.querySelector("#open-config");
 const exportButton = document.querySelector("#export-config");
-const providerUserId = document.querySelector("#provider-user-id");
-const shopUserId = document.querySelector("#shop-user-id");
-const providerBadges = document.querySelector("#provider-badges");
 const accountList = document.querySelector("#account-list");
 const accountListEmpty = document.querySelector("#account-list-empty");
 const lastSync = document.querySelector("#last-sync");
@@ -149,7 +146,7 @@ const TRANSLATIONS = {
     review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
     transfers: "This extension transfers", transfersRest: "chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.",
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
-    supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", provider: "Provider", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
+    supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
     lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.",
     checkConnection: "Check connection", inactiveShop: "Not active in this browser", activeShopContext: (shop) => `Active Shopee shop: ${shop}.`, separateProfiles: "Use a separate Chrome profile for each Shopee login to keep shops connected at the same time.", sessionUnverified: "The active Shopee shop is not verified yet. Open its chat to check the session.", sessionConflict: "Shopee tabs report different shops. Keep one Shopee login per Chrome profile, then refresh its chat.",
@@ -159,7 +156,7 @@ const TRANSLATIONS = {
   th: {
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
-    supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", provider: "ผู้ให้บริการ", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
+    supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
     lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
     checkConnection: "ตรวจสอบการเชื่อมต่อ", inactiveShop: "ไม่ได้ใช้งานในเบราว์เซอร์นี้", activeShopContext: (shop) => `ร้าน Shopee ที่ใช้งานอยู่: ${shop}`, separateProfiles: "ใช้โปรไฟล์ Chrome แยกสำหรับแต่ละบัญชี Shopee เพื่อเชื่อมต่อหลายร้านพร้อมกัน", sessionUnverified: "ยังยืนยันร้าน Shopee ที่ใช้งานอยู่ไม่ได้ เปิดแชตของร้านเพื่อตรวจสอบเซสชัน", sessionConflict: "แท็บ Shopee รายงานร้านไม่ตรงกัน ใช้บัญชี Shopee เดียวต่อโปรไฟล์ Chrome แล้วรีเฟรชแชตของร้าน",
     failed: "ไม่สำเร็จ", syncFailed: "ซิงค์ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ไม่มีตัวหลักที่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
@@ -190,7 +187,7 @@ function applyTranslations() {
     ["#consent-screen .consent-copy p:nth-child(2)", `<strong>${t("never")}</strong> ${t("neverRest")}`],
     ["#privacy-github", `${t("learnMore")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>.`],
     ["label.consent span", t("consent")], ["#continue", t("continue")], ["#provider-links-title", t("supported")],
-    ["#hint-screen .screen-intro p", t("chooseProvider")], ["#dashboard-screen #account-title", t("provider")], ["#detected-shops-title", t("detectedAccounts")],
+    ["#hint-screen .screen-intro p", t("chooseProvider")], ["#detected-shops-title", t("detectedAccounts")],
     ["#account-list-empty", t("noAccounts")], ["#unattended-recovery-label", t("unattendedRecovery")], ["#cancel-sync", t("cancel")],
     ["#open-logs", t("logs")], ["#open-config", t("settings")], ["#open-privacy", t("privacy")], ["#clear", t("erase")],
     ["#config-screen h2", t("settings")], ["#save-config", t("save")], ["#logs-screen h2", t("logs")],
@@ -284,8 +281,6 @@ function providerBadgeLabel(provider, adapter) {
 
 function accountDisplayLabel(account, adapter) {
   const displayName = String(account?.display_name ?? "").trim();
-  if (account?.provider === "line_oa" && displayName) return `LINE OA: ${displayName}`;
-  if (account?.provider === "shopee" && displayName) return `Shop: ${displayName}`;
   return displayName || accountLabel(adapter);
 }
 
@@ -442,43 +437,6 @@ function formatSyncResult(result) {
   return t("noNew");
 }
 
-function showAccounts(accounts) {
-  const values = (key) => [...new Set(
-    accounts
-      .map((account) => account?.[key])
-      .filter((value) => typeof value === "string" || typeof value === "number")
-      .map((value) => String(value).trim())
-      .filter(Boolean),
-  )];
-  setUserBadges(providerUserId, values("provider_user_id"));
-  setUserBadges(shopUserId, values("shop_user_id"));
-  const providers = [...new Set(accounts.map((account) => account?.provider).filter(Boolean))];
-  providerBadges.hidden = providers.length === 0;
-  providerBadges.replaceChildren(...providers.map((provider) => {
-    const adapter = providerAdapters.get(provider);
-    const badge = document.createElement("span");
-    badge.className = "provider-badge";
-    badge.dataset.provider = provider;
-    badge.textContent = providerBadgeLabel(provider, adapter);
-    return badge;
-  }));
-}
-
-function setUserBadges(element, values) {
-  const normalized = Array.isArray(values)
-    ? values.map((value) => String(value).trim()).filter(Boolean)
-    : [];
-  const row = element.closest(".account-identifier");
-  if (row) row.hidden = normalized.length === 0;
-  element.hidden = normalized.length === 0;
-  element.replaceChildren(...normalized.map((value) => {
-    const badge = document.createElement("span");
-    badge.className = "user-id-badge";
-    badge.textContent = value;
-    return badge;
-  }));
-}
-
 function accountIsActiveHere(account) {
   return !["shopee", "line_oa"].includes(account.provider)
     || readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
@@ -626,129 +584,140 @@ function renderDetectedAccounts() {
   accountListEmpty.setAttribute("aria-busy", String(detectingAccount));
   accountListEmpty.textContent = detectingAccount ? t("detectingShop")
     : activeProviderAdapter?.id === "shopee" ? t("shopUnknown") : t("noAccounts");
-  for (const account of accounts) {
-    const adapter = adapterForAccount(account);
-    const id = adapter ? String(account.provider_account_id ?? "").trim() : "";
-    if (!id) continue;
-    const label = accountLabel(adapter);
-    const cardState = accountRowStatus(account);
-    const card = document.createElement("div");
-    card.className = "account-row";
-    card.dataset.provider = account.provider;
-    card.dataset.accountId = id;
-    card.dataset.state = cardState.state;
-    const select = document.createElement("div");
-    select.className = "account-row-select";
-    const copy = document.createElement("span");
-    copy.className = "account-row-copy";
-    const lineUrl = lineChatUrl(account);
-    const name = document.createElement(lineUrl ? "a" : "strong");
-    name.textContent = accountDisplayLabel(account, adapter);
-    if (lineUrl) {
-      name.href = lineUrl;
-      name.target = "_blank";
-      name.rel = "noreferrer";
-      name.className = "account-row-line-link";
-      name.title = "Open LINE Chat";
-    }
-    const statusLabel = document.createElement(cardState.action ? "a" : "span");
-    statusLabel.className = "account-row-status";
-    statusLabel.dataset.state = cardState.state;
-    statusLabel.dataset.loading = String(cardState.loading === true);
-    statusLabel.setAttribute("aria-busy", String(cardState.loading === true));
-    statusLabel.textContent = cardState.label;
-    if (cardState.hint) statusLabel.title = cardState.hint;
-    if (cardState.action) {
-      statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
-      statusLabel.classList.add("account-row-status-link");
-      const actionHint = cardState.action === "config" ? "Open settings" : "Open error logs";
-      statusLabel.title = cardState.hint ? `${cardState.hint} · ${actionHint}` : actionHint;
-      statusLabel.setAttribute(
-        "aria-label",
-        cardState.action === "config"
-          ? `Open settings to configure ${account.display_name || label}`
-          : `Open error logs for ${account.display_name || label}`,
-      );
-      statusLabel.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (cardState.action === "config") openConfig();
-        else openLogs("error");
-      });
-    }
-    copy.append(name, statusLabel);
-    const actions = document.createElement("div");
-    actions.className = "account-row-actions";
-    if (cardState.loading) {
-      const progress = syncProgressPresentation(readAccountState(storedStatus, accountConfigKey(account), null));
-      if (progress?.showBar) {
-        const bar = document.createElement("progress");
-        bar.max = 100;
-        if (progress.value !== null) bar.value = progress.value;
-        bar.setAttribute("aria-label", cardState.label);
-        copy.append(bar);
-      }
-    }
-    if (["line_oa", "shopee"].includes(account.provider) && (cardState.state === "error" || cardState.loading)) {
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.disabled = retryingAccounts.has(accountConfigKey(account));
-      retry.className = "account-action";
-      retry.title = t("retry");
-      retry.append(createAccountActionIcon("retry"));
-      retry.setAttribute("aria-label", `${t("retry")}: ${account.display_name || id}`);
-      retry.addEventListener("click", () => void retryAccount(account));
-      actions.append(retry);
-    }
-    select.append(copy);
-    const shopId = document.createElement("button");
-    shopId.type = "button";
-    shopId.className = "account-row-id";
-    shopId.title = `${t("copyId", label)} ${id}`;
-    shopId.setAttribute("aria-label", `${t("copyId", label)} ${id}`);
-    const shopIdValue = document.createElement("span");
-    shopIdValue.textContent = id;
-    shopId.append(shopIdValue, createCopyIcon());
-    shopId.addEventListener("click", () => void copyProviderAccountId(id, label, shopId, shopIdValue));
-    const pending = readAccountState(pendingStates, accountConfigKey(account), []);
-    if (pending.length) {
-      const pendingRow = document.createElement("div");
-      pendingRow.className = "account-row-pending";
-      const pendingLabel = document.createElement("span");
-      pendingLabel.textContent = t("pending", pending.length);
-      const discardButton = document.createElement("button");
-      discardButton.type = "button";
-      discardButton.className = "account-action";
-      discardButton.append(createAccountActionIcon("discard"));
-      discardButton.setAttribute(
-        "aria-label",
-        `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
-      );
-      const accountSyncState = readAccountState(storedStatus, accountConfigKey(account), null);
-      const accountScanState = readAccountState(scanStates, accountConfigKey(account), null);
-      const syncInProgress = accountScanState?.in_progress === true
-        || ["discovering", "syncing"].includes(accountSyncState?.state);
-      discardButton.disabled = syncInProgress;
-      discardButton.title = syncInProgress
-        ? "Cancel sync before discarding pending messages."
-        : "Discard pending messages for this account";
-      discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
-      pendingRow.append(pendingLabel);
-      actions.append(discardButton);
-      copy.append(pendingRow);
-    }
-    const meta = document.createElement("div");
-    meta.className = "account-row-meta";
-    meta.append(actions, shopId);
-    card.append(select, meta);
-    accountList.append(card);
+  accountList.append(...accounts.map(renderAccountRow).filter(Boolean));
+}
+
+// One row layout; provider adapters supply identity and capabilities.
+function renderAccountRow(account) {
+  const adapter = adapterForAccount(account);
+  const id = adapter ? String(account.provider_account_id ?? "").trim() : "";
+  if (!id) return null;
+  const label = accountLabel(adapter);
+  const cardState = accountRowStatus(account);
+  const card = document.createElement("div");
+  card.className = "account-row";
+  card.dataset.provider = account.provider;
+  card.dataset.accountId = id;
+  card.dataset.state = cardState.state;
+  const select = document.createElement("div");
+  select.className = "account-row-select";
+  const copy = document.createElement("span");
+  copy.className = "account-row-copy";
+  const lineUrl = lineChatUrl(account);
+  const name = document.createElement(lineUrl ? "a" : "strong");
+  name.className = "account-row-name";
+  name.textContent = accountDisplayLabel(account, adapter);
+  name.title = name.textContent;
+  if (lineUrl) {
+    name.href = lineUrl;
+    name.target = "_blank";
+    name.rel = "noreferrer";
+    name.classList.add("account-row-line-link");
+    name.title = `Open LINE Chat · ${name.textContent}`;
   }
+  const statusLabel = document.createElement(cardState.action ? "a" : "span");
+  statusLabel.className = "account-row-status";
+  statusLabel.dataset.state = cardState.state;
+  statusLabel.dataset.loading = String(cardState.loading === true);
+  statusLabel.setAttribute("aria-busy", String(cardState.loading === true));
+  statusLabel.textContent = cardState.label;
+  if (cardState.hint) statusLabel.title = cardState.hint;
+  if (cardState.action) {
+    statusLabel.href = cardState.action === "config" ? "#config" : "#logs";
+    statusLabel.classList.add("account-row-status-link");
+    const actionHint = cardState.action === "config" ? "Open settings" : "Open error logs";
+    statusLabel.title = cardState.hint ? `${cardState.hint} · ${actionHint}` : actionHint;
+    statusLabel.setAttribute(
+      "aria-label",
+      cardState.action === "config"
+        ? `Open settings to configure ${account.display_name || label}`
+        : `Open error logs for ${account.display_name || label}`,
+    );
+    statusLabel.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (cardState.action === "config") openConfig();
+      else openLogs("error");
+    });
+  }
+  const heading = document.createElement("span");
+  heading.className = "account-row-heading";
+  const badge = document.createElement("span");
+  badge.className = "provider-badge";
+  badge.dataset.provider = account.provider;
+  badge.textContent = providerBadgeLabel(account.provider, adapter);
+  heading.append(badge, name);
+  copy.append(heading, statusLabel);
+  const actions = document.createElement("div");
+  actions.className = "account-row-actions";
+  if (cardState.loading) {
+    const progress = syncProgressPresentation(readAccountState(storedStatus, accountConfigKey(account), null));
+    if (progress?.showBar) {
+      const bar = document.createElement("progress");
+      bar.max = 100;
+      if (progress.value !== null) bar.value = progress.value;
+      bar.setAttribute("aria-label", cardState.label);
+      copy.append(bar);
+    }
+  }
+  if (adapter.supports?.("message_recovery") && (cardState.state === "error" || cardState.loading)) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.disabled = retryingAccounts.has(accountConfigKey(account));
+    retry.className = "account-action";
+    retry.title = t("retry");
+    retry.append(createAccountActionIcon("retry"));
+    retry.setAttribute("aria-label", `${t("retry")}: ${account.display_name || id}`);
+    retry.addEventListener("click", () => void retryAccount(account));
+    actions.append(retry);
+  }
+  select.append(copy);
+  const shopId = document.createElement("button");
+  shopId.type = "button";
+  shopId.className = "account-row-id";
+  shopId.title = `${t("copyId", label)} ${id}`;
+  shopId.setAttribute("aria-label", `${t("copyId", label)} ${id}`);
+  const shopIdValue = document.createElement("span");
+  shopIdValue.textContent = id;
+  shopId.append(shopIdValue, createCopyIcon());
+  shopId.addEventListener("click", () => void copyProviderAccountId(id, label, shopId, shopIdValue));
+  const pending = readAccountState(pendingStates, accountConfigKey(account), []);
+  if (pending.length) {
+    const pendingRow = document.createElement("div");
+    pendingRow.className = "account-row-pending";
+    const pendingLabel = document.createElement("span");
+    pendingLabel.textContent = t("pending", pending.length);
+    const discardButton = document.createElement("button");
+    discardButton.type = "button";
+    discardButton.className = "account-action";
+    discardButton.append(createAccountActionIcon("discard"));
+    discardButton.setAttribute(
+      "aria-label",
+      `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
+    );
+    const accountSyncState = readAccountState(storedStatus, accountConfigKey(account), null);
+    const accountScanState = readAccountState(scanStates, accountConfigKey(account), null);
+    const syncInProgress = accountScanState?.in_progress === true
+      || ["discovering", "syncing"].includes(accountSyncState?.state);
+    discardButton.disabled = syncInProgress;
+    discardButton.title = syncInProgress
+      ? "Cancel sync before discarding pending messages."
+      : "Discard pending messages for this account";
+    discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
+    pendingRow.append(pendingLabel);
+    actions.append(discardButton);
+    copy.append(pendingRow);
+  }
+  const meta = document.createElement("div");
+  meta.className = "account-row-meta";
+  meta.append(actions, shopId);
+  card.append(select, meta);
+  return card;
 }
 
 function renderDashboard(message = "", isError = false) {
   syncButton.dataset.provider = activeProviderAdapter?.id || detectedAccounts[0]?.provider || "";
   renderDeviceNameBadge();
-  showAccounts(detectedAccounts.filter(accountIsActiveHere));
   renderDetectedAccounts();
   status.replaceChildren();
   setStatusAppearance(isError ? "error" : "neutral");

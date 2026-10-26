@@ -62,20 +62,6 @@ test("hydrates saved accounts and sync status before live detection returns", ()
   assert.match(popupSource, /syncProgressPresentation\(readAccountState\(storedStatus/);
 });
 
-test("shows provider badges and account names separately", () => {
-  assert.match(html, /<h2 id="account-title">Provider<\/h2>/);
-  assert.match(html, /id="provider-badges" class="provider-badges"/);
-  assert.match(popupSource, /badge\.dataset\.provider = provider/);
-  assert.match(popupSource, /function providerBadgeLabel\(provider, adapter\)/);
-  assert.match(popupSource, /if \(provider === "line_oa"\) return "LINE"/);
-  assert.match(popupSource, /if \(provider === "shopee"\) return "Shopee"/);
-  assert.match(css, /\.provider-badge\[data-provider="line_oa"\] \{ background: #06c755; \}/);
-  assert.match(css, /\.provider-badge\[data-provider="shopee"\] \{ background: var\(--shopee\); \}/);
-  assert.match(popupSource, /return `LINE OA: \$\{displayName\}`/);
-  assert.match(popupSource, /return `Shop: \$\{displayName\}`/);
-  assert.match(popupSource, /name\.textContent = accountDisplayLabel\(account, adapter\)/);
-});
-
 test("links a detected LINE account name to its LINE Chat page", () => {
   assert.match(popupSource, /function lineChatUrl\(account\)/);
   assert.match(popupSource, /https:\/\/chat\.line\.biz\/\$\{encodeURIComponent\(botId\)\}/);
