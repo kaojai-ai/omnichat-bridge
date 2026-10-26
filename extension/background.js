@@ -984,7 +984,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_account") {
-    void retryLineAccount(message).then(
+    void retryProviderAccount(message).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) }),
     );
@@ -3662,20 +3662,24 @@ async function syncOpenProvider(control, context) {
   return result;
 }
 
-async function retryLineAccount(message) {
-  if (message.provider !== "line_oa") throw new Error("Account retry is only supported for LINE OA.");
+async function retryProviderAccount(message) {
+  if (!["line_oa", "shopee"].includes(message.provider)) throw new Error("Account retry is not supported for this provider.");
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized]);
   if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Accept local consent before syncing.");
-  const contexts = await lineSessionContexts(configuredAccountContexts(stored), { refresh: true });
-  const context = contexts.find((item) => item.adapter.id === "line_oa"
+  const requested = configuredAccountContexts(stored).find((item) => item.adapter.id === message.provider
     && item.account.provider_account_id === message.provider_account_id);
-  if (!context) throw new Error("This LINE account is not available to the current login. Check access and retry.");
-  if ((activeSyncControl?.providerAccountId === context.account.provider_account_id
-      && activeSyncControl?.adapter?.id === "line_oa") || providerAutomaticRecoveries.has(context.key)) {
-    return { skipped: "already_syncing" };
-  }
-  const control = { controller: new AbortController(), manualRestart: true, accountKey: context.key,
-    sessionGeneration: sessionEligibility.generation(context.key) };
+  if (!requested) throw new Error("This provider account is not configured.");
+  const alreadySyncing = () => (activeSyncControl?.providerAccountId === requested.account.provider_account_id
+    && activeSyncControl?.adapter?.id === requested.adapter.id) || providerAutomaticRecoveries.has(requested.key);
+  if (alreadySyncing()) return { skipped: "already_syncing" };
+  const control = { controller: new AbortController(), manualRestart: true, accountKey: requested.key };
+  // Reuse provider-specific access verification, restricted to the requested
+  // account. A different signed-in Shopee shop must never replace this target.
+  const contexts = await openSessionSyncContexts([requested], control);
+  const context = contexts.find((item) => item.key === requested.key);
+  if (!context) throw new Error("This account is not available to the current login. Open its provider chat and retry.");
+  if (alreadySyncing()) return { skipped: "already_syncing" };
+  control.sessionGeneration = sessionEligibility.generation(context.key);
   providerAutomaticRecoveries.set(context.key, control);
   try {
     await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));

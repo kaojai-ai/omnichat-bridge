@@ -23,7 +23,7 @@ function count(value) {
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
 }
 
-export function syncProgressPresentation(progressState, { locale = "en" } = {}) {
+export function syncProgressPresentation(progressState, { locale = "en", compact = false } = {}) {
   if (!progressState || !["discovering", "syncing"].includes(progressState.state)) {
     return null;
   }
@@ -55,12 +55,26 @@ export function syncProgressPresentation(progressState, { locale = "en" } = {}) 
       hour: "2-digit", minute: "2-digit", second: "2-digit",
     })}`);
   }
+  const detail = [text, ...details].join(" · ");
+  if (compact) {
+    const shortPhase = {
+      preparing: "Preparing…", checking_session: "Checking access…",
+      connecting_provider: "Connecting…", waiting_recovery: "Waiting for recovery…",
+      sending_pending: "Forwarding…", loading_conversations: "Loading…",
+      checking_conversations: "Checking messages…", fetching_messages: "Loading messages…",
+      conversation_complete: "Loading messages…", sending_recovered: "Forwarding…",
+    }[phase] ?? "Syncing…";
+    const captured = count(progressState.messages_captured);
+    return { active: true, showBar: true, value, detail,
+      text: shortPhase + (value !== null ? ` · ${value}%` : captured > 0 ? ` · ${captured} captured` : ""),
+    };
+  }
   return {
     active: true,
     showBar: true,
     // A missing value is a native indeterminate progress bar, not zero percent.
     value,
-    text: [text, ...details].join(" · "),
+    text: detail,
   };
 }
 

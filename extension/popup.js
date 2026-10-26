@@ -62,7 +62,6 @@ const lastSync = document.querySelector("#last-sync");
 const syncButton = document.querySelector("#sync");
 const unattendedRecoveryInput = document.querySelector("#unattended-recovery");
 const cancelSyncButton = document.querySelector("#cancel-sync");
-const syncProgress = document.querySelector("#sync-progress");
 const progressArea = document.querySelector("#progress-area");
 const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
@@ -152,7 +151,7 @@ const TRANSLATIONS = {
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
     supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", provider: "Provider", detectedAccounts: "Detected accounts", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
-    lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.", lineAccountStatus: "Each LINE account syncs independently. Check its status above.",
+    lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.",
     checkConnection: "Check connection", inactiveShop: "Not active in this browser", activeShopContext: (shop) => `Active Shopee shop: ${shop}.`, separateProfiles: "Use a separate Chrome profile for each Shopee login to keep shops connected at the same time.", sessionUnverified: "The active Shopee shop is not verified yet. Open its chat to check the session.", sessionConflict: "Shopee tabs report different shops. Keep one Shopee login per Chrome profile, then refresh its chat.",
     failed: "FAILED", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Starting a fresh sync…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NO READY LEADER", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", noNew: "No new messages.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
@@ -161,7 +160,7 @@ const TRANSLATIONS = {
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", provider: "ผู้ให้บริการ", detectedAccounts: "บัญชีที่ตรวจพบ", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
-    lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง", lineAccountStatus: "แต่ละบัญชี LINE ซิงค์แยกกัน ตรวจสอบสถานะของแต่ละบัญชีด้านบน",
+    lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
     checkConnection: "ตรวจสอบการเชื่อมต่อ", inactiveShop: "ไม่ได้ใช้งานในเบราว์เซอร์นี้", activeShopContext: (shop) => `ร้าน Shopee ที่ใช้งานอยู่: ${shop}`, separateProfiles: "ใช้โปรไฟล์ Chrome แยกสำหรับแต่ละบัญชี Shopee เพื่อเชื่อมต่อหลายร้านพร้อมกัน", sessionUnverified: "ยังยืนยันร้าน Shopee ที่ใช้งานอยู่ไม่ได้ เปิดแชตของร้านเพื่อตรวจสอบเซสชัน", sessionConflict: "แท็บ Shopee รายงานร้านไม่ตรงกัน ใช้บัญชี Shopee เดียวต่อโปรไฟล์ Chrome แล้วรีเฟรชแชตของร้าน",
     failed: "ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ไม่มีตัวหลักที่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", noNew: "ไม่มีข้อความใหม่", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
   },
@@ -509,10 +508,11 @@ function accountRowStatus(account) {
   const retryError = accountRetryErrors.get(key);
   if (retryError && Date.parse(syncState?.last_sync_at ?? "") > retryError.at) accountRetryErrors.delete(key);
   else if (retryError) return { label: t("failed"), state: "error", hint: retryError.message, action: "logs" };
-  if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) return {
-    label: syncProgressPresentation({ ...syncState, pending: readAccountState(pendingStates, key, []).length }, { locale: language })?.text || t("syncing"),
-    state: "neutral", loading: true,
-  };
+  if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) {
+    const progress = syncProgressPresentation({ ...syncState, pending: readAccountState(pendingStates, key, []).length }, { locale: language, compact: true });
+    return { label: progress?.text || t("syncing"), hint: progress?.detail,
+      state: "neutral", loading: true };
+  }
   if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
   const failure = currentAccountSyncFailure(syncState, live);
   if (failure) return { label: t("failed"), state: "error", hint: failure, action: "logs" };
@@ -533,7 +533,7 @@ async function retryAccount(account) {
       provider: account.provider,
       provider_account_id: account.provider_account_id,
     });
-    if (!result?.ok) throw new Error(result?.error || "Could not retry this account.");
+    if (!result?.ok || result?.error) throw new Error(result?.error || "Could not retry this account.");
     await refreshStoredState();
   } catch (error) {
     accountRetryErrors.set(key, { message: error.message, at: Date.now() });
@@ -582,7 +582,7 @@ async function discardPending(account, button, count) {
   if (!providerAccountId || !count) return;
   if (!confirm(`Discard ${count} pending message${count === 1 ? "" : "s"} for ${label}? This skips older messages for this account and cannot be undone.`)) return;
   button.disabled = true;
-  button.textContent = "Discarding…";
+  button.setAttribute("aria-busy", "true");
   try {
     const result = await chrome.runtime.sendMessage({
       type: "discard_pending",
@@ -598,6 +598,22 @@ async function discardPending(account, button, count) {
     reportPopupError("discard_pending", error);
     renderDashboard(error.message, true);
   }
+}
+
+function createAccountActionIcon(action) {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.classList.add("account-action-icon");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  const paths = action === "retry"
+    ? ["M20 7v5h-5", "M19.1 12a7.2 7.2 0 1 0-1.7 5.1", "M20 12l-3-4"]
+    : ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13", "M10 10v6", "M14 10v6"];
+  for (const d of paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    icon.append(path);
+  }
+  return icon;
 }
 
 function renderDetectedAccounts() {
@@ -660,7 +676,9 @@ function renderDetectedAccounts() {
       });
     }
     copy.append(name, statusLabel);
-    if (cardState.loading && account.provider === "line_oa") {
+    const actions = document.createElement("div");
+    actions.className = "account-row-actions";
+    if (cardState.loading) {
       const progress = syncProgressPresentation(readAccountState(storedStatus, accountConfigKey(account), null));
       if (progress) {
         const bar = document.createElement("progress");
@@ -670,21 +688,16 @@ function renderDetectedAccounts() {
         copy.append(bar);
       }
     }
-    if (account.provider === "line_oa" && (cardState.state === "error" || cardState.loading)) {
+    if (["line_oa", "shopee"].includes(account.provider) && (cardState.state === "error" || cardState.loading)) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.disabled = retryingAccounts.has(accountConfigKey(account));
-      retry.className = "discard-pending-link";
-      retry.textContent = t("retry");
+      retry.className = "account-action";
+      retry.title = t("retry");
+      retry.append(createAccountActionIcon("retry"));
       retry.setAttribute("aria-label", `${t("retry")}: ${account.display_name || id}`);
       retry.addEventListener("click", () => void retryAccount(account));
-      copy.append(retry);
-    }
-    if (account.provider === "shopee" && !accountIsActiveHere(account)) {
-      const hint = document.createElement("span");
-      hint.className = "account-row-status";
-      hint.textContent = cardState.hint;
-      copy.append(hint);
+      actions.append(retry);
     }
     select.append(copy);
     const shopId = document.createElement("button");
@@ -704,8 +717,8 @@ function renderDetectedAccounts() {
       pendingLabel.textContent = t("pending", pending.length);
       const discardButton = document.createElement("button");
       discardButton.type = "button";
-      discardButton.className = "discard-pending-link";
-      discardButton.textContent = t("discard");
+      discardButton.className = "account-action";
+      discardButton.append(createAccountActionIcon("discard"));
       discardButton.setAttribute(
         "aria-label",
         `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
@@ -719,10 +732,14 @@ function renderDetectedAccounts() {
         ? "Cancel sync before discarding pending messages."
         : "Discard pending messages for this account";
       discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
-      pendingRow.append(pendingLabel, discardButton);
+      pendingRow.append(pendingLabel);
+      actions.append(discardButton);
       copy.append(pendingRow);
     }
-    card.append(select, shopId);
+    const meta = document.createElement("div");
+    meta.className = "account-row-meta";
+    meta.append(shopId, actions);
+    card.append(select, meta);
     accountList.append(card);
   }
 }
@@ -784,9 +801,6 @@ function renderDashboard(message = "", isError = false) {
   const progressAccount = configuredStates.find((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
   ));
-  const progressView = syncProgressPresentation(progressAccount ? {
-    ...progressAccount.syncState, pending: progressAccount.pending.length,
-  } : null, { locale: language });
   const latestResult = configuredStates
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
@@ -826,7 +840,6 @@ function renderDashboard(message = "", isError = false) {
     syncButton.setAttribute("aria-label", syncButton.textContent);
     syncButton.title = "";
     cancelSyncButton.hidden = true;
-    syncProgress.hidden = true;
     progressArea.hidden = false;
     return;
   }
@@ -850,26 +863,15 @@ function renderDashboard(message = "", isError = false) {
     lastSync.hidden = false;
   }
 
-  if (activeProviderAdapter?.id === "line_oa" && !pendingAction && !message && !migrationFailure && !migrationPending) {
-    // Account progress and failures belong to their rows, not one global spinner.
-    syncProgress.hidden = true;
-    progressArea.hidden = false;
+  if (progressAccount && !message && !isError) {
+    // Both providers own progress in their account row; avoid a second copy.
+    progressArea.hidden = true;
     setStatusAppearance("neutral");
-    status.textContent = t("lineAccountStatus");
-  } else if (progressView?.active && !isError) {
-    setStatusAppearance("neutral", true);
-    syncProgress.hidden = !progressView.showBar;
-    if (progressView.value === null) syncProgress.removeAttribute("value");
-    else syncProgress.value = progressView.value;
-    syncProgress.setAttribute("aria-label", progressView.text);
-    progressArea.hidden = false;
-    status.textContent = progressView.text;
   } else {
     const resultMessage = message
       || (pendingAction ? t(pendingAction) : "")
       || surfaceHint?.hint
       || formatSyncResult(latestResult);
-    syncProgress.hidden = true;
     progressArea.hidden = !lastSyncText && !resultMessage && !anyError;
     if (message || pendingAction || !anyError) {
       setStatusAppearance(isError ? "error" : pendingAction ? "neutral" : surfaceHint?.state || (latestResult && !message && !latestResult.pending ? "ready" : "neutral"), !isError && Boolean(pendingAction || (!message && surfaceHint?.loading)));
@@ -1262,7 +1264,6 @@ syncButton.addEventListener("click", async () => {
   }
   syncButton.disabled = true;
   progressArea.hidden = false;
-  syncProgress.hidden = true;
   status.classList.remove("error");
   pendingAction = activeProviderAdapter?.id === "line_oa" ? "checking" : "restarting";
   renderDashboard();

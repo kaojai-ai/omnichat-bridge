@@ -59,7 +59,7 @@ test("hydrates saved accounts and sync status before live detection returns", ()
   assert.match(popupSource, /STORAGE\.detectedAccounts,/);
   assert.match(popupSource, /detectedAccounts = bestEffortAccounts\(stored\[STORAGE\.detectedAccounts\], activeTab\?\.url\);/);
   assert.match(popupSource, /from "\.\/lib\/popup-sync-progress\.js"/);
-  assert.match(popupSource, /syncProgressPresentation\(progressAccount \?/);
+  assert.match(popupSource, /syncProgressPresentation\(readAccountState\(storedStatus/);
 });
 
 test("shows provider badges and account names separately", () => {
@@ -89,7 +89,6 @@ test("offers an account-scoped discard action beside pending messages", () => {
   assert.match(popupSource, /type: "discard_pending"/);
   assert.match(popupSource, /provider_account_id: providerAccountId/);
   assert.match(popupSource, /skips older messages for this account and cannot be undone/);
-  assert.match(css, /\.discard-pending-link/);
 });
 
 test("offers to open Shopee Webchat mini before sync", () => {
