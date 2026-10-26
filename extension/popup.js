@@ -114,6 +114,7 @@ function renderExtensionUpdate(update) {
   const version = document.querySelector("#version");
   const updateLabel = updateExtensionButton.querySelector("span");
   version.textContent = `v${installedVersion}`;
+  document.querySelector("#node-version").textContent = version.textContent;
   version.removeAttribute("title");
   updateExtensionButton.hidden = true;
   updateExtensionButton.disabled = false;

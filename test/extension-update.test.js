@@ -33,13 +33,14 @@ function fakeElement() {
 
 test("footer update action follows the installed version and clears stale state", () => {
   const version = fakeElement();
+  const nodeVersion = fakeElement();
   const button = fakeElement();
   const label = fakeElement();
   button.querySelector = () => label;
   const installed = JSON.parse(manifest).version;
   const scope = vm.createContext({
     chrome: { runtime: { getManifest: () => ({ version: installed }) } },
-    document: { querySelector: () => version }, updateExtensionButton: button,
+    document: { querySelector: selector => selector === "#node-version" ? nodeVersion : version }, updateExtensionButton: button,
     t: key => ({ upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…" })[key],
   });
   const start = popupSource.indexOf("function renderExtensionUpdate(");
@@ -47,6 +48,7 @@ test("footer update action follows the installed version and clears stale state"
   const render = update => scope.renderExtensionUpdate({ installed_version: installed, ...update });
   render({ status: "available", available_version: "99.0.0" });
   assert.equal(version.textContent, `v${installed}`);
+  assert.equal(nodeVersion.textContent, version.textContent);
   assert.equal(button.hidden, false);
   assert.equal(button.disabled, false);
   assert.equal(label.textContent, "Update now");
