@@ -1200,7 +1200,9 @@
     for (const pending of pendingApiSends.values()) {
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
-      pending.resolve({ ok: false, error: reason });
+      // Replacing listeners cannot undo a provider request already dispatched.
+      // Never turn a lost confirmation into a retryable rejection.
+      pending.resolve({ ok: false, uncertain: true, error: reason });
     }
     pendingApiSends.clear();
     for (const pending of pendingProviderPreparations.values()) {

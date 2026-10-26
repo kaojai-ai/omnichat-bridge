@@ -89,6 +89,7 @@ test("an already-open old content bridge is reattached before the new watchdog i
     providerLabel: () => "Shopee",
     sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v3", ...(++pings > 1 ? { recovery_watchdog_version: 1 } : {}) }),
     reinjectProviderBridge: async () => { reinjections++; return true; },
+    providerMainBridgeStatus: async () => ({ ready: true }),
     recordLog: async () => {},
   });
   await ensure(42, { id: "shopee" });
@@ -115,4 +116,22 @@ function handle(message, _sender) { const respond = () => {}; ${section('  if (m
   assert.equal(runtime.isCurrentSyncControl(controls[0]), true);
   runtime.providerAutomaticRecoveries.delete("oa-a");
   assert.equal(runtime.isCurrentSyncControl(controls[0]), false);
+});
+
+
+test("a healthy content ping cannot hide an old Shopee main bridge after upgrade", async () => {
+  let replacements = 0;
+  let current = false;
+  const ensure = vm.runInNewContext(`(${section('async function ensureProviderBridge(', 'async function prepareProviderTab(')})`, {
+    BRIDGE_PROTOCOL_VERSION: 3, BRIDGE_SOURCE: "omnichat-realtime-bridge-v3", PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5_000,
+    providerLabel: () => "Shopee",
+    sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v3", recovery_watchdog_version: 1 }),
+    providerMainBridgeStatus: async () => ({ ready: current }),
+    reinjectProviderBridge: async () => { replacements++; current = true; return true; },
+    recordLog: async () => {},
+  });
+  await ensure(42, { id: "shopee" });
+  assert.equal(replacements, 1);
+  await ensure(42, { id: "shopee" });
+  assert.equal(replacements, 1, "compatible page bridges remain attached");
 });

@@ -58,6 +58,8 @@ const BRIDGE_PROTOCOL_VERSION = 5;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
+// Bump when an open Shopee page must replace its main-world bridge.
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -2982,7 +2984,7 @@ async function ensureProviderBridge(tabId, adapter) {
       && response.bridge_source === BRIDGE_SOURCE
       && response.recovery_watchdog_version === 1,
     );
-    if (bridgeReady && adapter.id === "line_oa") {
+    if (bridgeReady) {
       try {
         bridgeReady = (await providerMainBridgeStatus(tabId, adapter)).ready === true;
       } catch {
@@ -3010,7 +3012,7 @@ async function ensureProviderBridge(tabId, adapter) {
         && response.bridge_source === BRIDGE_SOURCE
         && response.recovery_watchdog_version === 1,
       );
-      if (bridgeReady && adapter.id === "line_oa") {
+      if (bridgeReady) {
         try {
           bridgeReady = (await providerMainBridgeStatus(tabId, adapter)).ready === true;
         } catch {
@@ -3115,8 +3117,8 @@ async function providerMainBridgeStatus(tabId, adapter) {
   const mainBridge = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION],
-    func: (bridgeSource, providerId, lineCompatibilityVersion) => ({
+    args: [BRIDGE_SOURCE, adapter?.id, LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION, SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION],
+    func: (bridgeSource, providerId, lineCompatibilityVersion, shopeeCompatibilityVersion) => ({
       ready: Boolean(
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
@@ -3128,6 +3130,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
+            && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.prepareSellerCentre === "function",

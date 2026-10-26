@@ -27,6 +27,7 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   const context = vm.createContext({
     BRIDGE_SOURCE: bridgeSource,
     LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION: Number(expected[1]),
+    SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION: 2,
     window: { __omnichatLineOABridgeControl: control },
     OmnichatProviderAdapters: { get: () => ({ id: "line_oa" }) },
     chrome: { scripting: { executeScript: async ({ func, args }) => [{ result: func(...args) }] } },
@@ -287,4 +288,28 @@ test("LINE OA preserves file replies and their correlation IDs when history is i
   assert.equal(messages[0].client_message_id, "file-send");
   assert.equal(adapter.supportsSend("send_file"), true);
   assert.equal(adapter.supportsSend("send_video"), true);
+});
+
+
+test("Shopee readiness requires the current main bridge compatibility", async () => {
+  const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+  const page = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
+  const expected = Number(background.match(/const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = (\d+)/)[1]);
+  const actual = Number(page.match(/compatibility_version: (\d+)/)[1]);
+  assert.equal(expected, actual);
+  const source = background.slice(background.indexOf("async function providerMainBridgeStatus("), background.indexOf("async function retireProviderMainBridge("));
+  const control = { source: "bridge", dispose() {}, resetRecovery() {}, prepareSellerCentre() {} };
+  const context = vm.createContext({
+    BRIDGE_SOURCE: "bridge", LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION: 2, SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION: expected,
+    window: { __omnichatRealtimeBridgeControl: control, __omnichatRealtimeState: {} },
+    OmnichatShopeeUrl: {}, OmnichatProviderAdapters: { get: () => ({}) },
+    chrome: { scripting: { executeScript: async ({ func, args }) => [{ result: func(...args) }] } },
+  });
+  vm.runInContext(source, context);
+  const status = () => context.providerMainBridgeStatus(42, { id: "shopee" });
+  assert.equal((await status()).ready, false);
+  control.compatibility_version = actual;
+  assert.equal((await status()).ready, true);
+  control.compatibility_version++;
+  assert.equal((await status()).ready, false);
 });
