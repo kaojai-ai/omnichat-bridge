@@ -28,7 +28,7 @@ Other configured shops remain visible as **Not active in this browser**. Use
 until detection agrees. Existing queued messages and sync checkpoints are retained.
 An uncertain send must be checked in Seller Chat before manually retrying.
 
-## Automatic page bridge upgrades (planned)
+## Automatic page bridge upgrades (0.7.7)
 
 On extension startup, open Shopee pages are checked for compatible page-bridge
 code even when their content bridge still answers pings. Outdated bridges are
