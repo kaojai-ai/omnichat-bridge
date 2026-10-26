@@ -2285,6 +2285,7 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
+    compatibility_version: 2,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

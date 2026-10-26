@@ -782,3 +782,15 @@ test("LINE reset after recovery completes forwards its account and retains per-a
   assert.equal(cancellation.provider_account_id, "oa-a");
   assert.equal(cancellation.request_id, undefined);
 });
+
+
+test("replacing a content bridge preserves uncertainty for an outstanding send", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { localConsent: true });
+  const result = bridge.sendCommand(command);
+  await new Promise(resolve => setImmediate(resolve));
+  bridge.reattach();
+  const outcome = await result;
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.uncertain, true);
+  assert.equal(bridge.runtimeListenerCount, 1);
+});

@@ -28,6 +28,18 @@ Other configured shops remain visible as **Not active in this browser**. Use
 until detection agrees. Existing queued messages and sync checkpoints are retained.
 An uncertain send must be checked in Seller Chat before manually retrying.
 
+## Automatic page bridge upgrades (0.7.7)
+
+On extension startup, open Shopee pages are checked for compatible page-bridge
+code even when their content bridge still answers pings. Outdated bridges are
+reattached without reloading or navigating the Shopee page. Existing queued data
+is retained. If reattachment interrupts a pending send confirmation, the result
+remains uncertain and must not be automatically resent.
+
+Compatibility versions must be advanced when a page-bridge change needs to reach
+already-open pages. Helper-script migrations require separate handling; this does
+not claim that arbitrary future helper changes can be hot-reloaded.
+
 ## How it works
 
 1. The seller signs in and opens New Webchat. Seller Centre remains a fallback
