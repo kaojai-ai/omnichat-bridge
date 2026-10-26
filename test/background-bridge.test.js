@@ -121,7 +121,7 @@ test("keeps connection status compatible with the server's strict version 1 enve
   assert.match(statusSource, /schema: "omnichat\.connection_status"/);
   assert.match(statusSource, /version: 1/);
   assert.match(statusSource, /ready,/);
-  assert.match(statusSource, /reason_code: health\.reason_code/);
+  assert.match(statusSource, /reason_code: session && !session\.eligible \? session\.reason_code : health\.reason_code/);
   assert.match(statusSource, /chrome\.runtime\.getPlatformInfo/);
   assert.match(statusSource, /client: \{ platform: platform\.os \}/);
   assert.match(statusSource, /last_sync_at: health\.last_sync_at/);
@@ -168,7 +168,7 @@ test("only opens live command channels for adapters that declare send commands",
 
 test("refreshes leader status after live presence is sent", () => {
   assert.match(source, /function scheduleLeaderStatusRefresh\(context, socket, attemptsRemaining = 2\)/);
-  assert.match(source, /socket\.send\(JSON\.stringify\(status\)\);[\s\S]*scheduleLeaderStatusRefresh\(context, socket\);/);
+  assert.match(source, /connection\.statusReporter\.publish\(status, key\)[\s\S]*scheduleLeaderStatusRefresh\(context, socket\);/);
   assert.match(source, /getLiveState\(context\.account\.provider_account_id, context\.account\.provider\)/);
   assert.match(source, /attemptsRemaining - 1/);
 });
@@ -325,7 +325,7 @@ test("discards pending messages only for the selected configured account", () =>
 
 test("flushes automatic poll delivery for one provider account", () => {
   assert.match(source, /message\?\.type === "flush_pending"/);
-  assert.match(source, /exclusive\(\(\) => flushAccountPending\(message\.provider_account_id, message\.provider\)\)/);
+  assert.match(source, /flushAccountPending\(message\.provider_account_id, message\.provider\)/);
   assert.match(source, /async function flushAccountPending\(providerAccountId, provider = ""\)/);
   assert.match(source, /return attemptDelivery\(context, \{ resetBackoff: false \}\)/);
 });

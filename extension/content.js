@@ -584,6 +584,9 @@
         messages,
         flush: automaticPoll,
         advance_cursor: false,
+        recovery_page: !automaticPoll,
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
       });
       post({
         type: "recovery_ack_v3",

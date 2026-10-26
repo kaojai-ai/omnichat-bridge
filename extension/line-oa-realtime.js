@@ -283,7 +283,9 @@
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         acknowledgements.delete(requestId);
-        reject(new Error("LINE OA local message queue acknowledgement timed out."));
+        const error = new Error("LINE OA local message queue acknowledgement timed out.");
+        error.name = "TimeoutError";
+        reject(error);
       }, ACK_TIMEOUT_MS);
       acknowledgements.set(requestId, (message) => {
         clearTimeout(timeout);

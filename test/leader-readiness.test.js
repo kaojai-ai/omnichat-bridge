@@ -1,3 +1,5 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
+import { createStatusReporter } from "../extension/lib/status-reporter.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -18,6 +20,7 @@ test("live presence advertises sends only for a responding tab belonging to this
   let status = ready;
   let tabs = [{ id: 1 }];
   const snapshot = fn("connectionStatusSnapshot", "\nfunction statusPublishKey", {
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }), getPlatformInfo: async () => ({ os: "mac" }) } },
     orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
     providerTabHealthy: (input) => input?.ok === true && input?.realtime_connected === true,
@@ -43,6 +46,7 @@ test("unchanged readiness does not add status writes or repeated leader checks",
   const sendStatus = fn("sendConnectionStatus", "\nfunction scheduleKeepalive", {
     connectionStatusSnapshot: async () => ({ ready: true }), WebSocket: { OPEN: 1 },
     liveConnections: new Map([[context.key, connection]]), statusPublishKey: JSON.stringify,
+    createStatusReporter: options => createStatusReporter({ ...options, id: () => "report", setTimer: () => 1, clearTimer: () => {} }),
     scheduleLeaderStatusRefresh: () => scheduled++, scheduleKeepalive: () => {}, recordLog: async () => {},
   });
   await sendStatus(socket, context);

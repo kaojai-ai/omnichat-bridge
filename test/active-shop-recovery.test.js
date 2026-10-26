@@ -1,3 +1,4 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -11,12 +12,15 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
   const shopeeAdapter = { id: "shopee", sendCommands: ["send"] };
   const contexts = ["a", "b"].map(id => ({ key: `shopee:${id}`, account: { provider: "shopee", provider_account_id: id }, adapter: shopeeAdapter }));
   let active = "b";
+  let now = 0;
+  const eligibility = createSessionEligibility({ now: () => now, setTimer: () => 1, clearTimer: () => {} });
   const connected = [], retired = [];
   const pending = { a: ["queued-message"] };
   let live = {};
   const liveConnections = new Map([["shopee:a", {}]]);
   const sandbox = vm.createContext({
-    shopeeAdapter, liveConnections,
+    sessionEligibility: eligibility,
+    shopeeAdapter, liveConnections, WebSocket: { OPEN: 1 },
     STORAGE: { consent: "consent" },
     readStorage: async () => ({ consent: true, pending }),
     configuredAccountContexts: () => contexts,
@@ -28,7 +32,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
     ensureProviderHealthAlarm: async () => {}, clearProviderRecoveryLiveState: async () => {},
     stopAccountLiveConnection: key => { retired.push(key); liveConnections.delete(key); },
     stopLiveConnection: () => { liveConnections.clear(); }, recordLog: async () => {},
-    ensureAccountLiveConnection: async c => { connected.push(c.key); liveConnections.set(c.key, {}); },
+    ensureAccountLiveConnection: async c => { connected.push(c.key); liveConnections.set(c.key, { socket: { readyState: 1 } }); },
   });
   vm.runInContext(extract("function liveCommandContexts(", "function messageProviderAccountId(") + extract("async function ensureLiveConnection(", "async function ensureAccountLiveConnection("), sandbox);
   await sandbox.ensureLiveConnection();
@@ -42,13 +46,24 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
   assert.deepEqual(pending, { a: ["queued-message"] });
   active = null;
   await sandbox.ensureLiveConnection();
-  assert.equal(liveConnections.size, 0);
+  assert.equal(liveConnections.size, 1, "transient uncertainty retains an already-open transport");
+  assert.equal(eligibility.state("shopee:a").eligible, false, "retained transport must not grant command eligibility");
+  assert.equal(readAccountState(live, "shopee:a", {}).active_in_profile, false);
+  now = 30_001;
+  await sandbox.ensureLiveConnection();
+  assert.equal(liveConnections.size, 0, "expired uncertainty cannot retain the transport");
+  now = 40_000;
+  eligibility.reset();
+  const before = connected.length;
+  await sandbox.ensureLiveConnection();
+  assert.equal(connected.length, before, "uncertainty must not create a fresh transport");
 });
 
 test("automatic delivery respects retry time while explicit retry bypasses it", async () => {
   let flushes = 0;
   const context = { key: "shop", account: { provider_account_id: "shop" } };
   const sandbox = vm.createContext({
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: { consent: "consent", pending: "pending", deliveryRetry: "retry" },
     readStorage: async () => ({ consent: true, pending: { shop: ["message"] }, retry: { shop: { next_at: new Date(Date.now() + 60_000).toISOString() } } }),
     readAccountState: (container, key, fallback) => container?.[key] ?? fallback,
@@ -72,6 +87,7 @@ test("conflicting Shopee pages pause both shops until fresh account detection ag
   let agrees = false;
   const patches = {};
   const sandbox = vm.createContext({
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     shopeeAdapter,
     providerChatTabs: async () => [{ id: 1 }, { id: 2 }],
     providerTabStatus: async tab => ({ current_provider_account_id: refreshed && agrees ? "b" : tab.id === 1 ? "a" : "b" }),

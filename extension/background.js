@@ -13,7 +13,6 @@ import {
   migrateScanState,
 } from "./lib/sync-state.js";
 import {
-  createLogEntry,
   availableLogBudget,
   createRoutineLogFilter,
   diagnosticErrorDetails,
@@ -23,6 +22,10 @@ import {
 } from "./lib/logs.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
+import { createDiagnosticBuffer } from "./lib/diagnostic-buffer.js";
+import { createSessionEligibility } from "./lib/session-eligibility.js";
+import { createStatusReporter } from "./lib/status-reporter.js";
+import { createDeliveryScheduler } from "./lib/delivery-scheduler.js";
 import { createReplyQueue } from "./lib/reply-queue.js";
 import {
   LEGACY_STORAGE,
@@ -135,6 +138,7 @@ const INBOUND_LOG_MESSAGES = {
 };
 let mutationQueue = Promise.resolve();
 const replyQueue = createReplyQueue();
+const deliveryScheduler = createDeliveryScheduler(2);
 let commandTabWriteQueue = Promise.resolve();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
@@ -150,6 +154,9 @@ const providerAutomaticRetryAttempts = new Map();
 const providerAutomaticRetryAt = new Map();
 const providerRecoveryTabLocks = new Map();
 let providerHealthWatchdogPromise = null;
+const sessionEligibility = createSessionEligibility({
+  onRecheck: () => runProviderHealthWatchdog(),
+});
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
@@ -180,52 +187,44 @@ async function resumeLogUpload() {
 
 const filterRoutineLog = createRoutineLogFilter();
 
+let diagnosticsSuspended = false;
+const diagnosticBuffer = createDiagnosticBuffer({
+  persist: (rows) => mutateLogs(async () => {
+    const stored = await readStorage([
+      STORAGE.logs, STORAGE.logOutbox, STORAGE.serverInitialized,
+      STORAGE.logUploadEnabled, STORAGE.config, STORAGE.detectedAccounts,
+    ]);
+    const local = chrome.storage.local;
+    const [totalBytes, currentLogBytes] = await Promise.all([
+      local.getBytesInUse(null), local.getBytesInUse([STORAGE.logs, STORAGE.logOutbox]),
+    ]);
+    const entries = rows.map(({ entry }) => {
+      const context = accountContextFor(stored, entry.details?.provider_account_id, entry.details?.provider);
+      return { ...entry, ...(context ? { account_key: context.key } : {}) };
+    });
+    const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
+    const logs = pruneLogs([...entries.reverse(), ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
+    const retained = new Set(logs.map((entry) => entry.id));
+    const outbox = new Set((Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []).filter((id) => retained.has(id)));
+    for (const { entry, remote } of rows) {
+      const context = accountContextFor(stored, entry.details?.provider_account_id, entry.details?.provider);
+      if (remote && entry.level !== "debug" && retained.has(entry.id)
+        && hasServerInitialized(stored) && stored[STORAGE.logUploadEnabled] === true
+        && context?.config.logs_url) outbox.add(entry.id);
+    }
+    await writeStorage({ [STORAGE.logs]: logs, [STORAGE.logOutbox]: [...outbox] });
+    if (outbox.size) void scheduleLogUpload().catch(() => {});
+  }),
+});
+
 async function recordLog(level, area, event, message, details = {}, { remote = true } = {}) {
   try {
+    if (diagnosticsSuspended) return false;
     details = filterRoutineLog(level, area, event, details);
     if (details === null) return false;
-    return await mutateLogs(async () => {
-      const stored = await readStorage([
-        STORAGE.logs,
-        STORAGE.logOutbox,
-        STORAGE.serverInitialized,
-        STORAGE.logUploadEnabled,
-        STORAGE.config,
-        STORAGE.detectedAccounts,
-      ]);
-      const context = accountContextFor(stored, details?.provider_account_id, details?.provider);
-      const entry = createLogEntry({
-        level,
-        area,
-        event,
-        message,
-        details,
-        account_key: context?.key,
-      });
-      const local = chrome.storage.local;
-      const [totalBytes, currentLogBytes] = await Promise.all([
-        local.getBytesInUse(null), local.getBytesInUse([STORAGE.logs, STORAGE.logOutbox]),
-      ]);
-      const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
-      const logs = pruneLogs([entry, ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
-      const retainedIds = new Set(logs.map((item) => item.id));
-      const outbox = (Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : [])
-        .filter((id) => retainedIds.has(id));
-      const shouldUpload = remote
-        && entry.level !== "debug"
-        && hasServerInitialized(stored)
-        && stored[STORAGE.logUploadEnabled] === true
-        && Boolean(context?.config.logs_url);
-      if (shouldUpload && retainedIds.has(entry.id)) outbox.push(entry.id);
-      await writeStorage({
-        [STORAGE.logs]: logs,
-        [STORAGE.logOutbox]: outbox,
-      });
-      if (shouldUpload) void scheduleLogUpload();
-      return retainedIds.has(entry.id);
-    });
+    return diagnosticBuffer.enqueue({ level, area, event, message, details }, { remote });
   } catch {
-    // Logging must never interrupt bridge behavior.
+    // Admission and persistence failures cannot interrupt message processing.
     return false;
   }
 }
@@ -368,10 +367,17 @@ async function lineSessionContexts(contexts, { refresh = false } = {}) {
   const ids = new Set(verified.flatMap((status) => status.accessible_account_ids ?? []));
   for (const context of line) {
     const active = ids.has(context.account.provider_account_id);
+    const eligibility = sessionEligibility.observe(context.key, {
+      hasTab: tabs.length > 0, verified: active,
+      explicitMismatch: !active && verified.length > 0,
+      identity: active ? context.account.provider_account_id : null,
+    });
     await updateLiveState(context, {
+      eligibility_reason_code: eligibility.reason_code,
+      session_generation: eligibility.generation,
       active_in_profile: active,
-      provider_session_reason_code: active ? null : verified.length ? "account_unavailable" : "session_unverified",
-      ...(!active ? { socket: "inactive", leader: false, leader_installation_id: null,
+      provider_session_reason_code: active ? null : eligibility.reason_code,
+      ...(!active && eligibility.reason_code !== "checking_session" ? { socket: "inactive", leader: false, leader_installation_id: null,
         provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
     });
   }
@@ -412,11 +418,18 @@ async function activeLiveCommandContexts(contexts) {
     const active = activeIds.has(context.account.provider_account_id);
     const reasonCode = active ? null : observedIds.size > 1 ? "session_conflict"
       : currentId ? "account_mismatch" : "session_unverified";
+    const eligibility = sessionEligibility.observe(context.key, {
+      hasTab: statuses.length > 0, verified: active,
+      explicitMismatch: !active && (Boolean(currentId) || observedIds.size > 1),
+      identity: currentId,
+    });
     await updateLiveState(context, {
+      eligibility_reason_code: eligibility.reason_code,
+      session_generation: eligibility.generation,
       active_in_profile: active,
       active_provider_account_id: currentId,
       provider_session_reason_code: reasonCode,
-      ...(!active ? {
+      ...(!active && eligibility.reason_code !== "checking_session" ? {
         socket: "inactive", leader: false, leader_installation_id: null,
         provider_recovery_state: null, provider_recovery_reason: null,
         provider_recovery_tab_id: null,
@@ -858,14 +871,34 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     ).then((recorded) => respond({ ok: recorded === true }));
     return true;
   }
+  if (message?.type === "erase_local_data") {
+    diagnosticsSuspended = true;
+    void diagnosticBuffer.discard().then(() => mutateLogs(async () => {
+      await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
+      await chrome.alarms.clear(PROVIDER_HEALTH_ALARM);
+      await chrome.alarms.clear(LOG_UPLOAD_ALARM);
+      await chrome.storage.local.clear();
+    })).then(
+      () => respond({ ok: true }),
+      () => respond({ ok: false, error: "Could not erase local extension data." }),
+    ).finally(() => { diagnosticsSuspended = false; });
+    return true;
+  }
+  if (message?.type === "flush_logs") {
+    void diagnosticBuffer.drain().then(
+      () => respond({ ok: true, diagnostics: diagnosticBuffer.stats() }),
+      () => respond({ ok: false, error: "Diagnostic persistence is unavailable." }),
+    );
+    return true;
+  }
   if (message?.type === "clear_logs") {
-    void mutateLogs(async () => {
+    void diagnosticBuffer.drain().then(() => mutateLogs(async () => {
       await chrome.alarms.clear(LOG_UPLOAD_ALARM);
       await writeStorage({
         [STORAGE.logs]: [],
         [STORAGE.logOutbox]: [],
       });
-    }).then(
+    })).then(
       () => respond({ ok: true }),
       (error) => respond({ ok: false, error: String(error) }),
     );
@@ -909,21 +942,35 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       message.messages,
       Boolean(message.flush),
       message.advance_cursor !== false,
-    )).then(
+    ).then(async (result) => {
+      if (message.recovery_page === true) {
+        const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+        const context = accountContextFor(stored, message.provider_account_id, message.provider);
+        if (context) await serializeAccountStorage(async () => {
+          const current = await readStorage([STORAGE.status]);
+          const status = readAccountState(current[STORAGE.status], context.key, {});
+          await writeStorage({ [STORAGE.status]: writeAccountState(current[STORAGE.status], context.key, {
+            ...status, pages_fetched: (status.pages_fetched ?? 0) + 1,
+            last_progress_at: new Date().toISOString(),
+          }) });
+        });
+      }
+      return result;
+    })).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "flush_now") {
-    void exclusive(() => attemptAllDeliveries({ resetBackoff: true })).then(
+    void attemptAllDeliveries({ resetBackoff: true }).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
     return true;
   }
   if (message?.type === "flush_pending") {
-    void exclusive(() => flushAccountPending(message.provider_account_id, message.provider)).then(
+    void flushAccountPending(message.provider_account_id, message.provider).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -989,7 +1036,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
         state: "syncing",
         phase: "checking_conversations",
         completed_conversations: message.completed_conversations,
-        total_conversations: message.total_conversations
+        total_conversations: message.total_conversations,
+        ...(Number(message.completed_conversations) > Number(current.completed_conversations ?? 0)
+          ? { last_progress_at: new Date().toISOString() } : {}),
       });
     })).then(
       () => recordLog("info", "sync", "progress", "Sync progress updated.", {
@@ -1879,6 +1928,7 @@ function startUnattendedProviderSync(tab, context) {
     preferredTabId: tabId,
     restorePolling: true,
     accountKey: recoveryKey,
+    sessionGeneration: sessionEligibility.generation(context.key),
   };
   void runAccountSync("automatic", control, context).then((result) => {
     if (result?.error) throw new Error(result.error);
@@ -2043,7 +2093,7 @@ async function runProviderHealthWatchdogOnce() {
     }
   }
   await ensureLiveConnection();
-  void exclusive(() => attemptAllDeliveries({ resetBackoff: false }))
+  void attemptAllDeliveries({ resetBackoff: false })
     .catch((error) => recordUnexpected("message_delivery", error));
 }
 
@@ -2196,6 +2246,7 @@ function stopAccountLiveConnection(key, connection) {
   clearTimeout(connection.reconnectTimer);
   clearInterval(connection.heartbeatTimer);
   clearTimeout(connection.leaderStatusTimer);
+  connection.statusReporter?.close();
   connection.socket?.close();
 }
 
@@ -2311,7 +2362,8 @@ async function connectionStatusSnapshot(context) {
     : providerTabCanSend(providerStatus, context)
       ? adapter.sendCommands.filter((command) => command !== "send_video" || providerStatus?.capabilities?.send_video === true)
       : [];
-  const ready = ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
+  const session = sessionEligibility.state(context.key);
+  const ready = (!session || session.eligible) && ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
     health.checks.some((check) => check.key === key && check.status === "pass")
   ));
   const platform = await chrome.runtime.getPlatformInfo();
@@ -2327,7 +2379,7 @@ async function connectionStatusSnapshot(context) {
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
     ready,
-    reason_code: health.reason_code,
+    reason_code: session && !session.eligible ? session.reason_code : health.reason_code,
     client: { platform: platform.os },
     last_sync_at: health.last_sync_at,
     ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
@@ -2350,12 +2402,21 @@ async function sendConnectionStatus(socket, context) {
   const status = await connectionStatusSnapshot(context);
   const connection = liveConnections.get(context.key);
   const key = statusPublishKey(status);
-  if (socket.readyState !== WebSocket.OPEN || connection?.lastStatusKey === key) return;
-  if (connection?.socket !== socket) return;
-  socket.send(JSON.stringify(status));
-  connection.lastActivityAt = Date.now();
-  scheduleKeepalive(context, socket);
-  if (connection) connection.lastStatusKey = key;
+  if (socket.readyState !== WebSocket.OPEN || connection?.socket !== socket) return;
+  if (!connection.statusReporter) {
+    connection.statusReporter = createStatusReporter({
+      send: (report) => {
+        if (liveConnections.get(context.key)?.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify(report));
+        connection.lastActivityAt = Date.now();
+        scheduleKeepalive(context, socket);
+      },
+      onExhausted: () => void recordLog("warn", "live", "status_unacknowledged", "Readiness report was not acknowledged within the retry budget.", {
+        provider: context.account.provider, provider_account_id: context.account.provider_account_id,
+      }),
+    });
+  }
+  if (!connection.statusReporter.publish(status, key)) return;
   scheduleLeaderStatusRefresh(context, socket);
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
     provider: context.account.provider,
@@ -2398,6 +2459,16 @@ async function ensureLiveConnection() {
 
   const contexts = hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])
     ? await activeLiveCommandContexts(configuredContexts) : [];
+  if (hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])) {
+    for (const context of configuredContexts) {
+      if (contexts.some((item) => item.key === context.key)) continue;
+      const existing = liveConnections.get(context.key);
+      if (sessionEligibility.state(context.key)?.reason_code === "checking_session"
+        && existing?.socket?.readyState === WebSocket.OPEN) {
+        contexts.push(context);
+      }
+    }
+  }
   const pingContexts = apiPingContexts(contexts);
   const canPing = pingContexts.length > 0
     && hasServerInitialized(stored)
@@ -2607,6 +2678,8 @@ async function ensureMigratedAccountLiveConnection(context) {
         connect_duration_ms: openedAt - attemptStartedAt,
       });
       existing.lastStatusKey = null;
+      existing.statusReporter?.close();
+      existing.statusReporter = null;
       scheduleKeepalive(context, socket);
       void sendConnectionStatus(socket, context)
         .catch((error) => recordUnexpected("connection_status", error, {
@@ -2623,6 +2696,8 @@ async function ensureMigratedAccountLiveConnection(context) {
       if (liveConnections.get(context.key)?.socket === socket) {
         clearTimeout(existing.handshakeTimer);
         clearTimeout(existing.stableTimer);
+        existing.statusReporter?.close();
+        existing.statusReporter = null;
         existing.socket = null;
         clearInterval(existing.heartbeatTimer);
         existing.heartbeatTimer = null;
@@ -2692,6 +2767,11 @@ function scheduleLeaderStatusRefresh(context, socket, attemptsRemaining = 2) {
 async function handleLiveCommand(raw, context, socket) {
   let command;
   try { command = JSON.parse(raw); } catch { return; }
+  if (command?.type === "connection_status_ack") {
+    const current = liveConnections.get(context.key);
+    if (current?.socket === socket) current.statusReporter?.acknowledge(command);
+    return;
+  }
   const adapter = providerAdapterForCommand(command);
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
@@ -2712,6 +2792,7 @@ async function handleLiveCommand(raw, context, socket) {
   }
   let cached = liveCommandResults.get(key);
   const duplicate = Boolean(cached);
+  const selectedGeneration = sessionEligibility.generation(context.key);
   if (!cached) {
     if (liveCommandResults.size >= 200) {
       acknowledge({ type: "send_result", request_id: command.request_id, ok: false, error: "Command channel is busy. Retry after current commands finish." });
@@ -2720,6 +2801,11 @@ async function handleLiveCommand(raw, context, socket) {
     cached = {
       expiresAt: Infinity,
       result: replyQueue.run(context.key, async () => {
+        const eligible = await activeLiveCommandContexts([context]);
+        if (!eligible.some((item) => item.key === context.key)
+          || !sessionEligibility.isCurrent(context.key, selectedGeneration)) {
+          return { ok: false, error: "Provider session changed while this command was queued. Verify the account and retry." };
+        }
         const sent = await sendViaProvider(command);
         // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
@@ -2820,7 +2906,7 @@ chrome.runtime.onStartup.addListener(() => {
   void resumeLogUpload();
   void ensureLiveConnection();
   void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
-  void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+  void attemptAllDeliveries({ resetBackoff: false });
 });
 
 chrome.runtime.onUpdateAvailable.addListener((details) => {
@@ -3429,6 +3515,7 @@ function sendProviderMessage(tabId, message, {
 } = {}) {
   let timeout;
   let onAbort;
+  const startedAt = performance.now();
   if (signal?.aborted) return Promise.reject(syncCancelledError());
   const response = Promise.resolve()
     .then(() => chrome.tabs.sendMessage(tabId, message));
@@ -3458,6 +3545,10 @@ function sendProviderMessage(tabId, message, {
     clearTimeout(timeout);
     if (recoveryControl) recoveryControl.touchRecovery = null;
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    void recordLog("debug", "timing", "provider_request", "Provider bridge request completed.", {
+      provider: message.provider, provider_account_id: message.provider_account_id,
+      operation, duration_ms: Math.round(performance.now() - startedAt),
+    });
   });
 }
 
@@ -3477,6 +3568,14 @@ async function syncOpenProvider(control, context) {
   }
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   const label = providerLabel(adapter);
+  const selectedGeneration = control.sessionGeneration;
+  if (selectedGeneration != null) {
+    const eligible = await activeLiveCommandContexts([context]);
+    if (!eligible.some((item) => item.key === context.key)
+      || !sessionEligibility.isCurrent(context.key, selectedGeneration)) {
+      throw new Error("Provider session changed before recovery started. Verify the account and retry.");
+    }
+  }
   if (!adapter?.supports("message_recovery")) {
     throw new Error(`${label} does not support message recovery.`);
   }
@@ -3575,7 +3674,8 @@ async function retryLineAccount(message) {
       && activeSyncControl?.adapter?.id === "line_oa") || providerAutomaticRecoveries.has(context.key)) {
     return { skipped: "already_syncing" };
   }
-  const control = { controller: new AbortController(), manualRestart: true, accountKey: context.key };
+  const control = { controller: new AbortController(), manualRestart: true, accountKey: context.key,
+    sessionGeneration: sessionEligibility.generation(context.key) };
   providerAutomaticRecoveries.set(context.key, control);
   try {
     await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));
@@ -3779,13 +3879,17 @@ async function runAccountSync(trigger, control, context) {
     await recordLog("debug", "delivery", "pre_sync_flush", "Checking queued messages before recovery.", {
       provider_account_id: providerAccountId,
     });
-    await attemptDelivery(context, { resetBackoff: true, signal });
+    void attemptDelivery(context, { resetBackoff: true })
+      .catch((error) => recordUnexpected("message_delivery", error));
     throwIfSyncCancelled(signal);
     await updateScopedState(STORAGE.status, context.key, {
       state: "syncing",
       phase: context.adapter.id === "line_oa" ? "connecting_provider" : "checking_conversations",
       completed_conversations: 0,
       total_conversations: 0,
+      pages_fetched: 0,
+      messages_captured: 0,
+      last_progress_at: null,
     });
     await recordLog("info", "sync", "provider_recovery", `Requesting missed messages from ${providerLabel(context.adapter)}.`, {
       provider: context.account.provider,
@@ -3907,8 +4011,8 @@ async function openSessionSyncContexts(contexts, control) {
   }
   // Reload configuration after detection: the owner may have switched shop since the last sync.
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const currentContexts = configuredAccountContexts(stored).filter((context) => context.adapter.id !== "line_oa"
-    || contexts.some((selected) => selected.key === context.key));
+  const currentContexts = configuredAccountContexts(stored).filter((context) =>
+    contexts.some((selected) => selected.key === context.key));
   throwIfSyncCancelled(control.controller.signal);
   const selected = currentContexts.filter((context) => context.adapter.id !== "shopee"
     || (currentId && context.account.provider_account_id === currentId));
@@ -3929,6 +4033,11 @@ async function openSessionSyncContexts(contexts, control) {
       sync_error_at: null,
     });
   }
+  for (const context of shopee) sessionEligibility.observe(context.key, {
+    hasTab: Boolean(tab), verified: context.account.provider_account_id === currentId,
+    explicitMismatch: Boolean(currentId) && context.account.provider_account_id !== currentId,
+    identity: currentId,
+  });
   if (tab) control.preferredTabId = tab.id;
   return selected;
 }
@@ -3940,13 +4049,41 @@ async function runUnifiedSync(trigger, control) {
   }
   const candidates = configuredAccountContexts(stored).filter((context) => !control.providerScope
     || context.adapter.id === control.providerScope);
-  const contexts = await openSessionSyncContexts(candidates, control);
-  if (!contexts.length) throw new Error("Log in to a configured provider account and open its chat to sync.");
   const accounts = [];
-  for (const context of contexts) {
-    throwIfSyncCancelled(control.controller.signal);
-    if (providerAutomaticRecoveries.has(context.key)) continue;
-    accounts.push(await runAccountSync(trigger, control, context));
+  const providers = [...new Set(candidates.map((item) => item.adapter.id))]
+    .sort((left, right) => (left === "shopee" ? -1 : right === "shopee" ? 1 : 0));
+  for (const provider of providers) {
+    const providerCandidates = candidates.filter((item) => item.adapter.id === provider
+      && !providerAutomaticRecoveries.has(item.key));
+    if (!providerCandidates.length) continue;
+    for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
+      state: "discovering", phase: "checking_session",
+      completed_conversations: null, total_conversations: null,
+      pages_fetched: 0, messages_captured: 0, last_progress_at: null,
+    });
+    let contexts;
+    try {
+      contexts = await openSessionSyncContexts(providerCandidates, control);
+    } catch (error) {
+      for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
+        state: "watching", phase: null,
+      });
+      throw error;
+    }
+    for (const context of providerCandidates) {
+      if (!contexts.some((selected) => selected.key === context.key)) await updateScopedState(STORAGE.status, context.key, {
+        state: "watching", phase: null,
+      });
+    }
+    for (const context of contexts) {
+      throwIfSyncCancelled(control.controller.signal);
+      if (providerAutomaticRecoveries.has(context.key)) continue;
+      control.sessionGeneration = sessionEligibility.generation(context.key);
+      accounts.push(await runAccountSync(trigger, control, context));
+    }
+  }
+  if (!accounts.length && !candidates.some((item) => providerAutomaticRecoveries.has(item.key))) {
+    throw new Error("Log in to a configured provider account and open its chat to sync.");
   }
   const errors = accounts.filter((account) => account.error);
   const result = {
@@ -4008,6 +4145,7 @@ function messageKey(message) {
 }
 
 async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
+  const startedAt = performance.now();
   const captured = await serializeAccountStorage(async () => {
     const stored = await readStorage([
       STORAGE.consent,
@@ -4059,6 +4197,8 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
         {
           ...currentStatus,
           last_capture_at: new Date().toISOString(),
+          messages_captured: (currentStatus.messages_captured ?? 0) + added.length,
+          ...(added.length ? { last_progress_at: new Date().toISOString() } : {}),
           pending: pending.length + added.length,
         },
       );
@@ -4093,36 +4233,24 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
     return { queued: 0, sent: 0, pending: 0 };
   }
   const { scopedMessages, added, pendingCount, latestCursor, deferCursorAdvance, initialized } = captured;
-  if (!shouldFlush || !initialized) {
-    await recordLog("info", "queue", "stored", "Recovered messages stored for delivery.", {
-      provider_account_id: context.account.provider_account_id,
-      received: scopedMessages.length,
-      queued: added.length,
-      pending: pendingCount,
-      deferred: deferCursorAdvance,
-    });
-    return {
-      queued: added.length,
-      sent: 0,
-      pending: pendingCount,
-      deferred: deferCursorAdvance,
-      latest_cursor: latestCursor,
-    };
+  // The caller acknowledges only local durable capture. Forwarding owns its
+  // account queue and must never extend the global capture/storage lock.
+  if (initialized) {
+    void attemptDelivery(context, { resetBackoff: false })
+      .catch((error) => recordUnexpected("message_delivery", error, {
+        provider: context.account.provider,
+        provider_account_id: context.account.provider_account_id,
+      }));
   }
-  const delivered = await attemptDelivery(context, { resetBackoff: false });
-  await recordLog("info", "queue", "realtime_processed", "Realtime messages processed.", {
+  void recordLog("info", "queue", "stored", "Captured messages stored for delivery.", {
     provider_account_id: context.account.provider_account_id,
-    received: scopedMessages.length,
-    queued: added.length,
-    sent: delivered.sent,
-    pending: delivered.pending,
-    deferred: deferCursorAdvance,
+    received: scopedMessages.length, queued: added.length,
+    pending: pendingCount, deferred: deferCursorAdvance,
+    duration_ms: Math.round(performance.now() - startedAt),
   });
   return {
-    queued: added.length,
-    deferred: deferCursorAdvance,
-    ...delivered,
-    latest_cursor: latestCursor,
+    queued: added.length, sent: 0, pending: pendingCount,
+    deferred: deferCursorAdvance, latest_cursor: latestCursor,
   };
 }
 
@@ -4261,6 +4389,7 @@ function selectBatchMessages(pending) {
 }
 
 async function signedRequest(config, providerAccountId, payload, signal) {
+  const startedAt = performance.now();
   const url = new URL(config.events_url);
   if (url.protocol !== "https:") throw new Error("Target server must use HTTPS.");
   const body = JSON.stringify(payload);
@@ -4299,7 +4428,12 @@ async function signedRequest(config, providerAccountId, payload, signal) {
       throw failure;
     }
     return response.json();
-  }, 15_000, signal);
+  }, 15_000, signal).finally(() => {
+    void recordLog("debug", "timing", "target_request", "Target server request completed.", {
+      provider: payload.provider, provider_account_id: providerAccountId,
+      duration_ms: Math.round(performance.now() - startedAt),
+    });
+  });
 }
 
 async function sendLogBatch(context, logs) {
@@ -4348,6 +4482,7 @@ async function sendLogBatch(context, logs) {
 }
 
 async function flushLogBatch() {
+  await diagnosticBuffer.drain();
   await logMutationQueue;
   const stored = await readStorage([
     STORAGE.logs,
@@ -4654,7 +4789,7 @@ async function flushAll(context, signal) {
   let pending = 0;
   for (let batch = 0; batch < MAX_FLUSH_BATCHES; batch += 1) {
     throwIfSyncCancelled(signal);
-    const result = await flushBatch(context, signal);
+    const result = await deliveryScheduler.run(() => flushBatch(context, signal));
     sent += result.sent;
     pending = result.pending;
     if (!pending || (!result.sent && !result.skipped) || result.failed || result.blocked) break;
@@ -4706,13 +4841,31 @@ async function scheduleDeliveryRetry(context) {
 }
 
 const accountDeliveries = new Map();
+const accountDeliveryWakeups = new Set();
 function attemptDelivery(context, options) {
   const key = context?.key;
-  const previous = accountDeliveries.get(key) ?? Promise.resolve();
-  const operation = previous.catch(() => undefined).then(() => deliverPendingForAccount(context, options));
+  const previous = accountDeliveries.get(key);
+  if (previous) {
+    accountDeliveryWakeups.add(key);
+    return previous;
+  }
+  const operation = Promise.resolve().then(async () => {
+    let result;
+    let sent = 0;
+    do {
+      accountDeliveryWakeups.delete(key);
+      result = await deliverPendingForAccount(context, options);
+      sent += Number(result.sent) || 0;
+    } while (accountDeliveryWakeups.has(key) && !options.signal?.aborted);
+    return { ...result, sent };
+  });
   accountDeliveries.set(key, operation);
   void operation.finally(() => {
-    if (accountDeliveries.get(key) === operation) accountDeliveries.delete(key);
+    if (accountDeliveries.get(key) === operation) {
+      accountDeliveries.delete(key);
+      if (accountDeliveryWakeups.delete(key)) void attemptDelivery(context, { resetBackoff: false })
+        .catch((error) => recordUnexpected("message_delivery", error));
+    }
   }).catch(() => undefined);
   return operation;
 }
@@ -4763,10 +4916,7 @@ async function deliverPendingForAccount(context, { resetBackoff, signal }) {
 async function attemptAllDeliveries(options) {
   const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
   const contexts = configuredAccountContexts(stored);
-  const results = [];
-  for (const context of contexts) {
-    results.push(await attemptDelivery(context, options));
-  }
+  const results = await Promise.all(contexts.map((context) => attemptDelivery(context, options)));
   const pending = results.reduce((total, result) => total + (Number(result.pending) || 0), 0);
   if (!pending) await clearDeliveryRetryAlarm();
   return {
@@ -4794,13 +4944,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     void pingConfiguredAccountApis().catch((error) => recordUnexpected("api_ping_schedule", error));
   } else if (alarm.name === DELIVERY_RETRY_ALARM) {
     void recordLog("info", "delivery", "retry_started", "Retrying queued message delivery.");
-    void exclusive(() => attemptAllDeliveries({ resetBackoff: false }));
+    void attemptAllDeliveries({ resetBackoff: false });
   } else if (alarm.name === PROVIDER_HEALTH_ALARM) {
     // Transport repair must not wait for provider checks or queued uploads.
     void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   } else if (alarm.name === LOG_UPLOAD_ALARM) {
-    void flushLogBatch();
+    void flushLogBatch().catch(() => {
+      // Diagnostic failures must not recursively emit diagnostics or reject
+      // the alarm listener. The bounded buffer owns persistence retry.
+      void scheduleLogUpload().catch(() => {});
+    });
   }
 });
 

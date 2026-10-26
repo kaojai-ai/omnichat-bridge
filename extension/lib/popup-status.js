@@ -129,7 +129,30 @@ export function accountDiscoveryStatus({ detecting, hasConfiguration, inactiveSh
   return { label: "needConfig", hint: "configurationMissing", action: "configure" };
 }
 
+export function sessionConnectionStatus(live) {
+  return {
+    waiting_for_tab: {
+      label: "OPEN PROVIDER CHAT", state: "neutral",
+      hint: "Open this account's provider chat so the bridge can verify its session.",
+    },
+    checking_session: {
+      label: "CHECKING SESSION", state: "neutral", loading: true,
+      hint: "Rechecking this account's session. Commands are paused until access is verified.",
+    },
+    wrong_account: {
+      label: "ACCOUNT NOT AVAILABLE", state: "neutral",
+      hint: "This account is not available in the current provider login. Open the matching account and check again.",
+    },
+    needs_attention: {
+      label: "SESSION NEEDS ATTENTION", state: "error",
+      hint: "The session could not be verified. Open the provider chat, check its login, and retry.",
+    },
+  }[live?.eligibility_reason_code] ?? null;
+}
+
 export function accountConnectionStatus(live) {
+  const session = sessionConnectionStatus(live);
+  if (session) return session;
   if (live?.endpoint_not_found && live.socket !== "connected") return {
     label: "SERVER ENDPOINT NOT FOUND", state: "error", action: "logs",
     hint: "Cannot connect to the KaoJai server: endpoint not found (404). Check the extension connection settings and server deployment, then retry.",

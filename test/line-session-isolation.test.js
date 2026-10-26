@@ -1,3 +1,4 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -10,6 +11,7 @@ test("LINE shared configuration selects verified access, preserves failures and 
   let status = { account_access_verified: true, accessible_account_ids: ["A", "B"] };
   const live = { "line_oa:B": { sync_error: "failed" } };
   const scope = vm.createContext({
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     providerChatTabs: async () => [{ id: 1 }], providerTabStatus: async () => status,
     updateLiveState: async (context, patch) => { live[context.key] = { ...live[context.key], ...patch }; },
   });
@@ -20,14 +22,15 @@ test("LINE shared configuration selects verified access, preserves failures and 
   assert.equal(live["line_oa:C"].active_in_profile, false);
   status = { account_access_verified: true, accessible_account_ids: ["A"] };
   assert.deepEqual(Array.from(await scope.lineSessionContexts(contexts), c => c.key), ["line_oa:A"]);
-  assert.equal(live["line_oa:B"].provider_session_reason_code, "account_unavailable");
+  assert.equal(live["line_oa:B"].provider_session_reason_code, "wrong_account");
   status = { account_access_verified: false, accessible_account_ids: ["A"] };
   assert.equal((await scope.lineSessionContexts(contexts)).length, 0);
-  assert.equal(live["line_oa:A"].provider_session_reason_code, "session_unverified");
+  assert.equal(live["line_oa:A"].provider_session_reason_code, "checking_session");
 });
 
 test("failed fresh LINE access check cannot reuse stale tab access", async () => {
   const scope = vm.createContext({
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     providerChatTabs: async () => [{ id: 1 }], ensureProviderBridge: async () => {},
     sendProviderMessage: async () => ({ ok: false }),
     providerTabStatus: async () => assert.fail("must not read stale access"),
@@ -41,6 +44,7 @@ test("retry B while A syncs never restarts A and retains B failure as an account
   const calls = [];
   const recoveries = new Map();
   const scope = vm.createContext({
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     AbortController, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     configuredAccountContexts: () => contexts, lineSessionContexts: async c => c.slice(0, 2),
     activeSyncControl: { providerAccountId: "A", adapter: { id: "line_oa" } },

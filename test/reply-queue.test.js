@@ -1,3 +1,4 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -15,9 +16,11 @@ function deferred() {
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 function harness(sendViaProvider) {
   const replyQueue = createReplyQueue();
+  const sessionEligibility = createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} });
   const background = deferred();
   const events = [];
   const sandbox = {
+    sessionEligibility, activeLiveCommandContexts: async contexts => contexts,
     sanitizeSendDiagnostics, replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
     scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     providerAdapterForCommand: (command) => ({ id: command.provider, supportsSend: () => true }),
@@ -43,8 +46,9 @@ function harness(sendViaProvider) {
     events.push(`ack:${result.request_id}`);
   } };
   return {
-    replyQueue, background, events, socket, update,
+    replyQueue, sessionEligibility, background, events, socket, update,
     send(request, account = "shop", provider = "shopee") {
+      sessionEligibility.observe(`${provider}:${account}`, { hasTab: true, verified: true });
       return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request }),
         { key: `${provider}:${account}`, account: { provider, provider_account_id: account } }, socket);
     },
@@ -121,4 +125,26 @@ test("concurrent tab selections preserve both accounts", async () => {
   });
   await Promise.all([remember("shopee:one", 1), remember("shopee:two", 2)]);
   assert.deepEqual(stored, { "shopee:one": 1, "shopee:two": 2 });
+});
+
+
+test("a queued reply cannot run after the account session changes and verifies again", async () => {
+  const first = deferred();
+  const started = [];
+  const h = harness(command => {
+    started.push(command.request_id);
+    return first.promise;
+  });
+  const running = h.send("first");
+  const queued = h.send("old-session");
+  await tick();
+  assert.deepEqual(started, ["first"]);
+  h.sessionEligibility.observe("shopee:shop", { hasTab: true, explicitMismatch: true, identity: "another-shop" });
+  h.sessionEligibility.observe("shopee:shop", { hasTab: true, verified: true, identity: "shop" });
+  first.resolve({ ok: true, provider_message_id: "receipt" });
+  await Promise.all([running, queued]);
+  assert.deepEqual(started, ["first"], "reverification must not revive queued work from the previous generation");
+  const rejected = h.socket.sent.find(result => result.request_id === "old-session");
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /session changed/);
 });

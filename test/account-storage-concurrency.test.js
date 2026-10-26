@@ -16,12 +16,12 @@ const turn = () => new Promise(resolve => setImmediate(resolve));
 const context = key => ({ key, account: { provider: "line_oa", provider_account_id: key } });
 const message = id => ({ id, provider: "line_oa", conversation_id: "conversation", event_timestamp: "2026-10-25T00:00:00.000Z" });
 
-function harness() {
+function harness(overrides = {}) {
   const state = { [STORAGE.consent]: true, [STORAGE.serverInitialized]: true };
   const uploads = [];
   let failWrite = false;
   const runtime = vm.createContext({
-    STORAGE, readAccountState, writeAccountState,
+    performance, STORAGE, readAccountState, writeAccountState,
     readStorage: async () => { const snapshot = structuredClone(state); await turn(); return snapshot; },
     writeStorage: async patch => { await turn(); if (failWrite) { failWrite = false; throw new Error("storage unavailable"); } Object.assign(state, structuredClone(patch)); },
     hasLocalConsent: value => value === true,
@@ -32,6 +32,8 @@ function harness() {
     selectBatchMessages: pending => pending,
     deliverWithIsolation: selected => new Promise(resolve => uploads.push({ selected, resolve })),
     isMessageScopedDeliveryError: () => false,
+    attemptDelivery: async () => ({ sent: 0 }),
+    ...overrides,
   });
   vm.runInContext([
     section("let accountStorageQueue =", "let liveStateWriteQueue ="),
@@ -95,7 +97,7 @@ test("a failed storage write does not prevent another account from saving", asyn
   assert.equal(readAccountState(h.state[STORAGE.status], "b", {}).state, "watching");
 });
 
-test("delivery attempts for one account wait for its upload while another account proceeds", { timeout: 3000 }, async () => {
+test("delivery triggers coalesce for one account while another account proceeds", { timeout: 3000 }, async () => {
   const started = [];
   const finish = [];
   const runtime = vm.createContext({
@@ -108,6 +110,7 @@ test("delivery attempts for one account wait for its upload while another accoun
   const first = runtime.attemptDelivery(context("a"), { fail: true });
   const failure = assert.rejects(first, /upload failed/);
   const second = runtime.attemptDelivery(context("a"), {});
+  assert.equal(second, first, "same-account triggers share the active delivery");
   const other = runtime.attemptDelivery(context("b"), {});
   await turn();
   assert.deepEqual(started, ["a", "b"]);
@@ -116,7 +119,58 @@ test("delivery attempts for one account wait for its upload while another accoun
   finish[0]();
   await failure;
   await turn();
+  assert.deepEqual(started, ["a", "b"]);
+  const retry = runtime.attemptDelivery(context("a"), {});
+  await turn();
   assert.deepEqual(started, ["a", "b", "a"]);
   finish[2]();
-  await second;
+  await retry;
+});
+
+
+test("capture ACK waits for durable storage but not blocked target delivery or diagnostics", { timeout: 3000 }, async () => {
+  const attempts = [];
+  const h = harness({
+    attemptDelivery: account => { attempts.push(account.key); return new Promise(() => {}); },
+    recordLog: () => new Promise(() => {}),
+  });
+  const a = context("a");
+  const result = await h.runtime.queueMessagesForContext([message("a1")], a, true, false);
+  assert.equal(result.queued, 1);
+  assert.equal(result.sent, 0, "local capture ACK must not claim server delivery");
+  assert.equal(result.pending, 1);
+  assert.deepEqual(readAccountState(h.state[STORAGE.pending], a.key, []).map(row => row.id), ["a1"]);
+  assert.deepEqual(attempts, ["a"]);
+  const progress = readAccountState(h.state[STORAGE.status], a.key, {});
+  assert.equal(progress.messages_captured, 1);
+  assert.ok(Number.isFinite(Date.parse(progress.last_progress_at)));
+  await h.runtime.queueMessagesForContext([message("a1")], a, true, false);
+  const unchanged = readAccountState(h.state[STORAGE.status], a.key, {});
+  assert.equal(unchanged.messages_captured, 1, "a duplicate must not inflate durable capture progress");
+  assert.equal(unchanged.last_progress_at, progress.last_progress_at);
+  h.failNextWrite();
+  await assert.rejects(h.runtime.queueMessagesForContext([message("a2")], a, true, false), /storage unavailable/);
+  assert.equal(attempts.length, 2, "failed capture must not schedule forwarding");
+});
+
+
+test("capture during an active upload wakes one follow-up drain without parallel uploads", async () => {
+  const finish = [];
+  const runtime = vm.createContext({
+    deliverPendingForAccount: () => new Promise(resolve => finish.push(resolve)),
+  });
+  vm.runInContext(section("const accountDeliveries =", "async function deliverPendingForAccount("), runtime);
+  const initial = runtime.attemptDelivery(context("a"), {});
+  await turn();
+  assert.equal(finish.length, 1);
+  assert.equal(runtime.attemptDelivery(context("a"), {}), initial);
+  assert.equal(runtime.attemptDelivery(context("a"), {}), initial);
+  assert.equal(finish.length, 1);
+  finish[0]({ sent: 2, pending: 1 });
+  await turn();
+  assert.equal(finish.length, 2, "bursty captures wake one subsequent drain");
+  finish[1]({ sent: 1, pending: 0 });
+  const result = await initial;
+  assert.equal(result.sent, 3);
+  assert.equal(result.pending, 0);
 });

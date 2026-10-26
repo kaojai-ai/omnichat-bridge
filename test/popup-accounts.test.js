@@ -129,3 +129,15 @@ test("an accessible LINE account remains visible when its sync fails", () => {
   } };
   assert.deepEqual(popupAccountsForSession(accounts, live), accounts);
 });
+
+test("accounts with explicit session problems stay visible without becoming active", () => {
+  const reasons = ["waiting_for_tab", "checking_session", "wrong_account", "needs_attention"];
+  for (const provider of ["line_oa", "shopee"]) {
+    const accounts = reasons.map((reason, index) => ({ provider, provider_account_id: String(index) }));
+    const live = { version: 2, accounts: Object.fromEntries(accounts.map((account, index) => [
+      `${provider}:${account.provider_account_id}`, { active_in_profile: false, eligibility_reason_code: reasons[index] },
+    ])) };
+    assert.deepEqual(popupAccountsForSession(accounts, live), accounts);
+    assert.ok(Object.values(live.accounts).every(state => state.active_in_profile === false));
+  }
+});
