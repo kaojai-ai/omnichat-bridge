@@ -65,6 +65,12 @@ function latestSuccessfulActivityAt(state) {
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
 }
 
+// An inactive shop cannot determine the dashboard action for the active shop.
+export function currentAccountSyncFailure(state, live) {
+  if (live?.active_in_profile === false) return "";
+  return latestSyncFailure([state]);
+}
+
 export function latestSyncFailure(states) {
   const failures = states.flatMap((state) => [
     {
@@ -116,8 +122,9 @@ export function transportConnectionStatus(live) {
 }
 
 // Startup discovery is not evidence that configuration is missing.
-export function accountDiscoveryStatus({ detecting, hasConfiguration }) {
+export function accountDiscoveryStatus({ detecting, hasConfiguration, inactiveShopee = false }) {
   if (detecting) return { label: "detectingShop", hint: "detectingShop", action: "sync" };
+  if (hasConfiguration && inactiveShopee) return { label: "inactiveShop", hint: "sessionUnverified", action: "detect" };
   if (hasConfiguration) return { label: "waitingForShop", hint: "shopUnknown", action: "sync" };
   return { label: "needConfig", hint: "configurationMissing", action: "configure" };
 }

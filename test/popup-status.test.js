@@ -5,6 +5,7 @@ import {
   accountConnectionStatus,
   accountDiscoveryStatus,
   latestSyncFailure,
+  currentAccountSyncFailure,
   transportConnectionStatus,
   providerConnectionStatus,
   sellerCentreConnectionStatus,
@@ -147,4 +148,22 @@ test("server 404 takes precedence over Shopee login guidance and clears on conne
   assert.match(status.hint, /endpoint not found \(404\)/);
   assert.doesNotMatch(status.hint, /Log in/);
   assert.notEqual(accountConnectionStatus({ ...live, socket: "connected" }).label, status.label);
+});
+
+
+test("healthy provider does not hide a failed history sync or undelivered messages", () => {
+  const state = { sync_error: "History request returned 401", sync_error_at: "2026-10-26T01:00:00Z" };
+  assert.match(currentAccountSyncFailure(state, { provider_recovery_state: "ready" }), /History request returned 401/);
+  assert.match(currentAccountSyncFailure({ ...state, delivery_error: "Target returned 503", delivery_error_at: "2026-10-26T01:01:00Z" }, { provider_recovery_state: "ready" }), /Sending queued messages/);
+  assert.equal(currentAccountSyncFailure({ ...state, last_sync_at: "2026-10-26T01:02:00Z" }, { provider_recovery_state: "ready" }), "");
+});
+
+test("configured inactive Shopee shop offers a connection check instead of retrying sync", () => {
+  const action = accountDiscoveryStatus({ detecting: false, hasConfiguration: true, inactiveShopee: true });
+  assert.equal(action.action, "detect");
+  assert.equal(action.label, "inactiveShop");
+});
+
+test("inactive account does not turn another shop's dashboard into retry state", () => {
+  assert.equal(currentAccountSyncFailure({ sync_error: "Old shop failed" }, { active_in_profile: false }), "");
 });

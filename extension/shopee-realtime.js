@@ -173,6 +173,8 @@
   state.routesByShopConversation ??= new Map();
   state.accountsById ??= new Map();
   state.sendErrorsByClientMessageId ??= new Map();
+  state.routeSessionEpoch ??= 0;
+  const sessionIsCurrent = (epoch) => isBridgeActive() && state.routeSessionEpoch === epoch;
   if (!Object.hasOwn(state, "nativeFetch")) state.nativeFetch = window.fetch.bind(window);
   state.recoveryInFlight ??= false;
   state.socket ??= null;
@@ -458,19 +460,21 @@
     if (publish) postAccounts(requestId);
     return [...state.accountsById.values()];
   };
-  const captureSessionAccount = (body) => {
+  const captureSessionAccount = (body, { cancelRecovery = true } = {}) => {
     const account = providerAdapter.currentAccountFromPayload(body);
     const nextId = value(account?.provider_account_id);
     const previousId = state.currentAccountId ?? null;
-    if (previousId !== nextId) {
+    if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate))) {
       state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
-      if (previousId) {
-        resetRecovery("Shopee session changed. Retry sync for the open shop.");
+      if (previousId || !nextId) {
+        if (cancelRecovery) resetRecovery("Shopee session changed. Retry sync for the open shop.");
         state.listTemplate = null;
         state.lookupListTemplate = null;
         state.getTemplate = null;
         state.historyTemplate = null;
         state.sendTemplate = null;
+        state.sendErrorsByClientMessageId.clear();
+        state.activeConversationId = null;
         state.conversationsById.clear();
         state.routesByShopConversation.clear();
         state.profilesByConversation.clear();
@@ -493,7 +497,7 @@
     return account ? [account] : [];
   };
   const captureAccount = (response, request = null, sessionEpoch = state.routeSessionEpoch) => {
-    if (state.routeSessionEpoch !== sessionEpoch) return;
+    if (!sessionIsCurrent(sessionEpoch)) return;
     if (response.status === 401 || response.status === 403) {
       captureSessionAccount(null);
       return;
@@ -501,7 +505,7 @@
     // Provider outages and malformed responses are not evidence of logout.
     if (!response.ok) return;
     void response.clone().json().then((body) => {
-      if (state.routeSessionEpoch !== sessionEpoch) return;
+      if (!sessionIsCurrent(sessionEpoch)) return;
       if (!providerAdapter.currentAccountFromPayload(body)) return;
       captureSessionAccount(body);
       // Keep native method, body and security parameters in page memory only.
@@ -511,6 +515,7 @@
   };
   // Keep browser networking and JSON parsing bounded, including hung responses.
   const fetchProviderJson = async (request, signal, timeoutMs = 15_000) => {
+    const sessionEpoch = state.routeSessionEpoch;
     const controller = new AbortController();
     let timer;
     let onAbort;
@@ -528,8 +533,19 @@
       return await Promise.race([
         (async () => {
           const response = await state.nativeFetch(request, { signal: controller.signal });
-          if (!response.ok) throw Object.assign(new Error(`Shopee provider request returned ${response.status}.`), { http_status: response.status, reason_code: "provider_rejected" });
-          return response.json();
+          if (!response.ok) {
+            const identityRequest = pathOf(request.url) === surfaceProfile().loginPath;
+            if (sessionIsCurrent(sessionEpoch) && (response.status === 401 || (response.status === 403 && identityRequest))) {
+              // Report this request's real failure instead of superseding it.
+              captureSessionAccount(null, { cancelRecovery: false });
+            }
+            throw Object.assign(new Error(`Shopee provider request returned ${response.status}.`), { http_status: response.status, reason_code: "provider_rejected" });
+          }
+          const body = await response.json();
+          if (!sessionIsCurrent(sessionEpoch)) {
+            throw Object.assign(new Error("Shopee session changed during the request. Try again."), { reason_code: "session_changed" });
+          }
+          return body;
         })(),
         timeout,
       ]);
@@ -539,7 +555,7 @@
     }
   };
 
-  const detectSessionAccount = async () => {
+  const detectSessionAccount = async ({ timeoutMs = 15_000 } = {}) => {
     const sessionEpoch = state.routeSessionEpoch;
     // New Webchat uses a native parameterized POST. Keep it in page memory only.
     // Seller Centre's authenticated session endpoint also works before capture.
@@ -547,12 +563,13 @@
       ...(state.loginRequest ? [state.loginRequest.clone()] : []),
       new Request(new URL("/api/v2/login/", window.location.origin), { method: "GET", credentials: "include" }),
     ];
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + Math.max(1, Math.min(15_000, timeoutMs));
     let failure;
     for (const request of requests) {
       if (Date.now() >= deadline) break;
       try {
         const body = await fetchProviderJson(request, undefined, deadline - Date.now());
+        if (!isBridgeActive()) throw new Error("Shopee bridge changed during detection. Try again.");
         const account = providerAdapter.currentAccountFromPayload(body);
         if (!account) throw new Error("Shopee session identity is unavailable. Refresh Seller Chat and try again.");
         if (state.routeSessionEpoch !== sessionEpoch) {
@@ -572,8 +589,15 @@
     }
     throw failure ?? new Error("Shopee account detection timed out. Refresh Seller Chat and try again.");
   };
-  const captureAccounts = (response) => {
+  const verifySessionAccount = async (expectedId, timeoutMs) => {
+    const [account] = await detectSessionAccount({ timeoutMs });
+    if (!expectedId || value(account?.provider_account_id) !== expectedId) {
+      throw Object.assign(new Error("Shopee signed-in shop does not match this operation. Open the matching shop and retry."), { reason_code: "session_changed" });
+    }
+  };
+  const captureAccounts = (response, sessionEpoch) => {
     void response.clone().json().then((body) => {
+      if (!sessionIsCurrent(sessionEpoch)) return;
       mergeAccounts(accountsFromPayload(body));
       captureProfiles(conversationItems(body));
     }).catch((error) => logAsyncError("accounts_capture", error));
@@ -843,7 +867,7 @@
     return true;
   }
 
-  async function captureSellerCentreConversationList(response) {
+  async function captureSellerCentreConversationList(response, sessionEpoch = state.routeSessionEpoch) {
     const captureEpoch = state.sellerCentreCaptureEpoch;
     let body;
     try {
@@ -852,7 +876,7 @@
       logAsyncError("seller_centre_conversation_parse", error);
       return;
     }
-    if (!isBridgeActive() || captureEpoch !== state.sellerCentreCaptureEpoch) return;
+    if (!sessionIsCurrent(sessionEpoch) || captureEpoch !== state.sellerCentreCaptureEpoch) return;
     const conversations = conversationItems(body);
     mergeAccounts(accountsFromPayload(body), null, true);
     captureProfiles(conversations);
@@ -960,9 +984,10 @@
     });
   }
 
-  const captureSendTemplate = async (request) => {
+  const captureSendTemplate = async (request, sessionEpoch) => {
     try {
       const payload = JSON.parse(await request.clone().text());
+      if (!sessionIsCurrent(sessionEpoch)) return;
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
       state.sendTemplate = {
         url: request.url,
@@ -1092,7 +1117,7 @@
     ? { ...content, quoted_msg_id: providerMessageId }
     : content;
 
-  const captureShopeeSendError = async (request, response) => {
+  const captureShopeeSendError = async (request, response, sessionEpoch) => {
     let clientMessageId = new URL(request.url).searchParams.get("uuid");
     if (!clientMessageId) {
       try {
@@ -1110,6 +1135,7 @@
       logAsyncError("send_error_response_parse", error);
     }
     const error = shopeeError(body);
+    if (!sessionIsCurrent(sessionEpoch)) return;
     if (!error) return;
     state.sendErrorsByClientMessageId.set(clientMessageId, error);
     setTimeout(() => state.sendErrorsByClientMessageId.delete(clientMessageId), 60_000);
@@ -1220,6 +1246,12 @@
       return;
     }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
+    try {
+      await verifySessionAccount(accountId, deadlineAt - Date.now());
+    } catch (error) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
+      return;
+    }
     if (state.currentAccountId && accountId !== state.currentAccountId) {
       post({ type: "api_send_result", request_id: requestId, ok: false,
         error: "Shopee signed-in shop does not match the reply command." });
@@ -1383,6 +1415,7 @@
       nativeAttempted = true;
       const response = await sendThroughSurface(template, url.toString(), payload);
       nativeResponseReceived = true;
+      if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
       let body = response;
       if (typeof response?.clone === "function") {
         try {
@@ -1392,6 +1425,7 @@
           body = null;
         }
       }
+      if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId) ?? shopeeError(body);
       state.sendErrorsByClientMessageId.delete(clientMessageId);
       const nativeCode = [body?.error_code, body?.error]
@@ -1694,6 +1728,7 @@
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
       await ensureSellerCentreChatOpen();
+      await verifySessionAccount(accountId);
       assertSessionUnchanged();
       await waitForTemplate();
       assertSessionUnchanged();
@@ -2019,16 +2054,23 @@
       const loginRequest = path === surfaceProfile().loginPath ? request.clone() : null;
       const requestSessionEpoch = state.routeSessionEpoch;
       if (isSendPath(path) && request.method === "POST") {
-        void observeAsync("send_template_capture", () => captureSendTemplate(request));
+        void observeAsync("send_template_capture", () => captureSendTemplate(request, requestSessionEpoch));
       }
       const response = await originalFetch(input, init);
+      if (!sessionIsCurrent(requestSessionEpoch)) return response;
+      if ((response.status === 401 && (path.startsWith("/webchat/api/") || path === surfaceProfile().loginPath))
+        || (response.status === 403 && path === surfaceProfile().loginPath)) {
+        captureSessionAccount(null);
+        return response;
+      }
       if (isSendPath(path) && request.method === "POST") {
-        await captureShopeeSendError(request, response);
+        await captureShopeeSendError(request, response, requestSessionEpoch);
       }
       if (request.method === "GET") {
         captureActiveConversation(request);
         if (isHistoryPath(path)) {
           void observeAsync("history_template", () => templateFrom(request).then((template) => {
+            if (!sessionIsCurrent(requestSessionEpoch)) return;
             state.historyTemplate = template;
             state.getTemplate ??= template;
             publishSurfaceStatus();
@@ -2038,6 +2080,7 @@
       }
       if (path.startsWith("/webchat/api/") && request.method === "GET" && !state.getTemplate) {
         void observeAsync("history_template", () => templateFrom(request).then((template) => {
+          if (!sessionIsCurrent(requestSessionEpoch)) return;
           state.getTemplate = template;
           publishSurfaceStatus();
           postLog("info", "history_template_ready", "Shopee history request template captured.");
@@ -2045,18 +2088,20 @@
       }
       if (isListPath(path)) {
         void observeAsync("conversation_template", () => templateFrom(request).then(async (template) => {
+          const lookupTemplate = await lookupTemplateFrom(template);
+          if (!sessionIsCurrent(requestSessionEpoch)) return;
           const firstCapture = !state.listTemplate;
           state.listTemplate = template;
-          state.lookupListTemplate = await lookupTemplateFrom(template);
+          state.lookupListTemplate = lookupTemplate;
           startSellerCentrePolling();
           publishSurfaceStatus();
           if (firstCapture) postLog("info", "list_template_ready", "Shopee conversation-list request template captured.");
           startAutomaticAccountDiscovery();
         }));
         if (isSellerCentreSurface()) {
-          void observeAsync("seller_centre_conversation_capture", () => captureSellerCentreConversationList(response));
+          void observeAsync("seller_centre_conversation_capture", () => captureSellerCentreConversationList(response, requestSessionEpoch));
         } else {
-          captureAccounts(response);
+          captureAccounts(response, requestSessionEpoch);
         }
       } else if (surfaceProfile().loginPath && path === surfaceProfile().loginPath) {
         captureAccount(response, loginRequest, requestSessionEpoch);
@@ -2071,6 +2116,7 @@
         publishSurfaceStatus();
         void observeAsync("seller_centre_sync_response", async () => {
           const body = await response.clone().json();
+          if (!sessionIsCurrent(requestSessionEpoch)) return;
           if (body?.have_new_msg) await refreshSellerCentreConversations();
         });
       }

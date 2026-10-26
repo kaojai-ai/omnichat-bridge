@@ -35,6 +35,64 @@ test("keeps the recovery account identity available to reconnect cleanup", () =>
   );
 });
 
+test("a late native list response cannot restore templates or routes from the previous shop", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  let release;
+  const oldList = bridge.fetch("/webchat/api/v1.2/conversations", () => new Promise(resolve => { release = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
+  await bridge.fetch("/webchat/api/coreapi/v1.2/login", { shop: { id: 200000002 } });
+  release(new Response(JSON.stringify([{ id: "old-conversation", shop_id: 100000001, to_id: 123 }]), { status: 200 }));
+  await oldList;
+  assert.equal(bridge.state.currentAccountId, "200000002");
+  assert.equal(bridge.state.listTemplate, null);
+  assert.equal(bridge.state.lookupListTemplate, null);
+  assert.equal(bridge.state.routesByShopConversation.size, 0);
+});
+
+test("observed authentication rejection invalidates the current shop and captured templates", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  await bridge.fetch("/webchat/api/v1.2/conversations", []);
+  await bridge.fetch("/webchat/api/v1.2/conversations/rejected/messages", () => new Response("{}", { status: 401 }));
+  assert.equal(bridge.state.currentAccountId, null);
+  assert.equal(bridge.state.listTemplate, null);
+  assert.equal(bridge.state.getTemplate, null);
+  assert.equal(bridge.state.historyTemplate, null);
+});
+
+test("recovery verifies the live authenticated shop before using cached request templates", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  bridge.setResponse("/api/v2/login/", { shop_id: 200000002 });
+  const result = await bridge.sync("100000001");
+  assert.equal(result.ok, false);
+  assert.match(result.error, /signed-in shop does not match|session changed|superseded/);
+  assert.equal(bridge.requests.some(path => /conversations\/.+\/messages/.test(path)), false);
+});
+
+test("recovery authentication failure clears stale templates and retains the actual 401 failure", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  await bridge.fetch("/webchat/api/v1.2/conversations", []);
+  bridge.setResponse("/api/v2/login/", () => new Response("{}", { status: 401 }));
+  const result = await bridge.sync("100000001");
+  assert.equal(result.ok, false);
+  assert.match(result.error, /401/);
+  assert.equal(bridge.state.currentAccountId, null);
+  assert.equal(bridge.state.listTemplate, null);
+  assert.equal(bridge.state.getTemplate, null);
+});
+
+test("an operation-specific 403 does not erase an authenticated shop", async () => {
+  const bridge = createBridge();
+  await bridge.detect();
+  await bridge.fetch("/webchat/api/v1.2/conversations", []);
+  await bridge.fetch("/webchat/api/v1.2/conversations/restricted/messages", () => new Response("{}", { status: 403 }));
+  assert.equal(bridge.state.currentAccountId, "100000001");
+  assert.ok(bridge.state.listTemplate);
+});
+
 function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, socket = null, requestTimeoutMs = 15_000 } = {}) {
   const listeners = [];
   const documentListeners = new Map();
@@ -909,6 +967,7 @@ test("Seller Centre retries m2 on the next poll without a new summary message", 
 for (const subaccount of [false, true]) {
   test(`recovers closed conversations across POST pages in ${subaccount ? "subaccount" : "normal"} mini-chat, restricted to the active shop`, async () => {
     const bridge = createBridge({ pathname: "/portal", miniChatOpen: true });
+    await bridge.detect();
     const path = subaccount
       ? "/webchat/api/v1.2/mini/subaccount/serving_mode/conversations"
       : "/webchat/api/v1.2/mini/conversations";

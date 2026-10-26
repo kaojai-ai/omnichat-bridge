@@ -345,22 +345,57 @@ function liveCommandContexts(contexts) {
 }
 
 let activeShopeeStatusPromise = null;
+const shopeeSessionStates = new Map();
 async function activeLiveCommandContexts(contexts) {
   const candidates = liveCommandContexts(contexts);
   if (!candidates.some((context) => context.adapter.id === "shopee")) return candidates;
   if (!activeShopeeStatusPromise) {
     activeShopeeStatusPromise = providerChatTabs(shopeeAdapter)
-      .then((tabs) => Promise.all(tabs.map(providerTabStatus)))
+      .then(async (tabs) => {
+        const statuses = await Promise.all(tabs.map(providerTabStatus));
+        if (new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean)).size <= 1) return statuses;
+        // Refresh conflicting cached identities once per coalesced check. A stale
+        // tab must neither keep its previous shop connected nor pause us forever.
+        const refreshed = await Promise.all(tabs.map(async (tab) => {
+          try {
+            const detected = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: "shopee" }, {
+              label: "Shopee", operation: "session check", timeoutMs: 15_000,
+            });
+            return detected?.ok ? await providerTabStatus(tab) : null;
+          } catch { return null; }
+        }));
+        return refreshed.every((status) => status?.current_provider_account_id) ? refreshed : statuses;
+      })
       .finally(() => { activeShopeeStatusPromise = null; });
   }
   const statuses = await activeShopeeStatusPromise;
-  const activeIds = new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  const observedIds = new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  // One Shopee session per local browser profile. Conflicting pages must not
+  // advertise both shops while one of them still holds a stale login snapshot.
+  const currentId = observedIds.size === 1 ? [...observedIds][0] : null;
+  const activeIds = new Set(currentId ? [currentId] : []);
   for (const context of candidates.filter((item) => item.adapter.id === "shopee")) {
     const active = activeIds.has(context.account.provider_account_id);
+    const reasonCode = active ? null : observedIds.size > 1 ? "session_conflict"
+      : currentId ? "account_mismatch" : "session_unverified";
     await updateLiveState(context, {
       active_in_profile: active,
-      ...(!active ? { socket: "inactive", leader: false, leader_installation_id: null } : {}),
+      active_provider_account_id: currentId,
+      provider_session_reason_code: reasonCode,
+      ...(!active ? {
+        socket: "inactive", leader: false, leader_installation_id: null,
+        provider_recovery_state: null, provider_recovery_reason: null,
+        provider_recovery_tab_id: null,
+      } : {}),
     });
+    const sessionState = `${currentId ?? ""}:${reasonCode ?? "active"}`;
+    if (shopeeSessionStates.get(context.key) !== sessionState) {
+      shopeeSessionStates.set(context.key, sessionState);
+      await recordLog("info", "session", "state_changed", "Shopee browser session status changed.", {
+        provider: "shopee", provider_account_id: context.account.provider_account_id,
+        current_provider_account_id: currentId, reason_code: reasonCode ?? "session_active",
+      });
+    }
   }
   return candidates.filter((context) => context.adapter.id !== "shopee" || activeIds.has(context.account.provider_account_id));
 }
@@ -1020,9 +1055,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "detect_account") {
     void detectOpenProviderAccount(message?.provider || shopeeAdapter.id, message?.tab_id).then(
-      (result) => respond(result),
+      async (result) => {
+        const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+        await activeLiveCommandContexts(configuredAccountContexts(stored));
+        respond(result);
+        void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
+      },
       (error) => respond({ ok: false, error: String(error) })
-    );
+    ).catch((error) => respond({ ok: false, error: String(error) }));
     return true;
   }
   if (providerAdapterForCommand(message)?.supportsSend(message?.type)) {
@@ -1713,7 +1753,8 @@ async function markClosedProviderRecoveryTab(tabId) {
     const adapter = providerAdapters.get(provider);
     if (!adapter) continue;
     const record = providerRecoveryRecord((await readStorage([STORAGE.providerRecoveryTabs]))[STORAGE.providerRecoveryTabs], provider);
-    await updateProviderRecoveryLiveState(contexts, adapter, {
+    const affected = adapter.id === "shopee" ? await activeLiveCommandContexts(contexts) : contexts;
+    await updateProviderRecoveryLiveState(affected, adapter, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: record?.reason,
       tabId: null,
@@ -1841,15 +1882,40 @@ async function runProviderHealthWatchdogOnce() {
   }
   const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
   for (const adapter of providerAdapters.list()) {
-    const matchingContexts = providerRecoveryContexts(contexts, adapter);
-    if (!matchingContexts.length) continue;
+    const providerContexts = providerRecoveryContexts(contexts, adapter);
+    let matchingContexts = adapter.id === "shopee"
+      ? await activeLiveCommandContexts(providerContexts) : providerContexts;
+    if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
+      // A missing content bridge is not an account conflict. Repair it before
+      // deciding which shop can recover; never infer identity from configuration.
+      let repaired = false;
+      for (const tab of await providerChatTabs(adapter)) {
+        if (await providerTabStatus(tab)) continue;
+        try {
+          await reconnectProviderTab(tab);
+          repaired = true;
+        } catch (error) {
+          await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
+        }
+      }
+      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts);
+    }
+    if (!matchingContexts.length) {
+      // Missing tabs may still be restored by the existing opt-in recovery.
+      // Opening a generic chat page does not make any configured shop ready.
+      if (adapter.id === "shopee" && providerContexts.length && allowTabRecovery
+        && !(await providerChatTabs(adapter)).length) {
+        await ensureProviderRecoveryTab(adapter, providerContexts[0], true);
+      }
+      continue;
+    }
     const context = matchingContexts[0];
     let recovery;
     try {
       recovery = await ensureProviderRecoveryTab(adapter, context, allowTabRecovery);
     } catch (error) {
       await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
-      await updateProviderRecoveryLiveState(contexts, adapter, {
+      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
         state: PROVIDER_RECOVERY_STATES.needsAttention,
         reason: `${providerLabel(adapter)} recovery check failed. ${String(error).slice(0, 180)}`,
       });
@@ -1859,7 +1925,7 @@ async function runProviderHealthWatchdogOnce() {
       await recordUnexpected("provider_watchdog", recovery.error, { provider: adapter.id });
     }
     if (!recovery.tab) {
-      await updateProviderRecoveryLiveState(contexts, adapter, {
+      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
         state: allowTabRecovery
           ? recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention
           : PROVIDER_RECOVERY_STATES.needsAttention,
@@ -1877,7 +1943,7 @@ async function runProviderHealthWatchdogOnce() {
         state: PROVIDER_RECOVERY_STATES.needsAttention,
         reason, failure_count: 0, last_failure_at: null, next_retry_at: null,
       });
-      await updateProviderRecoveryLiveState(contexts, adapter, {
+      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
         state: PROVIDER_RECOVERY_STATES.needsAttention, reason, tabId: tab.id,
       });
       continue;
@@ -1892,6 +1958,10 @@ async function runProviderHealthWatchdogOnce() {
       }
       await reconnectProviderTab(tab);
       const status = await providerTabStatus(tab);
+      if (adapter.id === "shopee" && status?.current_provider_account_id !== context.account.provider_account_id) {
+        await activeLiveCommandContexts(providerContexts);
+        continue;
+      }
       if (!providerTabHealthy(status, adapter)) {
         throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
       }
@@ -1906,13 +1976,17 @@ async function runProviderHealthWatchdogOnce() {
         })
         : recovery.record;
       for (const item of matchingContexts) {
-        const polling = adapter.id !== "line_oa" || (status.provider_polling_active === true
+        const polling = adapter.id === "shopee"
+          ? status.current_provider_account_id === item.account.provider_account_id
+          : (status.provider_polling_active === true
           && Array.isArray(status.provider_polling_account_ids)
           && status.provider_polling_account_ids.includes(item.account.provider_account_id));
         if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
         await updateProviderRecoveryLiveState([item], adapter, {
           state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
-          reason: polling ? null : "LINE OA polling is not running for this account. Sync this account to resume.",
+          reason: polling ? null : adapter.id === "shopee"
+            ? "Shopee account changed. Check the connection for this browser."
+            : "LINE OA polling is not running for this account. Sync this account to resume.",
           tabId: record?.tab_id ?? tab.id,
         });
       }
@@ -1922,7 +1996,7 @@ async function runProviderHealthWatchdogOnce() {
         tab_id: tab.id,
       });
       const status = await providerTabStatus(tab);
-      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts, allowTabRecovery);
+      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts, allowTabRecovery);
     }
   }
   await ensureLiveConnection();
@@ -3752,11 +3826,11 @@ async function openSessionSyncContexts(contexts, control) {
       provider: "shopee",
       provider_account_id: context.account.provider_account_id,
       current_provider_account_id: currentId,
-      reason: currentId ? "different_session_account" : "session_account_unavailable",
+      reason_code: currentId ? "account_mismatch" : "session_unverified",
     });
     await updateScopedState(STORAGE.status, context.key, {
       state: "watching", phase: null, caught_up: false,
-      sync_error: currentId ? "Open Webchat for this Shopee shop to sync it."
+      sync_error: currentId ? "This shop is not active in this browser. Use a separate Chrome profile for each Shopee shop."
         : "Could not verify the current Shopee shop. Refresh Seller Chat and try again.",
       sync_error_at: null,
     });

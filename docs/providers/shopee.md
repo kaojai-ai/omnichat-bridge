@@ -15,6 +15,19 @@ Legacy compatibility has automated fixture coverage; live legacy receiving and
 sending remain unverified on an affected account. Legacy outbound video is not
 advertised and is rejected before uploading; video remains New Webchat only.
 
+## Switching shops (planned)
+
+Use one signed-in Shopee shop per local Chrome profile. Separate tabs or windows
+in that profile share its login. For another shop, use a separate Chrome profile.
+Using the same Google account for Chrome sync on different computers does not by
+itself mean the extension shares its local installation ID or configuration.
+
+When the signed-in shop changes, only the verified active shop can become ready.
+Other configured shops remain visible as **Not active in this browser**. Use
+**Check connection** after signing in; conflicting page identities pause readiness
+until detection agrees. Existing queued messages and sync checkpoints are retained.
+An uncertain send must be checked in Seller Chat before manually retrying.
+
 ## How it works
 
 1. The seller signs in and opens New Webchat. Seller Centre remains a fallback
