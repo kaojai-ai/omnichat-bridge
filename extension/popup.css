@@ -699,10 +699,10 @@ input[type="checkbox"] {
   align-items: center;
   max-width: 110px;
   min-width: 0;
-  background: #f8fafc;
-  border: 1px solid var(--line);
+  background: #e9fbf8;
+  border: 1px solid #9beadf;
   border-radius: 999px;
-  color: var(--muted);
+  color: #11baa6;
   display: inline-flex;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
@@ -716,8 +716,8 @@ input[type="checkbox"] {
 .account-row-id .copy-icon { flex-shrink: 0; }
 
 .account-row-id:hover {
-  background: #f2f4f7;
-  border-color: #98a2b3;
+  background: #d8f7f2;
+  border-color: #55d6c5;
 }
 
 .device-name-badge {
