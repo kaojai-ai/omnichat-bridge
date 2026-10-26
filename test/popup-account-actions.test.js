@@ -31,7 +31,7 @@ for (const provider of ["line_oa", "shopee"]) {
       popupAccountsForSession: accounts => accounts,
       detectedAccounts: [account], liveState: {}, pageAccounts: [], accountList: list,
       accountListEmpty: element("div"), detectingAccount: false, activeProviderAdapter: { id: provider },
-      adapterForAccount: () => ({ id: provider, accountName: provider === "line_oa" ? "LINE OA" : "Shop", supports: capability => supportsRecovery && capability === "message_recovery" }),
+      adapterForAccount: () => ({ id: provider, displayName: provider === "shopee" ? "Shopee Seller Chat" : "LINE Official Account", accountName: provider === "line_oa" ? "LINE OA" : "Shop", supports: capability => supportsRecovery && capability === "message_recovery" }),
       accountRowStatus: () => ({ label: syncing ? "Loading…" : "Sync failed", state: syncing ? "neutral" : "error", loading: syncing, hint: syncing ? "" : "History request returned 401. Check the provider login.", action: syncing ? undefined : "logs" }),
       lineChatUrl: () => provider === "line_oa" ? "https://chat.line.biz/account-one" : null,
       syncProgressPresentation, storedStatus: syncState, pendingStates: pendingState, scanStates: scanState,
