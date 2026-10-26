@@ -61,8 +61,8 @@ export function syncProgressPresentation(progressState, { locale = "en", compact
       preparing: "Preparing…", checking_session: "Checking access…",
       connecting_provider: "Connecting…", waiting_recovery: "Waiting for recovery…",
       sending_pending: "Forwarding…", loading_conversations: "Loading…",
-      checking_conversations: "Checking messages…", fetching_messages: "Loading messages…",
-      conversation_complete: "Loading messages…", sending_recovered: "Forwarding…",
+      checking_conversations: "Checking messages…", fetching_messages: "Loading…",
+      conversation_complete: "Loading…", sending_recovered: "Forwarding…",
     }[phase] ?? "Syncing…";
     const captured = count(progressState.messages_captured);
     return { active: true, showBar: true, value, detail,

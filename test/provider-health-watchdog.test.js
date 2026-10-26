@@ -100,7 +100,7 @@ for (const provider of ["line_oa", "shopee"]) {
     await run();
     assert.ok(calls.checked > 0);
     assert.equal(calls.live.state, "ready");
-    assert.equal(providerConnectionStatus({ socket: "connected", provider_recovery_state: calls.live.state }).label, "CONNECTED · PROVIDER READY");
+    assert.equal(providerConnectionStatus({ socket: "connected", provider_recovery_state: calls.live.state }).label, "Ready");
     assert.equal(calls.alarm, true);
     assert.equal(calls.cleared, 0);
     assert.equal(calls.created, 0);

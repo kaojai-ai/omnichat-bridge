@@ -31,13 +31,14 @@ for (const provider of ["line_oa", "shopee"]) {
       accountListEmpty: element("div"), detectingAccount: false, activeProviderAdapter: { id: provider },
       adapterForAccount: () => ({ id: provider }), accountLabel: () => provider === "line_oa" ? "LINE OA" : "Shop",
       accountDisplayLabel: candidate => candidate.display_name,
-      accountRowStatus: () => ({ label: syncing ? "Loading messages…" : "FAILED", state: syncing ? "neutral" : "error", loading: syncing }),
+      accountRowStatus: () => ({ label: syncing ? "Loading…" : "Sync failed", state: syncing ? "neutral" : "error", loading: syncing, hint: syncing ? "" : "History request returned 401. Check the provider login.", action: syncing ? undefined : "logs" }),
       lineChatUrl: () => provider === "line_oa" ? "https://chat.line.biz/account-one" : null,
       syncProgressPresentation, storedStatus: syncState, pendingStates: pendingState, scanStates: scanState,
       accountConfigKey: candidate => `${candidate.provider}:${candidate.provider_account_id}`,
       readAccountState: (state, _key, fallback) => state === pendingState ? ["one", "two"]
         : state === syncState ? { state: syncing ? "syncing" : "error", phase: "fetching_messages" } : fallback,
       retryingAccounts: new Set(), createCopyIcon: () => element("svg"), copyProviderAccountId: () => {},
+      openLogs: level => calls.push(["logs", level]),
       retryAccount: candidate => calls.push(["retry", candidate]),
       discardPending: (candidate, _button, count) => calls.push(["discard", candidate, count]),
       t: (key, count) => key === "retry" ? "Retry now" : key === "pending" ? `${count} pending` : key,
@@ -48,7 +49,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const bar = nodes.find(node => node.tag === "progress");
     assert.ok(bar, "both providers expose row progress");
     assert.equal(bar.value, undefined, "unknown work uses an indeterminate bar");
-    assert.equal(bar.attributes["aria-label"], "Loading messages…");
+    assert.equal(bar.attributes["aria-label"], "Loading…");
     const actionButtons = nodes.filter(node => node.className === "account-action");
     assert.equal(actionButtons.length, 2);
     assert.equal(actionButtons.find(node => /Retry/.test(node.attributes["aria-label"])).disabled, false,
@@ -70,5 +71,11 @@ for (const provider of ["line_oa", "shopee"]) {
       button.handlers.click();
     }
     assert.deepEqual(calls, [["retry", account], ["discard", account, 2]]);
+    const failure = nodes.find(node => node.textContent === "Sync failed");
+    assert.equal(failure.dataset.state, "error");
+    assert.equal(failure.dataset.loading, "false");
+    assert.equal(failure.title, "History request returned 401. Check the provider login. · Open error logs");
+    failure.handlers.click({ preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(calls.at(-1), ["logs", "error"]);
   });
 }
