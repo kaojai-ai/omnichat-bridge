@@ -15,7 +15,7 @@ Legacy compatibility has automated fixture coverage; live legacy receiving and
 sending remain unverified on an affected account. Legacy outbound video is not
 advertised and is rejected before uploading; video remains New Webchat only.
 
-## Switching shops (planned)
+## Switching shops (0.7.6)
 
 Use one signed-in Shopee shop per local Chrome profile. Separate tabs or windows
 in that profile share its login. For another shop, use a separate Chrome profile.
