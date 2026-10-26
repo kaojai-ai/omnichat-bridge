@@ -63,3 +63,30 @@ test("automatic delivery respects retry time while explicit retry bypasses it", 
   assert.equal((await sandbox.attemptDelivery(context, { resetBackoff: true })).sent, 1);
   assert.equal(flushes, 1);
 });
+
+
+test("conflicting Shopee pages pause both shops until fresh account detection agrees", async () => {
+  const shopeeAdapter = { id: "shopee", sendCommands: ["send"] };
+  const contexts = ["a", "b"].map(id => ({ key: id, account: { provider_account_id: id }, adapter: shopeeAdapter }));
+  let refreshed = false;
+  let agrees = false;
+  const patches = {};
+  const sandbox = vm.createContext({
+    shopeeAdapter,
+    providerChatTabs: async () => [{ id: 1 }, { id: 2 }],
+    providerTabStatus: async tab => ({ current_provider_account_id: refreshed && agrees ? "b" : tab.id === 1 ? "a" : "b" }),
+    sendProviderMessage: async () => { refreshed = true; return { ok: true }; },
+    updateLiveState: async (context, patch) => { patches[context.key] = patch; },
+    recordLog: async () => {},
+  });
+  vm.runInContext(extract("function liveCommandContexts(", "function messageProviderAccountId("), sandbox);
+  assert.equal((await sandbox.activeLiveCommandContexts(contexts)).length, 0);
+  assert.equal(patches.a.provider_session_reason_code, "session_conflict");
+  assert.equal(patches.b.leader, false);
+  agrees = true;
+  const active = await sandbox.activeLiveCommandContexts(contexts);
+  assert.equal(active.length, 1);
+  assert.equal(active[0].key, "b");
+  assert.equal(patches.a.provider_session_reason_code, "account_mismatch");
+  assert.equal(patches.b.active_provider_account_id, "b");
+});

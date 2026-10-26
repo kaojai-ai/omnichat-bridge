@@ -14,7 +14,7 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false, accounts = ["account"], pollingAccounts = accounts } = {}) {
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false, accounts = ["account"], pollingAccounts = accounts, activeShop = accounts[0], missingBridge = false } = {}) {
   const adapter = { id: provider, matchesUrl: () => !redirected,
     surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre" };
   const contexts = accounts.map(id => ({ key: `${provider}:${id}`, adapter, account: { provider_account_id: id } }));
@@ -35,9 +35,9 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerChatTabs: async () => tabOpen && !redirected ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async (candidate) => { calls.checked++; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: "account", surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: "account", ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    providerTabStatus: async (candidate) => { calls.checked++; if (missingBridge) return null; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: activeShop, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: activeShop, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
-    reconnectProviderTab: async () => {},
+    reconnectProviderTab: async () => { missingBridge = false; },
     persistProviderSurfaceState: async () => {},
     updateProviderRecoveryLiveState: async (contexts, _adapter, state) => {
       calls.live = state;
@@ -61,7 +61,17 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     apiPingContexts: () => [],
     ensureApiPingAlarm: async () => {},
     liveCommandContexts: () => [],
-    activeLiveCommandContexts: async () => [],
+    activeLiveCommandContexts: async (items) => {
+      if (provider !== "shopee") return items;
+      if (missingBridge) return [];
+      for (const item of items) {
+        if (item.account.provider_account_id !== activeShop) calls.lives[item.account.provider_account_id] = { state: null };
+      }
+      return items.filter((item) => item.account.provider_account_id === activeShop);
+    },
+    liveConnections: new Map(),
+    ensureAccountLiveConnection: async () => {},
+    stopAccountLiveConnection: () => {},
     stopLiveConnection: () => {},
     chrome: { tabs: {
       query: async () => tabOpen ? [tab] : [],
@@ -293,4 +303,41 @@ test("unattended failure clears in-progress scan state instead of treating its o
   assert.match(result.error, /Provider unavailable/);
   assert.equal(state.in_progress, false);
   assert.equal(status.state, "error");
+});
+
+
+test("Shopee recovery follows the active second shop without marking inactive shops ready or failed", async () => {
+  for (const healthy of [true, false]) {
+    const { run, calls } = harness({ provider: "shopee", accounts: ["a", "b"], activeShop: "b", healthy });
+    await run();
+    assert.equal(calls.lives.a.state, null);
+    assert.equal(calls.lives.b.state, healthy ? "ready" : "needs_attention");
+  }
+});
+
+test("unverified Shopee session pauses all shops without reloading or opening a tab", async () => {
+  const { run, calls } = harness({ provider: "shopee", accounts: ["a", "b"], activeShop: null, recoveryEnabled: true });
+  await run();
+  assert.equal(calls.lives.a.state, null);
+  assert.equal(calls.lives.b.state, null);
+  assert.equal(calls.created, 0);
+  assert.equal(calls.reloaded, 0);
+});
+
+
+test("Shopee unattended recovery may restore a missing tab without advertising an unverified shop", async () => {
+  const { run, calls } = harness({ provider: "shopee", accounts: ["a", "b"], activeShop: null, tabOpen: false, recoveryEnabled: true });
+  await run();
+  assert.equal(calls.created, 1);
+  assert.equal(calls.lives.a.state, null);
+  assert.equal(calls.lives.b.state, null);
+});
+
+
+test("Shopee repairs a missing bridge before selecting its active shop", async () => {
+  const { run, calls } = harness({ provider: "shopee", accounts: ["a", "b"], activeShop: "b", missingBridge: true });
+  await run();
+  assert.equal(calls.lives.a.state, null);
+  assert.equal(calls.lives.b.state, "ready");
+  assert.equal(calls.created, 0);
 });

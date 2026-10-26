@@ -10,7 +10,8 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ pathname = null, sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
+function createBridge({ authenticatedAccountId = null, pathname = null, sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
+  let sendingAccountId = "shop-1";
   const listeners = [];
   const posts = [];
   const sent = [];
@@ -51,11 +52,13 @@ function createBridge({ pathname = null, sellerCentre = false, ready = true, sec
       },
     } : {}),
     __omnichatRealtimeState: {
+      currentAccountId: authenticatedAccountId ?? "shop-1",
       nativeFetch: async (input, init) => {
         const request = input instanceof Request ? input : new Request(input, init);
         const path = new URL(request.url, origin).pathname;
         nativeRequests.push(path);
         nativeRequestHeaders.push(Object.fromEntries(request.headers.entries()));
+        if (path === "/api/v2/login/") return jsonResponse({ shop_id: authenticatedAccountId ?? window.__omnichatRealtimeState.currentAccountId ?? sendingAccountId });
         if (path === "/webchat/api/v1.2/mini/conversations") {
           listRequests.push(request.clone());
           if (onList) return jsonResponse(await onList(request));
@@ -131,6 +134,7 @@ function createBridge({ pathname = null, sellerCentre = false, ready = true, sec
   vm.runInContext(source, context);
 
   async function send(message) {
+    sendingAccountId = message.provider_account_id ?? "shop-1";
     const before = sent.length;
     for (const listener of listeners) {
       listener({
@@ -170,10 +174,23 @@ function createBridge({ pathname = null, sellerCentre = false, ready = true, sec
 }
 
 const baseCommand = {
+  provider_account_id: "shop-1",
   request_id: "request-1",
   conversation_id: "conversation-1",
   client_message_id: "client-1",
 };
+
+test("fresh authenticated shop verification blocks a stale tab before native sending", async () => {
+  const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: "shop-2" });
+  bridge.state.currentAccountId = "shop-1";
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /signed-in shop does not match/);
+  assert.equal(bridge.nativePayloads.length, 0);
+  assert.equal(bridge.state.currentAccountId, "shop-2");
+  assert.equal(bridge.state.sendTemplate, null);
+  assert.equal(bridge.state.listTemplate, null);
+});
 
 test("maps a quoted text command to Shopee content.quoted_msg_id", async () => {
   const bridge = createBridge();
@@ -193,11 +210,11 @@ test("maps a quoted text command to Shopee content.quoted_msg_id", async () => {
 });
 
 test("finds a send route on Shopee conversation page two", async () => {
-  const bridge = createBridge({ sellerCentre: true, conversationPages: [
+  const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: "shop-2", conversationPages: [
     { conversations: [{ id: "other", shop_id: "shop-1", to_id: "199", biz_id: "0" }] },
     { conversations: [{ id: "conversation-1", shop_id: "shop-2", to_id: "102", to_shop_id: "201", biz_id: "3" }] },
   ] });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-2", command_type: "send_text", text: "Hello" });
   assert.equal(result.ok, true);
   assert.equal(bridge.nativeRequests.filter((path) => path.endsWith("/mini/conversations")).length, 2);
   assert.equal(bridge.nativePayloads.length, 1);
@@ -631,22 +648,22 @@ test("partial observations preserve a usable route and explicit zero updates biz
   assert.equal(bridge.nativePayloads[0].biz_id, 0);
 });
 
-test("same conversation ID in two shops keeps independent send routes", async () => {
-  const bridge = createBridge({ sellerCentre: true, conversationPages: [{ conversations: [
-    { id: "conversation-1", shop_id: "shop-1", to_id: "101" },
-    { id: "conversation-1", shop_id: "shop-2", to_id: "102" },
-  ] }] });
-  await bridge.observeList();
-  const before = bridge.listRequests.length;
-  for (const shop of [1, 2, 1]) {
+test("same conversation ID in two authenticated shops keeps independent send routes", async () => {
+  for (const shop of [1, 2]) {
+    const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: `shop-${shop}`, conversationPages: [{ conversations: [
+      { id: "conversation-1", shop_id: "shop-1", to_id: "101" },
+      { id: "conversation-1", shop_id: "shop-2", to_id: "102" },
+    ] }] });
+    await bridge.observeList();
+    const before = bridge.listRequests.length;
     const { result } = await bridge.send({ ...baseCommand, request_id: `shop-${shop}-${bridge.nativePayloads.length}`,
       provider_account_id: `shop-${shop}`, command_type: "send_text", text: "Hello" });
     assert.equal(result.ok, true);
     assert.equal(bridge.nativePayloads.at(-1).shop_id, `shop-${shop}`);
     assert.equal(bridge.nativePayloads.at(-1).to_id, 100 + shop);
     assert.equal(bridge.nativePayloads.at(-1).biz_id, 0);
+    assert.equal(bridge.listRequests.length, before);
   }
-  assert.equal(bridge.listRequests.length, before);
 });
 
 test("send lookup restarts a captured later nano page without changing the UI template", async () => {
@@ -711,7 +728,7 @@ test("a shop session switch during lookup prevents sending the old shop route", 
 
 test("param_error diagnostics survive local sanitization and export with exact numeric routing IDs", async () => {
   const { createLogEntry, logEntryForUpload } = await import("../extension/lib/logs.js");
-  const bridge = createBridge({ sellerCentre: true, sendBody: { error_code: "param_error", message: "private rejected text" },
+  const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: "207459663", sendBody: { error_code: "param_error", message: "private rejected text" },
     cachedRouting: { conversation_id: "conversation-1", shop_id: "207459663", to_id: "123456789", biz_id: "0" } });
   const command = { ...baseCommand, provider_account_id: "207459663", command_type: "send_text", text: "private rejected text" };
   const { result } = await bridge.send(command);
