@@ -47,7 +47,8 @@ test("node update action follows the installed version and clears stale state", 
   assert.equal(version.textContent, `v${installed}`);
   assert.equal(button.hidden, false);
   assert.equal(button.disabled, false);
-  assert.match(button.textContent, /Update now.*v99\.0\.0/);
+  assert.equal(button.textContent, "! Update now");
+  assert.match(button.title, /v99\.0\.0/);
   assert.equal(button["aria-label"], "Update now");
   render({ status: "updating" });
   assert.equal(button.hidden, false);

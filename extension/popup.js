@@ -125,7 +125,7 @@ function renderExtensionUpdate(update) {
     version.title = `${t("upToDate")} · ${checkedAt}`;
   } else if (update.status === "available") {
     updateExtensionButton.hidden = false;
-    updateExtensionButton.textContent = `↑ ${t("updateNow")}${update.available_version ? ` · v${update.available_version}` : ""}`;
+    updateExtensionButton.textContent = `! ${t("updateNow")}`;
     updateExtensionButton.setAttribute("aria-label", t("updateNow"));
     updateExtensionButton.title = update.available_version ? `${t("updateNow")} v${update.available_version}` : t("updateNow");
   } else if (update.status === "updating") {
