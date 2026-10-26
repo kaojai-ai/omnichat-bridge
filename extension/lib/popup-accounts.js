@@ -54,7 +54,11 @@ export function hydrateDetectedAccounts({
   );
 }
 
-export function popupAccountsForSession(accounts, liveState) {
+export function popupAccountsForSession(accounts, liveState, pageAccounts = []) {
+  const pageKeys = new Set(pageAccounts.map(accountConfigKey));
+  const isActive = (account) => readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
   return accounts.filter((account) => account.provider !== "shopee"
-    || readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true);
+    || isActive(account)
+    || pageKeys.has(accountConfigKey(account)))
+    .sort((left, right) => Number(isActive(right)) - Number(isActive(left)));
 }

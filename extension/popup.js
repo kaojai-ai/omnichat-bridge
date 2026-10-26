@@ -21,7 +21,7 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
-import { hydrateDetectedAccounts } from "./lib/popup-accounts.js";
+import { hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
 import { syncProgressPresentation } from "./lib/popup-sync-progress.js";
 import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus } from "./lib/popup-status.js";
 
@@ -93,6 +93,7 @@ let detectingAccount = true;
 let pendingAction = "";
 let storedConfig = emptyConfig();
 let detectedAccounts = [];
+let pageAccounts = [];
 let storedStatus = null;
 let liveState = null;
 let scanStates = null;
@@ -560,7 +561,7 @@ async function discardPending(account, button, count) {
 }
 
 function renderDetectedAccounts() {
-  const accounts = detectedAccounts.filter((account) => (
+  const accounts = popupAccountsForSession(detectedAccounts, liveState, pageAccounts).filter((account) => (
     adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
   ));
   accountList.replaceChildren();
@@ -942,6 +943,7 @@ async function refreshStoredState() {
 }
 
 async function detectAccount() {
+  pageAccounts = [];
   detectingAccount = true;
   renderDashboard();
   try {
@@ -951,6 +953,7 @@ async function detectAccount() {
       ...(activeProviderAdapter ? { provider: activeProviderAdapter.id } : {}),
     });
     if (result?.ok) {
+      pageAccounts = Array.isArray(result.accounts) ? result.accounts : [];
       const tabUrl = await currentActiveTabUrl();
       detectedAccounts = bestEffortAccounts(
         Array.isArray(result.accounts) ? result.accounts : [],
@@ -1419,6 +1422,7 @@ clearButton.addEventListener("click", async () => {
   storedConsent = null;
   storedConfig = emptyConfig();
   detectedAccounts = [];
+  pageAccounts = [];
   storedStatus = null;
   liveState = null;
   scanStates = null;
