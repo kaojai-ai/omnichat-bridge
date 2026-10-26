@@ -90,3 +90,18 @@ test("popup hides inactive Shopee configuration while retaining multiple LINE ac
   assert.deepEqual(popupAccountsForSession(accounts, live), accounts.slice(1));
   assert.deepEqual(popupAccountsForSession(accounts, null), accounts.slice(2));
 });
+
+
+test("shows active Shopee first and only the current page as an inactive shop", () => {
+  const accounts = [
+    { provider: "shopee", provider_account_id: "never-opened" },
+    { provider: "shopee", provider_account_id: "page" },
+    { provider: "shopee", provider_account_id: "active" },
+    { provider: "shopee", provider_account_id: "historical" },
+  ];
+  const live = { version: 2, accounts: { "shopee:active": { active_in_profile: true } } };
+  assert.deepEqual(popupAccountsForSession(accounts, live, [accounts[1]]), [accounts[2], accounts[1]]);
+  assert.deepEqual(popupAccountsForSession(accounts, live, [accounts[2]]), [accounts[2]]);
+  assert.deepEqual(popupAccountsForSession(accounts, null, [accounts[1]]), [accounts[1]]);
+  assert.deepEqual(accounts.map((account) => account.provider_account_id), ["never-opened", "page", "active", "historical"]);
+});
