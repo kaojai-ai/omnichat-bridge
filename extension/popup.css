@@ -569,9 +569,10 @@ input[type="checkbox"] {
 }
 
 .user-id-badge {
-  border: 1px solid #d0d5dd;
+  background: #eff8ff;
+  border: 1px solid #b2ddff;
   border-radius: 999px;
-  color: #475467;
+  color: #175cd3;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
   line-height: 1.2;
