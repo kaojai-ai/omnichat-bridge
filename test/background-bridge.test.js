@@ -187,12 +187,12 @@ test("uses a 20-second worker keepalive and preserves immediate status sends", (
 });
 
 test("repairs live status independently of manual retry", () => {
-  const start = source.indexOf("async function initializeAndStartSync(trigger)");
+  const start = source.indexOf("async function initializeAndStartSync(trigger, provider = null)");
   const end = source.indexOf("\n}\n\nasync function startUnattendedSellerCentreSync", start);
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncStartSource = source.slice(start, end);
-  assert.match(syncStartSource, /void ensureLiveConnection\(\)[\s\S]*restartSync\(\) : startSync\(trigger\)/);
+  assert.match(syncStartSource, /void ensureLiveConnection\(\)[\s\S]*restartSync\(\) : startSync\(trigger, false, provider\)/);
 });
 
 test("scopes leader changes to the provider shown in the popup", () => {
@@ -286,7 +286,7 @@ test("resumes an interrupted sync after the service worker restarts", () => {
 });
 
 test("starts provider recovery with visible conversation progress", () => {
-  assert.match(source, /state: "syncing",\n      phase: "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);
+  assert.match(source, /state: "syncing",\n      phase: context.adapter.id === "line_oa" \? "connecting_provider" : "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);
 });
 
 test("records unattended provider recovery through account sync bookkeeping", () => {

@@ -156,3 +156,14 @@ Developed and maintained by [KaoJai.ai](https://kaojai.ai).
 ## License
 
 [MIT](LICENSE)
+
+### LINE account access isolation (0.7.9)
+
+The popup and sync select only configured accounts accessible to the current LINE
+login. Multiple accessible accounts remain supported. An account sync failure stays
+on that account; its Retry action does not restart other accounts. Loading rows also
+offer Retry to recover an interrupted run, while duplicate active runs are ignored.
+Repeated LINE Sync requests reuse the active operation. Idle recovery times out per
+account, and rows show whether LINE is connecting, waiting, or checking conversations.
+Access checks distinguish a verified empty account list from a failed request. Shared
+configuration and existing sync history are retained when browser access changes.

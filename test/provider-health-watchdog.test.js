@@ -27,6 +27,8 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     STORAGE: { config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
     readStorage: async () => stored,
     configuredAccountContexts: () => contexts,
+    lineSessionContexts: async (items) => items,
+    providerAutomaticRecoveries: new Map(),
     hasServerInitialized: () => true,
     hasLocalConsent: (value) => value === true,
     providerAdapters: { list: () => [adapter] },

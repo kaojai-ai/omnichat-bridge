@@ -79,16 +79,20 @@ test("shows an unconfigured LINE account only when its chat tab is open", () => 
   );
 });
 
-test("popup hides inactive Shopee configuration while retaining multiple LINE accounts", () => {
+test("popup hides inactive configuration while retaining multiple accessible LINE accounts", () => {
   const accounts = [
     { provider: "shopee", provider_account_id: "old" },
     { provider: "shopee", provider_account_id: "current" },
     { provider: "line_oa", provider_account_id: "@one" },
     { provider: "line_oa", provider_account_id: "@two" },
   ];
-  const live = { version: 2, accounts: { "shopee:current": { active_in_profile: true } } };
+  const live = { version: 2, accounts: {
+    "shopee:current": { active_in_profile: true },
+    "line_oa:@one": { active_in_profile: true },
+    "line_oa:@two": { active_in_profile: true },
+  } };
   assert.deepEqual(popupAccountsForSession(accounts, live), accounts.slice(1));
-  assert.deepEqual(popupAccountsForSession(accounts, null), accounts.slice(2));
+  assert.deepEqual(popupAccountsForSession(accounts, null), []);
 });
 
 
@@ -104,4 +108,24 @@ test("shows active Shopee first and only the current page as an inactive shop", 
   assert.deepEqual(popupAccountsForSession(accounts, live, [accounts[2]]), [accounts[2]]);
   assert.deepEqual(popupAccountsForSession(accounts, null, [accounts[1]]), [accounts[1]]);
   assert.deepEqual(accounts.map((account) => account.provider_account_id), ["never-opened", "page", "active", "historical"]);
+});
+
+
+test("LINE shows only verified access, not configuration or the stale current page", () => {
+  const accounts = ["@one", "@two", "@three"].map((provider_account_id) => ({ provider: "line_oa", provider_account_id }));
+  const live = { version: 2, accounts: {
+    "line_oa:@one": { active_in_profile: true },
+    "line_oa:@two": { active_in_profile: false },
+  } };
+  assert.deepEqual(popupAccountsForSession(accounts, live, accounts), [accounts[0]]);
+  assert.deepEqual(popupAccountsForSession(accounts, null, accounts), []);
+});
+
+test("an accessible LINE account remains visible when its sync fails", () => {
+  const accounts = ["@one", "@two"].map((provider_account_id) => ({ provider: "line_oa", provider_account_id }));
+  const live = { version: 2, accounts: {
+    "line_oa:@one": { active_in_profile: true, socket: "connected" },
+    "line_oa:@two": { active_in_profile: true, provider_recovery_state: "needs_attention" },
+  } };
+  assert.deepEqual(popupAccountsForSession(accounts, live), accounts);
 });

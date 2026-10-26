@@ -57,8 +57,8 @@ export function hydrateDetectedAccounts({
 export function popupAccountsForSession(accounts, liveState, pageAccounts = []) {
   const pageKeys = new Set(pageAccounts.map(accountConfigKey));
   const isActive = (account) => readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
-  return accounts.filter((account) => account.provider !== "shopee"
+  return accounts.filter((account) => !["shopee", "line_oa"].includes(account.provider)
     || isActive(account)
-    || pageKeys.has(accountConfigKey(account)))
+    || (account.provider === "shopee" && pageKeys.has(accountConfigKey(account))))
     .sort((left, right) => Number(isActive(right)) - Number(isActive(left)));
 }
