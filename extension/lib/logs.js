@@ -15,6 +15,8 @@ const RAW_ERROR_DETAIL_LIMITS = new Map([
 const IDENTIFIER_DETAIL_KEYS = new Set([
   "category",
   "batch_id",
+  "request_id",
+  "current_provider_account_id",
   "server_error_code",
   "provider_account_id",
   "message_key",
@@ -133,9 +135,16 @@ function errorCategory(text, status) {
   return "unknown";
 }
 
-function sanitizeIdentifier(value) {
+const ACCOUNT_IDENTIFIER_KEYS = new Set([
+  "provider_account_id", "current_provider_account_id", "sender_account_id", "recipient_account_id",
+]);
+
+function sanitizeIdentifier(value, key) {
   const text = String(value ?? "").trim();
-  return /^[-A-Za-z0-9._:+]{1,200}$/.test(text) ? text : "[redacted]";
+  // LINE basic IDs start with @. Allow it only as an account prefix,
+  // keeping emails and arbitrary free text out of structured identifiers.
+  const identifier = ACCOUNT_IDENTIFIER_KEYS.has(key) && text.startsWith("@") ? text.slice(1) : text;
+  return /^[-A-Za-z0-9._:+]{1,200}$/.test(identifier) ? text : "[redacted]";
 }
 
 export function diagnosticErrorDetails(error) {
@@ -173,7 +182,7 @@ export function sanitizeLogDetails(value) {
     }
     if (!key || ["validation_fields", "diagnostics", "provider_code_present", "native_error_code", "response_format", "operation", "stage"].includes(key) || SEND_DIAGNOSTIC_ID_KEYS.includes(key) || BLOCKED_DETAIL_KEY.test(key)) continue;
     if (IDENTIFIER_DETAIL_KEYS.has(key) && typeof rawValue === "string") {
-      details[key] = sanitizeIdentifier(rawValue);
+      details[key] = sanitizeIdentifier(rawValue, key);
       continue;
     }
     if (RAW_ERROR_DETAIL_LIMITS.has(key) && typeof rawValue === "string") {

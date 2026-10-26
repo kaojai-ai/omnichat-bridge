@@ -40,7 +40,8 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   const response = await new Promise(resolve => {
     assert.equal(listener({ type: "record_log", area: "provider", level: "info",
       event: "send_route_resolution", message: "untrusted page message",
-      details: { request_id: "request-123", cache_reason: "absent", pages: 2,
+      details: { provider_account_id: "@line-account-one", current_provider_account_id: "@line-account-two",
+        request_id: "0123456789abcdef0123456789abcdef0123456789abcdef", cache_reason: "absent", pages: 2,
         stop_reason: "scoped_end", lookup_scope: "captured_filters", route_resolved: false,
         message_text: "private reply", request_url: "https://private.example", token: "private-token" },
     }, {}, resolve), true);
@@ -50,7 +51,8 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   const entry = storage.logs[0];
   assert.equal(entry.event, "send_route_resolution");
   assert.equal(entry.message, "Shopee reply routing checked.");
-  assert.deepEqual(entry.details, { request_id: "request-123", cache_reason: "absent", pages: 2,
+  assert.deepEqual(entry.details, { provider_account_id: "@line-account-one", current_provider_account_id: "@line-account-two",
+    request_id: "0123456789abcdef0123456789abcdef0123456789abcdef", cache_reason: "absent", pages: 2,
     stop_reason: "scoped_end", lookup_scope: "captured_filters", route_resolved: false });
   const rejected = await new Promise(resolve => listener({ type: "record_log", area: "provider",
     event: "unregistered_event" }, {}, resolve));
@@ -76,6 +78,9 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   assert.match(exported, /native_error_code=param_error/);
   assert.match(exported, /request_recipient_id=123456789/);
   assert.match(exported, /request_id=request-123/);
+  assert.match(exported, /provider_account_id=@line-account-one/);
+  assert.match(exported, /current_provider_account_id=@line-account-two/);
+  assert.match(exported, /request_id=0123456789abcdef0123456789abcdef0123456789abcdef/);
   assert.match(exported, /payload_shop_matches_route=false/);
   assert.doesNotMatch(exported, /private provider message|private reply|private.example|token=secret/);
   await new Promise(resolve => listener({ type: "record_log", area: "provider", level: "warn",
@@ -337,4 +342,20 @@ test("log storage failure is nonthrowing and does not acknowledge persistence", 
     mutateLogs: async () => { throw new Error("Storage unavailable"); },
   });
   assert.equal(await record("error", "provider", "recovery_failed", "Failed."), false);
+});
+
+test("account identifier relaxation still rejects emails, URLs, free text and credentials", () => {
+  for (const value of ["person@example.com", "@person@example.com", "@", "@line account", "https://line.example/account", "token=private", "@" + "a".repeat(201)]) {
+    const entry = createLogEntry({ details: { provider_account_id: value } });
+    assert.equal(entry.details.provider_account_id, "[redacted]", value);
+  }
+  const entry = createLogEntry({ details: {
+    request_id: "a".repeat(48), provider_account_id: "@line-one",
+    message_text: "private chat", authorization: "Bearer private", cookie: "private",
+    request_body: "private", request_url: "https://private.example", hmac_secret: "private",
+    reason: "a".repeat(48),
+  } });
+  assert.deepEqual(entry.details, {
+    request_id: "a".repeat(48), provider_account_id: "@line-one", reason: "[redacted]",
+  });
 });

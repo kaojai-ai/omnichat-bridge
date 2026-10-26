@@ -367,6 +367,7 @@
         } : {}),
       });
       log("info", "recovery_requested", "Provider recovery request sent.", {
+        request_id: requestId,
         provider_account_id: accountId,
         checkpoint_present: Boolean(syncState.checkpoint?.watermark),
       });
@@ -596,12 +597,14 @@
       log(result?.ok ? "debug" : "error", "recovery_batch_processed", result?.ok
         ? "Recovered message page processed."
         : result?.error ?? "Recovered message page failed.", {
+        request_id: message.request_id,
         provider_account_id: message.provider_account_id,
         parsed: messages.length,
         queued: Number(result?.queued) || 0,
       });
     } catch (error) {
       log("error", "recovery_batch_failed", error instanceof Error ? error.message : String(error), {
+        request_id: message.request_id,
         provider_account_id: message.provider_account_id,
         ...errorDetails(error),
       });
@@ -858,6 +861,7 @@
       pending.resolve(result);
     }
     log(automaticPoll ? "debug" : "info", "recovery_completed", "Provider recovery completed.", {
+      request_id: message.request_id,
       conversations_checked: message.conversations_checked,
       duration_ms: message.duration_ms,
       provider_account_id: message.provider_account_id,

@@ -36,8 +36,12 @@ operational logs to that configured HTTPS destination in signed batches.
 Upload starts when sync is initialized, manually or through configured
 automatic sync.
 These logs describe extension lifecycle, provider readiness, sync progress,
-queue counts, delivery status, errors, and numeric provider routing identifiers
-needed for send diagnostics. They do not include chat content,
+queue counts, delivery status, errors, provider account identifiers (including
+LINE IDs beginning with `@`), message and conversation identifiers, recovery
+request IDs, and numeric provider routing identifiers needed for diagnostics.
+These identifiers remain visible in local logs, support exports, and optional
+log uploads so support can correlate operations across accounts and attempts.
+They do not include chat content,
 provider credentials, cookies, login tokens, request headers, HMAC secrets,
 or full request URLs.
 
