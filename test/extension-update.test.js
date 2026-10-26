@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const [readme, html, css, popupSource, backgroundSource, manifest] = await Promise.all([
   readFile(new URL("../README.md", import.meta.url), "utf8"),
@@ -23,17 +24,64 @@ test("links the README and title to the Chrome Web Store without changing title 
   assert.match(css, /\.store-link:focus-visible/);
 });
 
-test("shows a compact, translated update state beside the manifest version", () => {
-  assert.match(html, /id="version"/);
-  assert.match(html, /id="update-extension"/);
-  assert.match(popupSource, /upToDate: "Up to date"/);
-  assert.match(popupSource, /updateNow: "Update now"/);
-  assert.match(popupSource, /updatingExtension: "Updating…"/);
-  assert.match(popupSource, /upToDate: "เป็นเวอร์ชันล่าสุด"/);
-  assert.match(popupSource, /updateNow: "อัปเดตตอนนี้"/);
-  assert.match(popupSource, /updateExtensionButton\.textContent = "Latest"/);
-  assert.match(css, /\.update-extension \{[\s\S]*padding: 0 3px;/);
-  assert.match(popupSource, /STORAGE\.extensionUpdate/);
+function fakeElement() {
+  return {
+    setAttribute(key, value) { this[key] = value; },
+    removeAttribute(key) { delete this[key]; },
+  };
+}
+
+test("node update action follows the installed version and clears stale state", () => {
+  const version = fakeElement();
+  const button = fakeElement();
+  const installed = JSON.parse(manifest).version;
+  const scope = vm.createContext({
+    chrome: { runtime: { getManifest: () => ({ version: installed }) } },
+    document: { querySelector: () => version }, updateExtensionButton: button,
+    t: key => ({ upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…" })[key],
+  });
+  const start = popupSource.indexOf("function renderExtensionUpdate(");
+  vm.runInContext(popupSource.slice(start, popupSource.indexOf("const TRANSLATIONS", start)), scope);
+  const render = update => scope.renderExtensionUpdate({ installed_version: installed, ...update });
+  render({ status: "available", available_version: "99.0.0" });
+  assert.equal(version.textContent, `v${installed}`);
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, false);
+  assert.match(button.textContent, /Update now.*v99\.0\.0/);
+  assert.equal(button["aria-label"], "Update now");
+  render({ status: "updating" });
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, "Updating…");
+  render({ status: "current", checked_at: "2026-10-26T01:00:00Z" });
+  assert.equal(button.hidden, true, "current installs have no redundant update action");
+  assert.match(version.title, /Up to date/);
+  assert.equal(button["aria-label"], undefined);
+  render({ status: "available", installed_version: "stale-version", available_version: "99.0.0" });
+  assert.equal(button.hidden, true, "cached results for an older install cannot offer an update");
+  assert.equal(version.title, undefined);
+  assert.equal(version.textContent, `v${installed}`);
+  const nodeSection = html.match(/<section class="node-summary"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(nodeSection);
+  assert.match(nodeSection, /id="update-extension"/);
+  assert.equal((html.match(/id="update-extension"/g) || []).length, 1);
+});
+
+test("unnamed node uses a translated browser label and clears the previous name", () => {
+  const badge = fakeElement();
+  const scope = vm.createContext({ deviceNameBadge: badge, storedDeviceName: "Desk browser",
+    normalizeDeviceName: value => String(value || "").trim(), t: key => key === "thisBrowser" ? "เบราว์เซอร์นี้" : key });
+  const start = popupSource.indexOf("function renderDeviceNameBadge()");
+  vm.runInContext(popupSource.slice(start, popupSource.indexOf("function setConfigStatus", start)), scope);
+  scope.renderDeviceNameBadge();
+  assert.equal(badge.textContent, "Desk browser");
+  assert.match(badge.title, /Desk browser/);
+  scope.storedDeviceName = " ";
+  scope.renderDeviceNameBadge();
+  assert.equal(badge.hidden, false);
+  assert.equal(badge.textContent, "เบราว์เซอร์นี้");
+  assert.equal(badge.title, "");
+  assert.doesNotMatch(badge["aria-label"], /Desk browser/);
 });
 
 test("uses Chrome's update lifecycle with bounded checks and queued restart", () => {

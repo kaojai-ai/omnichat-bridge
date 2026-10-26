@@ -2769,7 +2769,11 @@ async function handleLiveCommand(raw, context, socket) {
   try { command = JSON.parse(raw); } catch { return; }
   if (command?.type === "connection_status_ack") {
     const current = liveConnections.get(context.key);
-    if (current?.socket === socket) current.statusReporter?.acknowledge(command);
+    if (current?.socket === socket && current.statusReporter?.acknowledge(command) === true && command.ok === true) {
+      // Persistence may succeed after the initial leader probes have finished.
+      // Refresh the server's actual election result, never infer leadership from ACK.
+      scheduleLeaderStatusRefresh(context, socket);
+    }
     return;
   }
   const adapter = providerAdapterForCommand(command);

@@ -50,7 +50,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const badge = nodes.find(node => node.className === "provider-badge");
     const name = nodes.find(node => node.textContent === "Account One");
     assert.ok(badge, "the account row identifies its provider");
-    assert.equal(badge.textContent, provider === "line_oa" ? "LINE" : "Shopee");
+    assert.equal(badge.textContent, provider === "line_oa" ? "LINE" : "SHOPEE");
     assert.equal(badge.dataset.provider, provider);
     assert.ok(name, "the saved account name has no automatic provider prefix");
     assert.ok(nodes.indexOf(badge) < nodes.indexOf(name), "provider badge precedes the account name");

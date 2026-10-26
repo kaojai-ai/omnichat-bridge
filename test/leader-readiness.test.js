@@ -66,3 +66,26 @@ test("an outbound command cannot use a tab for another shop", async () => {
   });
   await assert.rejects(() => commandTab(context, { prepareForSend: true }), /not ready for this account/);
 });
+
+test("a delayed persisted readiness ACK refreshes real leader status, with stale socket/report fencing", async () => {
+  const currentSocket = { readyState: 1 }, oldSocket = { readyState: 1 };
+  const sent = [], scheduled = [];
+  const reporter = createStatusReporter({ send: report => sent.push(report), id: () => "report-current",
+    setTimer: () => 1, clearTimer: () => {} });
+  reporter.publish({ ready: true }, "ready");
+  const handle = fn("handleLiveCommand", "\nchrome.storage.onChanged", {
+    liveConnections: new Map([[context.key, { socket: currentSocket, statusReporter: reporter }]]),
+    scheduleLeaderStatusRefresh: (account, socket) => scheduled.push({ account, socket }),
+  });
+  const ack = { type: "connection_status_ack", report_id: sent[0].report_id, sequence: sent[0].sequence, ok: true };
+  await handle(JSON.stringify(ack), context, oldSocket);
+  await handle(JSON.stringify({ ...ack, report_id: "older-report" }), context, currentSocket);
+  await handle(JSON.stringify({ ...ack, ok: false, retryable: true }), context, currentSocket);
+  assert.equal(scheduled.length, 0);
+  await handle(JSON.stringify(ack), context, currentSocket);
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].account, context);
+  assert.equal(scheduled[0].socket, currentSocket);
+  await handle(JSON.stringify(ack), context, currentSocket);
+  assert.equal(scheduled.length, 1, "duplicate ACK must not start another refresh");
+});

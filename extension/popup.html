@@ -63,16 +63,17 @@
       </section>
 
       <section id="dashboard-screen" class="screen" hidden>
-        <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
-          <div class="account-heading">
-            <h2 id="detected-shops-title">Detected accounts</h2>
-            <div class="node-status-column">
-              <span id="device-name-badge" class="device-name-badge" aria-label="Node name" hidden></span>
-              <button id="leader-status" class="leader-status" type="button" aria-live="polite">
-                <i></i><span class="leader-current">NEED CONFIG</span>
-              </button>
-            </div>
+        <section class="node-summary" aria-label="Browser node">
+          <div class="node-summary-row">
+            <span id="device-name-badge" class="device-name-badge" aria-label="Node name"></span>
+            <button id="leader-status" class="leader-status" type="button" aria-live="polite">
+              <i></i><span class="leader-current">NEED CONFIG</span>
+            </button>
           </div>
+          <button id="update-extension" class="update-extension" type="button" hidden></button>
+        </section>
+        <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
+          <h2 id="detected-shops-title">Detected accounts</h2>
           <div id="account-list" class="account-list" aria-live="polite"></div>
           <p id="account-list-empty" class="account-list-empty" hidden>No provider accounts detected yet.</p>
         </section>
@@ -178,7 +179,7 @@
           <span>·</span>
           <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>
           <span>·</span>
-          <a id="version" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer"></a><button id="update-extension" class="update-extension" type="button" hidden></button>
+          <a id="version" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer"></a>
         </div>
         <div class="footer-copyright">
           <span>© 2026 </span><a class="ok-production-link" href="https://okproduction.co.th" target="_blank" rel="noreferrer">OK Production Co., Ltd.</a><span>, 💚 </span><a class="brand-link" href="https://kaojai.ai" target="_blank" rel="noreferrer">KaoJai.ai</a>

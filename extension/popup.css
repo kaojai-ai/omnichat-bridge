@@ -497,22 +497,10 @@ input[type="checkbox"] {
   gap: 10px;
 }
 
-.account-heading {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: space-between;
-}
-.account-heading h2 { margin: 0; }
-
-.node-status-column {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  justify-content: flex-end;
-}
+.node-summary { display: grid; gap: 6px; }
+.node-summary-row { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-width: 0; }
+.node-summary-row .leader-status { flex-shrink: 0; margin-left: auto; }
+.node-summary-row .device-name-badge { max-width: 160px; }
 
 .account-section h2 {
   color: #475467;
@@ -1046,8 +1034,7 @@ footer a {
 }
 
 .footer-link,
-.settings-link,
-.update-extension {
+.settings-link {
   background: transparent;
   border: 0;
   color: inherit;
@@ -1056,35 +1043,29 @@ footer a {
   min-height: auto;
   padding: 0;
 }
-
-.installation-id {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
+.installation-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 footer a:hover,
 .footer-link:hover,
-.settings-link:hover,
-.update-extension:hover {
+.settings-link:hover {
   background: transparent;
   color: var(--shopee-hover);
   text-decoration: underline;
 }
 
 .update-extension {
-  color: var(--shopee);
+  align-items: center;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  color: var(--ink);
   cursor: pointer;
-  padding: 0 3px;
+  font-size: 11px;
+  justify-self: end;
+  min-height: 28px;
+  padding: 4px 8px;
 }
-
-.update-extension[data-state="current"] {
-  color: var(--green);
-  cursor: default;
-}
-
-.update-extension:disabled { cursor: wait; }
-
-.update-extension[data-state="current"]:disabled { cursor: default; }
-
+.update-extension:hover { background: #f2f4f7; border-color: #98a2b3; }
+.update-extension:disabled { color: var(--muted); cursor: wait; }
 
 /* Status color indicates outcome; animation indicates work in progress. */
 .account-row-status[data-state="neutral"],
