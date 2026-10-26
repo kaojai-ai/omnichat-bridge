@@ -1,6 +1,7 @@
 export const SYNC_PHASE_LABELS = Object.freeze({
   preparing: "Preparing sync…",
   checking_session: "Checking provider account access…",
+  queued: "Waiting for turn…",
   connecting_provider: "Connecting to LINE…",
   waiting_recovery: "Waiting for LINE recovery…",
   sending_pending: "Sending previously queued messages…",
@@ -58,20 +59,20 @@ export function syncProgressPresentation(progressState, { locale = "en", compact
   const detail = [text, ...details].join(" · ");
   if (compact) {
     const shortPhase = {
-      preparing: "Preparing…", checking_session: "Checking access…",
+      preparing: "Preparing…", checking_session: "Checking access…", queued: "Waiting…",
       connecting_provider: "Connecting…", waiting_recovery: "Waiting for recovery…",
       sending_pending: "Forwarding…", loading_conversations: "Loading…",
       checking_conversations: "Checking messages…", fetching_messages: "Loading…",
       conversation_complete: "Loading…", sending_recovered: "Forwarding…",
     }[phase] ?? "Syncing…";
     const captured = count(progressState.messages_captured);
-    return { active: true, showBar: true, value, detail,
+    return { active: true, showBar: phase !== "queued", value, detail,
       text: shortPhase + (value !== null ? ` · ${value}%` : captured > 0 ? ` · ${captured} captured` : ""),
     };
   }
   return {
     active: true,
-    showBar: true,
+    showBar: phase !== "queued",
     // A missing value is a native indeterminate progress bar, not zero percent.
     value,
     text: detail,

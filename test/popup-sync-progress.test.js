@@ -129,3 +129,13 @@ test("compact percentages require a measured total in a counted phase", () => {
   assert.equal(preflight.value, null);
   assert.doesNotMatch(preflight.text, /%/);
 });
+
+
+test("verified queued accounts wait without claiming an active access check or percentage", () => {
+  const state = { state: "discovering", phase: "queued", total_conversations: 10, completed_conversations: 5 };
+  const view = syncProgressPresentation(state, { compact: true });
+  assert.equal(view.text, "Waiting…");
+  assert.equal(view.value, null);
+  assert.equal(view.showBar, false);
+  assert.doesNotMatch(view.detail, /Checking|%/);
+});

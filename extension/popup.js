@@ -511,7 +511,7 @@ function accountRowStatus(account) {
   if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) {
     const progress = syncProgressPresentation({ ...syncState, pending: readAccountState(pendingStates, key, []).length }, { locale: language, compact: true });
     return { label: progress?.text || t("syncing"), hint: progress?.detail,
-      state: "neutral", loading: true };
+      state: "neutral", loading: syncState?.phase !== "queued" };
   }
   if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
   const failure = currentAccountSyncFailure(syncState, live);
@@ -681,7 +681,7 @@ function renderDetectedAccounts() {
     actions.className = "account-row-actions";
     if (cardState.loading) {
       const progress = syncProgressPresentation(readAccountState(storedStatus, accountConfigKey(account), null));
-      if (progress) {
+      if (progress?.showBar) {
         const bar = document.createElement("progress");
         bar.max = 100;
         if (progress.value !== null) bar.value = progress.value;

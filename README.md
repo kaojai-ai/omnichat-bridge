@@ -169,3 +169,7 @@ Repeated LINE Sync requests reuse the active operation. Idle recovery times out 
 account, and rows show whether LINE is connecting, waiting, or checking conversations.
 Access checks distinguish a verified empty account list from a failed request. Shared
 configuration and existing sync history are retained when browser access changes.
+
+Access-check status belongs to its sync attempt. Cooldown skips and cancellation
+settle that attempt without overwriting newer work; verified accounts waiting for
+sequential recovery display “Waiting…” rather than “Checking access…”.
