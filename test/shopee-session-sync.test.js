@@ -138,3 +138,75 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
     assert.equal(logs.some(log => log.event === "superseded" && log.level === "info"), superseded);
   });
 }
+
+for (const outcome of ["selected", "failed"]) {
+  test(`blocked account access probe shows early progress and clears ${outcome === "selected" ? "skipped" : "failed"} candidates`, async () => {
+    const candidates = [context("line_oa", "A"), context("line_oa", "B")];
+    let resolveProbe, rejectProbe;
+    const probe = new Promise((resolve, reject) => { resolveProbe = resolve; rejectProbe = reject; });
+    const states = new Map(), synced = [];
+    const syncEnd = source.indexOf("\nasync function resumeSync", end);
+    const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+      STORAGE: { status: "status" }, readStorage: async () => ({}),
+      configuredAccountContexts: () => candidates, hasLocalConsent: () => true,
+      throwIfSyncCancelled: () => {},
+      lineSessionContexts: () => {
+        for (const candidate of candidates) {
+          assert.equal(states.get(candidate.key)?.phase, "checking_session", "publish progress before beginning a slow probe");
+        }
+        return probe;
+      },
+      updateScopedState: async (_storage, key, patch) => states.set(key, { ...states.get(key), ...patch }),
+      providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
+      recordLog: async () => {},
+      runAccountSync: async (_trigger, _control, account) => {
+        synced.push(account.key);
+        return { sent: 1 };
+      },
+    });
+    const running = run("manual", { controller: new AbortController() });
+    const failure = outcome === "failed" ? assert.rejects(running, /access probe failed/) : null;
+    await new Promise(setImmediate);
+    assert.deepEqual(synced, [], "capture/recovery must not start before access is verified");
+    for (const candidate of candidates) {
+      const state = states.get(candidate.key);
+      assert.equal(state.state, "discovering");
+      assert.equal(state.phase, "checking_session");
+      assert.equal(state.total_conversations, null);
+      assert.equal(state.pages_fetched, 0);
+      assert.equal(state.messages_captured, 0);
+      assert.equal(state.last_progress_at, null);
+    }
+    if (outcome === "failed") {
+      rejectProbe(new Error("access probe failed"));
+      await failure;
+      assert.deepEqual(synced, []);
+      for (const state of states.values()) {
+        assert.equal(state.state, "watching");
+        assert.equal(state.phase, null);
+      }
+    } else {
+      resolveProbe([candidates[0]]);
+      assert.equal((await running).sent, 1);
+      assert.deepEqual(synced, ["A"]);
+      assert.equal(states.get("B").state, "watching");
+      assert.equal(states.get("B").phase, null);
+    }
+  });
+}
+
+test("manual sync preserves an account already recovering automatically", async () => {
+  const candidate = context("line_oa", "A");
+  const syncEnd = source.indexOf("\nasync function resumeSync", end);
+  const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+    STORAGE: {}, readStorage: async () => ({}),
+    configuredAccountContexts: () => [candidate], hasLocalConsent: () => true,
+    providerAutomaticRecoveries: new Map([[candidate.key, {}]]),
+    updateScopedState: () => assert.fail("must preserve the automatic recovery's progress"),
+    lineSessionContexts: () => assert.fail("must not probe a running recovery again"),
+    runAccountSync: () => assert.fail("must not start duplicate recovery"),
+    recordLog: async () => {},
+  });
+  assert.equal((await run("manual", { controller: new AbortController() })).accounts.length, 0);
+});

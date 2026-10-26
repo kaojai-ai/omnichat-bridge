@@ -1,5 +1,6 @@
 export const SYNC_PHASE_LABELS = Object.freeze({
   preparing: "Preparing sync…",
+  checking_session: "Checking provider account access…",
   connecting_provider: "Connecting to LINE…",
   waiting_recovery: "Waiting for LINE recovery…",
   sending_pending: "Sending previously queued messages…",

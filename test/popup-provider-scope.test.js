@@ -34,7 +34,7 @@ test("selects current session accounts before manual sync", () => {
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncSource = backgroundSource.slice(start, end);
-  assert.match(syncSource, /openSessionSyncContexts\(candidates\.filter\(/);
+  assert.match(syncSource, /openSessionSyncContexts\(providerCandidates, control\)/);
   assert.match(syncSource, /for \(const context of contexts\)/);
   assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
 });

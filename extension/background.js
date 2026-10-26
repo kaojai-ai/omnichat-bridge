@@ -4053,7 +4053,28 @@ async function runUnifiedSync(trigger, control) {
   const providers = [...new Set(candidates.map((item) => item.adapter.id))]
     .sort((left, right) => (left === "shopee" ? -1 : right === "shopee" ? 1 : 0));
   for (const provider of providers) {
-    const contexts = await openSessionSyncContexts(candidates.filter((item) => item.adapter.id === provider), control);
+    const providerCandidates = candidates.filter((item) => item.adapter.id === provider
+      && !providerAutomaticRecoveries.has(item.key));
+    if (!providerCandidates.length) continue;
+    for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
+      state: "discovering", phase: "checking_session",
+      completed_conversations: null, total_conversations: null,
+      pages_fetched: 0, messages_captured: 0, last_progress_at: null,
+    });
+    let contexts;
+    try {
+      contexts = await openSessionSyncContexts(providerCandidates, control);
+    } catch (error) {
+      for (const context of providerCandidates) await updateScopedState(STORAGE.status, context.key, {
+        state: "watching", phase: null,
+      });
+      throw error;
+    }
+    for (const context of providerCandidates) {
+      if (!contexts.some((selected) => selected.key === context.key)) await updateScopedState(STORAGE.status, context.key, {
+        state: "watching", phase: null,
+      });
+    }
     for (const context of contexts) {
       throwIfSyncCancelled(control.controller.signal);
       if (providerAutomaticRecoveries.has(context.key)) continue;
@@ -4061,7 +4082,9 @@ async function runUnifiedSync(trigger, control) {
       accounts.push(await runAccountSync(trigger, control, context));
     }
   }
-  if (!accounts.length) throw new Error("Log in to a configured provider account and open its chat to sync.");
+  if (!accounts.length && !candidates.some((item) => providerAutomaticRecoveries.has(item.key))) {
+    throw new Error("Log in to a configured provider account and open its chat to sync.");
+  }
   const errors = accounts.filter((account) => account.error);
   const result = {
     recovered: accounts.reduce((total, account) => total + (Number(account.recovered) || 0), 0),
