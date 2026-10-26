@@ -1,3 +1,4 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -36,6 +37,8 @@ function messageHarness() {
   let now = 0, nextId = 0;
   const timers = new Map(), calls = [], response = deferred();
   const runtime = vm.createContext({
+    performance, recordLog: async () => {},
+    sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     PROVIDER_REQUEST_TIMEOUT_MS: 15_000,
     syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
     providerMessageTimeout: () => Object.assign(new Error("silent"), { name: "TimeoutError" }),

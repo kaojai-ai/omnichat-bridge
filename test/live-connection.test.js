@@ -1,3 +1,5 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
+import { createStatusReporter } from "../extension/lib/status-reporter.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -5,6 +7,12 @@ import vm from "node:vm";
 import { sanitizeSendDiagnostics, createLogEntry, logEntryForUpload, diagnosticErrorDetails } from "../extension/lib/logs.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+
+function verifiedSession(key) {
+  const eligibility = createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} });
+  eligibility.observe(key, { hasTab: true, verified: true });
+  return eligibility;
+}
 
 function deferred() {
   let resolve;
@@ -259,6 +267,7 @@ test("readiness diagnostics publish changed states once without recording messag
   const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, {
     liveConnections: new Map([[account.key, connection]]),
     WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
+    createStatusReporter: options => createStatusReporter({ ...options, id: () => "report", setTimer: () => 1, clearTimer: () => {} }),
     scheduleLeaderStatusRefresh: () => {}, scheduleKeepalive: () => {},
     recordLog: async (level, _area, event, _message, details) => logs.push({ level, event, details }),
   });
@@ -308,6 +317,7 @@ test("duplicate commands share one provider operation and replay its acknowledge
   const end = source.indexOf("\nchrome.storage.onChanged", start);
   const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+    sessionEligibility: verifiedSession(account.key), activeLiveCommandContexts: async contexts => contexts,
     providerAdapterForCommand: () => ({ id: "shopee", supportsSend: () => true }),
     messageProviderAccountId: (value) => value.provider_account_id, canonicalProviderAccountId: () => "shop",
     replyQueue: { run: (_account, action) => action() }, sendViaProvider: () => { sends++; return pending.promise; },
@@ -316,6 +326,7 @@ test("duplicate commands share one provider operation and replay its acknowledge
   const context = { ...account, account: { provider: "shopee", provider_account_id: "shop" } };
   const first = run(JSON.stringify(command), context, socket);
   const duplicate = run(JSON.stringify(command), context, socket);
+  await new Promise(setImmediate);
   assert.equal(sends, 1);
   pending.resolve({ ok: true, provider_message_id: "receipt" });
   await Promise.all([first, duplicate]);
@@ -337,6 +348,7 @@ test("failed LINE commands retain safe provider evidence locally and in upload w
     body: "private message", cookie: "secret", access_token: "secret" };
   const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
     liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+    sessionEligibility: verifiedSession("line_oa:oa"), activeLiveCommandContexts: async contexts => contexts,
     providerAdapterForCommand: () => ({ id: "line_oa", supportsSend: () => true }),
     messageProviderAccountId: value => value.provider_account_id, canonicalProviderAccountId: () => "oa",
     replyQueue: { run: (_account, action) => action() },

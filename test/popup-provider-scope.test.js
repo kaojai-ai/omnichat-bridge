@@ -34,7 +34,7 @@ test("selects current session accounts before manual sync", () => {
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncSource = backgroundSource.slice(start, end);
-  assert.match(syncSource, /openSessionSyncContexts\(candidates, control\)/);
+  assert.match(syncSource, /openSessionSyncContexts\(candidates\.filter\(/);
   assert.match(syncSource, /for \(const context of contexts\)/);
   assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
 });
@@ -50,7 +50,7 @@ test("gates the popup on local consent and clears it with erase all data", () =>
   assert.match(popupSource, /function routeTo\(target\)/);
   assert.match(popupSource, /if \(!consented\(\) && screen !== "consent" && screen !== "privacy"\)/);
   assert.match(popupSource, /storedConsent = null;/);
-  assert.match(popupSource, /await chrome\.storage\.local\.clear\(\);/);
+  assert.match(popupSource, /await chrome\.runtime\.sendMessage\(\{ type: "erase_local_data" \}\)/);
   assert.match(popupSource, /routeTo\("consent"\);/);
   assert.match(popupSource, /if \(!consented\(\)\) \{\n    routeTo\("consent"\);\n    return;\n  \}/);
 });
@@ -59,7 +59,7 @@ test("hydrates saved accounts and sync status before live detection returns", ()
   assert.match(popupSource, /STORAGE\.detectedAccounts,/);
   assert.match(popupSource, /detectedAccounts = bestEffortAccounts\(stored\[STORAGE\.detectedAccounts\], activeTab\?\.url\);/);
   assert.match(popupSource, /from "\.\/lib\/popup-sync-progress\.js"/);
-  assert.match(popupSource, /syncProgressPresentation\(progressState\)/);
+  assert.match(popupSource, /syncProgressPresentation\(progressAccount \?/);
 });
 
 test("shows provider badges and account names separately", () => {

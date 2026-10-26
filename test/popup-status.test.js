@@ -167,3 +167,19 @@ test("configured inactive Shopee shop offers a connection check instead of retry
 test("inactive account does not turn another shop's dashboard into retry state", () => {
   assert.equal(currentAccountSyncFailure({ sync_error: "Old shop failed" }, { active_in_profile: false }), "");
 });
+
+test("session uncertainty and revoked access never appear ready because a socket remains open", () => {
+  const cases = {
+    waiting_for_tab: ["OPEN PROVIDER CHAT", /Open this account's provider chat/],
+    checking_session: ["CHECKING SESSION", /Commands are paused/],
+    wrong_account: ["ACCOUNT NOT AVAILABLE", /current provider login/],
+    needs_attention: ["SESSION NEEDS ATTENTION", /could not be verified/],
+  };
+  for (const [reason, [label, hint]] of Object.entries(cases)) {
+    const view = accountConnectionStatus({ socket: "connected", provider_recovery_state: "ready", eligibility_reason_code: reason });
+    assert.equal(view.label, label);
+    assert.match(view.hint, hint);
+    assert.notEqual(view.state, "ready");
+  }
+  assert.equal(accountConnectionStatus({ socket: "connected", provider_recovery_state: "ready", eligibility_reason_code: "ready" }).state, "ready");
+});

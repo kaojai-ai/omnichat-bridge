@@ -1,3 +1,4 @@
+import { createDiagnosticBuffer } from "../extension/lib/diagnostic-buffer.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -20,16 +21,18 @@ test("background accepts route diagnostics and stores sanitized correlation deta
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const allowStart = source.indexOf("const INBOUND_LOG_MESSAGES =");
   const allowEnd = source.indexOf("\n};", allowStart) + 3;
-  const recordStart = source.indexOf("async function recordLog(");
+  const recordStart = source.indexOf("let diagnosticsSuspended =");
   const recordEnd = source.indexOf("\nasync function recordUnexpected", recordStart);
   const listenerStart = source.indexOf("chrome.runtime.onMessage.addListener(");
   const listenerEnd = source.indexOf("\n});", listenerStart) + 4;
   const storage = {};
   let listener;
+  let buffer;
   const context = vm.createContext({
     chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } },
       storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
     STORAGE: { logs: "logs", logOutbox: "outbox" },
+    createDiagnosticBuffer: options => (buffer = createDiagnosticBuffer({ ...options, setTimer: () => 1, clearTimer: () => {} })),
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => null, hasServerInitialized: () => false,
@@ -47,6 +50,8 @@ test("background accepts route diagnostics and stores sanitized correlation deta
     }, {}, resolve), true);
   });
   assert.equal(response.ok, true);
+  assert.equal(storage.logs, undefined, "response acknowledges bounded admission, not a storage flush");
+  await buffer.flush();
   assert.equal(storage.logs.length, 1);
   const entry = storage.logs[0];
   assert.equal(entry.event, "send_route_resolution");
@@ -67,6 +72,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
       request_recipient_id: "123456789", payload_shop_id_state: "absent", payload_shop_matches_route: false,
       failure_kind: "provider_rejection", message_text: "private reply", request_url: "https://private.example?token=secret" },
   }, {}, resolve));
+  await buffer.flush();
   assert.equal(storage.logs[0].event, "send_failed");
   assert.equal(storage.logs[0].message, "Provider reply failed. See routing diagnostics.");
   assert.equal(storage.logs[0].details.native_error_code, "param_error");
@@ -88,6 +94,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
     details: { request_id: "fallback-1", fallback_reason: "missing", missing_fields: "to_id",
       warning_code: "SHOPEE_LEGACY_ROUTE_FALLBACK", cookie: "secret", message_text: "private" },
   }, {}, resolve));
+  await buffer.flush();
   assert.equal(storage.logs[0].level, "warn");
   assert.equal(storage.logs[0].event, "send_route_fallback");
   assert.match(storage.logs[0].message, /deprecated/);
@@ -317,29 +324,34 @@ test("unrecognized native codes cannot carry arbitrary provider strings into sup
 test("DEBUG stays available locally without consuming the remote outbox", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const storage = { upload: true };
-  const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
+  let buffer;
+  const record = vm.runInNewContext(source.slice(source.indexOf("let diagnosticsSuspended ="), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
     STORAGE: { logs: "logs", logOutbox: "outbox", logUploadEnabled: "upload" },
     chrome: { storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
     filterRoutineLog: (_level, _area, _event, details) => details,
+    createDiagnosticBuffer: options => (buffer = createDiagnosticBuffer({ ...options, setTimer: () => 1, clearTimer: () => {} })),
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => ({ config: { logs_url: "https://example.invalid" } }),
     hasServerInitialized: () => true, createLogEntry, pruneLogs, availableLogBudget,
-    scheduleLogUpload: () => {},
+    scheduleLogUpload: async () => {},
   });
   await record("debug", "live", "connecting", "Connecting.");
+  await buffer.flush();
   assert.equal(storage.logs.length, 1);
   assert.equal(storage.outbox.length, 0);
   await record("error", "provider", "recovery_failed", "Failed.");
+  await buffer.flush();
   assert.equal(storage.logs.length, 2);
   assert.equal(storage.outbox.length, 1);
 });
 
-test("log storage failure is nonthrowing and does not acknowledge persistence", async () => {
+test("diagnostic admission failure is nonthrowing and is not acknowledged", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
     filterRoutineLog: (_level, _area, _event, details) => details,
-    mutateLogs: async () => { throw new Error("Storage unavailable"); },
+    diagnosticsSuspended: false,
+    diagnosticBuffer: { enqueue: () => { throw new Error("Admission unavailable"); } },
   });
   assert.equal(await record("error", "provider", "recovery_failed", "Failed."), false);
 });

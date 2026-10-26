@@ -1,3 +1,4 @@
+import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -14,6 +15,7 @@ for (const currentId of ["A", "B", null]) {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
       shopeeAdapter: { id: "shopee" }, STORAGE: {},
       findReadyProviderChatTab: async () => ({ id: 42 }), findProviderChatTab: async () => null,
       detectOpenProviderAccount: async () => ({ ok: Boolean(currentId) }),
@@ -31,7 +33,8 @@ test("LINE-only sync does not inspect a Shopee session", async () => {
   const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
-      providerAutomaticRecoveries: new Map(),});
+      providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),});
   const contexts = [context("line_oa", "L1"), context("line_oa", "L2")];
   assert.equal(await select(contexts, { controller: { signal: {} } }), contexts);
 });
@@ -42,6 +45,7 @@ test("a failed fresh lookup cannot reuse the previous shop ID", async () => {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     shopeeAdapter: {}, STORAGE: {}, findReadyProviderChatTab: async () => ({ id: 42 }),
     detectOpenProviderAccount: async () => ({ ok: false }),
     providerTabStatus: async () => assert.fail("stale status must not be read"),
@@ -89,6 +93,7 @@ for (const failureAt of ["tab_lookup", "detection", "status"]) {
       hasLocalConsent: () => true, throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
       runAccountSync: async (_trigger, _control, account) => {
         synced.push(account.key);
         return { sent: 1 };
@@ -117,10 +122,13 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
+      sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
       recordLog: async (level, area, event) => logs.push({ level, area, event }),
       recordUnexpected: async () => logs.push({ level: "error", event: "failed" }),
       updateScopedState: async (_key, _account, value) => states.push(value),
-      attemptDelivery: async () => { throw Object.assign(new Error("Provider recovery ended."), superseded ? { reason_code: "superseded" } : { recovery_diagnostic_recorded: recorded }); },
+      attemptDelivery: async () => ({ sent: 0, pending: 0 }),
+      providerLabel: adapter => adapter.id,
+      syncOpenProvider: async () => { throw Object.assign(new Error("Provider recovery ended."), superseded ? { reason_code: "superseded" } : { recovery_diagnostic_recorded: recorded }); },
       readStorage: async () => ({}), readAccountState: (_stored, _key, fallback) => fallback,
     });
     const result = await run("manual", control, context("shopee", "A"));

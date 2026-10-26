@@ -3,7 +3,7 @@ type: Explanation
 title: Active-shop connection recovery
 description: Planned isolation of Shopee profiles and bounded connection recovery.
 created: "2026-10-14T11:22:00+07:00"
-updated: "2026-10-14T11:40:50+07:00"
+updated: "2026-10-26"
 ---
 
 # Active-shop connection recovery
@@ -106,3 +106,57 @@ Popup status colors use neutral gray for processing/waiting/setup, green for con
 ### Multiple Shopee tabs (Planned)
 
 The recovery watchdog rechecks available Shopee tabs instead of remaining attached to a closed mini-chat when another tab is healthy. A fresh healthy status for the matching account clears stale recovery attention in local live state. Existing LINE tab selection is unchanged. Regression coverage includes an old closed mini-chat plus a healthy replacement with automatic recovery both enabled and disabled, and ensures unhealthy or mismatched observations cannot clear attention. Chrome inspection showed this two-tab arrangement and the supplied logs showed successful Shopee recovery; runtime record ownership was not directly inspected. No user tabs are closed or refreshed as part of the investigation.
+
+## Planned reliability repair
+
+**Planned — implementation under review; no release implied.**
+
+Captured messages are acknowledged after local durable persistence. The ACK's
+`sent: 0` does not mean forwarding failed: delivery runs independently. Provider
+history requests remain sequential. Target forwarding permits two concurrent
+account batches, one per account, with FIFO batch slots and coalesced wakeups.
+A late upload reconciles only acknowledged identities against the latest queue.
+Pending data resumes through the existing startup/watchdog/retry-alarm paths.
+
+Diagnostics enter a bounded 256 KiB serialized buffer, flushed every second or
+100 entries; 25% is reserved for warnings/errors. The existing 4 MiB/two-day
+persisted retention and remote outbox are preserved. Persistence runs once per
+batch rather than once per entry. Worker suspension may lose the unflushed
+support-log tail; message persistence is independent and remains mandatory.
+Exports flush before reading. Erase discards the buffer and waits for in-flight
+log persistence before clearing storage. Buffer stats include drops, queue wait
+and persistence duration; sanitized debug timing records cover capture, provider
+bridge requests and target requests. These are measurements, not speedup claims.
+
+### Eligibility and uncertainty
+
+LINE selects configured accounts confirmed accessible in the current browser;
+Shopee selects the configured shop matching the verified login. A background tab
+is sufficient. Missing tabs display waiting-for-tab and are opened only with
+existing automatic recovery opt-in. Uncertain sessions block commands and retry
+at 5/15 seconds, displaying needs-attention after 30 seconds. Existing sockets
+may remain open during that bounded check; uncertainty never creates a socket.
+Wrong-account evidence blocks immediately. Session generations fence queued
+commands and manual/automatic recovery. A provider waiting for verification must
+not occupy the capture/storage queue. Unified recovery selects Shopee before
+LINE so a slow LINE access check cannot delay Shopee.
+
+### Readiness compatibility
+
+New reports retain `omnichat.connection_status` version 1 and add paired UUID
+`report_id` / positive integer `sequence`. Sequences belong to one WebSocket
+connection. The server sends `connection_status_ack` with the matching fields
+and `ok: true` only after persistence or an exact persisted retry. Retryable
+negative acknowledgements cover missing presence and persistence failure;
+stale connections/status and identity mismatch are rejected. The client retries
+at 1/2/4/8/16/30 seconds, then allows a later health check to publish again.
+The server uses a consistent base-table read and conditional sequence/connection
+writes; legacy reports remain supported. Release server support before enabling
+the new extension. No relational database migration or new cloud resources.
+
+Progress shows actual pages durably accepted, newly captured messages, pending
+count and last measurable progress; unknown totals stay indeterminate. Storage
+refreshes are coalesced; the visible log list shows at most 200 rows while
+exports contain all retained entries.
+
+[CTO proposal](https://omnichat-reliability-plan.kjteam.chatgpt.site)

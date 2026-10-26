@@ -22,8 +22,8 @@ import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 import { hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
-import { syncProgressPresentation } from "./lib/popup-sync-progress.js";
-import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus } from "./lib/popup-status.js";
+import { createCoalescedRefresh, syncProgressPresentation } from "./lib/popup-sync-progress.js";
+import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -102,6 +102,7 @@ let scanStates = null;
 let pendingStates = null;
 let extensionUpdate = null;
 let logs = [];
+const MAX_VISIBLE_LOGS = 200;
 let popupTabId = null;
 let storedConsent = null;
 let storedDeviceName = "";
@@ -485,6 +486,8 @@ function accountIsActiveHere(account) {
 }
 
 function inactiveShopHint(live) {
+  const session = sessionConnectionStatus(live);
+  if (session) return session.hint;
   if (live?.provider_session_reason_code === "session_conflict") return t("sessionConflict");
   const activeId = live?.active_provider_account_id;
   if (!activeId) return t("sessionUnverified");
@@ -498,6 +501,8 @@ function accountRowStatus(account) {
   if (!config) return { label: t("needConfig"), state: "neutral", action: "config" };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
+  const session = sessionConnectionStatus(live);
+  if (session) return session;
   if (account.provider === "shopee" && !accountIsActiveHere(account)) {
     return { label: t("inactiveShop"), state: "neutral", hint: inactiveShopHint(live) };
   }
@@ -505,7 +510,7 @@ function accountRowStatus(account) {
   if (retryError && Date.parse(syncState?.last_sync_at ?? "") > retryError.at) accountRetryErrors.delete(key);
   else if (retryError) return { label: t("failed"), state: "error", hint: retryError.message, action: "logs" };
   if (retryingAccounts.has(key) || ["discovering", "syncing"].includes(syncState?.state)) return {
-    label: account.provider === "line_oa" ? syncProgressPresentation(syncState)?.text || t("syncing") : t("syncing"),
+    label: syncProgressPresentation({ ...syncState, pending: readAccountState(pendingStates, key, []).length }, { locale: language })?.text || t("syncing"),
     state: "neutral", loading: true,
   };
   if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
@@ -655,6 +660,16 @@ function renderDetectedAccounts() {
       });
     }
     copy.append(name, statusLabel);
+    if (cardState.loading && account.provider === "line_oa") {
+      const progress = syncProgressPresentation(readAccountState(storedStatus, accountConfigKey(account), null));
+      if (progress) {
+        const bar = document.createElement("progress");
+        bar.max = 100;
+        if (progress.value !== null) bar.value = progress.value;
+        bar.setAttribute("aria-label", cardState.label);
+        copy.append(bar);
+      }
+    }
     if (account.provider === "line_oa" && (cardState.state === "error" || cardState.loading)) {
       const retry = document.createElement("button");
       retry.type = "button";
@@ -766,10 +781,12 @@ function renderDashboard(message = "", isError = false) {
     && configuredStates.some((item) => (
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
-  const progressState = configuredStates.find((item) => (
+  const progressAccount = configuredStates.find((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
-  ))?.syncState ?? null;
-  const progressView = syncProgressPresentation(progressState);
+  ));
+  const progressView = syncProgressPresentation(progressAccount ? {
+    ...progressAccount.syncState, pending: progressAccount.pending.length,
+  } : null, { locale: language });
   const latestResult = configuredStates
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
@@ -842,7 +859,9 @@ function renderDashboard(message = "", isError = false) {
   } else if (progressView?.active && !isError) {
     setStatusAppearance("neutral", true);
     syncProgress.hidden = !progressView.showBar;
-    syncProgress.value = progressView.value;
+    if (progressView.value === null) syncProgress.removeAttribute("value");
+    else syncProgress.value = progressView.value;
+    syncProgress.setAttribute("aria-label", progressView.text);
     progressArea.hidden = false;
     status.textContent = progressView.text;
   } else {
@@ -929,7 +948,12 @@ function renderLogs() {
   const visible = visibleLogs();
   openLogsButton.title = logs.length ? `Logs (${logs.length})` : "Logs";
   logList.replaceChildren();
-  for (const item of visible) {
+  const windowNote = document.querySelector("#log-window-note");
+  windowNote.hidden = visible.length <= MAX_VISIBLE_LOGS;
+  windowNote.textContent = language === "th"
+    ? `แสดง ${MAX_VISIBLE_LOGS} รายการล่าสุดจาก ${visible.length} รายการที่ตรงกับตัวกรอง · ส่งออก Logs ได้ครบทั้งหมด`
+    : `Showing latest ${MAX_VISIBLE_LOGS} of ${visible.length} matching entries · exports include all retained logs`;
+  for (const item of visible.slice(0, MAX_VISIBLE_LOGS)) {
     const row = document.createElement("div");
     const timestamp = Number.isFinite(Date.parse(item.at ?? ""))
       ? new Date(item.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
@@ -1346,8 +1370,15 @@ document.querySelector("#close-logs").addEventListener("click", () => {
   routeTo(screen);
   if (screen === "dashboard") renderDashboard();
 });
+async function prepareLogExport() {
+  const result = await chrome.runtime.sendMessage({ type: "flush_logs" });
+  if (!result?.ok) throw new Error("Could not persist the latest diagnostics. Retry the export.");
+  await loadLogs();
+}
+
 copyLogsButton.addEventListener("click", async () => {
   try {
+    await prepareLogExport();
     await navigator.clipboard.writeText(formatSupportLogs());
     copyLogsButton.textContent = t("copied");
   } catch {
@@ -1356,7 +1387,13 @@ copyLogsButton.addEventListener("click", async () => {
   setTimeout(() => { copyLogsButton.textContent = t("copy"); }, 1_200);
 });
 
-downloadLogsButton.addEventListener("click", () => {
+downloadLogsButton.addEventListener("click", async () => {
+  try {
+    await prepareLogExport();
+  } catch (error) {
+    reportPopupError("export_logs", error);
+    return;
+  }
   const url = URL.createObjectURL(new Blob([`${formatSupportLogs()}\n`], { type: "text/plain" }));
   const link = document.createElement("a");
   link.href = url;
@@ -1479,10 +1516,8 @@ document.querySelector("#export-config").addEventListener("click", () => {
 
 clearButton.addEventListener("click", async () => {
   if (!confirm("Erase all local extension data, including device name, accounts, consent, pending messages, sync cursors, and logs?")) return;
-  await chrome.alarms.clear("omnichat-delivery-retry");
-  await chrome.alarms.clear("omnichat-provider-health");
-  await chrome.alarms.clear("omnichat-log-upload");
-  await chrome.storage.local.clear();
+  const erased = await chrome.runtime.sendMessage({ type: "erase_local_data" });
+  if (!erased?.ok) throw new Error(erased?.error || "Could not erase local extension data.");
   storedConsent = null;
   storedConfig = emptyConfig();
   detectedAccounts = [];
@@ -1527,13 +1562,26 @@ updateExtensionButton.addEventListener("click", async () => {
   }
 });
 
+let stateRefreshPending = false;
+let logsRefreshPending = false;
+const scheduleStoredRefresh = createCoalescedRefresh(async () => {
+  const refreshState = stateRefreshPending;
+  const refreshLogs = logsRefreshPending;
+  stateRefreshPending = false;
+  logsRefreshPending = false;
+  if (refreshState) await refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
+  if (refreshLogs && !logsScreen.hidden) await loadLogs().catch((error) => reportPopupError("load_logs", error));
+});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.commandTab] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language] || changes[STORAGE.extensionUpdate]) {
-    void refreshStoredState().catch((error) => reportPopupError("refresh_state", error));
+    stateRefreshPending = true;
+    scheduleStoredRefresh();
   }
   if (changes[STORAGE.logs] && !logsScreen.hidden) {
-    void loadLogs().catch((error) => reportPopupError("load_logs", error));
+    logsRefreshPending = true;
+    scheduleStoredRefresh();
   }
 });
 
