@@ -157,7 +157,7 @@ Developed and maintained by [KaoJai.ai](https://kaojai.ai).
 
 [MIT](LICENSE)
 
-### LINE account access isolation (planned)
+### LINE account access isolation (0.7.9)
 
 The popup and sync select only configured accounts accessible to the current LINE
 login. Multiple accessible accounts remain supported. An account sync failure stays
