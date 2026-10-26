@@ -549,7 +549,7 @@ input[type="checkbox"] {
 }
 
 .account-row::before {
-  background: #98a2b3;
+  background: #d0d5dd;
   border-radius: 2px;
   bottom: 10px;
   content: "";
@@ -646,7 +646,6 @@ input[type="checkbox"] {
   vertical-align: middle;
   width: 6px;
 }
-.account-row-status[data-state="ready"][data-loading="false"]::before { background: #789989; }
 .account-row-status[data-state="error"][data-loading="false"]::before { background: #bc776f; }
 
 .account-row-status-link {
@@ -691,7 +690,7 @@ input[type="checkbox"] {
 .account-action:disabled { background: transparent; color: #98a2b3; opacity: .55; }
 .account-action:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
 .account-action-icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.account-row-copy > progress { width: 100%; height: 3px; accent-color: #98a2b3; }
+.account-row-copy > progress { width: 100%; height: 3px; }
 .account-row-line-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .account-row-id {
@@ -816,10 +815,26 @@ input[type="checkbox"] {
 .status-log-link:hover { color: var(--shopee-hover); }
 
 progress {
-  accent-color: var(--muted);
+  appearance: none;
+  -webkit-appearance: none;
+  background: #f2f4f7;
+  border: 0;
+  border-radius: 999px;
   height: 5px;
+  overflow: hidden;
   width: 100%;
 }
+progress::-webkit-progress-bar { background: #f2f4f7; border-radius: 999px; }
+progress::-webkit-progress-value { background: #b8c2cd; border-radius: 999px; }
+progress::-moz-progress-bar { background: #b8c2cd; border-radius: 999px; }
+progress:indeterminate {
+  animation: progress-pulse 1.6s linear infinite;
+  background: linear-gradient(90deg, #f2f4f7 30%, #d0d5dd 50%, #f2f4f7 70%);
+  background-size: 200% 100%;
+}
+progress:indeterminate::-webkit-progress-bar { background: transparent; }
+@keyframes progress-pulse { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { progress:indeterminate { animation: none; } }
 
 .screen-heading {
   align-items: center;
@@ -1107,4 +1122,22 @@ footer a:hover,
 #status[data-loading="true"]::before { margin-top: 2px; }
 @media (prefers-reduced-motion: reduce) {
   [data-loading="true"]::before { animation: none; }
+}
+
+/* A check marks an actual healthy state; pending and unknown states keep their own indicators. */
+#status[data-state="ready"][data-loading="false"] { display: block; }
+.account-row-status[data-state="ready"][data-loading="false"]::before,
+#status[data-state="ready"][data-loading="false"]::before {
+  animation: none;
+  background: transparent;
+  border: solid #238647;
+  border-width: 0 1.6px 1.6px 0;
+  border-radius: 0;
+  content: "";
+  display: inline-block;
+  height: 8px;
+  margin: 0 7px 2px 2px;
+  transform: rotate(45deg);
+  vertical-align: middle;
+  width: 4px;
 }
