@@ -107,7 +107,7 @@ test("detect and open-chat actions do not refresh metadata", async () => {
 
 test("separate metadata controls and presentation are removed", () => {
   assert.doesNotMatch(source, /account-metadata-refresh|metadataRefreshResults|refreshAccountMetadata\(/);
-  assert.doesNotMatch(source, /Refresh account & customer info|รีเฟรชข้อมูลบัญชีและลูกค้า/);
+  assert.doesNotMatch(source, /refreshMetadata:|refreshingMetadata:|metadataRefreshFailed:/);
   const autoStart = source.slice(source.indexOf("async function autoStartSync("), source.indexOf("async function load()"));
   assert.doesNotMatch(autoStart, /refresh_metadata/);
 });

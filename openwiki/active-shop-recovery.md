@@ -247,3 +247,7 @@ Selected tabs are persisted only when changed; repeated selections reuse an in-m
 ### Planned: submit diagnostics on demand
 
 Diagnostic logs remain bounded and stored locally. Remote uploads happen only when the user clicks **Submit** on the Logs page; startup clears the former upload alarm. A submission snapshots queued operational diagnostics, sends sequential batches of up to 100 entries, and coalesces repeated clicks. Failed batches remain queued for a later manual submission, with no scheduled retry. Download and Copy remain local exports including all retained log levels. Submit is highlighted after Download; Copy and Clear sit below the logs.
+
+### Planned: bottom sync status
+
+The popup bottom status displays the active account and reported recovery phase with available conversation/message counters, including accounts outside the currently visible provider view during a combined sync. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.

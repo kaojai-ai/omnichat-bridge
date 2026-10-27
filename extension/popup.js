@@ -155,7 +155,7 @@ const TRANSLATIONS = {
     logsSubmitted: (count) => `Submitted ${count} log entries.`, logsSubmitRemaining: (count) => `${count} entries remain. Submit again to send them.`,
     lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.",
     checkConnection: "Check connection", inactiveShop: "Not active in this browser", activeShopContext: (shop) => `Active Shopee shop: ${shop}.`, separateProfiles: "Use a separate Chrome profile for each Shopee login to keep shops connected at the same time.", sessionUnverified: "The active Shopee shop is not verified yet. Open its chat to check the session.", sessionConflict: "Shopee tabs report different shops. Keep one Shopee login per Chrome profile, then refresh its chat.",
-    failed: "FAILED", syncFailed: "Sync failed", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Starting a fresh sync…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NOT READY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
+    failed: "FAILED", syncFailed: "Sync failed", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Preparing message sync…", refreshingInfo: "Refreshing account and customer info…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NOT READY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
@@ -166,6 +166,7 @@ const TRANSLATIONS = {
     logsSubmitted: (count) => `ส่ง Logs แล้ว ${count} รายการ`, logsSubmitRemaining: (count) => `เหลือ ${count} รายการ กดส่งอีกครั้งเพื่อส่งรายการที่เหลือ`,
     lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
     checkConnection: "ตรวจสอบการเชื่อมต่อ", inactiveShop: "ไม่ได้ใช้งานในเบราว์เซอร์นี้", activeShopContext: (shop) => `ร้าน Shopee ที่ใช้งานอยู่: ${shop}`, separateProfiles: "ใช้โปรไฟล์ Chrome แยกสำหรับแต่ละบัญชี Shopee เพื่อเชื่อมต่อหลายร้านพร้อมกัน", sessionUnverified: "ยังยืนยันร้าน Shopee ที่ใช้งานอยู่ไม่ได้ เปิดแชตของร้านเพื่อตรวจสอบเซสชัน", sessionConflict: "แท็บ Shopee รายงานร้านไม่ตรงกัน ใช้บัญชี Shopee เดียวต่อโปรไฟล์ Chrome แล้วรีเฟรชแชตของร้าน",
+    refreshingInfo: "กำลังรีเฟรชข้อมูลบัญชีและลูกค้า…",
     failed: "ไม่สำเร็จ", syncFailed: "ซิงค์ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ยังไม่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", allCaughtUp: "ซิงค์ครบแล้ว", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", thisBrowser: "เบราว์เซอร์นี้", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
   },
 };
@@ -774,7 +775,7 @@ function renderDashboard(message = "", isError = false) {
     && configuredStates.some((item) => (
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
-  const progressAccount = configuredStates.find((item) => (
+  const progressAccount = accountStates.filter((item) => item.config).find((item) => (
     ["discovering", "syncing"].includes(item.syncState?.state)
   ));
   const latestResult = configuredStates
@@ -840,9 +841,12 @@ function renderDashboard(message = "", isError = false) {
   }
 
   if (progressAccount && !message && !isError) {
-    // Both providers own progress in their account row; avoid a second copy.
-    progressArea.hidden = true;
-    setStatusAppearance("neutral");
+    const progress = syncProgressPresentation({ ...progressAccount.syncState,
+      pending: progressAccount.pending.length }, { locale: language });
+    const label = accountDisplayLabel(progressAccount.account, adapterForAccount(progressAccount.account));
+    progressArea.hidden = false;
+    status.textContent = `${label} · ${progress.text}`;
+    setStatusAppearance("neutral", progressAccount.syncState.phase !== "queued");
   } else {
     const resultMessage = message
       || (pendingAction ? t(pendingAction) : "")
@@ -1248,11 +1252,15 @@ syncButton.addEventListener("click", async () => {
     await requestTargetPermission(accountOrigins(storedConfig));
     if (actionId !== syncActionId) return;
     const accounts = storedConfig.accounts.filter((account) => !provider || account.provider === provider);
+    pendingAction = "refreshingInfo";
+    renderDashboard();
     // Display refresh is best effort; existing provider limits bound each request.
     await Promise.allSettled(accounts.map(async (account) => chrome.runtime.sendMessage({
       type: "refresh_metadata", provider: account.provider, provider_account_id: account.provider_account_id,
     })));
     if (actionId !== syncActionId) return;
+    pendingAction = "checking";
+    renderDashboard();
     const result = await chrome.runtime.sendMessage({
       type: "sync_now",
       ...(provider ? { provider } : {}),

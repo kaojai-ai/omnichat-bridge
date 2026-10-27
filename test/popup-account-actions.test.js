@@ -98,3 +98,25 @@ for (const provider of ["line_oa", "shopee"]) {
       "local pending-data actions remain available independently of recovery capability");
   });
 }
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`bottom status shows actual ${provider} recovery phase and account`, () => {
+    const start = source.indexOf("    const progress = syncProgressPresentation({ ...progressAccount.syncState,");
+    const end = source.indexOf("\n  } else {", start);
+    const status = {};
+    const progressArea = {};
+    let spinning;
+    vm.runInNewContext(source.slice(start, end), {
+      progressAccount: { account: { provider, display_name: "Test Shop" }, pending: [],
+        syncState: { state: "syncing", phase: "fetching_messages", completed_conversations: 2, total_conversations: 4 } },
+      syncProgressPresentation, language: "en", status, progressArea,
+      accountDisplayLabel: account => `${account.provider}: ${account.display_name}`,
+      adapterForAccount: () => ({}), setStatusAppearance: (_, loading) => { spinning = loading; },
+    });
+    assert.equal(progressArea.hidden, false);
+    assert.match(status.textContent, new RegExp(provider + ": Test Shop"));
+    assert.match(status.textContent, /Recovering conversation messages/);
+    assert.match(status.textContent, /2 of 4 conversations/);
+    assert.equal(spinning, true);
+  });
+}
