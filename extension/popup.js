@@ -108,6 +108,9 @@ let activeProviderAdapter = null;
 let activeProviderSurface = null;
 let isProviderChatTab = false;
 let language = defaultLanguage();
+let liveRefreshTimer = null;
+let liveRefreshPending = null;
+let popupClosed = false;
 
 function renderExtensionUpdate(update) {
   const installedVersion = chrome.runtime.getManifest().version;
@@ -253,6 +256,7 @@ function routeTo(target) {
   setHeaderActionsVisible(screen === "dashboard");
   setSettingsButtonVisible(consented() && !onConsentGate && screen !== "config" && screen !== "logs");
   if (onConsentGate) renderConsentScreen();
+  updateLiveRefresh();
 }
 
 async function currentActiveTabUrl() {
@@ -1555,10 +1559,41 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-void load().then(() => {
-  if (consented()) void chrome.runtime.sendMessage({ type: "get_live_state" })
-    .catch((error) => reportPopupError("leader_status", error));
-}).catch((error) => {
+function canRefreshLiveState() {
+  return !popupClosed && consented() && !dashboardScreen.hidden && document.visibilityState === "visible";
+}
+
+function refreshLiveState() {
+  if (!canRefreshLiveState()) return Promise.resolve();
+  if (liveRefreshPending) return liveRefreshPending;
+  liveRefreshPending = Promise.resolve().then(() => chrome.runtime.sendMessage({ type: "get_live_state" }))
+    .catch((error) => reportPopupError("leader_status", error))
+    .finally(() => { liveRefreshPending = null; });
+  return liveRefreshPending;
+}
+
+function updateLiveRefresh() {
+  if (!canRefreshLiveState()) {
+    clearInterval(liveRefreshTimer);
+    liveRefreshTimer = null;
+    return;
+  }
+  if (liveRefreshTimer !== null) return;
+  liveRefreshTimer = setInterval(() => { void refreshLiveState(); }, 60_000);
+  void refreshLiveState();
+}
+
+document.addEventListener("visibilitychange", updateLiveRefresh);
+window.addEventListener("focus", () => {
+  updateLiveRefresh();
+  void refreshLiveState();
+});
+window.addEventListener("pagehide", () => {
+  popupClosed = true;
+  updateLiveRefresh();
+});
+
+void load().catch((error) => {
   reportPopupError("load", error);
   storedConsent = null;
   routeTo("consent");
