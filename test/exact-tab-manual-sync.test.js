@@ -128,3 +128,18 @@ test("exact LINE metadata refresh rejects another accessible bot without fallbac
   await assert.rejects(h.runtime.refreshAccountMetadata("line_oa", "B", 42), /Open this LINE account/);
   assert.equal(h.calls.length, 0);
 });
+
+test("tab-scoped cancellation waits for old recovery cleanup before a fresh sync", async () => {
+  const h = fixture("shopee");
+  let finish;
+  const completion = new Promise(resolve => { finish = resolve; });
+  const control = { controller: new AbortController(), tabId: 42, adapter: { id: "shopee" }, completion };
+  h.recoveries.set("shopee:A", control);
+  let settled = false;
+  const cancelled = h.runtime.cancelActiveSync("shopee", 42).then(result => { settled = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(control.controller.signal.aborted, true);
+  assert.equal(settled, false);
+  finish();
+  assert.equal((await cancelled).cancelled, true);
+});

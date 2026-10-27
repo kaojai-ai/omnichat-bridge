@@ -75,7 +75,10 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         return { ok: sendStatus === 200, status: sendStatus, json: async () => { if (sendNonJson) throw new SyntaxError("secret provider HTML"); return sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody; } };
       }
       if (url.pathname === "/api/v1/bots") {
-        if (beforeAccountRequest) await beforeAccountRequest();
+        if (beforeAccountRequest) {
+          const response = await beforeAccountRequest();
+          if (response) return response;
+        }
         if (accountError) throw accountError;
         return {
           ok: true,
@@ -105,7 +108,10 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
-        if (beforeMessageRequest) await beforeMessageRequest(url);
+        if (beforeMessageRequest) {
+          const response = await beforeMessageRequest(url);
+          if (response) return response;
+        }
         if (messagePages) return { ok: true, json: async () => messagePages[url.searchParams.get("backward") ?? "first"] ?? { list: [] } };
         if (sentPayloads.length && confirmError) throw confirmError;
         if (sentPayloads.length && sendResponseBody === undefined) {
@@ -319,6 +325,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       fixtureNow = null;
       throw new Error("LINE OA recovery did not complete.");
     },
+    resetRecovery(reason) { return context.window.__omnichatLineOABridgeControl.resetRecovery(reason); },
     dispose() {
       context.window.__omnichatLineOABridgeControl.dispose();
     },
@@ -1388,4 +1395,102 @@ test("LINE OA send authorization rejection immediately reports a confirmed faile
     assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
     assert.equal(lastPollingStatus(bridge).account_access_verified, false);
   } finally { bridge.dispose(); }
+});
+
+
+for (const staleOutcome of ["success", "authorization failure"]) {
+  test(`LINE reset fences an old account ${staleOutcome} without clearing its replacement probe`, async () => {
+    let probes = 0;
+    let releaseOld;
+    let releaseNew;
+    const oldGate = new Promise(resolve => { releaseOld = resolve; });
+    const newGate = new Promise(resolve => { releaseNew = resolve; });
+    const bridge = createBridge({ chatCount: 0,
+      beforeAccountRequest: async () => {
+        const current = ++probes;
+        if (current === 1) {
+          await oldGate;
+          if (staleOutcome === "authorization failure") return { ok: false, status: 401, json: async () => ({ code: "UNAUTHORIZED" }) };
+        } else if (current === 2) await newGate;
+      },
+    });
+    try {
+      bridge.dispatch({ type: "detect_account_v3", request_id: "old-check" });
+      await settleBridge();
+      assert.equal(probes, 1);
+      assert.equal(bridge.resetRecovery("Fresh manual sync"), false);
+      assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+      assert.equal(lastPollingStatus(bridge).last_provider_check_at, null);
+      bridge.dispatch({ type: "detect_account_v3", request_id: "new-check" });
+      await settleBridge();
+      assert.equal(probes, 2);
+      releaseOld();
+      await settleBridge();
+      assert.equal(bridge.posts.find(post => post.request_id === "old-check")?.type, "account_detection_failed");
+      assert.equal(lastPollingStatus(bridge).provider_check_outcome, "unknown");
+      assert.equal(lastPollingStatus(bridge).last_provider_check_at, null);
+      bridge.dispatch({ type: "detect_account_v3", request_id: "shared-new-check" });
+      await settleBridge();
+      assert.equal(probes, 2, "old finally must not clear the replacement in-flight probe");
+      releaseNew();
+      await settleBridge();
+      assert.equal(bridge.posts.find(post => post.request_id === "new-check")?.type, "accounts_detected");
+      assert.equal(bridge.posts.find(post => post.request_id === "shared-new-check")?.type, "accounts_detected");
+      assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    } finally { releaseOld(); releaseNew(); bridge.dispose(); }
+  });
+}
+
+test("LINE reset stops recovery bookkeeping and preserves explicit-send profiles without replay", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  try {
+    await bridge.sync();
+    await bridge.captureManualSend({ type: "text", text: "Fixture manual message", sendId: "fixture-manual-send" });
+    const before = bridge.sentPayloads.length;
+    assert.equal(bridge.resetRecovery("Fresh manual sync"), true);
+    assert.equal(bridge.intervalCount, 0);
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, []);
+    assert.equal(bridge.resetRecovery("Already clean"), false);
+    bridge.tick();
+    await settleBridge();
+    assert.equal(bridge.sentPayloads.length, before);
+    const accountRequests = bridge.requests.filter(url => url.pathname === "/api/v1/bots").length;
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture explicit reply" });
+    assert.equal(result.ok, true);
+    assert.equal(bridge.sentPayloads.length, before + 1);
+    assert.equal(bridge.sentPayloads.at(-1).headers["x-oa-chat-client-version"], "observed-version");
+    assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, accountRequests + 1);
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE reset ignores a stale polling 401 after a fresh account check passes", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  let messageRequests = 0;
+  const bridge = createBridge({ chatCount: 1,
+    beforeMessageRequest: async () => {
+      messageRequests++;
+      await pending;
+      return { ok: false, status: 401, json: async () => ({ code: "UNAUTHORIZED" }) };
+    },
+  });
+  try {
+    bridge.dispatch({ type: "sync_v3", request_id: "old-poll", provider_account_id: "@exampleoa", bot_id: "bot-1", checkpoint: { watermark: new Date(900).toISOString() } });
+    await settleBridge();
+    assert.equal(messageRequests, 1);
+    assert.equal(bridge.resetRecovery("Manual recovery restarted"), true);
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+    const statusPosts = bridge.posts.filter(post => post.type === "provider_status").length;
+    release();
+    await settleBridge();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+    assert.equal(bridge.posts.filter(post => post.type === "provider_status").length, statusPosts);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_complete" && post.request_id === "old-poll"), false);
+    assert.equal(bridge.sentPayloads.length, 0);
+  } finally { release(); bridge.dispose(); }
 });

@@ -91,7 +91,7 @@ const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 9;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 4;
 // Bump when an open Shopee page must replace its main-world bridge.
 const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
 const MAX_BATCH_MESSAGES = 500;
@@ -899,6 +899,11 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "prepare_sync_tab") {
+    void prepareSyncTab(message.provider, message.tab_id).then(respond,
+      () => respond({ ok: false, error: "Could not refresh this tab. Open its provider chat and sync again." }));
+    return true;
+  }
   if (message?.type === "refresh_metadata") {
     void refreshAccountMetadata(message.provider, message.provider_account_id, message.tab_id).then(respond,
       () => respond({ ok: false, error: "Metadata refresh failed. Cached information was kept." }));
@@ -2022,12 +2027,13 @@ function startUnattendedProviderSync(tab, context) {
     accountKey: recoveryKey,
     sessionGeneration: sessionEligibility.generation(context.key),
   };
-  void runAccountSync("automatic", control, context).then((result) => {
+  control.completion = runAccountSync("automatic", control, context).then((result) => {
     if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
     providerAutomaticRetryAt.delete(recoveryKey);
     return result;
   }).catch(async (error) => {
+    if (control.controller.signal.aborted && error?.name === "AbortError") return;
     const attempts = (providerAutomaticRetryAttempts.get(recoveryKey) ?? 0) + 1;
     providerAutomaticRetryAttempts.set(recoveryKey, attempts);
     providerAutomaticRetryAt.set(recoveryKey, Date.now() + Math.min(30 * 60_000, 60_000 * (2 ** Math.min(attempts - 1, 5))));
@@ -3089,6 +3095,44 @@ async function providerChatTabById(adapter, tabId) {
   }
 }
 
+const syncTabPreparations = new Map();
+function prepareSyncTab(provider, tabId) {
+  const key = `${provider}:${tabId}`;
+  if (syncTabPreparations.has(key)) return syncTabPreparations.get(key);
+  const task = refreshSyncTab(provider, tabId).finally(() => {
+    if (syncTabPreparations.get(key) === task) syncTabPreparations.delete(key);
+  });
+  syncTabPreparations.set(key, task);
+  return task;
+}
+
+async function refreshSyncTab(provider, tabId) {
+  const adapter = providerAdapterForId(provider);
+  if (!adapter || !Number.isInteger(tabId) || tabId <= 0) throw new Error("Open a provider chat to sync.");
+  const stored = await readStorage([STORAGE.consent]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Consent required.");
+  const tab = await providerChatTabById(adapter, tabId);
+  if (!tab) throw new Error("The selected provider tab is no longer open.");
+  await cancelActiveSync(provider, tabId);
+  providerBridgeChecks.delete(tabId);
+  // Fence pending probes without closing a healthy command socket.
+  providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
+  for (const [key, evidenceTabId] of providerPolicyTabIds) {
+    if (evidenceTabId === tabId) sessionEligibility.reset(key);
+  }
+  const context = providerTabContext(tab, provider);
+  await ensureProviderBridge(tabId, adapter);
+  const cancelled = await sendProviderMessage(tabId, { type: "cancel_sync_v3", provider }, {
+    label: providerLabel(adapter), operation: "prepare sync", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+  });
+  if (!cancelled?.ok) throw new Error("Could not reset this tab's recovery.");
+  await resetProviderRecovery(tabId);
+  const current = await providerChatTabById(adapter, tabId);
+  if (!current || context !== providerTabContext(current, provider)) throw new Error("Page changed. Sync again.");
+  await recordLog("info", "sync", "tab_refreshed", "Temporary sync state refreshed for the selected tab.", { provider, tab_id: tabId });
+  return { ok: true };
+}
+
 async function exactProviderAccountTab(context, tabId) {
   if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("A valid provider tab is required.");
   const tab = await providerChatTabById(context.adapter, tabId);
@@ -3432,7 +3476,7 @@ async function resetProviderRecovery(tabId) {
     world: "MAIN",
     func: () => {
       const reason = "Provider bridge reconnected; retrying recovery.";
-      const control = window.__omnichatRealtimeBridgeControl;
+      const control = window.__omnichatLineOABridgeControl ?? window.__omnichatRealtimeBridgeControl;
       if (typeof control?.resetRecovery === "function") {
         return { ok: true, hadRecovery: Boolean(control.resetRecovery(reason)) };
       }
@@ -3757,7 +3801,14 @@ function sendProviderMessage(tabId, message, {
   const startedAt = performance.now();
   if (signal?.aborted) return Promise.reject(syncCancelledError());
   const response = Promise.resolve()
-    .then(() => chrome.tabs.sendMessage(tabId, message));
+    .then(() => chrome.tabs.sendMessage(tabId, message)).catch((error) => {
+      // Chrome supplies this specific lifecycle error. Keep it a failed operation,
+      // with a useful message; never classify it as cancellation or retry a send.
+      if (String(error?.message ?? error).includes("moved into back/forward cache")) {
+        throw Object.assign(new Error("Page changed. Sync again."), { reason_code: "provider_page_changed", cause: error });
+      }
+      throw error;
+    });
   const deadline = new Promise((_, reject) => {
     const touch = () => {
       clearTimeout(timeout);
@@ -3944,7 +3995,8 @@ async function retryProviderAccount(message) {
   providerAutomaticRecoveries.set(context.key, control);
   try {
     await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));
-    return await runAccountSync("manual", control, context);
+    control.completion = runAccountSync("manual", control, context);
+    return await control.completion;
   } finally {
     if (providerAutomaticRecoveries.get(context.key) === control) providerAutomaticRecoveries.delete(context.key);
     void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
@@ -4000,12 +4052,14 @@ async function cancelActiveSync(provider = null, requestedTabId = null) {
     const controls = [...new Set([activeSyncControl, ...providerAutomaticRecoveries.values()])]
       .filter((control) => control && control.tabId === requestedTabId
         && (!provider || control.adapter?.id === provider || control.accountKey?.startsWith(`${provider}:`)));
+    const completions = controls.map(control => control === activeSyncControl ? activeSync : control.completion).filter(Boolean);
     for (const control of controls) control.controller.abort();
     await Promise.allSettled(controls.map((control) => sendProviderMessage(requestedTabId, {
       type: "cancel_sync_v3", provider,
       ...(control.providerAccountId ? { provider_account_id: control.providerAccountId } : {}),
       ...(control.providerRequestId ? { request_id: control.providerRequestId } : {}),
     }, { label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS })));
+    await Promise.allSettled(completions);
     return { cancelled: controls.length > 0 };
   }
   if (provider === "line_oa") {

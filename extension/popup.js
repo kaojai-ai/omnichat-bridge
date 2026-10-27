@@ -1249,6 +1249,9 @@ syncButton.addEventListener("click", async () => {
     const tab = await chrome.tabs.get(popupTabId);
     const provider = providerAdapters.forPage(tab?.url)?.id;
     if (!provider) throw new Error("Open the provider account chat to sync.");
+    const prepared = await chrome.runtime.sendMessage({ type: "prepare_sync_tab", provider, tab_id: tab.id });
+    if (actionId !== syncActionId) return;
+    if (!prepared?.ok) throw new Error(prepared?.error || "Could not refresh this tab. Sync again.");
     const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
     const account = detected?.ok ? currentTabAccount(storedConfig, detected.accounts, provider, tab.url) : null;
     if (!account) throw new Error("Could not identify the configured account in this tab. Open its chat and retry.");

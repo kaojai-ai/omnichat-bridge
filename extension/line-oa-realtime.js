@@ -2,7 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_VERSION = "line-oa-poll-11";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 3;
+  const COMPATIBILITY_VERSION = 4;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -169,9 +169,9 @@
   async function availableAccounts() {
     if (accountAccessRequest) return accountAccessRequest;
     const sessionEpoch = metadataSessionEpoch;
-    accountAccessRequest = (async () => {
+    const request = (async () => {
       try {
-        const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
+        const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`, REQUEST_TIMEOUT_MS, sessionEpoch);
         if (!Array.isArray(body?.list)) throw new Error("LINE OA account list was invalid.");
         const accounts = body.list.map((bot) => ({
           provider_account_id: normalizeBasicId(bot?.basicSearchId ?? bot?.basicId),
@@ -191,11 +191,12 @@
         postProviderStatus();
         return accounts;
       } catch (error) {
-        markProviderCheckFailure(error);
+        if (accountAccessRequest === request && sessionEpoch === metadataSessionEpoch) markProviderCheckFailure(error);
         throw error;
       }
-    })().finally(() => { accountAccessRequest = null; });
-    return accountAccessRequest;
+    })().finally(() => { if (accountAccessRequest === request) accountAccessRequest = null; });
+    accountAccessRequest = request;
+    return request;
   }
 
   async function resolveBotId(providerAccountId) {
@@ -225,11 +226,19 @@
     return checkpointMs <= 0 || latestEventMs <= 0 || latestEventMs >= checkpointMs;
   }
 
-  async function json(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  function supersededAccountCheck() {
+    const error = new Error("LINE OA account check was superseded by a session change.");
+    error.reason_code = "superseded";
+    return error;
+  }
+
+  async function json(url, timeoutMs = REQUEST_TIMEOUT_MS, accountEpoch = metadataSessionEpoch) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const timeout = setTimeout(() => controller?.abort(), Math.max(1, Math.min(REQUEST_TIMEOUT_MS, timeoutMs)));
     try {
-      const response = await fetch(url, {
+      // Bridge-owned reads apply their session guard before publishing status;
+      // the advisory page-fetch observer must not classify a stale response.
+      const response = await nativeFetch(url, {
         credentials: "include",
         headers: { accept: "application/json" },
         ...(controller ? { signal: controller.signal } : {}),
@@ -242,9 +251,11 @@
         throw error;
       }
       const body = await response.json();
+      if (accountEpoch !== metadataSessionEpoch) throw supersededAccountCheck();
       lastProviderCheckAt = new Date().toISOString();
       return body;
     } catch (error) {
+      if (accountEpoch !== metadataSessionEpoch) throw supersededAccountCheck();
       const failure = error?.name === "AbortError" ? new Error("LINE OA request timed out.") : error;
       failure.providerCheckUnavailable = true;
       if ([401, 403].includes(failure?.providerDiagnostics?.http_status)) markProviderCheckFailure(failure);
@@ -846,6 +857,18 @@
     }
   }
 
+  function resetRecovery(reason = "LINE OA recovery was reset.") {
+    const hadRecovery = Boolean(activePoll || queuedSyncs.length || pollingAccounts.size || timer || acknowledgements.size);
+    metadataSessionEpoch += 1;
+    accountAccessRequest = null;
+    accessibleAccounts = [];
+    accountAccessVerified = false;
+    providerCheckOutcome = "unknown";
+    lastProviderCheckAt = null;
+    cancelPolling(reason, { notifyRequests: false });
+    return hadRecovery;
+  }
+
   function sendId(conversationId) {
     return `${conversationId}_${Date.now()}_${Math.floor(Math.random() * 100_000_000).toString().padStart(8, "0")}`;
   }
@@ -1197,6 +1220,7 @@
     metadata_refresh: true,
     bounded_message_ids: true,
     grace_classification: true,
+    resetRecovery,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

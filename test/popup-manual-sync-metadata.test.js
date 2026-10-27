@@ -60,6 +60,7 @@ for (const provider of ["shopee", "line_oa"]) {
     await turn();
     h.allowPermission();
     await turn();
+    assert.deepEqual(h.requests.slice(0, 2).map(value => value.type), ["prepare_sync_tab", "detect_account"]);
     const expected = accounts.find(account => account.provider === provider);
     const refreshes = h.requests.filter(value => value.type === "refresh_metadata");
     assert.deepEqual(refreshes.map(value => value.provider_account_id), [expected.provider_account_id]);
@@ -124,5 +125,5 @@ test("separate metadata controls and presentation are removed", () => {
 test("unidentified current account stops before refresh or sync", async () => {
   const h = harness({ unknown: true });
   await h.click();
-  assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
+  assert.deepEqual(h.requests.map(value => value.type), ["prepare_sync_tab", "detect_account"]);
 });

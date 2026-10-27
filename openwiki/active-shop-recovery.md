@@ -253,3 +253,9 @@ Diagnostic logs remain bounded and stored locally. Remote uploads happen only wh
 The popup bottom status displays the active account and reported recovery phase with available conversation/message counters. Manual Sync messages operates only on the account open in the current tab. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.
 
 Logs controls place a full-width Copy below the log list and a red Clear logs text link underneath. Clearing still requires confirmation.
+
+### Planned: manual Sync refreshes temporary tab state
+
+Sync messages first cancels and drains recovery already running in the selected tab, then invalidates that tab's temporary bridge verification, provider probes, and readiness evidence. It verifies or repairs the bridge and resets page recovery bookkeeping before detecting the current account, refreshing display metadata, and resuming from the saved checkpoint. A healthy command socket stays open. Other tabs, durable pending messages, saved checkpoints, outgoing command protection, and provider send profiles are preserved.
+
+LINE resets cached account-access evidence and starts a fresh probe. Pre-reset probe/poll responses cannot overwrite fresh readiness. A Chrome BFCache channel closure remains a failed operation with the short message “Page changed. Sync again.”; it never becomes an automatic outgoing retry. Manual Sync cannot prevent navigation during a recovery.
