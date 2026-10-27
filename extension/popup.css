@@ -1156,26 +1156,6 @@ footer a:hover,
   width: 4px;
 }
 
-
-.account-metadata-refresh {
-  justify-self: start;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-  font-size: 10px;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.account-metadata-refresh:hover { color: var(--ink); }
-.account-metadata-refresh:disabled { cursor: wait; opacity: 0.65; }
-.account-metadata-refresh:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-.account-metadata-result { color: var(--muted); font-size: 10px; line-height: 1.4; }
-.account-metadata-result[data-failed="true"] { color: #a34c43; }
-
 .log-bottom-actions { align-items: center; display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .log-submit-status { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 8px 0; }
 .log-submit-status[data-state="error"] { color: var(--danger); }

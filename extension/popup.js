@@ -95,8 +95,6 @@ let detectedAccounts = [];
 let pageAccounts = [];
 const retryingAccounts = new Set();
 const accountRetryErrors = new Map();
-const metadataRefreshes = new Map();
-const metadataRefreshResults = new Map();
 let storedStatus = null;
 let liveState = null;
 let scanStates = null;
@@ -155,9 +153,6 @@ const TRANSLATIONS = {
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", thisBrowser: "This browser", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
     submitLogs: "Submit", submittingLogs: "Submitting…", logsSubmitFailed: "Could not submit logs. Please try again.",
     logsSubmitted: (count) => `Submitted ${count} log entries.`, logsSubmitRemaining: (count) => `${count} entries remain. Submit again to send them.`,
-    refreshMetadata: "Refresh account & customer info", refreshingMetadata: "Refreshing info…", metadataRefreshFailed: "Could not refresh info. Cached info was kept.",
-    metadataRefreshed: (count) => `Refreshed ${count} recent customer${count === 1 ? "" : "s"}.`,
-    metadataPartial: "Some info could not be refreshed.", metadataAccountSkipped: "Account info could not be refreshed.", metadataOlder: "Up to 100 recent conversations; older customers may remain unchanged.",
     lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.",
     checkConnection: "Check connection", inactiveShop: "Not active in this browser", activeShopContext: (shop) => `Active Shopee shop: ${shop}.`, separateProfiles: "Use a separate Chrome profile for each Shopee login to keep shops connected at the same time.", sessionUnverified: "The active Shopee shop is not verified yet. Open its chat to check the session.", sessionConflict: "Shopee tabs report different shops. Keep one Shopee login per Chrome profile, then refresh its chat.",
     failed: "FAILED", syncFailed: "Sync failed", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", restarting: "Starting a fresh sync…", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NOT READY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking for missed messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
@@ -169,9 +164,6 @@ const TRANSLATIONS = {
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
     submitLogs: "ส่ง Logs", submittingLogs: "กำลังส่ง…", logsSubmitFailed: "ส่ง Logs ไม่สำเร็จ กรุณาลองอีกครั้ง",
     logsSubmitted: (count) => `ส่ง Logs แล้ว ${count} รายการ`, logsSubmitRemaining: (count) => `เหลือ ${count} รายการ กดส่งอีกครั้งเพื่อส่งรายการที่เหลือ`,
-    refreshMetadata: "รีเฟรชข้อมูลบัญชีและลูกค้า", refreshingMetadata: "กำลังรีเฟรชข้อมูล…", metadataRefreshFailed: "รีเฟรชข้อมูลไม่สำเร็จ ยังคงใช้ข้อมูลที่บันทึกไว้",
-    metadataRefreshed: (count) => `รีเฟรชข้อมูลลูกค้าล่าสุดแล้ว ${count} ราย`,
-    metadataPartial: "รีเฟรชข้อมูลบางส่วนไม่ได้", metadataAccountSkipped: "รีเฟรชข้อมูลบัญชีไม่ได้", metadataOlder: "สูงสุด 100 บทสนทนาล่าสุด ข้อมูลลูกค้าเก่าอาจยังไม่เปลี่ยนแปลง",
     lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
     checkConnection: "ตรวจสอบการเชื่อมต่อ", inactiveShop: "ไม่ได้ใช้งานในเบราว์เซอร์นี้", activeShopContext: (shop) => `ร้าน Shopee ที่ใช้งานอยู่: ${shop}`, separateProfiles: "ใช้โปรไฟล์ Chrome แยกสำหรับแต่ละบัญชี Shopee เพื่อเชื่อมต่อหลายร้านพร้อมกัน", sessionUnverified: "ยังยืนยันร้าน Shopee ที่ใช้งานอยู่ไม่ได้ เปิดแชตของร้านเพื่อตรวจสอบเซสชัน", sessionConflict: "แท็บ Shopee รายงานร้านไม่ตรงกัน ใช้บัญชี Shopee เดียวต่อโปรไฟล์ Chrome แล้วรีเฟรชแชตของร้าน",
     failed: "ไม่สำเร็จ", syncFailed: "ซิงค์ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", restarting: "กำลังเริ่มซิงค์ใหม่…", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ยังไม่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", allCaughtUp: "ซิงค์ครบแล้ว", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", thisBrowser: "เบราว์เซอร์นี้", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
@@ -516,34 +508,6 @@ async function retryAccount(account) {
   }
 }
 
-async function refreshAccountMetadata(account) {
-  const key = accountConfigKey(account);
-  if (metadataRefreshes.has(key)) return metadataRefreshes.get(key);
-  metadataRefreshResults.delete(key);
-  const request = Promise.resolve().then(async () => {
-    try {
-      const result = await chrome.runtime.sendMessage({
-        type: "refresh_metadata",
-        provider: account.provider,
-        provider_account_id: account.provider_account_id,
-      });
-      if (metadataRefreshes.get(key) !== request) return;
-      metadataRefreshResults.set(key, result ?? { ok: false });
-      await refreshStoredState();
-    } catch {
-      if (metadataRefreshes.get(key) === request) metadataRefreshResults.set(key, { ok: false });
-    } finally {
-      if (metadataRefreshes.get(key) === request) {
-        metadataRefreshes.delete(key);
-        renderDashboard();
-      }
-    }
-  });
-  metadataRefreshes.set(key, request);
-  renderDashboard();
-  return request;
-}
-
 async function copyProviderAccountId(providerAccountId, label, button, valueElement) {
   try {
     await navigator.clipboard.writeText(providerAccountId);
@@ -712,32 +676,6 @@ function renderAccountRow(account) {
     retry.setAttribute("aria-label", `${t("retry")}: ${account.display_name || id}`);
     retry.addEventListener("click", () => void retryAccount(account));
     actions.append(retry);
-  }
-  if (findAccountConfig(storedConfig, account)) {
-    const key = accountConfigKey(account);
-    const refreshing = metadataRefreshes.has(key);
-    const refresh = document.createElement("button");
-    refresh.type = "button";
-    refresh.className = "account-metadata-refresh";
-    refresh.textContent = t(refreshing ? "refreshingMetadata" : "refreshMetadata");
-    refresh.disabled = refreshing;
-    refresh.title = t("metadataOlder");
-    refresh.setAttribute("aria-busy", String(refreshing));
-    refresh.addEventListener("click", () => void refreshAccountMetadata(account));
-    copy.append(refresh);
-    const result = metadataRefreshResults.get(key);
-    if (result) {
-      const outcome = document.createElement("span");
-      outcome.className = "account-metadata-result";
-      outcome.setAttribute("role", "status");
-      outcome.dataset.failed = String(!result.ok);
-      outcome.textContent = result.ok
-        ? [t("metadataRefreshed", Math.max(0, Number(result.customer_count) || 0)),
-          result.account_refreshed === false ? t("metadataAccountSkipped") : "",
-          result.partial ? t("metadataPartial") : "", t("metadataOlder")].filter(Boolean).join(" ")
-        : t("metadataRefreshFailed");
-      copy.append(outcome);
-    }
   }
   select.append(copy);
   const shopId = document.createElement("button");
@@ -1306,10 +1244,18 @@ syncButton.addEventListener("click", async () => {
   pendingAction = activeProviderAdapter?.id === "line_oa" ? "checking" : "restarting";
   renderDashboard();
   try {
+    const provider = activeProviderAdapter?.id === "line_oa" ? "line_oa" : null;
     await requestTargetPermission(accountOrigins(storedConfig));
+    if (actionId !== syncActionId) return;
+    const accounts = storedConfig.accounts.filter((account) => !provider || account.provider === provider);
+    // Display refresh is best effort; existing provider limits bound each request.
+    await Promise.allSettled(accounts.map(async (account) => chrome.runtime.sendMessage({
+      type: "refresh_metadata", provider: account.provider, provider_account_id: account.provider_account_id,
+    })));
+    if (actionId !== syncActionId) return;
     const result = await chrome.runtime.sendMessage({
       type: "sync_now",
-      ...(activeProviderAdapter?.id === "line_oa" ? { provider: "line_oa" } : {}),
+      ...(provider ? { provider } : {}),
     });
     if (actionId === syncActionId) {
       pendingAction = "";
@@ -1593,8 +1539,6 @@ clearButton.addEventListener("click", async () => {
   pageAccounts = [];
   retryingAccounts.clear();
   accountRetryErrors.clear();
-  metadataRefreshes.clear();
-  metadataRefreshResults.clear();
   storedStatus = null;
   liveState = null;
   scanStates = null;
