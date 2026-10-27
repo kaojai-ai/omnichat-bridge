@@ -42,7 +42,6 @@ import {
   writeStorage,
 } from "./lib/storage.js";
 import {
-  PROVIDER_RECOVERY_FAILURE_THRESHOLD,
   PROVIDER_RECOVERY_STATES,
   normalizeProviderRecoveryTabs,
   providerRecoveryRecord,
@@ -1888,7 +1887,6 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
       failure_count: 0,
       last_failure_at: null,
       next_retry_at: null,
-      last_reload_at: null,
       reason: null,
     });
     await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
@@ -1972,50 +1970,17 @@ async function markClosedProviderRecoveryTab(tabId) {
   }
 }
 
-async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts, allowTabRecovery) {
+async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts) {
   const previousCount = recovery.record?.failure_count ?? 0;
   const failureCount = previousCount + 1;
   const now = Date.now();
   const reason = providerRecoveryFailureReason(adapter, tab, status, error);
-  const shouldReload = allowTabRecovery && failureCount >= PROVIDER_RECOVERY_FAILURE_THRESHOLD
-    && recoveryRetryDue(recovery.record, now)
-    && tab?.status !== "loading";
-  let nextRetryAt = allowTabRecovery ? recovery.record?.next_retry_at ?? null : null;
-  let lastReloadAt = recovery.record?.last_reload_at ?? null;
-  if (shouldReload) {
-    try {
-      await chrome.tabs.reload(tab.id);
-      lastReloadAt = now;
-      nextRetryAt = now + recoveryRetryDelay(failureCount);
-      await recordLog("warn", "recovery", "provider_tab_reloaded", `${providerLabel(adapter)} tab reloaded after repeated health failures.`, {
-        provider: adapter.id,
-        tab_id: tab.id,
-        failure_count: failureCount,
-        next_retry_at: new Date(nextRetryAt).toISOString(),
-      });
-    } catch (reloadError) {
-      await recordUnexpected("provider_tab_reload", reloadError, {
-        provider: adapter.id,
-        tab_id: tab.id,
-        failure_count: failureCount,
-      });
-      nextRetryAt = now + recoveryRetryDelay(failureCount);
-    }
-  } else if (allowTabRecovery && recovery.record?.next_retry_at && !recoveryRetryDue(recovery.record, now)) {
-    await recordLog("debug", "recovery", "provider_tab_backoff", `${providerLabel(adapter)} tab recovery is waiting for its next retry.`, {
-      provider: adapter.id,
-      tab_id: tab.id,
-      failure_count: failureCount,
-      next_retry_at: new Date(recovery.record.next_retry_at).toISOString(),
-    });
-  }
   const record = await updateProviderRecoveryTabState(adapter.id, {
     state: PROVIDER_RECOVERY_STATES.needsAttention,
     tab_id: tab?.id ?? recovery.record?.tab_id ?? null,
     failure_count: failureCount,
     last_failure_at: now,
-    next_retry_at: nextRetryAt,
-    last_reload_at: lastReloadAt,
+    next_retry_at: null,
     reason,
   });
   await updateProviderRecoveryLiveState(
@@ -2180,7 +2145,6 @@ async function runProviderHealthWatchdogOnce() {
           failure_count: 0,
           last_failure_at: null,
           next_retry_at: null,
-          last_reload_at: recovery.record?.last_reload_at ?? null,
         })
         : recovery.record;
       for (const item of matchingContexts) {
@@ -2204,7 +2168,7 @@ async function runProviderHealthWatchdogOnce() {
         tab_id: tab.id,
       });
       const status = await providerTabStatus(tab);
-      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts, allowTabRecovery);
+      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
     }
   }
   await ensureLiveConnection();

@@ -109,10 +109,8 @@ test("keeps unattended provider recovery opt-in and runs through one health alar
   assert.match(backgroundSource, /markClosedProviderRecoveryTab\(tabId\)/);
   assert.match(backgroundSource, /providerTabHealthy\(status, adapter\)/);
   assert.match(backgroundSource, /last_provider_check_at/);
-  assert.match(backgroundSource, /PROVIDER_RECOVERY_FAILURE_THRESHOLD/);
-  assert.match(backgroundSource, /provider_tab_reloaded/);
+  assert.doesNotMatch(backgroundSource, /provider_tab_reloaded/);
   assert.match(backgroundSource, /provider_tab_redirected/);
-  assert.match(backgroundSource, /provider_tab_backoff/);
   assert.match(backgroundSource, /startUnattendedProviderSync\(tab, context\)/);
   assert.match(backgroundSource, /type: "sync_now_v3"/);
   assert.match(backgroundSource, /providerAutomaticRetryAt/);

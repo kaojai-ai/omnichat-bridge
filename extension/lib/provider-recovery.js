@@ -5,7 +5,8 @@ export const PROVIDER_RECOVERY_STATES = Object.freeze({
 });
 
 export const PROVIDER_RECOVERY_STORAGE_VERSION = 1;
-export const PROVIDER_RECOVERY_FAILURE_THRESHOLD = 2;
+// Preserve the opening retry cadence: the first two failures wait one minute.
+const PROVIDER_OPEN_RETRY_BASE_ATTEMPTS = 2;
 export const PROVIDER_RECOVERY_RETRY_BASE_MS = 60_000;
 export const PROVIDER_RECOVERY_RETRY_MAX_MS = 30 * 60_000;
 
@@ -54,7 +55,6 @@ export function normalizeProviderRecoveryTabs(value) {
       failure_count: count(rawRecord.failure_count),
       last_failure_at: timestamp(rawRecord.last_failure_at),
       next_retry_at: timestamp(rawRecord.next_retry_at),
-      last_reload_at: timestamp(rawRecord.last_reload_at),
       reason: reason(rawRecord.reason),
     };
   }
@@ -79,7 +79,6 @@ export function updateProviderRecoveryRecord(value, provider, patch = {}) {
     failure_count: 0,
     last_failure_at: null,
     next_retry_at: null,
-    last_reload_at: null,
     reason: null,
   };
   const next = {
@@ -94,14 +93,13 @@ export function updateProviderRecoveryRecord(value, provider, patch = {}) {
     failure_count: count(next.failure_count),
     last_failure_at: timestamp(next.last_failure_at),
     next_retry_at: timestamp(next.next_retry_at),
-    last_reload_at: timestamp(next.last_reload_at),
     reason: reason(next.reason),
   };
   return normalized;
 }
 
 export function recoveryRetryDelay(failureCount) {
-  const exponent = Math.max(0, count(failureCount) - PROVIDER_RECOVERY_FAILURE_THRESHOLD);
+  const exponent = Math.max(0, count(failureCount) - PROVIDER_OPEN_RETRY_BASE_ATTEMPTS);
   return Math.min(PROVIDER_RECOVERY_RETRY_MAX_MS, PROVIDER_RECOVERY_RETRY_BASE_MS * (2 ** exponent));
 }
 

@@ -59,10 +59,8 @@ for (const provider of ["line_oa", "shopee"]) {
   });
 }
 
-test("retries an unhealthy provider tab without creating a replacement", () => {
-  assert.match(source, /chrome\.tabs\.reload\(tab\.id\)/);
-  assert.match(source, /PROVIDER_RECOVERY_FAILURE_THRESHOLD/);
-  assert.match(source, /recoveryRetryDelay\(failureCount\)/);
+test("reports an unhealthy provider tab without reloading it", () => {
+  assert.doesNotMatch(source, /chrome\.tabs\.reload/);
   assert.doesNotMatch(source, /allowTabRecovery && attempts >= 2/);
   assert.match(source, /PROVIDER_RECOVERY_STATES\.needsAttention/);
   assert.match(source, /providerRecoveryFailureReason\(/);

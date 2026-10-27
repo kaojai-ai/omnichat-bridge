@@ -32,7 +32,7 @@ sequenceDiagram
 | Owner | Before | Planned behaviour |
 | --- | --- | --- |
 | omnichat-bridge: background | Saved detected shops can all own live connections | Resolve current session; close inactive sockets; retain configuration and queued messages |
-| omnichat-bridge: recovery | Retry backoff can hide a recovered tab | Keep health checks running; back off reload attempts only |
+| omnichat-bridge: recovery | Retry backoff can hide a recovered tab | Keep health checks and bridge repair running; never automatically reload provider tabs |
 | omnichat-bridge: capture | Fetch or JSON parsing can hold the polling lock indefinitely | Bound provider requests to 15 seconds; release lock; ignore completion from an old shop session |
 | omnichat-bridge: readiness | Successful list polling can hide message-history failure | Report capture failure and apply existing freshness checks to ready status |
 | omnichat-bridge: delivery | Upload can delay watchdog; retry timestamp is not enforced | Bound upload/log requests to 15 seconds; independent transport repair; respect automatic retry time |
@@ -207,3 +207,7 @@ Manual refresh verifies the account and reads account/conversation lists only, w
 The versioned customer cache persists only display metadata and IDs under an opaque configuration/account fingerprint. It is bounded to 1,000 records per account, 5,000 per installation, and 2 MiB (whichever limit is reached first). Storage writes are batched; erasure cancels pending cache work. Display cache failures do not authorize or block sending. Existing server contracts and SQL schema remain unchanged.
 
 Release the related server/worker/Admin readiness compatibility first, then extension 0.8.0. CPU/heap and live incoming-message latency still require comparison on an authenticated provider tab; reduced redundant work is not a measured performance claim.
+
+### Planned: manual provider-tab reload only
+
+Version 0.8.0 removes automatic provider-tab reloads after health-check failures. Health checks and bridge repair continue; opt-in recovery can still open a missing tab with bounded retry backoff. A genuinely stuck page requires the user to reload it manually. Extension-update reloads are unaffected.

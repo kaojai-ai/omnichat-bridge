@@ -40,7 +40,6 @@ test("normalizes persisted provider recovery records without accepting invalid t
           failure_count: 0,
           last_failure_at: null,
           next_retry_at: null,
-          last_reload_at: null,
           reason: "waiting",
         },
         shopee: {
@@ -51,7 +50,6 @@ test("normalizes persisted provider recovery records without accepting invalid t
           failure_count: 0,
           last_failure_at: null,
           next_retry_at: null,
-          last_reload_at: null,
           reason: "x".repeat(240),
         },
       },
@@ -76,7 +74,6 @@ test("updates one provider without discarding another provider's recovery tab", 
     failure_count: 0,
     last_failure_at: null,
     next_retry_at: null,
-    last_reload_at: null,
     reason: null,
   });
 });
