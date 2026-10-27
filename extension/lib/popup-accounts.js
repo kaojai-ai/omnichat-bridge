@@ -77,10 +77,11 @@ export function activeSyncAccount(config, detectedAccounts, status, pending) {
   return null;
 }
 
-export function currentTabAccount(config, accounts, provider, tabUrl) {
+export function currentTabSyncAccounts(config, accounts, provider) {
   const detected = (Array.isArray(accounts) ? accounts : []).filter(account => account.provider === provider);
-  const botId = provider === "line_oa" ? lineBotIdFromUrl(tabUrl) : null;
-  const matches = detected.filter(account => provider !== "line_oa" || (botId && account.bot_id === botId));
-  if (matches.length !== 1) return null;
-  return findAccountConfig(config, matches[0]) ? matches[0] : null;
+  if (provider === "line_oa") {
+    const configured = detected.filter(account => findAccountConfig(config, account));
+    return [...new Map(configured.map(account => [accountConfigKey(account), account])).values()];
+  }
+  return detected.length === 1 && findAccountConfig(config, detected[0]) ? detected : [];
 }

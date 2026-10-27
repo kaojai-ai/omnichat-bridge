@@ -16,7 +16,7 @@ function fixture(provider = "line_oa") {
   const recoveries = new Map();
   const runtime = vm.createContext({ URL, AbortController, Map, Set,
     STORAGE: {}, hasLocalConsent: () => true, readStorage: async () => ({}),
-    configuredAccountContexts: () => contexts, providerAutomaticRecoveries: recoveries, activeSyncControl: null,
+    configuredAccountContexts: () => contexts, providerAutomaticRecoveries: recoveries, lineTabSyncs: new Map(), activeSyncControl: null,
     providerChatTabById: async (_adapter, id) => tab?.id === id ? { ...tab } : null,
     providerTabStatus: async () => status, providerTabContext: candidate => `${candidate.id}:${candidate.url}:${epoch}`,
     ensureProviderBridge: async () => {},
@@ -142,4 +142,15 @@ test("tab-scoped cancellation waits for old recovery cleanup before a fresh sync
   assert.equal(settled, false);
   finish();
   assert.equal((await cancelled).cancelled, true);
+});
+
+
+test("shared LINE retry accepts another configured accessible account on the same login tab", async () => {
+  const h = fixture();
+  await h.runtime.retryProviderAccount({ provider: "line_oa", provider_account_id: "B", tab_id: 42, shared_session: true });
+  assert.equal(h.calls[0].account, "B");
+  assert.equal(h.calls[0].control.lockedTabId, 42);
+  assert.equal(h.calls[0].control.sharedSession, true);
+  h.setStatus({ account_access_verified: true, accessible_account_ids: ["A"] });
+  await assert.rejects(h.runtime.retryProviderAccount({ provider: "line_oa", provider_account_id: "B", tab_id: 42, shared_session: true }), /Open this LINE account/);
 });

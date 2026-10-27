@@ -37,7 +37,7 @@ function fixture(provider = "shopee") {
     normalizeDeviceName: () => "", buildConnectionHealth, persistProviderSurfaceState: async () => {},
     canonicalProviderAccountId: () => "shop", installationId: () => installation,
     chrome: { runtime: { getPlatformInfo: async () => ({ os: "mac" }), getManifest: () => ({ version: "test" }) } },
-    activeSyncControl: null, providerAutomaticRecoveries: new Map(),
+    activeSyncControl: null, providerAutomaticRecoveries: new Map(), lineTabSyncs: new Map(),
     liveConnections: new Map(), stopAccountLiveConnection: (key, _connection, reason) => { closed.push({ key, reason }); scope.liveConnections.delete(key); },
     rememberCommandTab: async () => {},
   });

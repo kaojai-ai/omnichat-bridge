@@ -21,7 +21,7 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
-import { activeSyncAccount, currentTabAccount, hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
+import { activeSyncAccount, currentTabSyncAccounts, hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
 import { createCoalescedRefresh, syncProgressPresentation } from "./lib/popup-sync-progress.js";
 import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
 
@@ -1249,24 +1249,40 @@ syncButton.addEventListener("click", async () => {
     const tab = await chrome.tabs.get(popupTabId);
     const provider = providerAdapters.forPage(tab?.url)?.id;
     if (!provider) throw new Error("Open the provider account chat to sync.");
+    // Identify a configured target before resetting work in a shared LINE tab.
+    // Known configured accounts are enough for this preliminary check; access is freshly
+    // verified after reset and again by the account-scoped sync path.
+    if (!currentTabSyncAccounts(storedConfig, detectedAccounts, provider).length) {
+      const initial = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
+      if (!initial?.ok || !currentTabSyncAccounts(storedConfig, initial.accounts, provider).length) {
+        throw new Error("Open a configured account's chat to sync.");
+      }
+    }
+    if (actionId !== syncActionId) return;
     const prepared = await chrome.runtime.sendMessage({ type: "prepare_sync_tab", provider, tab_id: tab.id });
     if (actionId !== syncActionId) return;
     if (!prepared?.ok) throw new Error(prepared?.error || "Could not refresh this tab. Sync again.");
     const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
-    const account = detected?.ok ? currentTabAccount(storedConfig, detected.accounts, provider, tab.url) : null;
-    if (!account) throw new Error("Could not identify the configured account in this tab. Open its chat and retry.");
-    const config = findAccountConfig(storedConfig, account);
-    await requestTargetPermission(accountOrigins({ ...storedConfig, accounts: [config] }));
+    const accounts = detected?.ok ? currentTabSyncAccounts(storedConfig, detected.accounts, provider) : [];
+    if (!accounts.length) throw new Error("No configured account is available to this login.");
+    await requestTargetPermission(accountOrigins({ ...storedConfig,
+      accounts: accounts.map(account => findAccountConfig(storedConfig, account)) }));
     if (actionId !== syncActionId) return;
-    const target = { provider, provider_account_id: account.provider_account_id, tab_id: tab.id };
-    pendingAction = "refreshingInfo";
-    renderDashboard();
-    // Display refresh is best effort; only the account open in this tab is refreshed.
-    await chrome.runtime.sendMessage({ type: "refresh_metadata", ...target }).catch(() => undefined);
-    if (actionId !== syncActionId) return;
-    pendingAction = "checking";
-    renderDashboard();
-    const result = await chrome.runtime.sendMessage({ type: "sync_account", ...target });
+    let result;
+    if (provider === "line_oa") {
+      pendingAction = "checking";
+      renderDashboard();
+      result = await chrome.runtime.sendMessage({ type: "sync_line_tab", tab_id: tab.id });
+    } else {
+      const target = { provider, provider_account_id: accounts[0].provider_account_id, tab_id: tab.id };
+      pendingAction = "refreshingInfo";
+      renderDashboard();
+      await chrome.runtime.sendMessage({ type: "refresh_metadata", ...target }).catch(() => undefined);
+      if (actionId !== syncActionId) return;
+      pendingAction = "checking";
+      renderDashboard();
+      result = await chrome.runtime.sendMessage({ type: "sync_account", ...target });
+    }
     if (actionId === syncActionId) {
       pendingAction = "";
       await showSyncResult(result);

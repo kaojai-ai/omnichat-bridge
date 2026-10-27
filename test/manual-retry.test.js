@@ -168,7 +168,7 @@ test("idle LINE recovery settles error and releases only its own account slot", 
   const recoveries = new Map([["line_oa:B", { healthy: true }]]), updates = [];
   const account = { key: "line_oa:A", account: { provider: "line_oa", provider_account_id: "A" }, adapter: { id: "line_oa" } };
   Object.assign(h.runtime, {
-    AbortController, STORAGE: {}, activeSyncControl: null, providerAutomaticRecoveries: recoveries,
+    AbortController, STORAGE: {}, activeSyncControl: null, lineTabSyncs: new Map(), providerAutomaticRecoveries: recoveries,
     readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
     openSessionSyncContexts: async c => c, queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {}, recordLog: async () => {},

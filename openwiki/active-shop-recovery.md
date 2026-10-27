@@ -200,7 +200,7 @@ remote close diagnostics include time since the last inbound WebSocket message.
 
 ## Manual metadata refresh (0.8.0, Planned)
 
-Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields refresh when the user clicks **Sync messages**. The same action refreshes display metadata for the configured account open in the current tab before starting message recovery in that exact tab. LINE selects the bot in the tab URL, not every account accessible to the login. Unidentified or unconfigured accounts stop the action; it does not fall back to another tab or provider. Metadata failure preserves cached values and does not block message sync. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
+Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields refresh when the user clicks **Sync messages**. The same action uses the current tab: Shopee refreshes and syncs its signed-in configured shop; LINE uses its shared authenticated session to refresh and sync all configured LINE accounts it can access. The LINE batch runs in the background, sequentially, and continues if the popup closes. It does not fall back to another tab or provider. A configured target is identified before resetting work. Metadata failure preserves cached values and does not block message sync. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
 
 Manual refresh verifies the account and reads account/conversation lists only, with a 30-second overall deadline and at most 100 recent conversations. Partial failures keep valid completed results; context changes discard late results. No historical-message crawl, individual customer-profile fetch, message replay, or immediate rewrite of historical Admin customer records is performed. Refreshed information reaches KaoJai through subsequent ordinary ingestion.
 
@@ -250,7 +250,7 @@ Diagnostic logs remain bounded and stored locally. Remote uploads happen only wh
 
 ### Planned: bottom sync status
 
-The popup bottom status displays the active account and reported recovery phase with available conversation/message counters. Manual Sync messages operates only on the account open in the current tab. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.
+The popup bottom status displays the active account and reported recovery phase with available conversation/message counters. Manual Sync messages uses only the current tab: one signed-in Shopee shop, or all configured LINE accounts accessible to that tab’s login. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.
 
 Logs controls place a full-width Copy below the log list and a red Clear logs text link underneath. Clearing still requires confirmation.
 
@@ -265,3 +265,5 @@ LINE resets cached account-access evidence and starts a fresh probe. Pre-reset p
 Both providers acknowledge recovery startup immediately; a separate correlated completion event carries the final result. The background registers the waiter before dispatch and validates the provider, account, tab, and request identity. An idle deadline remains bounded, genuine progress renews it, and navigation ends the interrupted attempt without replaying it. The previous full-scan Chrome response and overlapping-scan retry path are removed. Content protocol 10 and updated page compatibility versions replace older bridges.
 
 List-page fetches, conversation checks, message fetches, local saving, and forwarding report their actual phase. Count-only events preserve the current phase and existing totals. Compact EN/TH status uses measured chat counts, list-page counts, captured messages, or pending forwarding counts; missing evidence does not create percentages. Queue states say Queued. LINE manual requests take priority over queued routine polls while allowing active work to finish. Recovery bounds, checkpoints, pending-message durability, and outgoing sending remain unchanged. This improves visibility and channel handling; it does not claim faster provider responses.
+
+Progress updates read configuration alongside account/status records so the real account lookup can persist phases and counters. Regression coverage uses the actual lookup rather than a stub; both providers previously rejected progress with a missing configuration while recovery itself continued.

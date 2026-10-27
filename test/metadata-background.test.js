@@ -30,6 +30,7 @@ function harness() {
   const tab = { id: 7, url: "https://seller.test/chat" };
   const forbidden = () => { throw new Error("Metadata must not touch readiness or dispatch."); };
   const runtime = vm.createContext({
+    throwIfSyncCancelled: signal => { if (signal?.aborted) throw new Error("Sync cancelled."); },
     Date: { now: () => now }, Map, WeakMap,
     STORAGE: { config: "config", consent: "consent", detectedAccounts: "detectedAccounts" },
     metadataRefreshes: new Map(), metadataScopes: new WeakMap(), metadataEpoch: 0, metadataErasing: false, metadataCacheWarningReported: false, recordLog: async () => {},

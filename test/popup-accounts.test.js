@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   activeSyncAccount,
-  currentTabAccount,
+  currentTabSyncAccounts,
   configuredProviderAccounts,
   popupAccountsForSession,
   hydrateDetectedAccounts,
@@ -167,19 +167,20 @@ test("combined sync reports LINE progress while popup only detects Shopee", () =
   assert.equal(activeSyncAccount(config, [], {}, {}), null);
 });
 
-test("current LINE tab selects its bot rather than every accessible account", () => {
+test("LINE shared tab selects all configured accessible accounts even on another bot page", () => {
   const accounts = [
     { provider: "line_oa", provider_account_id: "@one", bot_id: "bot-one" },
     { provider: "line_oa", provider_account_id: "@two", bot_id: "bot-two" },
+    { provider: "line_oa", provider_account_id: "@unconfigured", bot_id: "bot-three" },
   ];
-  const config = { accounts };
-  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/bot-two/chats"), accounts[1]);
-  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/"), null);
-  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/unknown/chats"), null);
+  const config = { accounts: accounts.slice(0, 2) };
+  assert.deepEqual(currentTabSyncAccounts(config, accounts, "line_oa"), accounts.slice(0, 2));
+  assert.deepEqual(currentTabSyncAccounts(config, [accounts[1]], "line_oa"), [accounts[1]]);
+  assert.deepEqual(currentTabSyncAccounts(config, [accounts[2]], "line_oa"), []);
 });
 test("Shopee current tab requires one unambiguous configured detected account", () => {
   const account = { provider: "shopee", provider_account_id: "shop" };
-  assert.equal(currentTabAccount({ accounts: [account] }, [account], "shopee", ""), account);
-  assert.equal(currentTabAccount({ accounts: [] }, [account], "shopee", ""), null);
-  assert.equal(currentTabAccount({ accounts: [account] }, [account, account], "shopee", ""), null);
+  assert.deepEqual(currentTabSyncAccounts({ accounts: [account] }, [account], "shopee"), [account]);
+  assert.deepEqual(currentTabSyncAccounts({ accounts: [] }, [account], "shopee"), []);
+  assert.deepEqual(currentTabSyncAccounts({ accounts: [account] }, [account, account], "shopee"), []);
 });

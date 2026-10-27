@@ -21,20 +21,21 @@ function harness({ provider = "shopee", action = "sync", refreshMode = "deferred
   const refreshes = [];
   const button = { dataset: { action }, addEventListener: (_event, handler) => { click = handler; } };
   const scope = vm.createContext({
-    syncButton: button, storedConfig: { accounts }, activeProviderAdapter: { id: provider }, pendingAction: "",
+    syncButton: button, storedConfig: { accounts }, detectedAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
     progressArea: {}, status: { classList: { remove() {} } },
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
     accountOrigins: config => config.accounts,
     requestTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
     detectAccount: async () => { detections += 1; }, refreshStoredState: async () => {},
     providerAdapters: { forPage: () => ({ id: provider }) },
-    currentTabAccount: (_config, detected) => unknown ? null : detected.find(account => account.provider === provider),
+    currentTabSyncAccounts: (_config, detected) => unknown ? [] : detected.filter(account => account.provider === provider),
     findAccountConfig: (_config, account) => account,
     popupTabId: 7, crypto: { randomUUID: () => "request" }, t: key => key,
     chrome: {
       runtime: { sendMessage: message => {
         requests.push(message);
         if (message.type === "detect_account") return Promise.resolve({ ok: true, accounts });
+        if (message.type === "sync_line_tab") return new Promise(resolve => refreshes.push(resolve));
         if (message.type === "refresh_metadata") {
           if (refreshMode === "failed") return Promise.reject(new Error("Provider unavailable"));
           if (refreshMode === "partial") return Promise.resolve({ ok: true, partial: true, customer_count: 10 });
@@ -53,7 +54,7 @@ function harness({ provider = "shopee", action = "sync", refreshMode = "deferred
 }
 
 for (const provider of ["shopee", "line_oa"]) {
-  test(`manual ${provider} sync refreshes only its current tab account after permission and before sync`, async () => {
+  test(`manual ${provider} sync selects the proper current-tab scope`, async () => {
     const h = harness({ provider });
     const task = h.click();
     assert.equal(h.requests.length, 0);
@@ -61,16 +62,21 @@ for (const provider of ["shopee", "line_oa"]) {
     h.allowPermission();
     await turn();
     assert.deepEqual(h.requests.slice(0, 2).map(value => value.type), ["prepare_sync_tab", "detect_account"]);
-    const expected = accounts.find(account => account.provider === provider);
-    const refreshes = h.requests.filter(value => value.type === "refresh_metadata");
-    assert.deepEqual(refreshes.map(value => value.provider_account_id), [expected.provider_account_id]);
-    assert.equal(refreshes[0].tab_id, 7);
+    if (provider === "line_oa") {
+      const batch = h.requests.filter(value => value.type === "sync_line_tab");
+      assert.equal(batch.length, 1);
+      assert.equal(batch[0].tab_id, 7);
+      assert.equal(h.requests.some(value => value.type === "refresh_metadata" || value.type === "sync_account"), false);
+    } else {
+      const refreshes = h.requests.filter(value => value.type === "refresh_metadata");
+      assert.deepEqual(refreshes.map(value => value.provider_account_id), ["shop"]);
+      assert.equal(refreshes[0].tab_id, 7);
+    }
     assert.equal(h.results.length, 0);
     h.refreshes.forEach(resolve => resolve({ ok: true }));
     await task;
     const sync = h.requests.at(-1);
-    assert.equal(sync.type, "sync_account");
-    assert.equal(sync.provider, provider);
+    assert.equal(sync.type, provider === "line_oa" ? "sync_line_tab" : "sync_account");
     assert.equal(sync.tab_id, 7);
     assert.equal(h.results.length, 1);
   });
@@ -125,5 +131,5 @@ test("separate metadata controls and presentation are removed", () => {
 test("unidentified current account stops before refresh or sync", async () => {
   const h = harness({ unknown: true });
   await h.click();
-  assert.deepEqual(h.requests.map(value => value.type), ["prepare_sync_tab", "detect_account"]);
+  assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
 });

@@ -93,7 +93,7 @@ test('count-only progress preserves the actual phase and reports measured list-p
 test('navigation fails the correlated recovery promptly without a second start', async () => {
   const h = fixture(); const task = h.start();
   Object.assign(h.scope, {
-    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), providerPolicyTabIds: new Map(),
+    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), providerPolicyTabIds: new Map(), lineTabSyncs: new Map(),
   });
   const start = source.indexOf('function invalidateProviderTab('), end = source.indexOf('chrome.tabs.onUpdated.addListener', start);
   vm.runInContext(source.slice(start, end), h.scope);
@@ -102,3 +102,41 @@ test('navigation fails the correlated recovery promptly without a second start',
   assert.equal(h.calls.length, 1);
   assert.equal(h.control.recoveryCompletion, null);
 });
+
+for (const provider of ['line_oa', 'shopee']) {
+  test(`${provider} real progress account lookup reads configuration before persisting counters`, async () => {
+    const { findAccountConfig, accountConfigKey } = await import('../extension/lib/config.js');
+    const { accountMigration } = await import('../extension/lib/config-migration.js');
+    const { STORAGE, readAccountState, writeAccountState } = await import('../extension/lib/storage.js');
+    const account = { provider, provider_account_id: provider === 'line_oa' ? '@account' : 'shop' };
+    const key = accountConfigKey(account);
+    const storage = {
+      [STORAGE.config]: { version:3, accounts:[{...account, api_url:'https://example.com/api'}] },
+      [STORAGE.detectedAccounts]: [account],
+      [STORAGE.status]: { version:2, accounts:{ [key]:{state:'syncing',phase:'loading_conversations'} } },
+    };
+    const control = { adapter:{id:provider}, providerAccountId:account.provider_account_id, controller:new AbortController() };
+    const scope = vm.createContext({
+      URL, STORAGE, findAccountConfig, accountConfigKey, accountMigration, readAccountState,
+      detectedAccounts: stored => stored[STORAGE.detectedAccounts] ?? [], normalizedProviderId: value => value,
+      providerAdapterForAccount: account => ({id:account.provider}),
+      syncControlForMessage: () => control, isCurrentSyncControl: () => true,
+      exclusive: operation => operation(),
+      readStorage: async keys => Object.fromEntries(keys.map(key => [key,storage[key]])),
+      updateScopedState: async (storageKey,key,patch) => {
+        const current = readAccountState(storage[storageKey],key,{});
+        storage[storageKey] = writeAccountState(storage[storageKey],key,{...current,...patch(current)});
+      },
+    });
+    const lookupStart = source.indexOf('function accountContextFor('), lookupEnd = source.indexOf('function configuredAccountContexts(',lookupStart);
+    const canonicalStart = source.indexOf('function canonicalProviderAccountId('), canonicalEnd = source.indexOf('function hasServerInitialized(',canonicalStart);
+    const start = source.indexOf('  if (message?.type === "sync_progress" || message?.type === "sync_phase")');
+    const end = source.indexOf('  if (message?.type === "record_sync_plan")',start);
+    vm.runInContext(source.slice(lookupStart,lookupEnd)+source.slice(canonicalStart,canonicalEnd)+'\nfunction progress(message,respond) { const _sender={tab:{id:7}};'+source.slice(start,end)+'}',scope);
+    const reply = await new Promise(resolve => scope.progress({type:'sync_phase',provider,provider_account_id:account.provider_account_id,
+      phase:'checking_conversations',completed_conversations:25,total_conversations:100,conversation_pages:1},resolve));
+    assert.equal(reply.ok,true,reply.error);
+    assert.equal(storage[STORAGE.status].accounts[key].completed_conversations,25);
+    assert.equal(storage[STORAGE.status].accounts[key].phase,'checking_conversations');
+  });
+}
