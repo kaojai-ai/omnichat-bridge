@@ -51,7 +51,6 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     clearProviderRecoveryLiveState: async () => { calls.cleared++; },
     ensureProviderHealthAlarm: async (enabled) => { calls.alarm = enabled; },
     PROVIDER_RECOVERY_STATES,
-    PROVIDER_RECOVERY_FAILURE_THRESHOLD: 2,
     recoveryRetryDue: (value) => !value?.next_retry_at || value.next_retry_at <= Date.now(),
     recoveryRetryDelay: () => 60_000,
     providerRecoveryFailureReason: () => "Provider unavailable",
@@ -119,11 +118,12 @@ test("a missing tab requests attention without opening a tab when recovery is of
 });
 
 for (const recoveryEnabled of [false, true]) {
-  test(`automatic recovery ${recoveryEnabled ? "reloads" : "does not reload"} a repeatedly unhealthy tab`, async () => {
+  test(`automatic recovery ${recoveryEnabled} never reloads a repeatedly unhealthy tab`, async () => {
     const { run, calls } = harness({ recoveryEnabled, healthy: false, record: { tab_id: 42, failure_count: 2 } });
-    await run();
+    for (let tick = 0; tick < 10; tick++) await run();
+    assert.ok(calls.checked >= 10);
     assert.equal(calls.live.state, "needs_attention");
-    assert.equal(calls.reloaded, recoveryEnabled ? 1 : 0);
+    assert.equal(calls.reloaded, 0);
     assert.equal(calls.created, 0);
   });
 }

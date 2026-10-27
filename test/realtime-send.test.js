@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
+const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
+const source = cacheSource + "\n" + await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
@@ -924,4 +925,24 @@ test("redirected Webchat video is rejected before upload or native send", async 
   assert.equal(uploads, 0);
   assert.equal(bridge.sentUrls.length, 0);
   assert.equal(bridge.nativePayloads.length, 0);
+});
+
+test("initialized Seller Centre sends skip template waits and lookup but verify the account for every command", async () => {
+  let templateWaits = 0;
+  const bridge = createBridge({ sellerCentre: true, ready: true,
+    onTemplateWait: () => { templateWaits++; },
+  });
+  const command = { ...baseCommand, command_type: "send_text", text: "Direct initialized send",
+    omnichat: commandRouting({ to_id: "101", to_shop_id: "201", biz_id: "0" }) };
+  await new Promise(resolve => setImmediate(resolve));
+  const identityRequestsBefore = bridge.nativeRequests.filter(path => path === "/api/v2/login/").length;
+  const first = await bridge.send(command);
+  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore + 1);
+  const second = await bridge.send({ ...command, request_id: "request-2", client_message_id: "client-2" });
+  assert.equal(first.result.ok, true);
+  assert.equal(second.result.ok, true);
+  assert.equal(templateWaits, 0);
+  assert.equal(bridge.listRequests.length, 0);
+  assert.equal(bridge.nativePayloads.length, 2);
+  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore + 2);
 });

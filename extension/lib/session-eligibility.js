@@ -1,59 +1,84 @@
-// Unknown access never grants eligibility. Retry timing is scoped to a continuous
-// unknown episode, so repeated probes cannot restart the grace period forever.
+// One policy owns readiness, command eligibility and temporary uncertainty.
+// Evidence lives only in this worker and is bound to its tab/session context.
 export function createSessionEligibility({
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   onRecheck = () => {},
+  onEvent = () => {},
 } = {}) {
   const sessions = new Map();
   let nextGeneration = 0;
-
   function cancel(state) {
     for (const timer of state.timers) clearTimer(timer);
     state.timers = [];
   }
-
-  function snapshot(state) {
-    return { eligible: state.mode === "verified", reason_code: state.mode === "verified" ? "ready"
-      : state.mode === "missing" ? "waiting_for_tab"
-        : state.mode === "mismatch" ? "wrong_account"
-          : now() - state.unknownSince >= 30_000 ? "needs_attention" : "checking_session",
-    generation: state.generation };
+  function emit(key, state, event) {
+    try { Promise.resolve(onEvent(key, event, { duration_ms: state.unknownSince === null ? 0 : now() - state.unknownSince })).catch(() => {}); } catch {}
   }
-
+  function snapshot(state, key) {
+    const unknown = state.mode === "unknown";
+    const elapsed = unknown ? now() - state.unknownSince : 0;
+    if (unknown && state.hadReady && elapsed >= 30_000 && !state.expired) {
+      state.expired = true;
+      state.generation = ++nextGeneration;
+      emit(key, state, "grace_expired");
+    }
+    if (unknown && elapsed >= 60_000 && !state.warned) {
+      state.warned = true;
+      emit(key, state, "needs_attention");
+    }
+    const grace = unknown && state.hadReady && !state.expired;
+    const eligible = state.mode === "verified" || grace;
+    return {
+      eligible,
+      reason_code: grace ? "provider_check_grace" : state.mode === "verified" ? "ready"
+        : state.mode === "missing" ? "waiting_for_tab" : state.mode === "mismatch" ? "wrong_account"
+          : state.mode === "blocked" ? state.reason : elapsed >= 60_000 ? "needs_attention" : "checking_session",
+      generation: state.generation,
+      retain_transport: !["missing", "mismatch"].includes(state.mode),
+      unknown,
+      account_verified: state.accountVerified,
+      evidence: eligible ? state.evidence : null,
+      last_evidence: state.evidence,
+      context: state.context,
+      ...(grace ? { readiness_grace_expires_at: new Date(state.unknownSince + 30_000).toISOString() } : {}),
+    };
+  }
   function notify(key, state) {
     if (sessions.get(key) !== state) return;
-    try { Promise.resolve(onRecheck(key, snapshot(state))).catch(() => {}); } catch {}
+    try { Promise.resolve(onRecheck(key, snapshot(state, key))).catch(() => {}); } catch {}
   }
-
-  function observe(key, { hasTab, verified, explicitMismatch, identity = null } = {}) {
-    const mode = !hasTab ? "missing" : explicitMismatch ? "mismatch" : verified ? "verified" : "unknown";
+  function observe(key, { hasTab, verified, explicitMismatch, identity = null, context = null,
+    ready = verified, account_verified = verified, evidence = null, reason_code = "provider_unready" } = {}) {
+    const mode = !hasTab ? "missing" : explicitMismatch ? "mismatch" : verified ? ready ? "verified" : "blocked" : "unknown";
     const previous = sessions.get(key);
-    const sameIdentity = previous?.identity === identity;
-    if (previous && previous.mode === mode && sameIdentity) return snapshot(previous);
+    if (previous) snapshot(previous, key); // Expiry cannot be bypassed by a late successful probe.
+    const sameContext = previous?.context === context;
+    const resolvedIdentity = mode === "unknown" && sameContext ? previous?.identity ?? null : identity;
+    const sameIdentity = previous?.identity === resolvedIdentity;
+    if (previous && previous.mode === mode && sameContext && sameIdentity) {
+      if (mode === "verified") previous.evidence = evidence;
+      if (mode === "blocked") previous.reason = reason_code;
+      previous.accountVerified = account_verified;
+      return snapshot(previous, key);
+    }
     if (previous) cancel(previous);
-    const state = { mode, identity, generation: ++nextGeneration,
-      unknownSince: mode === "unknown" ? now() : null, timers: [] };
+    const recovering = previous?.mode === "unknown" && mode === "verified" && sameContext && sameIdentity;
+    const hadReady = mode === "unknown" && sameContext && previous?.mode === "verified";
+    const preserveGeneration = hadReady || (recovering && !previous.expired);
+    if (recovering) emit(key, previous, "recovered");
+    const state = { mode, identity: resolvedIdentity, context, generation: preserveGeneration ? previous.generation : ++nextGeneration,
+      unknownSince: mode === "unknown" ? now() : null, hadReady, expired: false, warned: false,
+      evidence: mode === "verified" ? evidence : hadReady ? previous.evidence : null,
+      reason: reason_code, accountVerified: account_verified, timers: [] };
     sessions.set(key, state);
     if (mode === "unknown") {
-      // The final callback publishes needs_attention even if no external probe runs.
-      for (const delay of [5_000, 15_000, 30_000]) {
-        state.timers.push(setTimer(() => notify(key, state), delay));
-      }
+      emit(key, state, hadReady ? "grace_started" : "check_started");
+      for (const delay of [5_000, 15_000, 30_000, 60_000]) state.timers.push(setTimer(() => notify(key, state), delay));
     }
-    return snapshot(state);
+    return snapshot(state, key);
   }
-
-  function generation(key) {
-    return sessions.get(key)?.generation ?? null;
-  }
-
-  function isCurrent(key, candidate) {
-    const state = sessions.get(key);
-    return Boolean(state && state.mode === "verified" && state.generation === candidate);
-  }
-
   function reset(key) {
     if (arguments.length === 0) {
       for (const state of sessions.values()) cancel(state);
@@ -64,8 +89,13 @@ export function createSessionEligibility({
       sessions.delete(key);
     }
   }
-
-  return { observe, generation, isCurrent, reset,
-    state: (key) => sessions.has(key) ? snapshot(sessions.get(key)) : null,
+  return {
+    observe, reset,
+    generation: (key) => sessions.has(key) ? snapshot(sessions.get(key), key).generation : null,
+    isCurrent: (key, generation) => {
+      const state = sessions.has(key) ? snapshot(sessions.get(key), key) : null;
+      return Boolean(state?.eligible && state.generation === generation);
+    },
+    state: (key) => sessions.has(key) ? snapshot(sessions.get(key), key) : null,
   };
 }

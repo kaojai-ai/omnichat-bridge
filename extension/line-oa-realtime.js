@@ -8,7 +8,6 @@
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
-  const INCREMENTAL_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -22,12 +21,13 @@
   const pollingAccounts = new Map();
   let accessibleAccounts = [];
   let accountAccessVerified = false;
+  let providerCheckOutcome = "unknown";
   let accountAccessRequest = null;
+  let metadataSessionEpoch = 0;
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
-  const knownChatIdsByAccount = new Map();
-  const knownMessageIdsByAccount = new Map();
+  const metadataProfilesByAccount = new Map();
   const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
@@ -112,6 +112,7 @@
       command_capabilities_by_account: commandCapabilitiesByAccount,
       accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
       account_access_verified: accountAccessVerified,
+      provider_check_outcome: providerCheckOutcome,
       realtime_transport: "authenticated_polling",
       realtime_connected: !lastProviderCheckAt || Date.now() - Date.parse(lastProviderCheckAt) < 45_000,
       connected_at: new Date().toISOString(),
@@ -132,6 +133,8 @@
     try {
       const request = input instanceof Request ? input : null;
       const url = new URL(request?.url ?? String(input), window.location.origin);
+      if (url.origin === window.location.origin && /^\/api\/v\d+\/bots(?:\/|$)/.test(url.pathname)
+        && [401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
       const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
       const rawBody = init?.body ?? null;
       if (method === "POST" && typeof rawBody === "string" && messageSendPath(url)) {
@@ -144,8 +147,28 @@
     return response;
   };
 
+  function markProviderCheckFailure(error) {
+    const confirmedFailure = [401, 403].includes(error?.providerDiagnostics?.http_status);
+    if (confirmedFailure) {
+      metadataSessionEpoch += 1;
+      providerCheckOutcome = "failed";
+      accessibleAccounts = [];
+    } else if (providerCheckOutcome !== "failed") {
+      providerCheckOutcome = "unknown";
+    }
+    accountAccessVerified = false;
+    postProviderStatus();
+  }
+
+  function invalidProviderResponse(message) {
+    const error = new Error(message);
+    markProviderCheckFailure(error);
+    return error;
+  }
+
   async function availableAccounts() {
     if (accountAccessRequest) return accountAccessRequest;
+    const sessionEpoch = metadataSessionEpoch;
     accountAccessRequest = (async () => {
       try {
         const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
@@ -156,8 +179,11 @@
           display_name: value(bot?.name ?? bot?.displayName),
         })).filter((account) => account.provider_account_id && account.bot_id);
         if (disposed) return [];
+        if (sessionEpoch !== metadataSessionEpoch) throw new Error("LINE OA account check was superseded by a session change.");
+        if (accessibleAccounts.some((previous) => !accounts.some((account) => account.provider_account_id === previous.provider_account_id && account.bot_id === previous.bot_id))) metadataSessionEpoch += 1;
         accessibleAccounts = accounts;
         accountAccessVerified = true;
+        providerCheckOutcome = "passed";
         const ids = new Set(accounts.map((account) => account.provider_account_id));
         for (const id of pollingAccounts.keys()) {
           if (!ids.has(id)) cancelPolling("This LINE OA is not accessible to the signed-in user.", { providerAccountId: id });
@@ -165,9 +191,7 @@
         postProviderStatus();
         return accounts;
       } catch (error) {
-        // A failed request cannot prove that access was revoked.
-        accountAccessVerified = false;
-        postProviderStatus();
+        markProviderCheckFailure(error);
         throw error;
       }
     })().finally(() => { accountAccessRequest = null; });
@@ -201,9 +225,9 @@
     return checkpointMs <= 0 || latestEventMs <= 0 || latestEventMs >= checkpointMs;
   }
 
-  async function json(url) {
+  async function json(url, timeoutMs = REQUEST_TIMEOUT_MS) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
-    const timeout = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller?.abort(), Math.max(1, Math.min(REQUEST_TIMEOUT_MS, timeoutMs)));
     try {
       const response = await fetch(url, {
         credentials: "include",
@@ -221,8 +245,10 @@
       lastProviderCheckAt = new Date().toISOString();
       return body;
     } catch (error) {
-      if (error?.name === "AbortError") throw new Error("LINE OA request timed out.");
-      throw error;
+      const failure = error?.name === "AbortError" ? new Error("LINE OA request timed out.") : error;
+      failure.providerCheckUnavailable = true;
+      if ([401, 403].includes(failure?.providerDiagnostics?.http_status)) markProviderCheckFailure(failure);
+      throw failure;
     } finally {
       clearTimeout(timeout);
     }
@@ -302,7 +328,32 @@
     }
   }
 
+  function captureChatProfile(providerAccountId, chat) {
+    const conversationId = value(chat?.chatId);
+    const profile = chat?.profile;
+    const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+    if (!providerAccountId || !conversationId || !id) return;
+    const profiles = metadataProfilesByAccount.get(providerAccountId) ?? new Map();
+    metadataProfilesByAccount.set(providerAccountId, profiles);
+    const key = `${conversationId}:${id}`;
+    const previous = profiles.get(key) ?? {};
+    const displayName = previous.display_name ? "" : value(profile?.displayName ?? profile?.name);
+    let avatarUrl = "";
+    if (!previous.avatar_url) {
+      try {
+        const url = new URL(value(profile?.pictureUrl ?? profile?.imageUrl ?? profile?.avatarUrl));
+        if (url.protocol === "https:") avatarUrl = url.toString();
+      } catch { /* Optional metadata. */ }
+    }
+    if (!displayName && !avatarUrl) return;
+    const additions = { ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
+    profiles.set(key, { ...previous, ...additions });
+    while (profiles.size > 1_000) profiles.delete(profiles.keys().next().value);
+    post({ type: "profiles_detected", profiles: [{ conversation_id: conversationId, id, provider_account_id: providerAccountId, ...additions }] });
+  }
+
   async function queueMessagePage({ requestId, providerAccountId, chat, messages, page }) {
+    captureChatProfile(providerAccountId, chat);
     if (!messages.length) return { parsed: 0, queued: 0 };
     const batchRequestId = `${requestId}:${value(chat?.chatId)}:${page}`;
     post({
@@ -346,16 +397,16 @@
     return !disposed && generation.epoch === pollGeneration && !generation.cancelled;
   }
 
-  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0 }) {
+  // Persisted boundaries own recovery; evictable IDs must never stop pagination.
+  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0 }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
-    const knownMessageIds = knownMessageIdsByChat.get(chatId) ?? new Set();
-    knownMessageIdsByChat.set(chatId, knownMessageIds);
     let backward = null;
     let page = 0;
     let parsed = 0;
     let queued = 0;
     let accepted = 0;
+    let latestCursor = null;
     const seenCursors = new Set();
 
     while (pollIsActive(generation)) {
@@ -363,12 +414,8 @@
       if (remaining <= 0) break;
       const body = await json(messagesUrl(botId, chatId, backward, Math.min(PAGE_LIMIT, remaining)));
       if (!pollIsActive(generation)) return { parsed, queued };
-      const rawMessages = Array.isArray(body?.list) ? body.list : [];
-      const allKnown = rawMessages.length > 0 && rawMessages.every((message) => {
-        const id = messageId(message);
-        return id && knownMessageIds.has(id);
-      });
-      if (allKnown) break;
+      if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA message history response is invalid.");
+      const rawMessages = body.list;
       const messages = rawMessages
         .filter((message) => {
           const timestamp = messageTimeMs(message);
@@ -389,7 +436,8 @@
       if (!messages.length && (pageIsBeforeCheckpoint || limitReached)) break;
       if (!messages.length && sinceMs > 0) {
         const nextBackward = cursor(body?.backward);
-        if (!nextBackward || seenCursors.has(nextBackward)) break;
+        if (!nextBackward) break;
+        if (seenCursors.has(nextBackward)) throw new Error("LINE OA message history pagination repeated a cursor.");
         seenCursors.add(nextBackward);
         backward = nextBackward;
         page += 1;
@@ -400,26 +448,23 @@
       parsed += result.parsed;
       queued += result.queued;
       accepted += messages.length;
-      await advanceRecoveryCursor({
-        requestId,
-        providerAccountId,
-        chat,
-        page,
-        latestCursor: result.latestCursor,
-      });
+      const candidate = result.latestCursor;
+      if (candidate && (!latestCursor || timeMs(candidate.event_timestamp) > timeMs(latestCursor.event_timestamp)
+        || (timeMs(candidate.event_timestamp) === timeMs(latestCursor.event_timestamp)
+          && String(candidate.message_id) > String(latestCursor.message_id)))) latestCursor = candidate;
       if (!pollIsActive(generation)) return { parsed, queued };
-      for (const message of messages) {
-        const id = messageId(message);
-        if (id) knownMessageIds.add(id);
-      }
       if (maxMessages !== null && accepted >= maxMessages) break;
       const nextBackward = cursor(body?.backward);
-      if (!nextBackward || seenCursors.has(nextBackward) || pageIsBeforeCheckpoint) break;
+      if (!nextBackward || pageIsBeforeCheckpoint) break;
+      if (seenCursors.has(nextBackward)) throw new Error("LINE OA message history pagination repeated a cursor.");
       seenCursors.add(nextBackward);
       backward = nextBackward;
       page += 1;
     }
-    return { parsed, queued };
+    if (pollIsActive(generation) && latestCursor) {
+      await advanceRecoveryCursor({ requestId, providerAccountId, chat, page, latestCursor });
+    }
+    return { parsed, queued, latestCursor };
   }
 
   function numberFrom(body, keys) {
@@ -505,14 +550,12 @@
   }
 
   async function poll(requestId, providerAccountId, botId, checkpoint, generation, history) {
+    const scanStartedAt = Date.now();
+    const completedCursors = { ...(checkpoint?.conversations ?? {}) };
     try {
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!pollIsActive(generation)) return;
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
-      const knownChatIds = knownChatIdsByAccount.get(providerAccountId) ?? new Set();
-      const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
-      knownChatIdsByAccount.set(providerAccountId, knownChatIds);
-      knownMessageIdsByAccount.set(providerAccountId, knownMessageIdsByChat);
       const selection = historySelection(history);
       if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
@@ -522,7 +565,7 @@
         ? selection.sinceMs
         : bootstrap
           ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
-          : Math.max(Date.now() - INCREMENTAL_SYNC_LOOKBACK_MS, checkpointMs);
+          : checkpointMs;
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );
@@ -539,6 +582,7 @@
       while (pollIsActive(generation)) {
         const body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
+        if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
@@ -553,7 +597,6 @@
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
-        const allKnown = chats.length > 0 && chats.every((chat) => knownChatIds.has(value(chat?.chatId)));
         const chatsToRecover = [];
         for (const chat of chats) {
           const chatId = value(chat?.chatId);
@@ -586,14 +629,14 @@
               botId: resolvedBotId,
               chat,
               generation,
-              knownMessageIdsByChat,
               maxMessages: deep || historyWindow
                 ? null
                 : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
-              sinceMs: deep || historyWindow ? selection.sinceMs : lowerBoundMs,
+              sinceMs: deep || historyWindow ? selection.sinceMs : Math.max(lowerBoundMs, timeMs(completedCursors[chatId]?.event_timestamp)),
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
+          if (result.latestCursor) completedCursors[chatId] = result.latestCursor;
           if (deep) {
             await markHistoryBackfill({
               requestId,
@@ -606,7 +649,6 @@
           }
           parsed += result.parsed;
           queued += result.queued;
-          knownChatIds.add(chatId);
           completedConversations += 1;
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
           if (trackedRequest) {
@@ -624,7 +666,8 @@
         if (pageBeforeHistory) break;
         if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
         const nextCursor = cursor(body?.next);
-        if (!nextCursor || seenCursors.has(nextCursor) || (allKnown && pendingIds.size === 0)) break;
+        if (!nextCursor) break;
+        if (seenCursors.has(nextCursor)) throw new Error("LINE OA conversation pagination repeated a cursor.");
         seenCursors.add(nextCursor);
         next = nextCursor;
       }
@@ -637,11 +680,11 @@
             botId: resolvedBotId,
             chat: { chatId },
             generation,
-            knownMessageIdsByChat,
             maxMessages: null,
             sinceMs: selection.sinceMs,
           });
           if (!pollIsActive(generation)) return;
+          if (result.latestCursor) completedCursors[chatId] = result.latestCursor;
           await markHistoryBackfill({
             requestId,
             providerAccountId,
@@ -668,11 +711,13 @@
           checkpoint,
         });
       }
-      const watermark = new Date().toISOString();
+      const watermark = new Date(scanStartedAt).toISOString();
       const state = pollingAccounts.get(providerAccountId);
       if (state) {
         state.checkpoint = {
+          ...checkpoint,
           watermark,
+          conversations: completedCursors,
           ...(checkpoint?.history_backfill ? { history_backfill: checkpoint.history_backfill } : {}),
           ...(checkpoint?.history_window_days ? { history_window_days: checkpoint.history_window_days } : {}),
         };
@@ -680,9 +725,7 @@
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
     } catch (error) {
-      if ([401, 403].includes(error?.providerDiagnostics?.http_status)) {
-        await availableAccounts().catch(() => undefined);
-      }
+      if (error?.providerCheckUnavailable) markProviderCheckFailure(error);
       if (pollIsActive(generation)) {
         postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
@@ -778,7 +821,9 @@
       for (const id of affectedAccounts) {
         const hasReplacement = activePoll?.providerAccountId === id
           || queuedSyncs.some((request) => request.providerAccountId === id);
-        if (!hasReplacement) pollingAccounts.delete(id);
+        if (!hasReplacement) {
+          pollingAccounts.delete(id);
+        }
       }
       if (!pollingAccounts.size) stopTimer();
       for (const request of interrupted) cancelAcknowledgements(reason, request.requestId);
@@ -963,6 +1008,7 @@
         httpStatus = upload.status;
         const uploaded = await upload.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
         if (!upload.ok) {
+          if ([401, 403].includes(upload.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: upload.status } });
           providerDetails = providerErrorDetails(uploaded);
           throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
         }
@@ -986,7 +1032,7 @@
       httpStatus = response.status;
       const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
       if (!response.ok) {
-        if ([401, 403].includes(response.status)) void availableAccounts().catch(() => undefined);
+        if ([401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
         providerDetails = providerErrorDetails(responseBody);
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
@@ -1027,9 +1073,81 @@
     }
   }
 
+  // Read only account/chat lists. Never fetch message history for metadata.
+  async function refreshMetadata(command) {
+    const requestId = value(command?.request_id);
+    const accountId = normalizeBasicId(command?.provider_account_id);
+    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
+    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
+    const locationAtStart = window.location.href;
+    const sessionEpoch = metadataSessionEpoch;
+    const profiles = [];
+    let account;
+    const assertCurrent = () => {
+      if (disposed || sessionEpoch !== metadataSessionEpoch || window.location.href !== locationAtStart) throw new Error("LINE OA session changed during metadata refresh.");
+      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
+    };
+    try {
+      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
+      assertCurrent();
+      const accountsBody = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`, deadlineAt - Date.now());
+      assertCurrent();
+      if (!Array.isArray(accountsBody?.list)) throw new Error("LINE OA account list was invalid.");
+      const bot = accountsBody.list.find((item) => normalizeBasicId(item?.basicSearchId ?? item?.basicId) === accountId);
+      const botId = value(bot?.botId ?? bot?.id);
+      if (!botId) throw new Error("This LINE OA is not accessible to the signed-in user.");
+      const name = value(bot?.name ?? bot?.displayName);
+      account = { provider: "line_oa", provider_account_id: accountId, bot_id: botId,
+        ...(name ? { display_name: name } : {}) };
+      let next = null;
+      let count = 0;
+      const seenCursors = new Set();
+      const seenChats = new Set();
+      let partial = false;
+      do {
+        assertCurrent();
+        const url = new URL(chatUrl(botId, next));
+        url.searchParams.set("limit", String(Math.min(CHAT_PAGE_LIMIT, limit - count)));
+        url.searchParams.set("prioritizePinnedChat", "false");
+        const body = await json(url.toString(), deadlineAt - Date.now());
+        assertCurrent();
+        if (!Array.isArray(body?.list)) throw new Error("LINE OA returned an invalid conversation list.");
+        const chats = globalThis.OmnichatLineOA.chatItems(body);
+        for (const chat of chats) {
+          if (count >= limit) break;
+          const conversationId = value(chat?.chatId);
+          if (!conversationId || seenChats.has(conversationId)) continue;
+          seenChats.add(conversationId);
+          count += 1;
+          const profile = chat?.profile;
+          const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+          const displayName = value(profile?.displayName ?? profile?.name);
+          const avatar = value(profile?.pictureUrl ?? profile?.imageUrl ?? profile?.avatarUrl);
+          let avatarUrl = "";
+          try { const parsed = new URL(avatar); if (parsed.protocol === "https:") avatarUrl = parsed.toString(); } catch { /* Optional metadata. */ }
+          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
+            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
+        }
+        next = cursor(body?.next);
+        if (next && seenCursors.has(next)) { partial = true; break; }
+        if (next) seenCursors.add(next);
+        if (next && count >= limit) partial = true;
+      } while (next && count < limit);
+      assertCurrent();
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
+    } catch (error) {
+      const current = !disposed && sessionEpoch === metadataSessionEpoch && window.location.href === locationAtStart && Date.now() < deadlineAt;
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
+        ...(current && account ? { account } : {}), profiles: current ? profiles : [], partial: Boolean(current && account),
+        error: error instanceof Error ? error.message : "Metadata refresh failed." });
+    }
+  }
+
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "detect_account_v3") {
+    if (event.data.type === "refresh_metadata_v3") {
+      void refreshMetadata(event.data);
+    } else if (event.data.type === "detect_account_v3") {
       void availableAccounts().then((accounts) => {
         postProviderStatus();
         post({
@@ -1040,6 +1158,7 @@
       }).catch((error) => {
         post({
           type: "account_detection_failed",
+          provider_check_outcome: providerCheckOutcome,
           request_id: event.data.request_id,
           error: "LINE OA account detection failed.",
           diagnostics: failedOperationDiagnostics(error, "initialize"),
@@ -1075,6 +1194,9 @@
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
     compatibility_version: COMPATIBILITY_VERSION,
+    metadata_refresh: true,
+    bounded_message_ids: true,
+    grace_classification: true,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

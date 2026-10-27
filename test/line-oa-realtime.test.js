@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -75,6 +75,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         return { ok: sendStatus === 200, status: sendStatus, json: async () => { if (sendNonJson) throw new SyntaxError("secret provider HTML"); return sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody; } };
       }
       if (url.pathname === "/api/v1/bots") {
+        if (beforeAccountRequest) await beforeAccountRequest();
         if (accountError) throw accountError;
         return {
           ok: true,
@@ -86,6 +87,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
         if (beforeChatRequest) await beforeChatRequest(url);
         if (chatError) throw chatError;
+        if (chatPages) return { ok: true, json: async () => chatPages[url.searchParams.get("next") ?? "first"] ?? { list: [] } };
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
         const chatId = chatIds[pageIndex];
@@ -103,6 +105,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
+        if (beforeMessageRequest) await beforeMessageRequest(url);
+        if (messagePages) return { ok: true, json: async () => messagePages[url.searchParams.get("backward") ?? "first"] ?? { list: [] } };
         if (sentPayloads.length && confirmError) throw confirmError;
         if (sentPayloads.length && sendResponseBody === undefined) {
           const body = JSON.parse(sentPayloads.at(-1).body);
@@ -457,16 +461,16 @@ test("LINE OA recovers every chat and message page only after each page is ackno
   );
 });
 
-test("LINE OA saves a per-conversation cursor after each persisted message page", async () => {
+test("LINE OA saves a per-conversation cursor only after all its pages persist", async () => {
   const bridge = createBridge();
 
   await bridge.sync();
 
   const cursors = bridge.posts.filter((post) => post.type === "recovery_cursor");
-  assert.equal(cursors.length, 3);
+  assert.equal(cursors.length, 2);
   assert.deepEqual(
     cursors.map((post) => post.conversation_id),
-    ["chat-1", "chat-1", "chat-2"],
+    ["chat-1", "chat-2"],
   );
   assert.ok(cursors.every((post) => post.cursor?.event_timestamp && post.cursor?.message_id));
 });
@@ -878,17 +882,17 @@ test("LINE OA rejects malformed mention commands before sending", async () => {
 });
 
 
-test("LINE OA stale checkpoints cannot import messages older than 5 days", async () => {
-  const bridge = createBridge();
-  const complete = await bridge.sync({
-    checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
-    now: 6 * 24 * 60 * 60 * 1_000,
+for (const days of [8, 30]) {
+  test(`LINE OA resumes ${days}-day-old checkpoints without a rolling cutoff`, async () => {
+    const bridge = createBridge();
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: "1970-01-01T00:00:00.900Z" }, now: days * 24 * 60 * 60 * 1_000 });
+      assert.equal(complete.ok, true);
+      assert.equal(complete.recovered, 3);
+      assert.ok(bridge.requests.some(url => url.searchParams.has("backward")));
+    } finally { bridge.dispose(); }
   });
-  assert.equal(complete.ok, true);
-  assert.equal(complete.recovered, 0);
-  assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
-  assert.equal(bridge.requests.some(url => url.searchParams.has("backward")), false);
-});
+}
 
 
 test("LINE OA initial setup excludes two-day-old history", async () => {
@@ -899,7 +903,7 @@ test("LINE OA initial setup excludes two-day-old history", async () => {
   assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
 });
 
-test("LINE OA reconnect includes two-day-old messages within the five-day maximum", async () => {
+test("LINE OA reconnect includes messages newer than its saved checkpoint", async () => {
   const bridge = createBridge({ chatCount: 1 });
   const complete = await bridge.sync({
     now: 2 * 24 * 60 * 60 * 1_000 + 2_000,
@@ -1213,4 +1217,175 @@ test("LINE queued deadlines renew only while the active account makes real progr
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "active" && post.ok));
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
   bridge.dispose();
+});
+
+
+test("LINE OA interrupted newest-first recovery retains the boundary for older pages", async () => {
+  let failOlder = true;
+  const bridge = createBridge({ chatCount: 1,
+    messagePages: { first: { list: [{ id: "newer", timestamp: 3000 }], backward: "older" }, older: { list: [{ id: "older", timestamp: 2000 }] } },
+    beforeMessageRequest(url) { if (failOlder && url.searchParams.get("backward") === "older") throw new Error("Temporary provider failure"); },
+  });
+  try {
+    const checkpoint = { watermark: "1970-01-01T00:00:01.000Z" };
+    const failed = await bridge.sync({ requestId: "failed-scan", checkpoint });
+    assert.equal(failed.ok, false);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+    failOlder = false;
+    const recovered = await bridge.sync({ requestId: "retry-scan", checkpoint });
+    assert.equal(recovered.ok, true);
+    const messages = bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith("retry-scan:"))
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+    assert.deepEqual(messages.map(message => message.id), ["newer", "older"]);
+    const saved = bridge.posts.find(post => post.type === "recovery_cursor");
+    assert.equal(saved.cursor.message_id, "newer");
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA successful recovery watermark is the scan start boundary", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  try {
+    const complete = await bridge.sync({ now: 5000 });
+    assert.equal(complete.watermark, new Date(5000).toISOString());
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA durable conversation cursor bounds message history without hiding same-time IDs", async () => {
+  const bridge = createBridge({ chatCount: 1, messagePages: {
+    first: { list: [{ id: "same-time-new-id", timestamp: 3000 }, { id: "older", timestamp: 2000 }] },
+  } });
+  try {
+    await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString(), conversations: { "chat-1": { event_timestamp: new Date(3000).toISOString(), message_id: "same-time-old-id" } } } });
+    const batch = bridge.posts.find(post => post.type === "recovery_batch");
+    assert.deepEqual(batch.body.conversations[0].messages.map(message => message.id), ["same-time-new-id"]);
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE OA warm recovery and a fresh bridge cover the same checkpoint range", async () => {
+  const checkpoint = { watermark: new Date(900).toISOString() };
+  const warm = createBridge({ chatCount: 3 });
+  const cold = createBridge({ chatCount: 3 });
+  try {
+    await warm.sync({ requestId: "warm-up", checkpoint });
+    const beforeRequests = warm.requests.length;
+    await warm.sync({ requestId: "warm-again", checkpoint });
+    await cold.sync({ requestId: "cold", checkpoint });
+    const ids = (bridge, requestId) => bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith(`${requestId}:`))
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages.map(message => message.id)));
+    assert.deepEqual(ids(warm, "warm-again"), ids(cold, "cold"));
+    const messageRequests = requests => requests.filter(url => url.pathname.includes("/messages")).length;
+    assert.equal(messageRequests(warm.requests.slice(beforeRequests)), messageRequests(cold.requests));
+  } finally { warm.dispose(); cold.dispose(); }
+});
+
+
+for (const [name, options] of [
+  ["invalid messages", { messagePages: { first: { unexpected: true } } }],
+  ["invalid conversations", { chatPages: { first: { unexpected: true } } }],
+  ["repeated message cursor", { messagePages: { first: { list: [{ id: "first", timestamp: 3000 }], backward: "repeat" }, repeat: { list: [{ id: "second", timestamp: 2000 }], backward: "repeat" } } }],
+  ["repeated conversation cursor", { chatPages: { first: { list: [], next: "repeat" }, repeat: { list: [], next: "repeat" } } }],
+]) {
+  test(`LINE OA ${name} cannot complete recovery or advance its watermark`, async () => {
+    const bridge = createBridge({ chatCount: 1, ...options });
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString() } });
+      assert.equal(complete.ok, false);
+      assert.equal(complete.watermark, undefined);
+      if (name.includes("message")) assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+    } finally { bridge.dispose(); }
+  });
+}
+
+for (const [name, error, expected] of [
+  ["network error", new TypeError("network unavailable"), "unknown"],
+  ["timeout", Object.assign(new Error("request aborted"), { name: "AbortError" }), "unknown"],
+  ["server error", Object.assign(new Error("server unavailable"), { providerDiagnostics: { http_status: 503 } }), "unknown"],
+  ["unauthorized", Object.assign(new Error("unauthorized"), { providerDiagnostics: { http_status: 401 } }), "failed"],
+  ["forbidden", Object.assign(new Error("forbidden"), { providerDiagnostics: { http_status: 403 } }), "failed"],
+]) {
+  test(`LINE OA account ${name} reports ${expected} without verified access`, async () => {
+    const bridge = createBridge({ chatCount: 0 });
+    try {
+      await bridge.sync();
+      assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+      bridge.setAccountError(error);
+      const result = await bridge.detect();
+      const status = lastPollingStatus(bridge);
+      assert.equal(result.type, "account_detection_failed");
+      assert.equal(result.provider_check_outcome, expected);
+      assert.equal(status.provider_check_outcome, expected);
+      assert.equal(status.account_access_verified, false);
+      if (expected === "failed") assert.deepEqual(status.accessible_account_ids, []);
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("LINE OA malformed account list is uncertainty and a valid response restores passed", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  try {
+    await bridge.sync();
+    bridge.setAccounts({ unexpected: true });
+    const failed = await bridge.detect();
+    assert.equal(failed.provider_check_outcome, "unknown");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    bridge.setAccounts([{ botId: "bot-1", basicSearchId: "@exampleoa" }]);
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA polling authorization failure remains failed through subsequent unknown checks", async () => {
+  const error = Object.assign(new Error("permission denied"), { providerDiagnostics: { http_status: 403 } });
+  const bridge = createBridge({ chatError: error });
+  try {
+    const result = await bridge.sync();
+    assert.equal(result.ok, false);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    bridge.setAccountError(new TypeError("network unavailable"));
+    const unknown = await bridge.detect();
+    assert.equal(unknown.provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    bridge.setAccountError(null);
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE OA late account success cannot overwrite a newer authorization failure", async () => {
+  let block = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ chatCount: 0, sendStatus: 401,
+    beforeAccountRequest: async () => { if (block) await gate; },
+  });
+  try {
+    await bridge.sync();
+    block = true;
+    const detection = bridge.detect();
+    await settleBridge();
+    await bridge.captureManualSend({ type: "text", text: "Fixture", sendId: "fixture-send" });
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    release();
+    const stale = await detection;
+    assert.equal(stale.type, "account_detection_failed");
+    assert.equal(stale.provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    block = false;
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+  } finally { release(); bridge.dispose(); }
+});
+
+test("LINE OA send authorization rejection immediately reports a confirmed failed check", async () => {
+  const bridge = createBridge({ sendStatus: 403 });
+  try {
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply" });
+    assert.equal(result.ok, false);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+  } finally { bridge.dispose(); }
 });

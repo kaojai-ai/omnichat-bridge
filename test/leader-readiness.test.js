@@ -1,3 +1,4 @@
+import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import { createStatusReporter } from "../extension/lib/status-reporter.js";
 import assert from "node:assert/strict";
@@ -7,7 +8,9 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
 function fn(name, next, globals) {
-  return vm.runInNewContext(`(${source.slice(source.indexOf(`async function ${name}(`), source.indexOf(next)).trim()})`, globals);
+  const scope = vm.createContext(globals);
+  installProviderPolicy(scope);
+  return vm.runInContext(`(${source.slice(source.indexOf(`async function ${name}(`), source.indexOf(next)).trim()})`, scope);
 }
 const context = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" },
   adapter: { id: "shopee", tabQueryPattern: "https://seller.shopee.co.th/*", matchesUrl: () => true, sendCommands: ["send_text"] } };
@@ -22,7 +25,7 @@ test("live presence advertises sends only for a responding tab belonging to this
   const snapshot = fn("connectionStatusSnapshot", "\nfunction statusPublishKey", {
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }), getPlatformInfo: async () => ({ os: "mac" }) } },
-    orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
+    providerChatTabs: async () => tabs, orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
     providerTabHealthy: (input) => input?.ok === true && input?.realtime_connected === true,
     providerTabCanSend: canSend, providerTabIsReady: (input) => input?.ok === true,
     persistProviderSurfaceState: async () => {}, detectedAccounts: () => [context.account],
@@ -56,7 +59,7 @@ test("unchanged readiness does not add status writes or repeated leader checks",
 });
 
 test("an outbound command cannot use a tab for another shop", async () => {
-  const commandTab = fn("commandTab", "\nfunction providerAdapterForCommand", {
+  const selectContext = fn("selectSendContext", "\nasync function commandTab", {
     STORAGE: {}, providerLabel: () => "Shopee Seller Chat", readStorage: async () => ({}), readAccountState: () => null,
     providerChatTabs: async () => [{ id: 1, url: "https://seller.shopee.co.th/" }], providerRecoveryRecord: () => null,
     getTab: async () => null, orderProviderTabs: (_adapter, tabs) => tabs,
@@ -64,7 +67,7 @@ test("an outbound command cannot use a tab for another shop", async () => {
     providerTabCanSend: canSend, providerTabStatus: async () => ({ ...ready, provider_account_ids: ["shop", "another-shop"], current_provider_account_id: "another-shop" }),
     recordLog: async () => {}, writeStorage: async () => assert.fail("must not select a mismatched tab"),
   });
-  await assert.rejects(() => commandTab(context, { prepareForSend: true }), /not ready for this account/);
+  await assert.rejects(() => selectContext(context), /not ready for this account/);
 });
 
 test("a delayed persisted readiness ACK refreshes real leader status, with stale socket/report fencing", async () => {

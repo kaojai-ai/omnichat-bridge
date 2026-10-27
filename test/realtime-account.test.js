@@ -4,7 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 import { latestMessageCursor } from "../extension/lib/sync-state.js";
 
-const source = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
+const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
+const source = cacheSource + "\n" + await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
@@ -336,6 +337,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
 
   return {
     get state() { return window.__omnichatRealtimeState; },
+    setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
+    checkStatus(requestId) {
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
+      return posts.findLast(post => post.type === "provider_status" && post.request_id === requestId);
+    },
     fetch,
     setResponse,
     seedRecoveryState,
@@ -359,6 +365,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       }, origin);
     },
     get state() { return window.__omnichatRealtimeState; },
+    setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
+    checkStatus(requestId) {
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
+      return posts.findLast(post => post.type === "provider_status" && post.request_id === requestId);
+    },
     dispose() { window.__omnichatRealtimeBridgeControl.dispose(); },
     get messageListenerCount() { return listeners.length; },
     get miniChatClicks() { return miniChatClicks; },
@@ -607,6 +618,7 @@ test("Shopee history_days without conversation ids loads every conversation in t
     message("inside-message", insideId, "2026-08-26T00:00:00.000Z"),
     message("inside-too-old", insideId, "2026-08-20T00:00:00.000Z"),
   ]);
+  bridge.setResponse("/webchat/api/v1.2/conversations/inside-older/messages", []);
   const store = { messages: [], conversations: {}, watermark: null };
   const complete = await bridge.sync("100000001", "history-window", {
     watermark: "2026-09-20T00:00:00.000Z",
@@ -1056,7 +1068,7 @@ for (const hangBody of [false, true]) {
   });
 }
 
-test("default polling ignores ancient newly discovered conversations and filters ancient messages from a missing-marker page", async () => {
+test("default polling captures old provider events without an arbitrary age cutoff", async () => {
   const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   const conversation = (id, latest) => ({
@@ -1079,13 +1091,13 @@ test("default polling ignores ancient newly discovered conversations and filters
   await bridge.runIntervals();
   const ids = capturedRetryIds(bridge);
   assert.equal(requestedLimit, "100");
-  assert.equal(ids.length, 35);
-  assert.deepEqual(ids, messages.slice(5).map((message) => message.id));
-  assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), false);
+  assert.equal(ids.length, 40);
+  assert.deepEqual(ids, messages.map((message) => message.id));
+  assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), true);
 });
 
 
-test("default recovery with no conversation cursor stops at the 5-day floor", async () => {
+test("default recovery with no conversation cursor stops at the saved checkpoint", async () => {
   const bridge = createBridge();
   const listPath = "/webchat/api/v1.2/conversations";
   const conversation = { id: "missing-cursor", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
@@ -1099,10 +1111,10 @@ test("default recovery with no conversation cursor stops at the 5-day floor", as
   const complete = await bridge.sync("100000001");
   assert.equal(complete.ok, true);
   const messages = bridge.posts.filter(post => post.type === "recovery_batch").flatMap(post => Array.from(post.body));
-  assert.deepEqual(messages.map(message => message.id), ["recent", "inside-window"]);
+  assert.deepEqual(messages.map(message => message.id), ["recent", "inside-window", "outside-window"]);
 });
 
-test("initial Shopee sync uses one day while reconnect can recover within five days", async () => {
+test("initial Shopee sync uses one day while reconnect resumes its saved checkpoint", async () => {
   const listPath = "/webchat/api/v1.2/conversations";
   const historyPath = `${listPath}/initial-window/messages`;
   const conversation = { id: "initial-window", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" };
@@ -1140,3 +1152,153 @@ test("redirected Webchat discovers its shop, captures routing, and observes the 
     assert.equal(inbound.body.messages[0].id, "incoming-1");
   } finally { bridge.dispose(); }
 });
+
+
+test("Shopee provider checks replace socket listeners without a recurring observer", async () => {
+  const makeSocket = () => ({ connected: true, handlers: new Map(),
+    on(event, handler) { this.handlers.set(event, handler); },
+    off(event) { this.handlers.delete(event); } });
+  const first = makeSocket();
+  const bridge = createBridge({ socket: first, captureIntervals: true });
+  try {
+    assert.equal(bridge.intervals.some(item => item.delay === 2_000), false);
+    await new Promise(resolve => setImmediate(resolve));
+    const staleDisconnect = first.handlers.get("disconnect");
+    const second = makeSocket();
+    bridge.setSocket(second);
+    const status = bridge.checkStatus("fresh-1");
+    assert.equal(status.realtime_connected, true);
+    assert.ok(status.last_provider_check_at);
+    assert.equal(first.handlers.size, 0);
+    assert.equal(second.handlers.size, 3);
+    const count = bridge.posts.length;
+    staleDisconnect();
+    assert.equal(bridge.posts.length, count);
+    second.connected = false;
+    second.handlers.get("disconnect")();
+    assert.equal(bridge.posts.at(-1).realtime_connected, false);
+    bridge.setSocket(null);
+    assert.equal(bridge.checkStatus("fresh-2").realtime_connected, false);
+    assert.equal(second.handlers.size, 0);
+    assert.equal(bridge.state.socket, null);
+  } finally { bridge.dispose(); }
+});
+
+
+for (const offlineDays of [8, 30]) {
+  test(`Shopee recovers since checkpoint after ${offlineDays} days offline`, async () => {
+    const bridge = createBridge();
+    const now = Date.parse("2026-08-20T12:00:00Z");
+    const checkpoint = new Date(now - offlineDays * 86400_000).toISOString();
+    const timestamp = now - (offlineDays - 1) * 86400_000;
+    const conversation = { id: "offline", shop_id: 100000001, last_message_time: new Date(timestamp).toISOString() };
+    await bridge.fetch("/webchat/api/v1.2/conversations", [conversation]);
+    bridge.setResponse("/webchat/api/v1.2/conversations/offline/messages", [
+      { ...retryMessage("offline-message", 0), conversation_id: "offline", created_timestamp: timestamp / 1000 },
+      { ...retryMessage("before-checkpoint", 0), conversation_id: "offline", created_timestamp: (Date.parse(checkpoint) - 1) / 1000 },
+    ]);
+    const complete = await bridge.sync("100000001", `offline-${offlineDays}`, { watermark: checkpoint });
+    assert.equal(complete.ok, true);
+    assert.deepEqual(bridge.posts.filter(post => post.type === "recovery_batch").flatMap(post => Array.from(post.body, item => item.id)), ["offline-message"]);
+    bridge.dispose();
+  });
+}
+
+test("Shopee does not advance a conversation cursor after a later history page fails", async () => {
+  const bridge = createBridge();
+  const listPath = "/webchat/api/v1.2/conversations";
+  const historyPath = `${listPath}/interrupted/messages`;
+  const timestamp = Date.parse("2026-08-20T10:00:00Z");
+  await bridge.fetch(listPath, [{ id: "interrupted", shop_id: 100000001, last_message_time: new Date(timestamp).toISOString() }]);
+  const message = (id, time) => ({ ...retryMessage(id, 0), conversation_id: "interrupted", created_timestamp: time / 1000 });
+  const newest = Array.from({ length: 100 }, (_, index) => message(`new-${index}`, timestamp - index * 1000));
+  const older = message("older-unprocessed", timestamp - 101000);
+  let fail = true;
+  bridge.setResponse(historyPath, request => {
+    const offset = Number(new URL(request.url).searchParams.get("offset"));
+    return new Response(JSON.stringify(offset === 0 ? newest : fail ? { error: "unavailable" } : [older]));
+  });
+  const store = { messages: [], conversations: {}, watermark: "2026-08-01T00:00:00Z" };
+  const checkpoint = { watermark: store.watermark, conversations: store.conversations };
+  const failed = await bridge.sync("100000001", "failed-later-page", checkpoint, store);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.reason_code, "invalid_message_history");
+  assert.equal(store.conversations.interrupted, undefined);
+  assert.equal(store.watermark, checkpoint.watermark);
+  fail = false;
+  const recovered = await bridge.sync("100000001", "restart-later-page", checkpoint, store);
+  assert.equal(recovered.ok, true);
+  assert.equal(store.messages.some(item => item.id === "older-unprocessed"), true);
+  assert.ok(store.conversations.interrupted);
+  bridge.dispose();
+});
+
+test("Shopee rejects malformed conversation lists without advancing recovery", async () => {
+  const bridge = createBridge();
+  await bridge.fetch("/webchat/api/v1.2/conversations", []);
+  bridge.setResponse("/webchat/api/v1.2/conversations", { error: "unavailable" });
+  const complete = await bridge.sync("100000001", "invalid-list");
+  assert.equal(complete.ok, false);
+  assert.equal(complete.reason_code, "invalid_conversation_list");
+  assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+  bridge.dispose();
+});
+
+for (const status of [503, 403]) {
+  test(`Seller Centre classifies polling ${status} as ${status === 503 ? "unknown" : "failed"} and recovers`, async () => {
+    const bridge = await pollingRetryBridge();
+    try {
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("before-failure").provider_check_outcome, "passed");
+      bridge.setResponse(retryListPath, () => new Response("{}", { status }));
+      await bridge.runIntervals();
+      const failed = bridge.checkStatus("after-failure");
+      assert.equal(failed.provider_check_outcome, status === 503 ? "unknown" : "failed");
+      assert.equal(failed.realtime_connected, false);
+      assert.equal(failed.current_provider_account_id, "100000001");
+      bridge.setResponse(retryListPath, [retryConversation("m1")]);
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("after-recovery").provider_check_outcome, "passed");
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("Seller Centre timeout reports missing evidence and clears it after a successful poll", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true, requestTimeoutMs: 20 });
+  try {
+    await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+    await bridge.fetch(retryListPath, [retryConversation("m1")]);
+    await bridge.runIntervals();
+    bridge.setResponse(retryListPath, () => new Promise(() => {}));
+    await bridge.runIntervals();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(bridge.checkStatus("timeout").provider_check_outcome, "unknown");
+    bridge.setResponse(retryListPath, [retryConversation("m1")]);
+    await bridge.runIntervals();
+    assert.equal(bridge.checkStatus("recovered-timeout").provider_check_outcome, "passed");
+  } finally { bridge.dispose(); }
+});
+
+for (const status of [503, 403]) {
+  test(`Seller Centre successful list cannot hide required history ${status}`, async () => {
+    const bridge = await pollingRetryBridge();
+    try {
+      bridge.setResponse(retryListPath, [retryConversation("m2")]);
+      bridge.setResponse(retryHistoryPath, () => new Response("{}", { status }));
+      await bridge.runIntervals();
+      assert.equal(bridge.state.pollingConnected, true);
+      assert.equal(bridge.checkStatus("capture-failure").provider_check_outcome, status === 503 ? "unknown" : "failed");
+      if (status === 403) {
+        bridge.setResponse(retryHistoryPath, () => new Response("{}", { status: 503 }));
+        await bridge.runIntervals();
+        assert.equal(bridge.checkStatus("capture-still-failed").provider_check_outcome, "failed");
+      }
+      bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("capture-recovered").provider_check_outcome, "passed");
+      await bridge.fetch("/webchat/api/v1.2/mini/user/setting", () => new Response("{}", { status: 401 }));
+      assert.equal(bridge.checkStatus("logged-out").provider_check_outcome, "failed");
+      assert.equal(bridge.checkStatus("logged-out-account").current_provider_account_id, null);
+    } finally { bridge.dispose(); }
+  });
+}

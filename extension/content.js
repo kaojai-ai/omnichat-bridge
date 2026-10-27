@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 5;
+  const BRIDGE_PROTOCOL_VERSION = 9;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -17,12 +17,14 @@
   const providerLabel = providerAdapter.displayName || providerAdapter.id;
   const recoveries = new Map();
   const accountDetections = new Map();
+  const metadataRefreshRequests = new Map();
+  let providerStatusRequest = null;
   const profilesByConversation = new Map();
   const routingByConversation = new Map();
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
   const pendingProviderPreparations = new Map();
-  const realtimeMessageKeys = new Set();
+  const realtimeMessageKeys = globalThis.OmnichatMessageIdCache.create();
   let activeConversationId = null;
   let realtimeConnected = false;
   let lastRealtimeConnectedAt = null;
@@ -33,6 +35,7 @@
   let providerAccountIds = [];
   let accessibleAccountIds = [];
   let accountAccessVerified = false;
+  let providerCheckOutcome = null;
   let currentProviderAccountId = null;
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
@@ -403,6 +406,22 @@
     return { ok: true, cancelled: cancelled > 0 };
   }
 
+  function requestMetadataRefresh(message) {
+    const requestId = crypto.randomUUID();
+    const deadline = Math.min(Number(message.deadline_at) || 0, Date.now() + 30_000);
+    if (deadline <= Date.now()) return Promise.resolve({ ok: false, error: "Metadata refresh expired." });
+    const result = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        metadataRefreshRequests.delete(requestId);
+        resolve({ ok: false, error: "Metadata refresh timed out." });
+      }, deadline - Date.now());
+      metadataRefreshRequests.set(requestId, { resolve, timeout, accountId: message.provider_account_id, deadline });
+    });
+    post({ type: "refresh_metadata_v3", request_id: requestId,
+      provider_account_id: message.provider_account_id, deadline_at: deadline, limit: 100 });
+    return result;
+  }
+
   async function requestAccountDetection() {
     if (!providerAdapter.supports("account_detection")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support account detection.` };
@@ -417,7 +436,7 @@
       const timeout = setTimeout(() => {
         accountDetections.delete(requestId);
         log("warn", "account_detection_timeout", `${providerLabel} account detection timed out.`);
-        resolve({ ok: false, error: `Refresh ${providerLabel} to detect the account ID.` });
+        resolve({ ok: false, provider_check_outcome: "unknown", error: `Refresh ${providerLabel} to detect the account ID.` });
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
@@ -492,7 +511,10 @@
       ...providerFailureDiagnostics(message),
       request_id: message.request_id,
     });
-    pending.resolve({ ok: false, error: message.error ?? `${providerLabel} account ID was not found.` });
+    pending.resolve({ ok: false,
+      ...(["unknown", "failed", "passed"].includes(message.provider_check_outcome)
+        ? { provider_check_outcome: message.provider_check_outcome } : {}),
+      error: message.error ?? `${providerLabel} account ID was not found.` });
   }
 
   function profileField(profile, field) {
@@ -517,6 +539,7 @@
   }
 
   function handleProfilesDetected(message) {
+    const discovered = [];
     for (const profile of message.profiles ?? []) {
       const conversationId = String(profile?.conversation_id ?? "").trim();
       const id = String(profile?.id ?? "").trim();
@@ -542,9 +565,19 @@
           : {})
       };
       const key = JSON.stringify([normalizedProfile.provider_account_id ?? "", conversationId]);
-      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(key));
-      if (merged) profilesByConversation.set(key, merged);
+      const cached = profilesByConversation.get(key);
+      const previous = cached?.id === id ? cached : null;
+      const fields = {
+        ...(!previous?.display_name && normalizedProfile.display_name ? { display_name: normalizedProfile.display_name } : {}),
+        ...(!previous?.avatar_url && normalizedProfile.avatar_url ? { avatar_url: normalizedProfile.avatar_url } : {}),
+      };
+      if (Object.keys(fields).length) {
+        profilesByConversation.set(key, { ...normalizedProfile, ...previous, ...fields });
+        if (profilesByConversation.size > 1_000) profilesByConversation.delete(profilesByConversation.keys().next().value);
+        discovered.push({ ...normalizedProfile, ...fields, conversation_id: conversationId });
+      }
     }
+    if (discovered.length) void sendRuntimeMessage({ type: "cache_profiles", provider: providerAdapter.id, profiles: discovered });
   }
 
   function addConversationProfile(messages) {
@@ -552,18 +585,24 @@
       const accountId = message.provider_account_id ?? message.participant?.provider_account_id
         ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "");
       const key = JSON.stringify([accountId, message.conversation_id]);
-      const profile = profilesByConversation.get(key);
+      const cached = profilesByConversation.get(key);
+      const profile = message.participant?.id && cached?.id !== message.participant.id ? null : cached;
       const participant = mergeConversationProfiles(message.participant, profile);
-      if (participant?.display_name) profilesByConversation.set(key, participant);
+      if (participant && profile) {
+        if (profile.display_name) participant.display_name = profile.display_name;
+        if (profile.avatar_url) participant.avatar_url = profile.avatar_url;
+      }
+      if (participant?.display_name) {
+        profilesByConversation.set(key, participant);
+        if (profilesByConversation.size > 1_000) profilesByConversation.delete(profilesByConversation.keys().next().value);
+      }
       const routing = routingByConversation.get(JSON.stringify([accountId, message.conversation_id]));
-      return participant
-        ? {
-          ...message,
-          ...(routing ? { omnichat: { routing } } : {}),
-          ...(accountId ? { provider_account_id: accountId } : {}),
-          participant,
-        }
-        : message;
+      return {
+        ...message,
+        ...(routing ? { omnichat: { routing } } : {}),
+        ...(accountId ? { provider_account_id: accountId } : {}),
+        ...(participant ? { participant } : {}),
+      };
     });
   }
 
@@ -776,9 +815,10 @@
         finishPendingApiSend(apiSend.requestId, apiSend.pending);
       }
 
-      const realtimeKey = `${message.conversation_id}:${message.id}`;
-      if (realtimeMessageKeys.has(realtimeKey)) continue;
-      realtimeMessageKeys.add(realtimeKey);
+      const accountId = message.provider_account_id ?? message.participant?.provider_account_id
+        ?? currentProviderAccountId ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "unverified");
+      if (realtimeMessageKeys.has(providerAdapter.id, accountId, message.conversation_id, message.id)) continue;
+      realtimeMessageKeys.add(providerAdapter.id, accountId, message.conversation_id, message.id);
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
@@ -1007,6 +1047,13 @@
       void observeAsync("accounts_detected", () => handleAccountsDetected(event.data));
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
+    } else if (event.data.type === "metadata_refresh_result") {
+      const pending = metadataRefreshRequests.get(event.data.request_id);
+      if (!pending) return;
+      metadataRefreshRequests.delete(event.data.request_id);
+      clearTimeout(pending.timeout);
+      if (Date.now() >= pending.deadline) pending.resolve({ ok: false, error: "Metadata refresh expired." });
+      else pending.resolve(event.data);
     } else if (event.data.type === "profiles_detected") {
       handleProfilesDetected(event.data);
     } else if (event.data.type === "active_conversation") {
@@ -1017,7 +1064,11 @@
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
+      if (providerAdapter.id === "shopee" && event.data.request_id
+        && event.data.request_id !== providerStatusRequest?.requestId) return;
       const wasSurfaceReady = providerSurfaceReady;
+      providerCheckOutcome = ["unknown", "failed", "passed"].includes(event.data.provider_check_outcome)
+        ? event.data.provider_check_outcome : null;
       if (providerAdapter.id === "line_oa") {
         accountAccessVerified = event.data.account_access_verified === true;
         accessibleAccountIds = Array.isArray(event.data.accessible_account_ids)
@@ -1025,7 +1076,9 @@
         providerAccountIds = accountAccessVerified ? [...accessibleAccountIds] : [];
       }
       if (providerAdapter.id === "shopee") {
-        currentProviderAccountId = event.data.current_provider_account_id ?? null;
+        const nextAccountId = event.data.current_provider_account_id ?? null;
+        if (nextAccountId !== currentProviderAccountId) realtimeMessageKeys.clear(providerAdapter.id);
+        currentProviderAccountId = nextAccountId;
       }
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
@@ -1065,6 +1118,13 @@
         && !automaticSellerCentreLandingStarted
       ) {
         requestResumeSync();
+      }
+      if (providerAdapter.id === "shopee" && event.data.request_id === providerStatusRequest?.requestId
+        && providerStatusRequest) {
+        const pending = providerStatusRequest;
+        providerStatusRequest = null;
+        clearTimeout(pending.timeout);
+        pending.resolve(providerStatusSnapshot());
       }
     } else if (event.data.type === "seller_centre_chat_opened") {
       requestResumeSync();
@@ -1116,6 +1176,44 @@
     }
   };
 
+  function providerStatusSnapshot() {
+    return {
+      ok: true,
+      surface: providerSurface,
+      provider_account_ids: providerAccountIds,
+      accessible_account_ids: [...accessibleAccountIds],
+      account_access_verified: accountAccessVerified,
+      ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
+      current_provider_account_id: currentProviderAccountId,
+      surface_ready: providerSurfaceReady,
+      capabilities: { ...providerCapabilities },
+      command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
+      realtime_transport: providerRealtimeTransport,
+      chat_open: providerChatOpen,
+      realtime_connected: realtimeConnected,
+      provider_polling_active: providerPollingActive,
+      provider_polling_account_ids: [...providerPollingAccountIds],
+      last_realtime_connected_at: lastRealtimeConnectedAt,
+      last_provider_check_at: lastProviderCheckAt,
+      page_visible: document.visibilityState === "visible",
+    };
+  }
+
+  function requestFreshProviderStatus() {
+    if (providerStatusRequest) return providerStatusRequest.promise;
+    const requestId = crypto.randomUUID();
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    const timeout = setTimeout(() => {
+      if (providerStatusRequest?.requestId !== requestId) return;
+      providerStatusRequest = null;
+      resolve({ ok: false, provider_check_outcome: "unknown", error: "Provider status response timed out." });
+    }, 1500);
+    providerStatusRequest = { requestId, promise, resolve, timeout };
+    post({ type: "check_provider_status_v3", request_id: requestId });
+    return promise;
+  }
+
   const onRuntimeMessage = (message, _sender, respond) => {
     if (!isBridgeActive()) return undefined;
     if (message?.provider && message.provider !== providerAdapter.id) {
@@ -1127,25 +1225,11 @@
       return false;
     }
     if (message?.type === "get_provider_status_v3") {
-      respond({
-        ok: true,
-        surface: providerSurface,
-        provider_account_ids: providerAccountIds,
-        accessible_account_ids: [...accessibleAccountIds],
-        account_access_verified: accountAccessVerified,
-        current_provider_account_id: currentProviderAccountId,
-        surface_ready: providerSurfaceReady,
-        capabilities: { ...providerCapabilities },
-        command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
-        realtime_transport: providerRealtimeTransport,
-        chat_open: providerChatOpen,
-        realtime_connected: realtimeConnected,
-        provider_polling_active: providerPollingActive,
-        provider_polling_account_ids: [...providerPollingAccountIds],
-        last_realtime_connected_at: lastRealtimeConnectedAt,
-        last_provider_check_at: lastProviderCheckAt,
-        page_visible: document.visibilityState === "visible",
-      });
+      if (providerAdapter.id === "shopee") {
+        void requestFreshProviderStatus().then(respond);
+        return true;
+      }
+      respond(providerStatusSnapshot());
       return false;
     }
     if (message?.type === "auto_open_chat_and_sync_v3") {
@@ -1161,6 +1245,10 @@
     if (message?.type === "cancel_sync_v3") {
       respond(cancelRecovery(message.request_id, message.provider_account_id));
       return false;
+    }
+    if (message?.type === "refresh_metadata_v3") {
+      void requestMetadataRefresh(message).then(respond, () => respond({ ok: false }));
+      return true;
     }
     if (message?.type === "detect_account_v3") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
@@ -1205,6 +1293,12 @@
     if (disposed) return false;
     disposed = true;
     clearTimeout(resumeSyncTimer);
+    realtimeMessageKeys.clear();
+    if (providerStatusRequest) {
+      clearTimeout(providerStatusRequest.timeout);
+      providerStatusRequest.resolve({ ok: false, provider_check_outcome: "unknown", error: reason });
+      providerStatusRequest = null;
+    }
     for (const pending of recoveries.values()) {
       pending.resolve({ ok: false, error: reason });
     }
@@ -1214,6 +1308,11 @@
       pending.resolve({ ok: false, error: reason });
     }
     accountDetections.clear();
+    for (const pending of metadataRefreshRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    metadataRefreshRequests.clear();
     for (const pending of pendingApiSends.values()) {
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);

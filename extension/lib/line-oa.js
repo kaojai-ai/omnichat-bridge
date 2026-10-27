@@ -53,6 +53,7 @@
         provider: "line_oa",
         provider_account_id: providerAccountId || undefined,
         conversation_id: conversationId,
+        participant: { id: userId, ...(providerAccountId ? { provider_account_id: providerAccountId } : {}) },
         id: messageId,
         ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
         event_timestamp: iso(timestamp, new Date().toISOString()),

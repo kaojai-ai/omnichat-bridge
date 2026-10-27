@@ -49,7 +49,7 @@ export function hydrateDetectedAccounts({
     ? stored.filter((account) => account?.provider === providerId)
     : stored;
   return visibleDetectedAccounts(
-    mergeDetectedAccounts(seeded, scopedStored),
+    mergeDetectedAccounts(scopedStored, seeded),
     config,
     activeTabUrl,
   );

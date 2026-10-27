@@ -32,7 +32,7 @@ sequenceDiagram
 | Owner | Before | Planned behaviour |
 | --- | --- | --- |
 | omnichat-bridge: background | Saved detected shops can all own live connections | Resolve current session; close inactive sockets; retain configuration and queued messages |
-| omnichat-bridge: recovery | Retry backoff can hide a recovered tab | Keep health checks running; back off reload attempts only |
+| omnichat-bridge: recovery | Retry backoff can hide a recovered tab | Keep health checks and bridge repair running; never automatically reload provider tabs |
 | omnichat-bridge: capture | Fetch or JSON parsing can hold the polling lock indefinitely | Bound provider requests to 15 seconds; release lock; ignore completion from an old shop session |
 | omnichat-bridge: readiness | Successful list polling can hide message-history failure | Report capture failure and apply existing freshness checks to ready status |
 | omnichat-bridge: delivery | Upload can delay watchdog; retry timestamp is not enforced | Bound upload/log requests to 15 seconds; independent transport repair; respect automatic retry time |
@@ -133,11 +133,24 @@ bridge requests and target requests. These are measurements, not speedup claims.
 LINE selects configured accounts confirmed accessible in the current browser;
 Shopee selects the configured shop matching the verified login. A background tab
 is sufficient. Missing tabs display waiting-for-tab and are opened only with
-existing automatic recovery opt-in. Uncertain sessions block commands and retry
-at 5/15 seconds, displaying needs-attention after 30 seconds. Existing sockets
-may remain open during that bounded check; uncertainty never creates a socket.
-Wrong-account evidence blocks immediately. Session generations fence queued
-commands and manual/automatic recovery. A provider waiting for verification must
+existing automatic recovery opt-in. **Planned — readiness grace:** one account policy drives browser readiness,
+status reports and command selection for both providers. A missing status response
+can retain previously ready evidence for 30 seconds only when the tab, navigation
+and account context remain unchanged. Repeated missing responses never move the
+deadline; a successful check ends the episode. Unknown sessions without recent
+ready evidence cannot send. At grace expiry, replies become unavailable with
+`checking_session`; sustained uncertainty becomes `needs_attention` at 60 seconds.
+Checks repeat at 5/15 seconds and at the two boundaries. Existing healthy sockets
+remain open through provider uncertainty, including after grace expiry; unknown
+sessions never create a fresh socket.
+Wrong-account evidence, logout, missing tabs, required-capability failures and
+confirmed realtime failures block readiness immediately. Navigation, replacement,
+configuration changes and worker restart invalidate retained evidence. Invalidating
+an unused tab does not close another tab's validated account connection. In-flight
+probes share one request per tab/session; navigation epochs and observation order
+fence stale results. Session generations survive temporary uncertainty and recovery
+to the same account within grace, but change on true context changes or expiry.
+They fence queued commands and manual/automatic recovery. A provider waiting for verification must
 not occupy the capture/storage queue. Unified recovery selects Shopee before
 LINE so a slow LINE access check cannot delay Shopee.
 
@@ -164,3 +177,73 @@ exports contain all retained entries.
 After a successful readiness acknowledgement on the current socket, refresh the
 server leader result again. Sync completion and acknowledgement alone never
 establish leadership; the compatible server release remains required.
+
+
+### Readiness-grace wire contract (Planned)
+
+During grace, version 1 `connection_status` reports include `ready: true`,
+`reason_code: "provider_check_grace"` and optional RFC3339
+`readiness_grace_expires_at`. The absolute deadline is retained across checks and
+cleared on recovery or expiry. Consumers must stop treating the report as ready
+when its deadline expires, even if no replacement report arrives. Release server,
+worker and Admin support before the extension. Database changes: none.
+
+Command preflight uses the same account policy, including the retained exact tab
+inside grace. The actual page sender retains its exact-account guard, and the
+background rechecks generation immediately before the single provider attempt.
+No message waits, automatic resends or additional provider attempts are added.
+An uncertain provider result remains uncertain and is deduplicated by request ID.
+
+Readiness logs record episode start, recovery duration, grace expiry and the
+60-second warning once per episode. Local transport cleanup identifies its reason;
+remote close diagnostics include time since the last inbound WebSocket message.
+
+## Manual metadata refresh (0.8.0, Planned)
+
+Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields change only through **Refresh account & customer info** in the extension. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
+
+Manual refresh verifies the account and reads account/conversation lists only, with a 30-second overall deadline and at most 100 recent conversations. Partial failures keep valid completed results; context changes discard late results. No historical-message crawl, individual customer-profile fetch, message replay, or immediate rewrite of historical Admin customer records is performed. Refreshed information reaches KaoJai through subsequent ordinary ingestion.
+
+The versioned customer cache persists only display metadata and IDs under an opaque configuration/account fingerprint. It is bounded to 1,000 records per account, 5,000 per installation, and 2 MiB (whichever limit is reached first). Storage writes are batched; erasure cancels pending cache work. Display cache failures do not authorize or block sending. Existing server contracts and SQL schema remain unchanged.
+
+Release the related server/worker/Admin readiness compatibility first, then extension 0.8.0. CPU/heap and live incoming-message latency still require comparison on an authenticated provider tab; reduced redundant work is not a measured performance claim.
+
+### Planned: manual provider-tab reload only
+
+Version 0.8.0 removes automatic provider-tab reloads after health-check failures. Health checks and bridge repair continue; opt-in recovery can still open a missing tab with bounded retry backoff. A genuinely stuck page requires the user to reload it manually. Extension-update reloads are unaffected.
+
+### Planned: Shopee socket checks on demand
+
+Version 0.8.0 removes the two-second socket observer. Startup, detected session/page events, and fresh provider-status requests attach listeners to the current socket. The existing minute watchdog requests a fresh page response; command checks also use this path. Message/connect/disconnect listeners remain immediate, and provider message polling is unchanged. A silent socket replacement can take up to the next watchdog check to discover (longer if Chrome delays scheduling). Missing page responses remain uncertainty under the readiness policy, not confirmed logout.
+
+
+### Planned: bounded message IDs and checkpoint recovery
+
+Version 0.8.0 uses one shared insertion-order ID cache for Shopee event capture and the content bridge used by both providers. Limits are 200 IDs per conversation, 10,000 per provider account, and 20,000 per bridge instance. Reads do not refresh order; eviction removes empty indexes. No timers, cache persistence, or age-based expiry are involved. Account/session changes and disposal release the relevant IDs. These limits do not bound the separate durable pending-message queue.
+
+LINE's former known-message and known-chat sets are removed: they were used to stop pagination, which could hide unrecovered pages. LINE now relies on saved recovery boundaries. This can increase summary-page requests; unchanged old conversations do not require message-history fetches. Memory IDs never authorize sending or determine recovery coverage.
+
+Normal recovery resumes from the saved account watermark and conversation cursor without a five-day cutoff. Initial sync retains at most 10 conversations, 25 messages each, within one day, unless explicit history configuration requests otherwise. Provider retention may still limit available history.
+
+Conversation cursors advance only after every required page for that conversation is durably captured. Failed or cancelled scans keep realtime cursor advancement deferred until recovery completes. LINE advances its successful watermark to scan start, preserving messages arriving during the scan. Invalid provider response shapes and pagination cycles fail recovery instead of reporting completion. Existing pending delivery and single-attempt outgoing sends remain independent.
+
+Validation covers 8/30-day absence, interrupted newest-first pagination, warm/cold recovery equivalence, same-timestamp messages, initial bounds, cache caps, malformed responses, and failed-scan realtime capture. Synthetic cache cardinality is bounded under sustained input; no live heap, CPU, or incoming-latency improvement has been measured.
+
+Synthetic validation: 48,000 distinct IDs retain 20,000 entries under the configured cache cap. For the same three-conversation fixed-checkpoint LINE fixture, message requests are 4 for both warm and fresh bridges; the prior warm-cache shortcut made 1 request. These are fixture counts, not production request-rate or heap measurements.
+
+### Planned: explicit check outcomes
+
+Provider checks distinguish passed, unknown, and failed outcomes through the page/content/background boundary. Shopee page-response/polling timeouts and LINE transient account-check failures are unknown and use the same fixed 30-second grace for a previously ready, unchanged session. LINE authentication/access rejection is failed and blocks immediately; a later missing response cannot restore grace after a confirmed failure. A valid new account check is required for recovery. Late account-check results cannot overwrite a newer authentication failure. Internal content protocol 9 and provider classification capabilities ensure existing page bridges are replaced.
+
+
+### Planned: shorter send preparation
+
+Queued commands perform one readiness/tab selection after leaving the account queue. The selection carries its original session generation through bridge initialization, media preparation and dispatch. A session replaced while selection storage or initialization is pending cannot adopt the older command. Direct commands use the same selection path.
+
+Sends reuse a successful bridge initialization check for the same provider and tab-document epoch. Background health/repair checks still validate the bridge, and concurrent initialization checks share work. Navigation, closure, configuration changes, explicit bridge retirement and missing bridge responses invalidate reuse. This cache contains code-initialization evidence only, never account authorization or provider readiness. A failed dispatch is not retried.
+
+Selected tabs are persisted only when changed; repeated selections reuse an in-memory hint. Final provider account verification, Shopee routing fallback, media handling, LINE confirmation and duplicate-command protection retain their behavior. Initialized provider-page helpers already avoid repeated template waits; no additional authorization cache is introduced. Tests validate one readiness probe per queued send and document/session changes around asynchronous preparation. Live latency savings have not been measured.
+
+### Planned: submit diagnostics on demand
+
+Diagnostic logs remain bounded and stored locally. Remote uploads happen only when the user clicks **Submit** on the Logs page; startup clears the former upload alarm. A submission snapshots queued operational diagnostics, sends sequential batches of up to 100 entries, and coalesces repeated clicks. Failed batches remain queued for a later manual submission, with no scheduled retry. Download and Copy remain local exports including all retained log levels. Submit is highlighted after Download; Copy and Clear sit below the logs.

@@ -20,6 +20,7 @@ import {
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
+import { createMetadataCache } from "./lib/metadata-cache.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
 import { createDiagnosticBuffer } from "./lib/diagnostic-buffer.js";
@@ -41,7 +42,6 @@ import {
   writeStorage,
 } from "./lib/storage.js";
 import {
-  PROVIDER_RECOVERY_FAILURE_THRESHOLD,
   PROVIDER_RECOVERY_STATES,
   normalizeProviderRecoveryTabs,
   providerRecoveryRecord,
@@ -54,10 +54,41 @@ import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 
+let metadataCacheWarningReported = false;
+function newCustomerMetadataCache() {
+  return createMetadataCache({
+    load: async () => (await readStorage([STORAGE.customerMetadata]))[STORAGE.customerMetadata],
+    save: (value) => writeStorage({ [STORAGE.customerMetadata]: value }),
+    onError: () => {
+      if (metadataCacheWarningReported) return;
+      metadataCacheWarningReported = true;
+      return recordLog("warn", "metadata", "cache_save_failed", "Display metadata could not be saved locally.");
+    },
+  });
+}
+let customerMetadata = newCustomerMetadataCache();
+let metadataEpoch = 0;
+let metadataErasing = false;
+const metadataRefreshes = new Map();
+// Persist only an opaque configuration fingerprint, never endpoint or credential values.
+const metadataScopes = new WeakMap();
+function metadataScope(context) {
+  let scopes = metadataScopes.get(context.config);
+  if (!scopes) { scopes = new Map(); metadataScopes.set(context.config, scopes); }
+  const key = accountKey(context.account.provider, context.account.provider_account_id);
+  if (!scopes.has(key)) scopes.set(key, sha256Hex(JSON.stringify([
+    context.config.events_url, context.config.api_url ?? context.config.commands_url,
+    context.config.tenant_id ?? null, context.config.user_id ?? null,
+    context.config.hmac_secret, // Opaque configuration fingerprint only; never persist the credential.
+    context.account.provider, context.account.provider_account_id,
+  ])));
+  return scopes.get(key);
+}
+
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 5;
+const BRIDGE_PROTOCOL_VERSION = 9;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
@@ -140,6 +171,8 @@ let mutationQueue = Promise.resolve();
 const replyQueue = createReplyQueue();
 const deliveryScheduler = createDeliveryScheduler(2);
 let commandTabWriteQueue = Promise.resolve();
+const rememberedCommandTabs = new Map();
+const providerBridgeChecks = new Map();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
@@ -154,35 +187,32 @@ const providerAutomaticRetryAttempts = new Map();
 const providerAutomaticRetryAt = new Map();
 const providerRecoveryTabLocks = new Map();
 let providerHealthWatchdogPromise = null;
+const providerSessionEpochs = new Map();
+const providerTabEpochs = new Map();
+const providerPolicyTabIds = new Map();
+const providerPolicyObservations = new Map();
+let providerObservationSequence = 0;
+const providerStatusProbes = new Map();
+const providerPolicyContexts = new Map();
 const sessionEligibility = createSessionEligibility({
-  onRecheck: () => runProviderHealthWatchdog(),
+  onRecheck: () => ensureLiveConnection(),
+  onEvent: (key, event, details) => {
+    const context = providerPolicyContexts.get(key);
+    return recordLog(event === "needs_attention" ? "warn" : "info", "readiness", event,
+      event === "grace_started" ? "Provider check is temporarily unavailable; retaining recent readiness."
+        : event === "recovered" ? "Provider readiness check recovered."
+          : event === "grace_expired" ? "Provider readiness grace expired; replies are unavailable."
+            : event === "needs_attention" ? "Provider checks have remained unavailable for sixty seconds."
+              : "Provider readiness verification started.", {
+        provider: context?.account.provider, provider_account_id: context?.account.provider_account_id, ...details,
+      });
+  },
 });
 
 function mutateLogs(task) {
   const result = logMutationQueue.then(task, task);
   logMutationQueue = result.then(() => undefined, () => undefined);
   return result;
-}
-
-async function scheduleLogUpload(delayInMinutes = 1) {
-  if (await chrome.alarms.get(LOG_UPLOAD_ALARM)) return;
-  chrome.alarms.create(LOG_UPLOAD_ALARM, { delayInMinutes });
-}
-
-async function resumeLogUpload() {
-  const stored = await readStorage([
-    STORAGE.serverInitialized,
-    STORAGE.logUploadEnabled,
-    STORAGE.logOutbox,
-  ]);
-  if (
-    hasServerInitialized(stored)
-    && stored[STORAGE.logUploadEnabled] === true
-    && Array.isArray(stored[STORAGE.logOutbox])
-    && stored[STORAGE.logOutbox].length
-  ) {
-    await scheduleLogUpload();
-  }
 }
 
 const filterRoutineLog = createRoutineLogFilter();
@@ -213,7 +243,6 @@ const diagnosticBuffer = createDiagnosticBuffer({
         && context?.config.logs_url) outbox.add(entry.id);
     }
     await writeStorage({ [STORAGE.logs]: logs, [STORAGE.logOutbox]: [...outbox] });
-    if (outbox.size) void scheduleLogUpload().catch(() => {});
   }),
 });
 
@@ -345,12 +374,113 @@ function liveCommandContexts(contexts) {
   return contexts.filter((context) => (context?.adapter?.sendCommands?.length ?? 0) > 0);
 }
 
-// Access is local to this browser session, never inferred from shared config.
-async function lineSessionContexts(contexts, { refresh = false } = {}) {
+// A single observation drives status, session eligibility and command selection.
+// Only a missing response can use evidence from the same tab/session context.
+function providerSessionEpoch(provider) {
+  return providerSessionEpochs.get(provider) ?? 0;
+}
+
+function providerTabContext(tab, provider) {
+  return `${provider}:${providerSessionEpoch(provider)}:${tab.id}:${providerTabEpochs.get(tab.id) ?? 0}:${tab.url ?? ""}`;
+}
+
+function providerCommandCapabilities(status, context) {
+  if (context.adapter.id === "line_oa") return status?.command_capabilities_by_account?.[context.account.provider_account_id];
+  return providerTabCanSend(status, context)
+    ? context.adapter.sendCommands.filter((command) => command !== "send_video" || status?.capabilities?.send_video === true)
+    : [];
+}
+
+function providerStatusMeetsPolicy(status, context) {
+  const capabilities = providerCommandCapabilities(status, context);
+  return providerTabCanSend(status, context) && providerTabHealthy(status, context.adapter)
+    && Array.isArray(capabilities) && capabilities.includes("send_text");
+}
+
+function invalidateBridgeVerification(tabId) {
+  const check = providerBridgeChecks.get(tabId);
+  if (check) check.verified = false;
+}
+
+// A transport/probe failure is missing evidence, not a provider rejection.
+function providerStatusEvidence(status) {
+  return status?.provider_check_outcome === "unknown" ? null : status;
+}
+
+async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
+  const adapter = context.adapter;
+  providerPolicyContexts.set(context.key, context);
+  const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
+  const observedTabs = tabs ?? await providerChatTabs(adapter);
+  const observedTabContexts = tabContexts ?? observedTabs.map((tab) => providerTabContext(tab, adapter.id));
+  const reportedStatuses = statuses ?? await Promise.all(observedTabs.map(providerTabStatus));
+  const observedStatuses = reportedStatuses.map(providerStatusEvidence);
+  // Navigation/replacement invalidates pending reads; a late response never restores readiness.
+  if (observedEpoch !== providerSessionEpoch(adapter.id)
+    || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
+  if ((providerPolicyObservations.get(context.key) ?? 0) > observation) return sessionEligibility.state(context.key);
+  providerPolicyObservations.set(context.key, observation);
+  const previous = sessionEligibility.state(context.key);
+  const identityMatches = (status) => adapter.id === "shopee"
+    ? status?.current_provider_account_id === context.account.provider_account_id
+    : status?.account_access_verified === true && status.accessible_account_ids?.includes(context.account.provider_account_id);
+  // A known different Shopee account still blocks even when its polling check is unavailable.
+  const identities = new Set(reportedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  const conflict = adapter.id === "shopee" && identities.size > 1;
+  const matchingTab = orderProviderTabs(adapter, observedTabs).find((candidate) => {
+    const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
+    return identityMatches(status) && providerStatusMeetsPolicy(status, context);
+  });
+  const matchingIndex = matchingTab ? observedTabs.findIndex((tab) => tab.id === matchingTab.id) : -1;
+  const previousTabId = previous?.last_evidence?.tab.id;
+  const previousIndex = observedTabs.findIndex((tab) => tab.id === previousTabId);
+  const matching = observedStatuses.findIndex(identityMatches);
+  const index = matchingIndex >= 0 ? matchingIndex : previousIndex >= 0 ? previousIndex : matching >= 0 ? matching : 0;
+  const tab = observedTabs[index];
+  const status = observedStatuses[index] ?? null;
+  const mismatch = conflict || (adapter.id === "shopee"
+    ? identities.size > 0 && !identities.has(context.account.provider_account_id)
+    : observedStatuses.some((item) => item?.account_access_verified === true) && matching < 0);
+  const responded = Boolean(status);
+  const verified = responded && identityMatches(status) && !conflict;
+  const ready = verified && providerStatusMeetsPolicy(status, context);
+  providerPolicyTabIds.set(context.key, tab?.id ?? null);
+  const policy = sessionEligibility.observe(context.key, {
+    hasTab: observedTabs.length > 0,
+    verified: responded, // A confirmed negative cannot consume missing-response grace.
+    account_verified: verified,
+    explicitMismatch: mismatch,
+    identity: mismatch ? adapter.id === "shopee" ? [...identities].sort().join(",") : "inaccessible" : context.account.provider_account_id,
+    context: tab ? providerTabContext(tab, adapter.id) : `${adapter.id}:${observedEpoch}:missing`,
+    ready,
+    reason_code: !verified ? "provider_account_unverified" : !providerTabCanSend(status, context)
+      ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
+    evidence: ready ? { tab, status, command_capabilities: providerCommandCapabilities(status, context) } : null,
+  });
+  const active = policy.eligible;
+  await updateLiveState(context, {
+    eligibility_reason_code: policy.reason_code,
+    session_generation: policy.generation,
+    active_in_profile: active,
+    active_provider_account_id: active ? context.account.provider_account_id : null,
+    provider_session_reason_code: active ? null : conflict ? "session_conflict" : mismatch ? "account_mismatch" : policy.reason_code,
+    readiness_grace_expires_at: policy.readiness_grace_expires_at ?? null,
+    ...(!policy.retain_transport ? { socket: "inactive", leader: false, leader_installation_id: null,
+      provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
+  });
+  if (observedEpoch !== providerSessionEpoch(adapter.id)
+    || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
+  return { ...policy, observed_status: status, observed_tab: tab };
+}
+
+async function lineSessionContexts(contexts, { refresh = false, forRecovery = true } = {}) {
   const line = contexts.filter((context) => context.adapter.id === "line_oa");
   if (!line.length) return contexts;
   const adapter = line[0].adapter;
+  const epoch = providerSessionEpoch(adapter.id);
+  const observation = ++providerObservationSequence;
   const tabs = await providerChatTabs(adapter);
+  const tabContexts = tabs.map((tab) => providerTabContext(tab, adapter.id));
   const statuses = await Promise.all(tabs.map(async (tab) => {
     if (refresh) {
       try {
@@ -358,93 +488,45 @@ async function lineSessionContexts(contexts, { refresh = false } = {}) {
         const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: adapter.id }, {
           label: "LINE OA", operation: "access check", timeoutMs: 25_000,
         });
-        if (!result?.ok) return null;
+        if (!result?.ok) return { ok: false, provider_check_outcome: result?.provider_check_outcome };
       } catch { return null; }
     }
     return providerTabStatus(tab);
   }));
-  const verified = statuses.filter((status) => status?.account_access_verified === true);
-  const ids = new Set(verified.flatMap((status) => status.accessible_account_ids ?? []));
+  const eligible = new Set();
   for (const context of line) {
-    const active = ids.has(context.account.provider_account_id);
-    const eligibility = sessionEligibility.observe(context.key, {
-      hasTab: tabs.length > 0, verified: active,
-      explicitMismatch: !active && verified.length > 0,
-      identity: active ? context.account.provider_account_id : null,
-    });
-    await updateLiveState(context, {
-      eligibility_reason_code: eligibility.reason_code,
-      session_generation: eligibility.generation,
-      active_in_profile: active,
-      provider_session_reason_code: active ? null : eligibility.reason_code,
-      ...(!active && eligibility.reason_code !== "checking_session" ? { socket: "inactive", leader: false, leader_installation_id: null,
-        provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
-    });
+    const policy = await providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation });
+    if (policy?.eligible || (forRecovery && policy?.account_verified)) eligible.add(context.key);
   }
-  return contexts.filter((context) => context.adapter.id !== "line_oa" || ids.has(context.account.provider_account_id));
+  return contexts.filter((context) => context.adapter.id !== "line_oa" || eligible.has(context.key));
 }
 
-let activeShopeeStatusPromise = null;
-const shopeeSessionStates = new Map();
-async function activeLiveCommandContexts(contexts) {
-  const candidates = await lineSessionContexts(liveCommandContexts(contexts));
-  if (!candidates.some((context) => context.adapter.id === "shopee")) return candidates;
-  if (!activeShopeeStatusPromise) {
-    activeShopeeStatusPromise = providerChatTabs(shopeeAdapter)
-      .then(async (tabs) => {
-        const statuses = await Promise.all(tabs.map(providerTabStatus));
-        if (new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean)).size <= 1) return statuses;
-        // Refresh conflicting cached identities once per coalesced check. A stale
-        // tab must neither keep its previous shop connected nor pause us forever.
-        const refreshed = await Promise.all(tabs.map(async (tab) => {
-          try {
-            const detected = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: "shopee" }, {
-              label: "Shopee", operation: "session check", timeoutMs: 15_000,
-            });
-            return detected?.ok ? await providerTabStatus(tab) : null;
-          } catch { return null; }
-        }));
-        return refreshed.every((status) => status?.current_provider_account_id) ? refreshed : statuses;
-      })
-      .finally(() => { activeShopeeStatusPromise = null; });
+async function activeLiveCommandContexts(contexts, { forRecovery = false } = {}) {
+  const candidates = await lineSessionContexts(liveCommandContexts(contexts), { forRecovery });
+  const shopee = candidates.filter((context) => context.adapter.id === "shopee");
+  if (!shopee.length) return candidates;
+  const epoch = providerSessionEpoch("shopee");
+  const observation = ++providerObservationSequence;
+  const tabs = await providerChatTabs(shopeeAdapter);
+  const tabContexts = tabs.map((tab) => providerTabContext(tab, "shopee"));
+  let statuses = await Promise.all(tabs.map(providerTabStatus));
+  if (new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean)).size > 1) {
+    const refreshed = await Promise.all(tabs.map(async (tab) => {
+      try {
+        const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: "shopee" }, {
+          label: "Shopee", operation: "session check", timeoutMs: 15_000,
+        });
+        return result?.ok ? await providerTabStatus(tab) : null;
+      } catch { return null; }
+    }));
+    if (refreshed.every((status) => status?.current_provider_account_id)) statuses = refreshed;
   }
-  const statuses = await activeShopeeStatusPromise;
-  const observedIds = new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean));
-  // One Shopee session per local browser profile. Conflicting pages must not
-  // advertise both shops while one of them still holds a stale login snapshot.
-  const currentId = observedIds.size === 1 ? [...observedIds][0] : null;
-  const activeIds = new Set(currentId ? [currentId] : []);
-  for (const context of candidates.filter((item) => item.adapter.id === "shopee")) {
-    const active = activeIds.has(context.account.provider_account_id);
-    const reasonCode = active ? null : observedIds.size > 1 ? "session_conflict"
-      : currentId ? "account_mismatch" : "session_unverified";
-    const eligibility = sessionEligibility.observe(context.key, {
-      hasTab: statuses.length > 0, verified: active,
-      explicitMismatch: !active && (Boolean(currentId) || observedIds.size > 1),
-      identity: currentId,
-    });
-    await updateLiveState(context, {
-      eligibility_reason_code: eligibility.reason_code,
-      session_generation: eligibility.generation,
-      active_in_profile: active,
-      active_provider_account_id: currentId,
-      provider_session_reason_code: reasonCode,
-      ...(!active && eligibility.reason_code !== "checking_session" ? {
-        socket: "inactive", leader: false, leader_installation_id: null,
-        provider_recovery_state: null, provider_recovery_reason: null,
-        provider_recovery_tab_id: null,
-      } : {}),
-    });
-    const sessionState = `${currentId ?? ""}:${reasonCode ?? "active"}`;
-    if (shopeeSessionStates.get(context.key) !== sessionState) {
-      shopeeSessionStates.set(context.key, sessionState);
-      await recordLog("info", "session", "state_changed", "Shopee browser session status changed.", {
-        provider: "shopee", provider_account_id: context.account.provider_account_id,
-        current_provider_account_id: currentId, reason_code: reasonCode ?? "session_active",
-      });
-    }
+  const eligible = new Set();
+  for (const context of shopee) {
+    const policy = await providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation });
+    if (policy?.eligible || (forRecovery && policy?.account_verified)) eligible.add(context.key);
   }
-  return candidates.filter((context) => context.adapter.id !== "shopee" || activeIds.has(context.account.provider_account_id));
+  return candidates.filter((context) => context.adapter.id !== "shopee" || eligible.has(context.key));
 }
 
 function messageProviderAccountId(message) {
@@ -817,6 +899,27 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "refresh_metadata") {
+    void refreshAccountMetadata(message.provider, message.provider_account_id).then(respond,
+      () => respond({ ok: false, error: "Metadata refresh failed. Cached information was kept." }));
+    return true;
+  }
+  if (message?.type === "cache_profiles") {
+    void exclusive(async () => {
+      const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+      if (metadataErasing || !hasLocalConsent(stored[STORAGE.consent])) return { ok: false };
+      const adapter = providerAdapterForId(message.provider);
+      if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return { ok: false };
+      for (const profile of (Array.isArray(message.profiles) ? message.profiles : []).slice(0, 100)) {
+        const context = accountContextFor(stored, profile.provider_account_id, message.provider);
+        if (context) await customerMetadata.enrich(await metadataScope(context), {
+          conversation_id: profile.conversation_id, participant: profile,
+        });
+      }
+      return { ok: true };
+    }).then(respond, () => respond({ ok: false }));
+    return true;
+  }
   if (message?.type === "check_extension_update") {
     void checkForExtensionUpdate().then(
       (update) => respond({ ok: true, update }),
@@ -846,8 +949,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       if (!hasLocalConsent(stored[STORAGE.consent])) {
         throw new Error("Provider browser bridge is not configured.");
       }
-      const detectedAccounts = mergeDetectedAccounts(stored[STORAGE.detectedAccounts], accounts);
-      await writeStorage({ [STORAGE.detectedAccounts]: detectedAccounts });
+      const previous = stored[STORAGE.detectedAccounts] ?? [];
+      const detectedAccounts = mergeDetectedAccounts(previous, accounts);
+      const needsWrite = accounts.some((account) => {
+        const cached = previous.find((item) => item.provider === account.provider
+          && item.provider_account_id === account.provider_account_id);
+        return !cached || ["display_name", "avatar_url"].some((field) => !cached[field] && account[field]);
+      });
+      if (needsWrite) await writeStorage({ [STORAGE.detectedAccounts]: detectedAccounts });
       return { accounts: detectedAccounts };
     }).then(
       (result) => respond({ ok: true, ...result }),
@@ -873,15 +982,27 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "erase_local_data") {
     diagnosticsSuspended = true;
-    void diagnosticBuffer.discard().then(() => mutateLogs(async () => {
+    metadataErasing = true;
+    metadataEpoch += 1;
+    metadataRefreshes.clear();
+    const metadataDisposed = customerMetadata.dispose();
+    void Promise.all([diagnosticBuffer.discard(), metadataDisposed]).then(() => exclusive(() => mutateLogs(async () => {
       await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
       await chrome.alarms.clear(PROVIDER_HEALTH_ALARM);
       await chrome.alarms.clear(LOG_UPLOAD_ALARM);
       await chrome.storage.local.clear();
-    })).then(
+    }))).then(
       () => respond({ ok: true }),
       () => respond({ ok: false, error: "Could not erase local extension data." }),
-    ).finally(() => { diagnosticsSuspended = false; });
+    ).finally(() => {
+      customerMetadata = newCustomerMetadataCache();
+      metadataErasing = false;
+      diagnosticsSuspended = false;
+    });
+    return true;
+  }
+  if (message?.type === "submit_logs") {
+    void submitLogs().then(respond, () => respond({ ok: false, submitted: 0, error: "Could not submit logs." }));
     return true;
   }
   if (message?.type === "flush_logs") {
@@ -1255,19 +1376,44 @@ async function startUnattendedSellerCentreSync(provider) {
 }
 
 function rememberCommandTab(account, tabId) {
+  if (rememberedCommandTabs.get(account) === tabId) return Promise.resolve();
+  // A queued replacement makes the old memo stale immediately.
+  rememberedCommandTabs.delete(account);
   // Different reply accounts can select tabs concurrently. Merge only while
   // holding this short storage queue, never during provider/network work.
   const result = commandTabWriteQueue.then(async () => {
+    if (rememberedCommandTabs.get(account) === tabId) return;
     const stored = await readStorage([STORAGE.commandTab]);
-    await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], account, tabId) });
+    if (readAccountState(stored[STORAGE.commandTab], account, null) !== tabId) {
+      await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], account, tabId) });
+    }
+    rememberedCommandTabs.set(account, tabId);
   });
   commandTabWriteQueue = result.catch(() => undefined);
   return result;
 }
 
+async function selectSendContext(context, { expectedGeneration } = {}) {
+  const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const policy = await providerReadiness({ ...context, adapter });
+  const tab = policy?.evidence?.tab;
+  if (!policy?.eligible || !tab?.id) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
+  if (expectedGeneration !== undefined && policy.generation !== expectedGeneration) {
+    throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
+  }
+  await rememberCommandTab(context.key, tab.id);
+  if (!sessionEligibility.isCurrent(context.key, policy.generation)) {
+    throw new Error("Provider session changed during tab selection. Verify the account and retry.");
+  }
+  // Carry this generation through dispatch; never adopt a replacement session.
+  return { tab, generation: policy.generation };
+}
+
 async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
+  if (prepareForSend) return (await selectSendContext(context)).tab;
   const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
@@ -1286,26 +1432,6 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
     if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
       tab = candidate;
       break;
-    }
-  }
-  if (!tab && prepareForSend && adapter.id === "shopee") {
-    for (const candidate of orderedTabs.filter((tab) => adapter.surfaceForUrl?.(tab.url) === "seller-centre")) {
-      const status = await providerTabStatus(candidate);
-      if (status?.current_provider_account_id
-        && status.current_provider_account_id !== context.account.provider_account_id) continue;
-      try {
-        await prepareProviderTab(candidate, adapter);
-        if (providerTabCanSend(await providerTabStatus(candidate), context)) {
-          tab = candidate;
-          break;
-        }
-      } catch (error) {
-        await recordLog("warn", "provider", "surface_unready", `${label} Seller Centre could not be prepared for an outbound reply.`, {
-          provider: adapter.id,
-          surface: "seller-centre",
-          ...diagnosticErrorDetails(error),
-        });
-      }
     }
   }
   if (!tab) tab = orderedTabs[0] ?? selectedTab ?? null;
@@ -1328,9 +1454,6 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
       provider: adapter.id,
       surface: adapter.surfaceForUrl?.(tab.url) ?? null,
     });
-    if (prepareForSend && adapter.id === "shopee") {
-      throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
-    }
   }
   await rememberCommandTab(context.key, tab.id);
   return tab;
@@ -1340,7 +1463,7 @@ function providerAdapterForCommand(message) {
   return providerAdapterForId(messageProvider(message));
 }
 
-async function sendViaProvider(message) {
+async function sendViaProvider(message, { expectedGeneration } = {}) {
   const adapter = providerAdapterForCommand(message);
   if (!adapter?.supportsSend(message?.type)) return { ok: false, error: "Unsupported provider reply command." };
   const requestId = typeof message?.request_id === "string" ? message.request_id : "";
@@ -1354,8 +1477,8 @@ async function sendViaProvider(message) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
-  await ensureProviderBridge(tab.id, adapter);
+  const { tab, generation: selectedGeneration } = await selectSendContext(context, { expectedGeneration });
+  await ensureProviderBridge(tab.id, adapter, { reuseVerified: true });
   let imagePayload = {};
   if (["send_image", "send_video", "send_file"].includes(commandType)) {
     const imageUrl = typeof (message.image_url ?? message.media_url) === "string" ? (message.image_url ?? message.media_url) : "";
@@ -1390,6 +1513,9 @@ async function sendViaProvider(message) {
     imagePayload = commandType === "send_image"
       ? { image_base64: btoa(binary), image_type: imageType }
       : { media_base64: btoa(binary), media_type: imageType };
+  }
+  if (!sessionEligibility.isCurrent(context.key, selectedGeneration)) {
+    return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry." };
   }
   const result = await chrome.tabs.sendMessage(tab.id, {
     ...message,
@@ -1773,7 +1899,6 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
       failure_count: 0,
       last_failure_at: null,
       next_retry_at: null,
-      last_reload_at: null,
       reason: null,
     });
     await recordLog("info", "recovery", "provider_tab_opened", `${providerLabel(adapter)} tab opened for automatic recovery.`, {
@@ -1857,50 +1982,17 @@ async function markClosedProviderRecoveryTab(tabId) {
   }
 }
 
-async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts, allowTabRecovery) {
+async function handleProviderRecoveryFailure(adapter, tab, status, recovery, error, contexts) {
   const previousCount = recovery.record?.failure_count ?? 0;
   const failureCount = previousCount + 1;
   const now = Date.now();
   const reason = providerRecoveryFailureReason(adapter, tab, status, error);
-  const shouldReload = allowTabRecovery && failureCount >= PROVIDER_RECOVERY_FAILURE_THRESHOLD
-    && recoveryRetryDue(recovery.record, now)
-    && tab?.status !== "loading";
-  let nextRetryAt = allowTabRecovery ? recovery.record?.next_retry_at ?? null : null;
-  let lastReloadAt = recovery.record?.last_reload_at ?? null;
-  if (shouldReload) {
-    try {
-      await chrome.tabs.reload(tab.id);
-      lastReloadAt = now;
-      nextRetryAt = now + recoveryRetryDelay(failureCount);
-      await recordLog("warn", "recovery", "provider_tab_reloaded", `${providerLabel(adapter)} tab reloaded after repeated health failures.`, {
-        provider: adapter.id,
-        tab_id: tab.id,
-        failure_count: failureCount,
-        next_retry_at: new Date(nextRetryAt).toISOString(),
-      });
-    } catch (reloadError) {
-      await recordUnexpected("provider_tab_reload", reloadError, {
-        provider: adapter.id,
-        tab_id: tab.id,
-        failure_count: failureCount,
-      });
-      nextRetryAt = now + recoveryRetryDelay(failureCount);
-    }
-  } else if (allowTabRecovery && recovery.record?.next_retry_at && !recoveryRetryDue(recovery.record, now)) {
-    await recordLog("debug", "recovery", "provider_tab_backoff", `${providerLabel(adapter)} tab recovery is waiting for its next retry.`, {
-      provider: adapter.id,
-      tab_id: tab.id,
-      failure_count: failureCount,
-      next_retry_at: new Date(recovery.record.next_retry_at).toISOString(),
-    });
-  }
   const record = await updateProviderRecoveryTabState(adapter.id, {
     state: PROVIDER_RECOVERY_STATES.needsAttention,
     tab_id: tab?.id ?? recovery.record?.tab_id ?? null,
     failure_count: failureCount,
     last_failure_at: now,
-    next_retry_at: nextRetryAt,
-    last_reload_at: lastReloadAt,
+    next_retry_at: null,
     reason,
   });
   await updateProviderRecoveryLiveState(
@@ -1977,7 +2069,7 @@ async function runProviderHealthWatchdogOnce() {
     const providerContexts = providerRecoveryContexts(contexts, adapter);
     let matchingContexts = adapter.id === "line_oa"
       ? await lineSessionContexts(providerContexts, { refresh: true })
-      : await activeLiveCommandContexts(providerContexts);
+      : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
     if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
       // A missing content bridge is not an account conflict. Repair it before
       // deciding which shop can recover; never infer identity from configuration.
@@ -1991,7 +2083,7 @@ async function runProviderHealthWatchdogOnce() {
           await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
         }
       }
-      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts);
+      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts, { forRecovery: true });
     }
     if (!matchingContexts.length) {
       // Missing tabs may still be restored by the existing opt-in recovery.
@@ -2065,7 +2157,6 @@ async function runProviderHealthWatchdogOnce() {
           failure_count: 0,
           last_failure_at: null,
           next_retry_at: null,
-          last_reload_at: recovery.record?.last_reload_at ?? null,
         })
         : recovery.record;
       for (const item of matchingContexts) {
@@ -2089,7 +2180,7 @@ async function runProviderHealthWatchdogOnce() {
         tab_id: tab.id,
       });
       const status = await providerTabStatus(tab);
-      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts, allowTabRecovery);
+      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
     }
   }
   await ensureLiveConnection();
@@ -2237,8 +2328,12 @@ async function openCommandTab() {
   return { ok: true };
 }
 
-function stopAccountLiveConnection(key, connection) {
+function stopAccountLiveConnection(key, connection, reason = "provider_context_removed") {
   liveConnections.delete(key);
+  void recordLog("info", "live", "local_cleanup", "Live channel closed after local context teardown.", {
+    provider: connection.context?.account.provider, provider_account_id: connection.context?.account.provider_account_id,
+    reason_code: reason,
+  });
   connection.ticketController?.abort();
   clearTimeout(connection.ticketTimer);
   clearTimeout(connection.stableTimer);
@@ -2250,8 +2345,8 @@ function stopAccountLiveConnection(key, connection) {
   connection.socket?.close();
 }
 
-function stopLiveConnection() {
-  for (const [key, connection] of liveConnections) stopAccountLiveConnection(key, connection);
+function stopLiveConnection(reason = "configuration_or_consent_unavailable") {
+  for (const [key, connection] of liveConnections) stopAccountLiveConnection(key, connection, reason);
 }
 
 function scheduleLiveReconnect(context) {
@@ -2314,59 +2409,30 @@ async function connectionStatusSnapshot(context) {
     STORAGE.status,
   ]);
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
-  const tabs = adapter
-    ? (await chrome.tabs.query({ url: adapter.tabQueryPattern }))
-      .filter((tab) => adapter.matchesUrl(tab.url))
-    : [];
-  let providerStatus = null;
-  let providerStatusTab = null;
-  for (const tab of orderProviderTabs(adapter, tabs)) {
-    if (!tab.id) continue;
-    const result = await providerTabStatus(tab);
-    if (!result) continue;
-    if (!providerStatus) {
-      providerStatus = result;
-      providerStatusTab = tab;
-    }
-    if (providerTabCanSend(result, context)) {
-      providerStatus = result;
-      providerStatusTab = tab;
-      break;
-    }
-  }
+  const policy = await providerReadiness({ ...context, adapter });
+  const providerStatus = policy?.evidence?.status ?? policy?.observed_status ?? null;
+  const providerStatusTab = policy?.evidence?.tab ?? policy?.observed_tab ?? null;
   await persistProviderSurfaceState(context, adapter, providerStatus, providerStatusTab);
-
-  const accountDetected = detectedAccounts(stored).some(
-    (account) => account.provider === context.account.provider
-      && account.provider_account_id === context.account.provider_account_id,
-  );
-  const accountMatches = adapter?.id === "shopee"
-    ? providerStatus?.current_provider_account_id === context.account.provider_account_id
-    : accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
   const health = buildConnectionHealth({
     provider: context.account.provider,
-    tabCount: tabs.length,
-    contentReady: adapter?.id === "shopee" ? providerTabIsReady(providerStatus, adapter) : Boolean(providerStatus),
-    accountDetected,
-    accountMatches,
-    realtimeConnected: providerTabHealthy(providerStatus, adapter),
+    tabCount: providerStatusTab ? 1 : 0,
+    contentReady: Boolean(policy?.eligible),
+    accountDetected: Boolean(policy?.eligible),
+    accountMatches: Boolean(policy?.eligible),
+    realtimeConnected: Boolean(policy?.eligible),
     lastRealtimeConnectedAt: providerStatus?.last_realtime_connected_at,
     pendingMessages: pending.length,
     status,
   });
-  const commandCapabilities = adapter?.id === "line_oa"
-    ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
-    : providerTabCanSend(providerStatus, context)
-      ? adapter.sendCommands.filter((command) => command !== "send_video" || providerStatus?.capabilities?.send_video === true)
-      : [];
-  const session = sessionEligibility.state(context.key);
-  const ready = (!session || session.eligible) && ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
-    health.checks.some((check) => check.key === key && check.status === "pass")
-  ));
+  const commandCapabilities = policy?.eligible ? policy.evidence?.command_capabilities : [];
   const platform = await chrome.runtime.getPlatformInfo();
+  const id = await installationId();
+  const current = sessionEligibility.state(context.key);
+  const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
+  const ready = samePolicy && current?.eligible === true;
 
   return {
     type: "connection_status",
@@ -2374,15 +2440,16 @@ async function connectionStatusSnapshot(context) {
     version: 1,
     provider: context.account.provider,
     provider_account_id: canonicalProviderAccountId(context),
-    installation_id: await installationId(),
+    installation_id: id,
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
     ready,
-    reason_code: session && !session.eligible ? session.reason_code : health.reason_code,
+    reason_code: !samePolicy ? "checking_session" : current?.reason_code === "ready" ? health.reason_code : current?.reason_code ?? "checking_session",
+    ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
     client: { platform: platform.os },
     last_sync_at: health.last_sync_at,
-    ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
+    ...(Array.isArray(commandCapabilities) ? { command_capabilities: ready ? commandCapabilities : [] } : {}),
   };
 }
 
@@ -2390,6 +2457,7 @@ function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
     reason_code: status.reason_code,
+    readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
     device_name: status.device_name,
     command_capabilities: status.command_capabilities ?? null,
     extension_version: status.extension_version ?? null,
@@ -2423,6 +2491,7 @@ async function sendConnectionStatus(socket, context) {
     provider_account_id: context.account.provider_account_id,
     ready: status.ready,
     reason_code: status.reason_code,
+    readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
   });
 }
 
@@ -2463,7 +2532,7 @@ async function ensureLiveConnection() {
     for (const context of configuredContexts) {
       if (contexts.some((item) => item.key === context.key)) continue;
       const existing = liveConnections.get(context.key);
-      if (sessionEligibility.state(context.key)?.reason_code === "checking_session"
+      if (sessionEligibility.state(context.key)?.retain_transport
         && existing?.socket?.readyState === WebSocket.OPEN) {
         contexts.push(context);
       }
@@ -2613,7 +2682,7 @@ async function ensureMigratedAccountLiveConnection(context) {
     connecting: false,
   };
   if (existing.config && JSON.stringify(existing.config) !== JSON.stringify(context.config)) {
-    stopAccountLiveConnection(context.key, existing);
+    stopAccountLiveConnection(context.key, existing, "configuration_changed");
     existing = { socket: null, reconnectTimer: null, heartbeatTimer: null, leaderStatusTimer: null,
       lastStatusKey: null, reconnectAttempt: 0, connecting: false };
   }
@@ -2666,6 +2735,7 @@ async function ensureMigratedAccountLiveConnection(context) {
       clearTimeout(existing.handshakeTimer);
       openedAt = Date.now();
       existing.lastActivityAt = openedAt;
+      existing.lastInboundAt = openedAt;
       existing.stableTimer = setTimeout(() => {
         if (liveConnections.get(context.key)?.socket === socket) existing.reconnectAttempt = 0;
       }, 30_000);
@@ -2689,6 +2759,7 @@ async function ensureMigratedAccountLiveConnection(context) {
     socket.addEventListener("message", (event) => {
       if (liveConnections.get(context.key)?.socket !== socket) return;
       existing.lastActivityAt = Date.now();
+      existing.lastInboundAt = existing.lastActivityAt;
       scheduleKeepalive(context, socket);
       void handleLiveCommand(event.data, context, socket);
     });
@@ -2711,6 +2782,7 @@ async function ensureMigratedAccountLiveConnection(context) {
           close_code: event.code,
           was_clean: event.wasClean,
           open_duration_ms: openedAt === null ? null : Date.now() - openedAt,
+          since_last_inbound_ms: existing.lastInboundAt == null ? null : Date.now() - existing.lastInboundAt,
         });
         if (migrationSource && openedAt === null) {
           void markMigrationPending(context, new Error("New server connection could not be established. The previous configuration is still active."))
@@ -2805,12 +2877,7 @@ async function handleLiveCommand(raw, context, socket) {
     cached = {
       expiresAt: Infinity,
       result: replyQueue.run(context.key, async () => {
-        const eligible = await activeLiveCommandContexts([context]);
-        if (!eligible.some((item) => item.key === context.key)
-          || !sessionEligibility.isCurrent(context.key, selectedGeneration)) {
-          return { ok: false, error: "Provider session changed while this command was queued. Verify the account and retry." };
-        }
-        const sent = await sendViaProvider(command);
+        const sent = await sendViaProvider(command, { expectedGeneration: selectedGeneration });
         // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
           acknowledge({ type: "send_result", request_id: command.request_id,
@@ -2854,6 +2921,10 @@ async function handleLiveCommand(raw, context, socket) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
+  if (changes[STORAGE.commandTab] || changes[STORAGE.config]) rememberedCommandTabs.clear();
+  if (changes[STORAGE.config] || changes[STORAGE.consent]) {
+    for (const adapter of providerAdapters.list()) invalidateProviderSession(adapter.id, "configuration_or_consent_changed");
+  }
   if (changes[STORAGE.unattendedRecovery]) {
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   }
@@ -2887,7 +2958,34 @@ async function reconnectProviderTab(tab) {
   await ensureLiveConnection();
 }
 
+function invalidateProviderSession(provider, reason) {
+  for (const [tabId, check] of providerBridgeChecks) {
+    if (check.provider === provider) providerBridgeChecks.delete(tabId);
+  }
+  providerSessionEpochs.set(provider, providerSessionEpoch(provider) + 1);
+  for (const [key, context] of providerPolicyContexts) {
+    if (context.adapter.id !== provider) continue;
+    sessionEligibility.reset(key);
+    const connection = liveConnections.get(key);
+    if (connection) stopAccountLiveConnection(key, connection, reason);
+  }
+}
+
+function invalidateProviderTab(tabId, reason) {
+  providerBridgeChecks.delete(tabId);
+  providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
+  // Unused tabs cannot tear down another tab's validated account connection.
+  for (const [key, evidenceTabId] of providerPolicyTabIds) {
+    if (evidenceTabId !== tabId) continue;
+    sessionEligibility.reset(key);
+    providerPolicyTabIds.delete(key);
+    const connection = liveConnections.get(key);
+    if (connection) stopAccountLiveConnection(key, connection, reason);
+  }
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === "loading") invalidateProviderTab(tabId, "provider_tab_navigated");
   if (changeInfo.url) {
     void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
   }
@@ -2899,15 +2997,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  invalidateProviderTab(tabId, "provider_tab_closed");
   sellerCentreLandingStarts.delete(tabId);
   void markClosedProviderRecoveryTab(tabId)
     .then(() => ensureLiveConnection())
     .catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
 });
 
+chrome.tabs.onReplaced?.addListener((_addedTabId, removedTabId) => {
+  invalidateProviderTab(removedTabId, "provider_tab_replaced");
+  void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
+});
+
 chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
-  void resumeLogUpload();
+  void chrome.alarms.clear(LOG_UPLOAD_ALARM);
   void ensureLiveConnection();
   void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
   void attemptAllDeliveries({ resetBackoff: false });
@@ -2929,7 +3033,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
-void resumeLogUpload();
+void chrome.alarms.clear(LOG_UPLOAD_ALARM);
 void ensureLiveConnection();
 void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
 void resumeInterruptedSync().catch((error) => recordUnexpected("sync_resume", error));
@@ -2983,6 +3087,69 @@ async function providerChatTabById(adapter, tabId) {
   } catch {
     return null;
   }
+}
+
+async function refreshAccountMetadata(provider, providerAccountId) {
+  const key = accountKey(provider, providerAccountId);
+  if (metadataRefreshes.has(key)) return metadataRefreshes.get(key);
+  const task = runAccountMetadataRefresh(provider, providerAccountId)
+    .finally(() => { if (metadataRefreshes.get(key) === task) metadataRefreshes.delete(key); });
+  metadataRefreshes.set(key, task);
+  return task;
+}
+
+async function runAccountMetadataRefresh(provider, providerAccountId) {
+  if (metadataErasing) throw new Error("Local data is being erased.");
+  const startedEpoch = metadataEpoch;
+  const deadline = Date.now() + 30_000;
+  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Consent required.");
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!context) throw new Error("Configured account required.");
+  const epoch = providerSessionEpoch(provider);
+  const tabs = await providerChatTabs(context.adapter);
+  let tab;
+  for (const candidate of orderProviderTabs(context.adapter, tabs)) {
+    const status = await providerTabStatus(candidate);
+    const ids = provider === "line_oa" ? status?.accessible_account_ids : [status?.current_provider_account_id];
+    if (ids?.includes(providerAccountId)) { tab = candidate; break; }
+  }
+  if (!tab || Date.now() >= deadline) throw new Error("Open the matching provider account.");
+  const tabContext = providerTabContext(tab, provider);
+  await ensureProviderBridge(tab.id, context.adapter);
+  const result = await sendProviderMessage(tab.id, { type: "refresh_metadata_v3", provider,
+    provider_account_id: providerAccountId, deadline_at: deadline, limit: 100 }, {
+    label: "Metadata", operation: "refresh", timeoutMs: Math.max(1, deadline - Date.now()),
+  });
+  return exclusive(async () => {
+    const current = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+    const currentContext = accountContextFor(current, providerAccountId, provider);
+    const scope = await metadataScope(context);
+    const currentScope = currentContext ? await metadataScope(currentContext) : null;
+    if (metadataErasing || startedEpoch !== metadataEpoch || Date.now() >= deadline || epoch !== providerSessionEpoch(provider)
+      || tabContext !== providerTabContext(tab, provider) || !currentContext
+      || !hasLocalConsent(current[STORAGE.consent]) || scope !== currentScope) {
+      throw new Error("Account context changed during refresh.");
+    }
+    if (!result?.ok) return { ok: false, customer_count: 0, error: "Metadata refresh failed. Cached information was kept." };
+    const account = result.account?.provider_account_id === providerAccountId
+      ? { ...result.account, provider } : null;
+    if (account) await writeStorage({ [STORAGE.detectedAccounts]: mergeDetectedAccounts(
+      current[STORAGE.detectedAccounts], [account], { refreshMetadata: true }) });
+    const profiles = (Array.isArray(result.profiles) ? result.profiles : []).slice(0, 100)
+      .filter((profile) => profile.provider_account_id === providerAccountId);
+    const count = await customerMetadata.refresh(scope, profiles);
+    let persistenceFailed = false;
+    try { await customerMetadata.flush(); } catch {
+      persistenceFailed = true;
+      if (!metadataCacheWarningReported) {
+        metadataCacheWarningReported = true;
+        void recordLog("warn", "metadata", "cache_save_failed", "Display metadata could not be saved locally.");
+      }
+    }
+    return { ok: true, account_refreshed: Boolean(account), customer_count: count,
+      partial: result.partial === true || persistenceFailed };
+  });
 }
 
 async function detectOpenProviderAccount(provider = shopeeAdapter.id, preferredTabId = null) {
@@ -3046,16 +3213,21 @@ function orderProviderTabs(adapter, tabs, preferredTabId = null) {
 
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
-  try {
-    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
-      label: "Provider",
-      operation: "status request",
-      timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
-    });
-    return result?.ok ? result : null;
-  } catch {
-    return null;
-  }
+  const adapter = providerAdapters.list().find((item) => item.matchesUrl(tab.url));
+  if (!adapter) return null;
+  const key = providerTabContext(tab, adapter.id);
+  if (providerStatusProbes.has(key)) return providerStatusProbes.get(key);
+  const probe = (async () => {
+    try {
+      const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
+        label: "Provider", operation: "status request", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+      });
+      if (!result || result.ok === false) invalidateBridgeVerification(tab.id);
+      return key === providerTabContext(tab, adapter.id) && result && typeof result === "object" ? result : null;
+    } catch { invalidateBridgeVerification(tab.id); return null; }
+  })().finally(() => { if (providerStatusProbes.get(key) === probe) providerStatusProbes.delete(key); });
+  providerStatusProbes.set(key, probe);
+  return probe;
 }
 
 function providerTabIsReady(status, adapter) {
@@ -3101,7 +3273,29 @@ async function findReadyProviderChatTab(adapter) {
   return null;
 }
 
-async function ensureProviderBridge(tabId, adapter) {
+async function ensureProviderBridge(tabId, adapter, { reuseVerified = false } = {}) {
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const epoch = providerTabEpochs.get(tabId) ?? 0;
+  const existing = providerBridgeChecks.get(tabId);
+  if (existing?.provider === adapter.id && existing.epoch === epoch) {
+    if (existing.pending) return existing.pending;
+    if (reuseVerified && existing.verified) return;
+  }
+  const check = { provider: adapter.id, epoch, verified: false, pending: null };
+  providerBridgeChecks.set(tabId, check);
+  check.pending = verifyProviderBridge(tabId, adapter).then(() => {
+    if ((providerTabEpochs.get(tabId) ?? 0) !== epoch || providerBridgeChecks.get(tabId) !== check) {
+      throw new Error("Provider document changed during bridge verification. Retry after it is ready.");
+    }
+    check.verified = true;
+  }).catch((error) => {
+    if (providerBridgeChecks.get(tabId) === check) providerBridgeChecks.delete(tabId);
+    throw error;
+  }).finally(() => { check.pending = null; });
+  return check.pending;
+}
+
+async function verifyProviderBridge(tabId, adapter) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
   let response = null;
@@ -3256,6 +3450,9 @@ async function providerMainBridgeStatus(tabId, adapter) {
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
+            && window.__omnichatLineOABridgeControl?.metadata_refresh === true
+            && window.__omnichatLineOABridgeControl?.bounded_message_ids === true
+            && window.__omnichatLineOABridgeControl?.grace_classification === true
             // Existing page scripts predate this field and use compatibility v1.
             && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
@@ -3263,6 +3460,10 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
+            && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
+            && window.__omnichatRealtimeBridgeControl?.fresh_provider_status === true
+            && window.__omnichatRealtimeBridgeControl?.bounded_message_ids === true
+            && window.__omnichatRealtimeBridgeControl?.grace_classification === true
             && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
@@ -3280,6 +3481,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
 }
 
 async function retireProviderMainBridge(tabId) {
+  invalidateBridgeVerification(tabId);
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -3339,6 +3541,7 @@ async function retireProviderMainBridge(tabId) {
 }
 
 async function retireProviderContentBridge(tabId) {
+  invalidateBridgeVerification(tabId);
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: "ISOLATED",
@@ -3374,6 +3577,7 @@ async function reinjectProviderBridge(tabId, adapter) {
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
             ...(mainStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
             "lib/shopee-video.js",
+            "lib/message-id-cache.js",
             "shopee-realtime.js",
           ];
         await chrome.scripting.executeScript({
@@ -3401,6 +3605,7 @@ async function reinjectProviderBridge(tabId, adapter) {
         ? [
           ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
           ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
+          "lib/message-id-cache.js",
           "content.js",
         ]
         : [
@@ -3408,6 +3613,7 @@ async function reinjectProviderBridge(tabId, adapter) {
           ...(isolatedStatus.hasShopee ? [] : ["lib/shopee.js"]),
           ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
           ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
+          "lib/message-id-cache.js",
           "content.js",
         ];
       await chrome.scripting.executeScript({
@@ -4010,11 +4216,16 @@ async function openSessionSyncContexts(contexts, control) {
   if (!shopee.length) return contexts;
   let tab = null;
   let currentId = null;
+  let observedStatus = null;
+  let tabContext = null;
+  const epoch = providerSessionEpoch("shopee");
+  const observation = ++providerObservationSequence;
   try {
     tab = await findReadyProviderChatTab(shopeeAdapter) ?? await findProviderChatTab(shopeeAdapter);
+    tabContext = tab ? providerTabContext(tab, "shopee") : null;
     const detected = tab ? await detectOpenProviderAccount("shopee", tab.id) : null;
-    const status = detected?.ok ? await providerTabStatus(tab) : null;
-    currentId = status?.current_provider_account_id ?? null;
+    observedStatus = detected?.ok ? await providerTabStatus(tab) : null;
+    currentId = observedStatus?.current_provider_account_id ?? null;
   } catch (error) {
     await recordUnexpected("session_detection", error, { provider: "shopee" });
   }
@@ -4042,10 +4253,8 @@ async function openSessionSyncContexts(contexts, control) {
       sync_error_at: null,
     });
   }
-  for (const context of shopee) sessionEligibility.observe(context.key, {
-    hasTab: Boolean(tab), verified: context.account.provider_account_id === currentId,
-    explicitMismatch: Boolean(currentId) && context.account.provider_account_id !== currentId,
-    identity: currentId,
+  for (const context of shopee) await providerReadiness(context, {
+    tabs: tab ? [tab] : [], statuses: tab ? [observedStatus] : [], epoch, tabContexts: tab ? [tabContext] : [], observation,
   });
   if (tab) control.preferredTabId = tab.id;
   return selected;
@@ -4177,7 +4386,11 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
       STORAGE.status,
     ]);
     if (!hasLocalConsent(stored[STORAGE.consent])) return null;
-    const scopedMessages = Array.isArray(messages) ? messages : [];
+    const scope = await metadataScope(context);
+    const scopedMessages = [];
+    for (const message of Array.isArray(messages) ? messages : []) {
+      scopedMessages.push(await customerMetadata.enrich(scope, message));
+    }
     let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
     const pending = readAccountState(stored[STORAGE.pending], context.key, []);
     const migrated = scanState?.version !== 1;
@@ -4501,6 +4714,13 @@ async function sendLogBatch(context, logs) {
   }, 15_000);
 }
 
+let logSubmission = null;
+function submitLogs() {
+  if (logSubmission) return logSubmission;
+  logSubmission = flushLogBatch().finally(() => { logSubmission = null; });
+  return logSubmission;
+}
+
 async function flushLogBatch() {
   await diagnosticBuffer.drain();
   await logMutationQueue;
@@ -4515,40 +4735,46 @@ async function flushLogBatch() {
   ]);
   if (!hasLocalConsent(stored[STORAGE.consent])
     || !hasServerInitialized(stored)
-    || stored[STORAGE.logUploadEnabled] !== true) return;
+    || stored[STORAGE.logUploadEnabled] !== true) return { ok: false, submitted: 0, error: "Complete account setup before submitting logs." };
   const contexts = configuredAccountContexts(stored).filter((context) => context.config.logs_url);
-  if (!contexts.length) return;
+  if (!contexts.length) return { ok: false, submitted: 0, error: "No configured log destination." };
   const queuedIds = new Set(Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []);
   const entries = pruneLogs(stored[STORAGE.logs]);
-  let remaining = queuedIds.size;
+  let submitted = 0;
+  let failed = false;
   for (const context of contexts) {
-    const selected = entries
+    const pending = entries
       .filter((entry) => entry.account_key === context.key && queuedIds.has(entry.id))
-      .reverse()
-      .slice(0, MAX_LOG_UPLOAD_BATCH);
-    if (!selected.length) continue;
-    try {
-      await sendLogBatch(context, selected);
-      const deliveredIds = new Set(selected.map((entry) => entry.id));
-      await mutateLogs(async () => {
-        const current = await readStorage([STORAGE.logOutbox]);
-        const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
-          .filter((id) => !deliveredIds.has(id));
-        remaining = outbox.length;
-        await writeStorage({ [STORAGE.logOutbox]: outbox });
-      });
-      await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
-        provider_account_id: context.account.provider_account_id,
-        count: selected.length,
-      }, { remote: false });
-    } catch (error) {
-      await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
-        provider_account_id: context.account.provider_account_id,
-        ...diagnosticErrorDetails(error),
-      }, { remote: false });
+      .reverse();
+    for (let offset = 0; offset < pending.length; offset += MAX_LOG_UPLOAD_BATCH) {
+      const selected = pending.slice(offset, offset + MAX_LOG_UPLOAD_BATCH);
+      try {
+        await sendLogBatch(context, selected);
+        const deliveredIds = new Set(selected.map((entry) => entry.id));
+        await mutateLogs(async () => {
+          const current = await readStorage([STORAGE.logOutbox]);
+          const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
+            .filter((id) => !deliveredIds.has(id));
+          await writeStorage({ [STORAGE.logOutbox]: outbox });
+        });
+        submitted += selected.length;
+        await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
+          provider_account_id: context.account.provider_account_id,
+          count: selected.length,
+        }, { remote: false });
+      } catch (error) {
+        failed = true;
+        await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
+          provider_account_id: context.account.provider_account_id,
+          ...diagnosticErrorDetails(error),
+        }, { remote: false });
+        break; // Manual submission never retries a failed batch.
+      }
     }
   }
-  if (remaining) void scheduleLogUpload(5);
+  const remaining = entries.filter((entry) => queuedIds.has(entry.id)).length - submitted;
+  return { ok: !failed && remaining === 0, submitted, remaining,
+    ...(failed || remaining ? { error: "Some logs could not be submitted. Submit again to try the remaining logs." } : {}) };
 }
 
 function isMessageScopedDeliveryError(error) {
@@ -4969,12 +5195,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Transport repair must not wait for provider checks or queued uploads.
     void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
-  } else if (alarm.name === LOG_UPLOAD_ALARM) {
-    void flushLogBatch().catch(() => {
-      // Diagnostic failures must not recursively emit diagnostics or reject
-      // the alarm listener. The bounded buffer owns persistence retry.
-      void scheduleLogUpload().catch(() => {});
-    });
   }
 });
 

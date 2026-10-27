@@ -24,7 +24,12 @@ export function isAfterMessageCursor(message, cursor) {
 }
 
 export function hasScanBacklog(state) {
-  return !state?.watermark || state.in_progress === true;
+  if (!state?.watermark || state.in_progress === true) return true;
+  // Failed/cancelled scans keep their old watermark. Later realtime arrivals
+  // must not advance a conversation cursor past that unfinished recovery.
+  const started = Date.parse(state.started_at ?? "");
+  const completed = Date.parse(state.completed_at ?? "");
+  return Number.isFinite(started) && (!Number.isFinite(completed) || started > completed);
 }
 
 export function advanceConversationCursors(current, messages) {

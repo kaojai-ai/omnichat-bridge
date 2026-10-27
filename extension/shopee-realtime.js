@@ -87,16 +87,13 @@
   });
   const HISTORY_LIMIT = 100;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
-  const MAX_HISTORY_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 300;
-  const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
   const SELLER_CENTRE_CHAT_OPEN_POLL_MS = 250;
   let sellerCentreClickListener = null;
-  let socketObserverTimer = null;
   let pageMessageListener = null;
   let observedFetch = null;
   let fetchBeforeBridge = null;
@@ -133,13 +130,15 @@
     pendingSellerCentreMessages: new Map(),
     sellerCentreFetches: new Map(),
     sellerCentreCaptureEpoch: 0,
-    observedMessageKeys: new Set(),
+    observedMessageKeys: globalThis.OmnichatMessageIdCache.create(),
     sellerCentreListInitialized: false,
     sellerCentrePollingStarted: false,
     sellerCentrePollingTimer: null,
     pollingConnected: false,
     pollingConnectedAt: null,
     lastProviderCheckAt: null,
+    sellerCentrePollOutcome: null,
+    sellerCentreCaptureOutcome: null,
     pollingRefreshInFlight: false,
     sellerCentreChatOpenPromise: null,
   };
@@ -158,13 +157,15 @@
     state.pendingSellerCentreMessages = new Map();
     state.sellerCentreFetches = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
-    state.observedMessageKeys = new Set();
+    state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
     state.sellerCentreListInitialized = false;
     state.sellerCentrePollingStarted = false;
     state.sellerCentrePollingTimer = null;
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
   }
@@ -190,7 +191,8 @@
   state.pendingSellerCentreMessages ??= new Map();
   state.sellerCentreFetches ??= new Map();
   state.sellerCentreCaptureEpoch ??= 0;
-  state.observedMessageKeys ??= new Set();
+  // Message IDs are disposable acceleration state; never retain an old unbounded Set.
+  state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
   state.sellerCentreListInitialized ??= false;
   state.sellerCentrePollingStarted ??= false;
   state.sellerCentrePollingTimer ??= null;
@@ -206,6 +208,8 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
     state.socket = null;
@@ -245,7 +249,7 @@
     send_product: surfaceSendReady(),
   });
 
-  const publishSurfaceStatus = () => {
+  const publishSurfaceStatus = (requestId = null) => {
     const capabilities = surfaceCapabilities();
     const ready = Boolean(state.listTemplate && state.getTemplate);
     const chatOpen = isSellerCentreSurface()
@@ -254,8 +258,16 @@
         return launcher ? sellerCentreChatIsOpen(launcher) : null;
       })()
       : null;
+    const providerCheckOutcome = isSellerCentreSurface()
+      ? (!state.currentAccountId || chatOpen === false ? "failed"
+        : state.sellerCentreCaptureOutcome === "failed" || state.sellerCentrePollOutcome === "failed" ? "failed"
+        : state.sellerCentreCaptureOutcome === "unknown" || state.sellerCentrePollOutcome === "unknown" ? "unknown"
+        : state.pollingConnected && state.sellerCentreCaptureFailed !== true ? "passed" : "failed")
+      : null;
     post({
       type: "provider_status",
+      ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
+      ...(requestId ? { request_id: requestId } : {}),
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
@@ -482,9 +494,12 @@
         resetSellerCentreCapture();
         state.observedMessageKeys.clear();
         state.pollingConnected = false;
+        state.sellerCentrePollOutcome = null;
+        state.sellerCentreCaptureOutcome = null;
         state.sellerCentreListInitialized = false;
       }
       state.currentAccountId = nextId;
+      observeSocket();
       state.loginRequest = null;
       state.accountsById.clear();
       postLog("info", "session_account_changed", "Shopee session account changed; sync follows the open shop.", {
@@ -756,8 +771,20 @@
         ...(displayName ? { display_name: displayName } : {}),
         ...(avatarUrl ? { avatar_url: avatarUrl } : {})
       };
-      state.profilesByConversation.set(conversationId, profile);
-      profiles.push(profile);
+      const cachedProfile = state.profilesByConversation.get(conversationId);
+      const previous = cachedProfile?.id === id ? cachedProfile : null;
+      // Known display data is refreshed only by the explicit metadata command.
+      // Routing remains live and must reach content even when metadata is full.
+      const display = {
+        ...(previous?.display_name ? { display_name: previous.display_name } : profile.display_name ? { display_name: profile.display_name } : {}),
+        ...(previous?.avatar_url ? { avatar_url: previous.avatar_url } : profile.avatar_url ? { avatar_url: profile.avatar_url } : {}),
+      };
+      state.profilesByConversation.set(conversationId, { ...profile, ...display });
+      while (state.profilesByConversation.size > 1_000) state.profilesByConversation.delete(state.profilesByConversation.keys().next().value);
+      profiles.push({ conversation_id: conversationId, id, ...(profile.provider_account_id ? { provider_account_id: profile.provider_account_id } : {}),
+        ...(profile.omnichat ? { omnichat: profile.omnichat } : {}),
+        ...(!previous?.display_name && profile.display_name ? { display_name: profile.display_name } : {}),
+        ...(!previous?.avatar_url && profile.avatar_url ? { avatar_url: profile.avatar_url } : {}) });
     }
     if (profiles.length) post({ type: "profiles_detected", profiles });
   };
@@ -778,10 +805,11 @@
       const messageId = messageIdOf(message);
       if (!conversationId || !messageId) continue;
       const eventMs = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
-      if (!eventMs || eventMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) continue;
-      const key = `${conversationId}:${messageId}`;
-      if (state.observedMessageKeys.has(key)) continue;
-      state.observedMessageKeys.add(key);
+      if (!eventMs) continue;
+      const accountId = state.currentAccountId;
+      if (!accountId) continue;
+      if (state.observedMessageKeys.has("shopee", accountId, conversationId, messageId)) continue;
+      state.observedMessageKeys.add("shopee", accountId, conversationId, messageId);
       accepted.push(message);
     }
     if (accepted.length) {
@@ -835,6 +863,13 @@
     state.pendingSellerCentreMessages.clear();
     state.sellerCentreFetches.clear();
     state.sellerCentreCaptureFailed = false;
+    state.sellerCentreCaptureOutcome = null;
+  };
+
+  const sellerCentreFailureOutcome = (error) => {
+    const status = error?.http_status;
+    return status >= 400 && status < 500 || error?.reason_code === "session_changed"
+      ? "failed" : "unknown";
   };
 
   async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
@@ -842,6 +877,9 @@
     if (!template) return false;
     const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template));
     if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
+    if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+      throw Object.assign(new Error("Shopee message capture returned an invalid response."), { reason_code: "invalid_message_history" });
+    }
     const messages = Array.isArray(body)
       ? body
       : conversationItems(body);
@@ -891,12 +929,6 @@
       state.latestMessageIdsByConversation.set(conversationId, latestId);
       // The first list is a baseline; bootstrap/recovery owns its history.
       if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
-      const summaryMs = conversationTime(conversation);
-      if (summaryMs && summaryMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) {
-        state.pendingSellerCentreMessages.delete(conversationId);
-        state.capturedMessageIdsByConversation.set(conversationId, latestId);
-        continue;
-      }
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
         state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
@@ -920,6 +952,7 @@
         if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
         if (!captured) {
           state.sellerCentreCaptureFailed = true;
+          state.sellerCentreCaptureOutcome = "failed";
           continue;
         }
         state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
@@ -928,7 +961,10 @@
           state.pendingSellerCentreMessages.delete(conversationId);
         }
       } catch (error) {
-        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) state.sellerCentreCaptureFailed = true;
+        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
+          state.sellerCentreCaptureFailed = true;
+          if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
+        }
         logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
       } finally {
         if (state.sellerCentreFetches.get(conversationId) === token) {
@@ -936,7 +972,10 @@
         }
       }
     }
-    if (!state.pendingSellerCentreMessages.size) state.sellerCentreCaptureFailed = false;
+    if (!state.pendingSellerCentreMessages.size) {
+      state.sellerCentreCaptureFailed = false;
+      state.sellerCentreCaptureOutcome = null;
+    }
   }
 
   async function refreshSellerCentreConversations() {
@@ -949,6 +988,9 @@
         body: state.listTemplate.body?.slice(0),
       }));
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+        throw Object.assign(new Error("Shopee conversation polling returned an invalid response."), { reason_code: "invalid_conversation_list" });
+      }
       await captureSellerCentreConversationList(body);
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       state.lastProviderCheckAt = new Date().toISOString();
@@ -968,10 +1010,12 @@
           await refreshSellerCentreConversations();
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = true;
+          state.sellerCentrePollOutcome = "passed";
           state.pollingConnectedAt ??= new Date().toISOString();
         } catch (error) {
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = false;
+          state.sellerCentrePollOutcome = sellerCentreFailureOutcome(error);
           postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
         } finally {
           publishSurfaceStatus();
@@ -1553,7 +1597,7 @@
       body: state.listTemplate.body?.slice(0),
     });
     const body = await (sendLookup ? fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now()) : recoveryFetchJson(request.clone()));
-    if (sendLookup && (!Array.isArray(body) && ![
+    if ((!Array.isArray(body) && ![
       body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
     ].some(Array.isArray) || shopeeError(body))) {
       throw Object.assign(new Error("Shopee returned an invalid conversation list."), { reason_code: "invalid_conversation_list" });
@@ -1629,6 +1673,86 @@
     return { conversations, firstPage, exhausted, pages, stopReason };
   }
 
+  // Manual metadata refresh never enters message recovery or advances a cursor.
+  async function refreshMetadata(command) {
+    const requestId = value(command?.request_id);
+    const accountId = value(command?.provider_account_id);
+    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
+    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
+    const epoch = state.routeSessionEpoch;
+    const profiles = [];
+    let account;
+    const assertCurrent = () => {
+      if (!isBridgeActive() || epoch !== state.routeSessionEpoch || state.currentAccountId !== accountId) {
+        throw new Error("Shopee session changed during metadata refresh.");
+      }
+      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
+    };
+    try {
+      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
+      assertCurrent();
+      const detected = await detectSessionAccount({ timeoutMs: deadlineAt - Date.now() });
+      assertCurrent();
+      account = detected.find((item) => value(item?.provider_account_id) === accountId);
+      if (!account) throw new Error("Shopee signed-in shop does not match metadata refresh.");
+      if (!state.listTemplate) throw new Error("Open the Shopee conversation list before refreshing customer info.");
+      const template = await lookupTemplateFrom(state.listTemplate);
+      // Captured GET lists can point at a scrolled page. Begin at the first
+      // page for the paging parameters this bridge already understands.
+      if (template.init.method === "GET") {
+        const initialUrl = new URL(template.url);
+        if (initialUrl.searchParams.has("offset")) initialUrl.searchParams.set("offset", "0");
+        initialUrl.searchParams.delete("cursor");
+        initialUrl.searchParams.delete("next_cursor");
+        template.url = initialUrl.toString();
+      }
+      assertCurrent();
+      let request = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
+      const seenPages = new Set();
+      const seenConversations = new Set();
+      let count = 0;
+      let partial = false;
+      while (request && count < limit) {
+        assertCurrent();
+        const pageKey = `${request.url}:${await request.clone().text()}`;
+        if (seenPages.has(pageKey)) { partial = true; break; }
+        seenPages.add(pageKey);
+        const body = await fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now());
+        assertCurrent();
+        if (shopeeError(body) || (!Array.isArray(body) && ![
+          body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
+        ].some(Array.isArray))) throw new Error("Shopee returned an invalid conversation list.");
+        const items = conversationItems(body);
+        for (const conversation of items) {
+          if (count >= limit) break;
+          const conversationId = value(conversation?.id);
+          if (!conversationId || seenConversations.has(conversationId)
+            || value(conversation?.shop_id) !== accountId) continue;
+          seenConversations.add(conversationId);
+          count += 1;
+          const id = value(conversation?.to_id);
+          if (!id) continue;
+          const displayName = value(conversation?.to_name);
+          const avatar = value(conversation?.to_avatar);
+          let avatarUrl = "";
+          try { const url = new URL(avatar); if (url.protocol === "https:") avatarUrl = url.toString(); } catch { /* Optional metadata. */ }
+          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
+            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
+        }
+        request = await nextConversationRequest(request, body, items);
+        assertCurrent();
+        if (count >= limit && request) partial = true;
+      }
+      assertCurrent();
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
+    } catch (error) {
+      const current = isBridgeActive() && epoch === state.routeSessionEpoch && state.currentAccountId === accountId && Date.now() < deadlineAt;
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
+        ...(current && account ? { account } : {}), profiles: current && Date.now() < deadlineAt ? profiles : [],
+        partial: Boolean(current && account), error: error instanceof Error ? error.message : "Metadata refresh failed." });
+    }
+  }
+
   async function detectCurrentAccount(requestId) {
     try {
       await discoverAccounts();
@@ -1671,7 +1795,9 @@
         headers,
         body: undefined,
       }));
-      if (!Array.isArray(pageMessages)) break;
+      if (!Array.isArray(pageMessages)) {
+        throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
+      }
       let currentMessages = pageMessages
         .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
         .sort((left, right) => {
@@ -1734,7 +1860,7 @@
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
-      const defaultSinceMs = Date.now() - (bootstrap ? INITIAL_SYNC_LOOKBACK_MS : MAX_HISTORY_LOOKBACK_MS);
+      const defaultSinceMs = bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : watermarkMs;
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
@@ -1822,7 +1948,7 @@
           return { decision: "history_job", reason: "configured_history", cursor, deep: true };
         }
         if (summaryMs && summaryMs < defaultSinceMs) {
-          return { decision: "skip", reason: "older_than_default_window", cursor };
+          return { decision: "skip", reason: bootstrap ? "older_than_initial_window" : "summary_older_than_checkpoint", cursor };
         }
         if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
         if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
@@ -2025,7 +2151,7 @@
       // Content owns the recovery outcome log. Keep diagnostic fields bounded;
       // preserve the existing UI error separately.
       const status = error?.http_status;
-      const reasonCode = ["provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list",
+      const reasonCode = ["provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list", "invalid_message_history",
         "history_not_ready", "session_changed", "persistence_failed"].includes(error?.reason_code) ? error.reason_code : "recovery_failed";
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: accountId,
         ok: false, error: String(error), reason_code: reasonCode, conversations_checked: checked,
@@ -2109,6 +2235,7 @@
         captureAccount(response, null, requestSessionEpoch);
       } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
         state.pollingConnected = response.ok;
+        if (!response.ok) state.sellerCentrePollOutcome = response.status >= 500 ? "unknown" : "failed";
         if (state.pollingConnected) {
           state.pollingConnectedAt ??= new Date().toISOString();
           state.lastProviderCheckAt = new Date().toISOString();
@@ -2147,24 +2274,30 @@
     socketListeners = null;
   };
 
-  function observeSocket() {
+  function observeSocket(requestId = null) {
     if (!isBridgeActive()) return;
     if (isSellerCentreSurface()) {
-      publishSurfaceStatus();
+      publishSurfaceStatus(requestId);
       return;
     }
     const socket = window.__CHAT_GLOBAL__?.socket;
     if (!socket?.on) {
-      publishSurfaceStatus();
+      detachObservedSocket();
+      state.socket = null;
+      state.lastProviderCheckAt = null;
+      publishSurfaceStatus(requestId);
       return;
     }
     const connected = typeof socket.connected === "boolean" ? socket.connected : true;
     if (connected) state.lastProviderCheckAt = new Date().toISOString();
-    publishSurfaceStatus();
-    if (state.socket === socket && observedSocket === socket) return;
+    if (state.socket === socket && observedSocket === socket) {
+      publishSurfaceStatus(requestId);
+      return;
+    }
     detachObservedSocket();
     state.socket = socket;
     observedSocket = socket;
+    publishSurfaceStatus(requestId);
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtime = connected ? "connected" : "disconnected";
     }
@@ -2173,19 +2306,19 @@
       postLog("info", "socket_connected", "Shopee realtime socket connected.");
     }
     const onConnect = () => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
       state.lastProviderCheckAt = new Date().toISOString();
       post({ type: "socket_connected" });
       publishSurfaceStatus();
     };
     const onDisconnect = () => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
       publishSurfaceStatus();
     };
     const onMessage = (event) => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
       try {
@@ -2207,14 +2340,16 @@
 
   if (isSellerCentreSurface() && state.listTemplate) startSellerCentrePolling();
   void observeAsync("socket_observer", observeSocket);
-  socketObserverTimer = setInterval(() => {
-    void observeAsync("socket_observer", observeSocket);
-  }, SOCKET_OBSERVER_INTERVAL_MS);
+  const onPageSessionChange = () => { void observeAsync("socket_observer", observeSocket); };
+  window.addEventListener("popstate", onPageSessionChange);
+  window.addEventListener("pageshow", onPageSessionChange);
 
   pageMessageListener = (event) => {
     if (!isBridgeActive()) return;
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "sync_v3") {
+    if (event.data.type === "check_provider_status_v3") {
+      observeSocket(event.data.request_id);
+    } else if (event.data.type === "sync_v3") {
       const providerAccountId = value(event.data.provider_account_id);
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
@@ -2233,6 +2368,8 @@
       }
     } else if (event.data.type === "reset_recovery_v3") {
       resetRecovery();
+    } else if (event.data.type === "refresh_metadata_v3") {
+      void refreshMetadata(event.data);
     } else if (event.data.type === "detect_account_v3") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api_v3") {
@@ -2262,10 +2399,11 @@
   const dispose = (reason = "Page bridge was replaced.") => {
     if (disposed) return false;
     disposed = true;
+    state.observedMessageKeys.clear();
     resetSellerCentreCapture();
     resetRecovery(reason);
-    if (socketObserverTimer != null) clearInterval(socketObserverTimer);
-    socketObserverTimer = null;
+    window.removeEventListener?.("popstate", onPageSessionChange);
+    window.removeEventListener?.("pageshow", onPageSessionChange);
     if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
     state.sellerCentrePollingTimer = null;
     state.sellerCentrePollingStarted = false;
@@ -2273,6 +2411,8 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.sellerCentreChatOpenPromise = null;
     detachObservedSocket();
     state.socket = null;
@@ -2286,6 +2426,10 @@
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
     compatibility_version: 2,
+    metadata_refresh: true,
+    fresh_provider_status: true,
+    bounded_message_ids: true,
+    grace_classification: true,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

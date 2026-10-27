@@ -22,6 +22,8 @@ function harness(overrides = {}) {
   let failWrite = false;
   const runtime = vm.createContext({
     performance, STORAGE, readAccountState, writeAccountState,
+    metadataScope: async context => context.key,
+    customerMetadata: { enrich: async (_scope, message) => message },
     readStorage: async () => { const snapshot = structuredClone(state); await turn(); return snapshot; },
     writeStorage: async patch => { await turn(); if (failWrite) { failWrite = false; throw new Error("storage unavailable"); } Object.assign(state, structuredClone(patch)); },
     hasLocalConsent: value => value === true,
@@ -173,4 +175,18 @@ test("capture during an active upload wakes one follow-up drain without parallel
   const result = await initial;
   assert.equal(result.sent, 3);
   assert.equal(result.pending, 0);
+});
+
+
+test("realtime after a failed scan cannot advance past unrecovered historical pages", async () => {
+  const h = harness();
+  const a = context("a");
+  const checkpoint = { event_timestamp: "2026-09-01T00:00:00Z", message_id: "old" };
+  h.state[STORAGE.scanState] = writeAccountState(null, a.key, { version: 1,
+    watermark: "2026-09-01T00:00:00Z", in_progress: false,
+    started_at: "2026-10-25T00:00:00Z", completed_at: "2026-09-01T00:00:00Z",
+    failed_at: "2026-10-25T00:01:00Z", conversations: { conversation: checkpoint } });
+  await h.runtime.queueMessagesForContext([message("new-realtime")], a, false);
+  assert.deepEqual(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation, checkpoint);
+  assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 1);
 });
