@@ -1626,6 +1626,7 @@
     accountId = null,
     sendLookup = false,
     deadlineAt = Infinity,
+    onProgress = null,
   } = {}) {
     const conversations = [];
     const seenIds = new Set();
@@ -1645,8 +1646,10 @@
         ? `${url.url}:${await url.clone().text()}` : url;
       if (seenPages.has(pageKey)) { stopReason = "repeated_page"; break; }
       seenPages.add(pageKey);
+      onProgress?.("loading_conversations", pages);
       const page = await fetchConversationPage(url, accountId, true, sendLookup, deadlineAt);
       pages += 1;
+      onProgress?.("checking_conversations", pages);
       exhausted = !page.next;
       if (!firstPage.length) firstPage = page.items;
       let added = 0;
@@ -1765,7 +1768,7 @@
     }
   }
 
-  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0) {
+  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0, onProgress = null) {
     const cursorMs = timeMs(cursor?.event_timestamp);
     const sinceMs = Math.max(sinceFloorMs, cursorMs);
     const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
@@ -1789,6 +1792,7 @@
       if (isSellerCentreSurface()) url.searchParams.set("on_message_received", "true");
       const headers = new Headers(historyTemplate.init.headers);
       headers.delete("content-type");
+      onProgress?.("fetching_messages");
       const pageMessages = await recoveryFetchJson(new Request(url, {
         ...historyTemplate.init,
         method: "GET",
@@ -1798,6 +1802,7 @@
       if (!Array.isArray(pageMessages)) {
         throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
       }
+      onProgress?.("fetching_messages");
       let currentMessages = pageMessages
         .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
         .sort((left, right) => {
@@ -1888,6 +1893,11 @@
         requiredIds: pageRequired.length ? pageRequired : null,
         maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
+        onProgress: (phase, conversationPages) => {
+          assertSessionUnchanged();
+          post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId,
+            phase, conversation_pages: conversationPages });
+        },
       });
       assertSessionUnchanged();
       const sorted = [...pages.conversations]
@@ -2034,6 +2044,12 @@
             return acknowledgement;
           },
           deep || windowJob ? historySinceMs : defaultSinceMs,
+          (phase) => {
+            assertSessionUnchanged();
+            post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId,
+              phase, conversation_id: String(conversation.id), conversation_pages: pages.pages,
+              completed_conversations: completedConversations, total_conversations: totalConversations });
+          },
         );
         if (deep) {
           const backfillRequestId = `${requestId}:${conversation.id}:history`;
@@ -2082,6 +2098,9 @@
           }
         }
         completedConversations += 1;
+        post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId,
+          phase: "conversation_complete", conversation_id: String(conversation.id), conversation_pages: pages.pages,
+          completed_conversations: completedConversations, total_conversations: totalConversations });
         post({ type: "recovery_progress", request_id: requestId, provider_account_id: accountId, completed_conversations: completedConversations, total_conversations: totalConversations });
         postLog("debug", "conversation_completed", "Conversation recovery check completed.", {
           position: checked,
@@ -2425,7 +2444,7 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
-    compatibility_version: 2,
+    compatibility_version: 3,
     metadata_refresh: true,
     fresh_provider_status: true,
     bounded_message_ids: true,

@@ -8,6 +8,7 @@ function fixture(verify = async () => {}) {
   const calls = [];
   const scope = vm.createContext({ providerBridgeChecks: new Map(), providerTabEpochs: new Map(),
     providerSessionEpochs: new Map(), providerPolicyContexts: new Map(), providerPolicyTabIds: new Map(),
+    activeSyncControl: null, providerAutomaticRecoveries: new Map(),
     providerSessionEpoch: () => 0, liveConnections: new Map(),
     verifyProviderBridge: async (...args) => { calls.push(args); return verify(...args); },
   });

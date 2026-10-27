@@ -2,7 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_VERSION = "line-oa-poll-11";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 4;
+  const COMPATIBILITY_VERSION = 5;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -423,10 +423,12 @@
     while (pollIsActive(generation)) {
       const remaining = maxMessages === null ? PAGE_LIMIT : maxMessages - accepted;
       if (remaining <= 0) break;
+      postRecoveryPhase(requestId, providerAccountId, "fetching_messages", { conversation_id: chatId });
       const body = await json(messagesUrl(botId, chatId, backward, Math.min(PAGE_LIMIT, remaining)));
       if (!pollIsActive(generation)) return { parsed, queued };
       if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA message history response is invalid.");
       const rawMessages = body.list;
+      postRecoveryPhase(requestId, providerAccountId, "fetching_messages", { conversation_id: chatId });
       const messages = rawMessages
         .filter((message) => {
           const timestamp = messageTimeMs(message);
@@ -484,6 +486,11 @@
       if (Number.isFinite(value) && value >= 0) return Math.floor(value);
     }
     return null;
+  }
+
+  function postRecoveryPhase(requestId, providerAccountId, phase, details = {}) {
+    if (String(requestId).startsWith("poll:")) return;
+    post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase, ...details });
   }
 
   function postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations) {
@@ -585,15 +592,21 @@
       let parsed = 0;
       let queued = 0;
       let completedConversations = 0;
+      let conversationPages = 0;
       let nonTargetConversations = 0;
       let totalConversations = null;
       const seenCursors = new Set();
       const trackedRequest = !String(requestId).startsWith("poll:");
       postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
       while (pollIsActive(generation)) {
+        postRecoveryPhase(requestId, providerAccountId, "loading_conversations", {
+          conversation_pages: conversationPages, completed_conversations: completedConversations,
+          total_conversations: totalConversations,
+        });
         const body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
         if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
+        conversationPages += 1;
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
@@ -623,7 +636,8 @@
             type: "recovery_phase",
             request_id: requestId,
             provider_account_id: providerAccountId,
-            phase: "fetching_messages",
+            phase: "checking_conversations",
+            conversation_pages: conversationPages,
             completed_conversations: completedConversations,
             total_conversations: totalConversations ?? 0,
           });
@@ -668,6 +682,7 @@
               request_id: requestId,
               provider_account_id: providerAccountId,
               phase: "conversation_complete",
+              conversation_pages: conversationPages,
               conversation_id: chatId,
               completed_conversations: completedConversations,
               total_conversations: totalConversations ?? 0,
@@ -781,7 +796,9 @@
     pollingAccounts.set(accountId, account);
     const request = { requestId, providerAccountId: accountId, ...account };
     if (activePoll) {
-      queuedSyncs.push(request);
+      const firstRoutine = queuedSyncs.findIndex((queued) => String(queued.requestId).startsWith("poll:"));
+      if (!String(requestId).startsWith("poll:") && firstRoutine >= 0) queuedSyncs.splice(firstRoutine, 0, request);
+      else queuedSyncs.push(request);
       if (!String(requestId).startsWith("poll:")) {
         post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId, phase: "waiting_recovery" });
       }

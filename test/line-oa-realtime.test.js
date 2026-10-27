@@ -1123,7 +1123,7 @@ test("LINE OA stalled recovery emits no synthetic activity and scoped cancellati
   startAccount(bridge, "@third", "poll:periodic");
   await settleBridge();
   assert.deepEqual(bridge.posts.filter((post) => post.type === "recovery_phase").map((post) => [post.request_id, post.phase]), [
-    ["active", "loading_conversations"], ["queued", "waiting_recovery"],
+    ["active", "loading_conversations"], ["queued", "waiting_recovery"], ["active", "loading_conversations"],
   ]);
   const before = bridge.posts.length;
   for (let tick = 0; tick < 5; tick += 1) bridge.tick();
@@ -1492,5 +1492,60 @@ test("LINE reset ignores a stale polling 401 after a fresh account check passes"
     assert.equal(bridge.posts.filter(post => post.type === "provider_status").length, statusPosts);
     assert.equal(bridge.posts.some(post => post.type === "recovery_complete" && post.request_id === "old-poll"), false);
     assert.equal(bridge.sentPayloads.length, 0);
+  } finally { release(); bridge.dispose(); }
+});
+
+
+test("LINE manual recovery reports real list-page progress while requests are pending", async () => {
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  let first = true;
+  const bridge = createBridge({ beforeChatRequest: async () => { if (first) { first = false; await blocked; } } });
+  try {
+    startAccount(bridge, "@exampleoa", "visible-progress");
+    await settleBridge();
+    const pending = bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress");
+    assert.equal(pending.at(-1).phase, "loading_conversations");
+    assert.equal(pending.at(-1).conversation_pages, 0);
+    assert.equal(pending.some(post => post.phase === "fetching_messages"), false);
+    const count = pending.length;
+    bridge.tick();
+    await settleBridge();
+    assert.equal(bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress").length, count);
+    release();
+    await settleBridge();
+    const phases = bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress");
+    assert.deepEqual(phases.filter(post => post.phase === "checking_conversations").map(post => post.conversation_pages), [1, 2]);
+    assert.ok(phases.some(post => post.phase === "fetching_messages" && post.conversation_id === "chat-1"));
+    assert.equal(phases.at(-1).phase, "conversation_complete");
+    assert.equal(phases.at(-1).completed_conversations, 2);
+  } finally { release(); bridge.dispose(); }
+});
+
+test("LINE manual recovery waits for active work and then runs before queued routine polls", async () => {
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  let blockNext = false;
+  const bridge = createBridge({ chatCount: 0,
+    availableAccounts: ["@first", "@second", "@third"].map(basicSearchId => ({ basicSearchId, botId: "bot-1" })),
+    beforeChatRequest: async () => { if (blockNext) { blockNext = false; await blocked; } },
+  });
+  try {
+    for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
+    await settleBridge();
+    const before = bridge.posts.length;
+    blockNext = true;
+    bridge.tick();
+    await settleBridge();
+    startAccount(bridge, "@third", "manual-priority");
+    await settleBridge();
+    assert.equal(bridge.posts.slice(before).some(post => post.type === "recovery_complete"), false);
+    assert.ok(bridge.posts.slice(before).some(post => post.request_id === "manual-priority" && post.phase === "waiting_recovery"));
+    release();
+    await settleBridge();
+    const completed = bridge.posts.slice(before).filter(post => post.type === "recovery_complete");
+    assert.deepEqual(completed.map(post => [post.provider_account_id, post.request_id.startsWith("poll:") ? "routine" : post.request_id]),
+      [["@first", "routine"], ["@third", "manual-priority"], ["@second", "routine"], ["@third", "routine"]]);
+    assert.ok(completed.every(post => post.ok));
   } finally { release(); bridge.dispose(); }
 });

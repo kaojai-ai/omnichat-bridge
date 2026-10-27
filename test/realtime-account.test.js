@@ -1302,3 +1302,23 @@ for (const status of [503, 403]) {
     } finally { bridge.dispose(); }
   });
 }
+
+
+test("Shopee recovery reports fetched conversation pages and actual message work", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.fetch("/webchat/api/v1.2/conversations", [{ id: "progress-conversation", shop_id: 100000001,
+      last_message_time: "2026-08-16T11:00:00.000Z" }]);
+    await bridge.fetch("/webchat/api/v1.2/conversations/progress-conversation/messages", []);
+    const complete = await bridge.sync("100000001", "visible-progress");
+    assert.equal(complete.ok, true);
+    const phases = bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress");
+    assert.equal(phases[0].phase, "loading_conversations");
+    assert.equal(phases[0].conversation_pages, 0);
+    assert.equal(phases[1].phase, "checking_conversations");
+    assert.equal(phases[1].conversation_pages, 1);
+    assert.ok(phases.some(post => post.phase === "fetching_messages" && post.conversation_id === "progress-conversation"));
+    assert.equal(phases.at(-1).phase, "conversation_complete");
+    assert.equal(phases.at(-1).completed_conversations, 1);
+  } finally { bridge.dispose(); }
+});

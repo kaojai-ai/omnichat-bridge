@@ -74,7 +74,7 @@ test("already-cancelled handoff never sends a provider request", async () => {
 test("stale attempts and other tabs cannot refresh the current recovery watchdog", () => {
   let touches = 0;
   const handle = vm.runInNewContext(`${section('function isCurrentSyncControl(', 'async function initializeAndStartSync(')}
-(message, _sender) => { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress")')} }`, {
+(message, _sender) => { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress" || message?.type === "sync_phase")')} }`, {
     activeSyncControl: { controller: new AbortController(), tabId: 42, providerRequestId: "new", touchRecovery: () => touches++ },
     providerAutomaticRecoveries: new Map(),
   });
@@ -109,7 +109,7 @@ test("unattended OA activity reaches only its current control and sender tab", (
     providerAutomaticRecoveries: new Map(controls.map(control => [control.accountKey, control])) });
   vm.runInContext(section('function isCurrentSyncControl(', 'async function initializeAndStartSync(')
     + `
-function handle(message, _sender) { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress")')} }`, runtime);
+function handle(message, _sender) { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress" || message?.type === "sync_phase")')} }`, runtime);
   runtime.handle({ request_id: "oa-a", type: "sync_activity" }, { tab: { id: 42 } });
   runtime.handle({ request_id: "oa-b", type: "sync_activity" }, { tab: { id: 99 } });
   runtime.handle({ request_id: "old", type: "sync_activity" }, { tab: { id: 42 } });

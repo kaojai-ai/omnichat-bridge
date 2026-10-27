@@ -88,12 +88,12 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 9;
+const BRIDGE_PROTOCOL_VERSION = 10;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 4;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
 // Bump when an open Shopee page must replace its main-world bridge.
-const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 2;
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -1137,6 +1137,19 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "sync_complete") {
+    const control = syncControlForMessage(message, _sender?.tab?.id);
+    const completion = control?.recoveryCompletion;
+    if (!completion || message.provider !== control.adapter?.id
+      || message.provider_account_id !== control.providerAccountId
+      || message.request_id !== control.providerRequestId || typeof message.result?.ok !== "boolean") {
+      respond({ ok: true, skipped: "superseded" });
+      return false;
+    }
+    completion.resolve(message.result);
+    respond({ ok: true });
+    return false;
+  }
   if (message?.type === "sync_activity") {
     const control = syncControlForMessage(message, _sender?.tab?.id);
     if (control) {
@@ -1145,59 +1158,27 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     respond({ ok: true });
     return false;
   }
-  if (message?.type === "sync_progress") {
+  if (message?.type === "sync_progress" || message?.type === "sync_phase") {
     const attempt = syncControlForMessage(message, _sender?.tab?.id);
-    if (!attempt) {
+    if (!attempt || message.provider !== attempt.adapter?.id
+      || message.provider_account_id !== attempt.providerAccountId) {
       respond({ ok: true, skipped: "superseded" });
       return false;
     }
+    attempt.touchRecovery?.();
     void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
       if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
       const context = accountContextFor(stored, message.provider_account_id, message.provider);
-      const key = context?.key;
-      if (!key) throw new Error("Provider account is not detected.");
-      const current = readAccountState(stored[STORAGE.status], key, {});
-      if (!["discovering", "syncing"].includes(current.state)) return;
-      return updateScopedState(STORAGE.status, key, {
-        state: "syncing",
-        phase: "checking_conversations",
-        completed_conversations: message.completed_conversations,
-        total_conversations: message.total_conversations,
-        ...(Number(message.completed_conversations) > Number(current.completed_conversations ?? 0)
-          ? { last_progress_at: new Date().toISOString() } : {}),
-      });
-    })).then(
-      () => recordLog("info", "sync", "progress", "Sync progress updated.", {
-        provider: message.provider,
-        provider_account_id: message.provider_account_id,
-        completed: Number(message.completed_conversations) || 0,
-        total: Number(message.total_conversations) || 0,
-      }),
-    ).then(
-      () => respond({ ok: true }),
-      (error) => respond({ ok: false, error: String(error) })
-    );
-    return true;
-  }
-  if (message?.type === "sync_phase") {
-    const attempt = syncControlForMessage(message, _sender?.tab?.id);
-    if (!attempt) {
-      respond({ ok: true, skipped: "superseded" });
-      return false;
-    }
-    void exclusive(() => readStorage([STORAGE.detectedAccounts, STORAGE.status]).then((stored) => {
-      if (!isCurrentSyncControl(attempt) || attempt.controller.signal.aborted) return;
-      const context = accountContextFor(stored, message.provider_account_id, message.provider);
-      const key = context?.key;
-      if (!key) throw new Error("Provider account is not detected.");
-      const current = readAccountState(stored[STORAGE.status], key, {});
-      if (!["discovering", "syncing"].includes(current.state)) return;
-      return updateScopedState(STORAGE.status, key, {
-        state: "syncing",
-        phase: message.phase || "fetching_messages",
-        active_conversation_id: message.conversation_id || null,
-        completed_conversations: message.completed_conversations,
-        total_conversations: message.total_conversations,
+      if (!context) throw new Error("Provider account is not detected.");
+      return updateScopedState(STORAGE.status, context.key, current => {
+        if (!["discovering", "syncing"].includes(current.state)) return {};
+        const patch = { state: "syncing", last_progress_at: new Date().toISOString() };
+        if (typeof message.phase === "string") patch.phase = message.phase;
+        for (const field of ["completed_conversations", "total_conversations", "conversation_pages"]) {
+          if (Number.isInteger(message[field]) && message[field] >= 0) patch[field] = message[field];
+        }
+        if (message.conversation_id) patch.active_conversation_id = message.conversation_id;
+        return patch;
       });
     })).then(
       () => respond({ ok: true }),
@@ -2980,6 +2961,10 @@ function invalidateProviderSession(provider, reason) {
 function invalidateProviderTab(tabId, reason) {
   providerBridgeChecks.delete(tabId);
   providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
+  for (const control of [activeSyncControl, ...providerAutomaticRecoveries.values()]) {
+    if (control?.tabId === tabId) control.recoveryCompletion?.reject(
+      Object.assign(new Error("Page changed. Sync again."), { reason_code: "provider_page_changed" }));
+  }
   // Unused tabs cannot tear down another tab's validated account connection.
   for (const [key, evidenceTabId] of providerPolicyTabIds) {
     if (evidenceTabId !== tabId) continue;
@@ -3842,6 +3827,49 @@ function sendProviderMessage(tabId, message, {
   });
 }
 
+function awaitProviderRecovery(tabId, message, control, signal) {
+  if (signal.aborted) return Promise.reject(syncCancelledError());
+  let timer;
+  let onAbort;
+  let resolve;
+  let reject;
+  const completion = new Promise((done, fail) => { resolve = done; reject = fail; });
+  const waiter = { resolve, reject };
+  control.recoveryCompletion = waiter;
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      reject(providerMessageTimeout("Provider", "recovery"));
+      void sendProviderMessage(tabId, { type: "cancel_sync_v3", provider: message.provider,
+        request_id: message.request_id, provider_account_id: message.provider_account_id }, {
+        timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+      }).catch(() => undefined);
+    }, RECOVERY_IDLE_TIMEOUT_MS);
+  };
+  control.touchRecovery = touch;
+  touch();
+  onAbort = () => reject(syncCancelledError());
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  // Register completion before dispatch: a fast scan may finish before its ACK.
+  // The Chrome response covers startup only, never the full recovery duration.
+  const started = sendProviderMessage(tabId, message, {
+    label: "Provider", operation: "start recovery", signal, timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+  }).then(ack => {
+    if (!ack?.ok || ack.started !== true || ack.request_id !== message.request_id) {
+      throw new Error(ack?.error || "Provider recovery could not start.");
+    }
+  });
+  return Promise.all([started, completion]).then(([, result]) => result).finally(() => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+    if (control.recoveryCompletion === waiter) {
+      control.recoveryCompletion = null;
+      control.touchRecovery = null;
+    }
+  });
+}
+
 function syncCancelledError() {
   const error = new Error("Sync cancelled.");
   error.name = "AbortError";
@@ -3921,7 +3949,7 @@ async function syncOpenProvider(control, context) {
     throwIfSyncCancelled(signal);
   }
   if (adapter.id === "line_oa") {
-    await updateScopedState(STORAGE.status, context.key, { phase: "waiting_recovery" });
+    await updateScopedState(STORAGE.status, context.key, { phase: "loading_conversations" });
   }
   if (control.lockedTabId !== undefined) {
     const current = await providerChatTabById(adapter, control.lockedTabId);
@@ -3939,26 +3967,8 @@ async function syncOpenProvider(control, context) {
       ? { bot_id: context.config.bot_id || context.account.bot_id }
       : {}),
   };
-  let result = await sendProviderMessage(tab.id, syncMessage, {
-    label,
-    operation: "sync request",
-    timeoutMs: RECOVERY_IDLE_TIMEOUT_MS,
-    recoveryControl: control,
-    signal,
-  });
+  const result = await awaitProviderRecovery(tab.id, syncMessage, control, signal);
   throwIfSyncCancelled(signal);
-  if (!result?.ok && result?.error === "Recovery is already running.") {
-    await resetProviderRecovery(tab.id);
-    throwIfSyncCancelled(signal);
-    result = await sendProviderMessage(tab.id, syncMessage, {
-      label,
-      operation: "retry sync request",
-      timeoutMs: RECOVERY_IDLE_TIMEOUT_MS,
-      recoveryControl: control,
-      signal,
-    });
-    throwIfSyncCancelled(signal);
-  }
   if (!result?.ok) throw Object.assign(new Error(result?.error ?? `${label} recovery failed.`),
     { ...(result?.reason_code === "superseded" ? { reason_code: "superseded" } : {}),
       recovery_diagnostic_recorded: result?.recovery_diagnostic_recorded === true });
@@ -4221,6 +4231,7 @@ async function runAccountSync(trigger, control, context) {
       completed_conversations: 0,
       total_conversations: 0,
       pages_fetched: 0,
+      conversation_pages: 0,
       messages_captured: 0,
       last_progress_at: null,
     });

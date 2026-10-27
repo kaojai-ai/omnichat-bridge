@@ -10,6 +10,7 @@ export const SYNC_PHASE_LABELS = Object.freeze({
   fetching_messages: "Recovering conversation messages…",
   conversation_complete: "Recovering conversation messages…",
   sending_recovered: "Sending recovered messages to your server…",
+  saving_messages: "Saving recovered messages…",
 });
 
 const COUNTED_PHASES = new Set([
@@ -58,18 +59,48 @@ export function syncProgressPresentation(progressState, { locale = "en", compact
   }
   const detail = [text, ...details].join(" · ");
   if (compact) {
-    const shortPhase = {
-      preparing: "Preparing…", checking_session: "Checking access…", queued: "Waiting…",
-      connecting_provider: "Connecting…", waiting_recovery: "Waiting for recovery…",
-      sending_pending: "Forwarding…", loading_conversations: "Loading…",
-      checking_conversations: "Checking messages…", fetching_messages: "Loading…",
-      conversation_complete: "Loading…", sending_recovered: "Forwarding…",
-    }[phase] ?? "Syncing…";
+    const thai = String(locale).toLowerCase().startsWith("th");
+    const queued = phase === "queued" || phase === "waiting_recovery";
+    const shortPhase = (thai ? {
+      preparing: "กำลังเตรียม…", checking_session: "กำลังตรวจสอบสิทธิ์…", queued: "รอคิว",
+      connecting_provider: "กำลังเชื่อมต่อ…", waiting_recovery: "รอคิว",
+      saving_messages: "กำลังบันทึก", sending_pending: "กำลังส่งต่อ", loading_conversations: "กำลังโหลดแชต",
+      checking_conversations: "กำลังตรวจสอบแชต", fetching_messages: "กำลังโหลดข้อความ",
+      conversation_complete: "กำลังโหลดข้อความ", sending_recovered: "กำลังส่งต่อ",
+    } : {
+      preparing: "Preparing…", checking_session: "Checking access…", queued: "Queued",
+      connecting_provider: "Connecting…", waiting_recovery: "Queued",
+      saving_messages: "Saving messages", sending_pending: "Forwarding", loading_conversations: "Loading chats",
+      checking_conversations: "Checking chats", fetching_messages: "Loading messages",
+      conversation_complete: "Loading messages", sending_recovered: "Forwarding",
+    })[phase] ?? (thai ? "กำลังซิงค์…" : "Syncing…");
+    const measuredCompleted = count(progressState.completed_conversations);
+    const measuredTotal = count(progressState.total_conversations);
     const captured = count(progressState.messages_captured);
-    return { active: true, showBar: phase !== "queued", value, detail,
-      text: shortPhase + (value !== null ? ` · ${value}%` : captured > 0 ? ` · ${captured} captured` : ""),
+    const pages = count(progressState.conversation_pages);
+    const pending = count(progressState.pending);
+    let work = "";
+    if (phase === "loading_conversations" && pages > 0) {
+      work = thai ? `${pages} หน้า` : `${pages} page${pages === 1 ? "" : "s"}`;
+    } else if (["sending_pending", "sending_recovered"].includes(phase) && pending > 0) {
+      work = thai ? `${pending} ข้อความ` : `${pending} message${pending === 1 ? "" : "s"}`;
+    } else if (["fetching_messages", "conversation_complete"].includes(phase) && captured > 0) {
+      work = thai ? `รับแล้ว ${captured} ข้อความ` : `${captured} captured`;
+    } else if (counted && measuredCompleted !== null) {
+      if (measuredTotal > 0) {
+        work = `${measuredCompleted}/${measuredTotal}`;
+        if (phase !== "checking_conversations") work += thai ? " แชต" : " chats";
+      } else if (measuredCompleted > 0) {
+        work = thai ? `ตรวจแล้ว ${measuredCompleted} แชต` : `${measuredCompleted} chats checked`;
+      }
+    }
+    const measuredValue = !queued && counted && measuredCompleted !== null && measuredTotal > 0
+      ? Math.min(100, Math.round((measuredCompleted / measuredTotal) * 100)) : null;
+    return { active: true, showBar: !queued, value: measuredValue, detail,
+      text: shortPhase + (!queued && work ? ` · ${work}` : ""),
     };
   }
+
   return {
     active: true,
     showBar: phase !== "queued",

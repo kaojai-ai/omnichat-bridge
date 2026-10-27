@@ -233,7 +233,7 @@ Synthetic validation: 48,000 distinct IDs retain 20,000 entries under the config
 
 ### Planned: explicit check outcomes
 
-Provider checks distinguish passed, unknown, and failed outcomes through the page/content/background boundary. Shopee page-response/polling timeouts and LINE transient account-check failures are unknown and use the same fixed 30-second grace for a previously ready, unchanged session. LINE authentication/access rejection is failed and blocks immediately; a later missing response cannot restore grace after a confirmed failure. A valid new account check is required for recovery. Late account-check results cannot overwrite a newer authentication failure. Internal content protocol 9 and provider classification capabilities ensure existing page bridges are replaced.
+Provider checks distinguish passed, unknown, and failed outcomes through the page/content/background boundary. Shopee page-response/polling timeouts and LINE transient account-check failures are unknown and use the same fixed 30-second grace for a previously ready, unchanged session. LINE authentication/access rejection is failed and blocks immediately; a later missing response cannot restore grace after a confirmed failure. A valid new account check is required for recovery. Late account-check results cannot overwrite a newer authentication failure. Internal content protocol 10 and provider classification capabilities ensure existing page bridges are replaced.
 
 
 ### Planned: shorter send preparation
@@ -259,3 +259,9 @@ Logs controls place a full-width Copy below the log list and a red Clear logs te
 Sync messages first cancels and drains recovery already running in the selected tab, then invalidates that tab's temporary bridge verification, provider probes, and readiness evidence. It verifies or repairs the bridge and resets page recovery bookkeeping before detecting the current account, refreshing display metadata, and resuming from the saved checkpoint. A healthy command socket stays open. Other tabs, durable pending messages, saved checkpoints, outgoing command protection, and provider send profiles are preserved.
 
 LINE resets cached account-access evidence and starts a fresh probe. Pre-reset probe/poll responses cannot overwrite fresh readiness. A Chrome BFCache channel closure remains a failed operation with the short message “Page changed. Sync again.”; it never becomes an automatic outgoing retry. Manual Sync cannot prevent navigation during a recovery.
+
+### Planned: measured progress and separate recovery completion
+
+Both providers acknowledge recovery startup immediately; a separate correlated completion event carries the final result. The background registers the waiter before dispatch and validates the provider, account, tab, and request identity. An idle deadline remains bounded, genuine progress renews it, and navigation ends the interrupted attempt without replaying it. The previous full-scan Chrome response and overlapping-scan retry path are removed. Content protocol 10 and updated page compatibility versions replace older bridges.
+
+List-page fetches, conversation checks, message fetches, local saving, and forwarding report their actual phase. Count-only events preserve the current phase and existing totals. Compact EN/TH status uses measured chat counts, list-page counts, captured messages, or pending forwarding counts; missing evidence does not create percentages. Queue states say Queued. LINE manual requests take priority over queued routine polls while allowing active work to finish. Recovery bounds, checkpoints, pending-message durability, and outgoing sending remain unchanged. This improves visibility and channel handling; it does not claim faster provider responses.

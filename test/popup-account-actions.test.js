@@ -115,7 +115,7 @@ for (const provider of ["shopee", "line_oa"]) {
     });
     assert.equal(progressArea.hidden, false);
     assert.match(status.textContent, new RegExp(provider + ": Test Shop"));
-    assert.match(status.textContent, /Loading… · 50%/);
+    assert.match(status.textContent, /Loading messages · 2\/4 chats/);
     assert.doesNotMatch(status.textContent, /pages fetched|Last progress|pending/);
     assert.equal(spinning, true);
   });

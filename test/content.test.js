@@ -16,6 +16,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   const runtimeListeners = [];
   const windowListeners = new Map();
   const runtimeMessages = [];
+  const syncCompletions = new Map();
   const storageWrites = [];
   let context;
   const window = {
@@ -54,6 +55,10 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
         },
         async sendMessage(message) {
           runtimeMessages.push(message);
+          if (message.type === "sync_complete") {
+            const resolve = syncCompletions.get(message.request_id);
+            if (resolve) { syncCompletions.delete(message.request_id); resolve(message.result); }
+          }
           return runtimeHandler ? runtimeHandler(message) : { ok: true };
         },
       },
@@ -91,7 +96,14 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   vm.runInContext(source, context);
 
   const sendCommand = (message) => new Promise((resolve) => {
-    assert.equal(runtimeListeners[0](message, {}, resolve), true);
+    if (message.type === "sync_now_v3") {
+      syncCompletions.set(message.request_id, resolve);
+      assert.equal(runtimeListeners[0](message, {}, acknowledgement => {
+        assert.deepEqual(plain(acknowledgement), { ok: true, started: true, request_id: message.request_id });
+      }), false, "manual sync closes the original message channel immediately");
+    } else {
+      assert.equal(runtimeListeners[0](message, {}, resolve), true);
+    }
   });
   const providerEvent = async (data) => {
     for (const listener of windowListeners.get("message") ?? []) {
@@ -885,3 +897,67 @@ for (const outcome of ["unknown", "failed"]) {
     assert.equal((await pending).provider_check_outcome, outcome);
   });
 }
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider} manual sync acknowledges immediately and completes once through a correlated event`, async () => {
+    let finishCheckpoint;
+    const providerAccountId = provider === "shopee" ? "shop-ack" : "@oa-ack";
+    const account = { provider, provider_account_id: providerAccountId,
+      ...(provider === "line_oa" ? { bot_id: "bot-ack" } : {}) };
+    const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/bot-ack/chats", {
+      provider, localConsent: true, storage: { config: { accounts: [account] }, detected_accounts: [account] },
+      runtimeHandler: message => message.type === "get_sync_state"
+        ? new Promise(resolve => { finishCheckpoint = resolve; }) : { ok: true },
+    });
+    const requestId = `${provider}:immediate-ack`;
+    const acknowledgement = await bridge.requestMessage({ type: "sync_now_v3", provider,
+      provider_account_id: providerAccountId, bot_id: account.bot_id, request_id: requestId });
+    assert.deepEqual(plain(acknowledgement), { ok: true, started: true, request_id: requestId });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(typeof finishCheckpoint, "function");
+    assert.equal(bridge.runtimeMessages.some(message => message.type === "sync_v3"), false,
+      "acknowledgement does not wait for checkpoint loading or provider recovery");
+    assert.equal(bridge.runtimeMessages.some(message => message.type === "sync_complete"), false);
+    finishCheckpoint({ ok: true, checkpoint: {} });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.runtimeMessages.find(message => message.type === "sync_v3").request_id, requestId);
+    assert.equal(bridge.runtimeMessages.some(message => message.type === "sync_complete"), false);
+    await bridge.providerEvent({ type: "recovery_complete", provider_account_id: providerAccountId,
+      request_id: requestId, ok: true, recovered: 3, queued: 3 });
+    await bridge.providerEvent({ type: "recovery_complete", provider_account_id: providerAccountId,
+      request_id: requestId, ok: true, recovered: 3, queued: 3 });
+    const completions = bridge.runtimeMessages.filter(message => message.type === "sync_complete");
+    assert.equal(completions.length, 1, "a repeated page completion cannot notify the background twice");
+    assert.equal(completions[0].provider, provider);
+    assert.equal(completions[0].provider_account_id, providerAccountId);
+    assert.equal(completions[0].request_id, requestId);
+    assert.deepEqual(plain(completions[0].result), { ok: true, recovered: 3, queued: 3, watermark: null });
+  });
+}
+
+test("cancelled LINE account emits only its own completion while another account continues", async () => {
+  const accounts = ["@oa-a", "@oa-b"].map((provider_account_id, index) => ({ provider: "line_oa",
+    provider_account_id, bot_id: `bot-${index}` }));
+  const bridge = contentBridge("/bot-0/chats", { provider: "line_oa", localConsent: true,
+    storage: { config: { accounts }, detected_accounts: accounts } });
+  for (const [index, account] of accounts.entries()) {
+    const acknowledgement = await bridge.requestMessage({ type: "sync_now_v3", provider: "line_oa",
+      provider_account_id: account.provider_account_id, bot_id: account.bot_id, request_id: `request-${index}` });
+    assert.deepEqual(plain(acknowledgement), { ok: true, started: true, request_id: `request-${index}` });
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(bridge.runtimeMessages.filter(message => message.type === "sync_v3").length, 2);
+  await bridge.requestMessage({ type: "cancel_sync_v3", provider: "line_oa", provider_account_id: "@oa-a" });
+  await new Promise(resolve => setImmediate(resolve));
+  const afterCancel = bridge.runtimeMessages.filter(message => message.type === "sync_complete");
+  assert.equal(afterCancel.length, 1);
+  assert.equal(afterCancel[0].request_id, "request-0");
+  assert.equal(afterCancel[0].provider_account_id, "@oa-a");
+  assert.equal(afterCancel[0].result.ok, false);
+  await bridge.providerEvent({ type: "recovery_complete", provider_account_id: "@oa-b", request_id: "request-1", ok: true });
+  const completions = bridge.runtimeMessages.filter(message => message.type === "sync_complete");
+  assert.equal(completions.length, 2);
+  assert.equal(completions[1].request_id, "request-1");
+  assert.equal(completions[1].provider_account_id, "@oa-b");
+  assert.equal(completions[1].result.ok, true);
+});

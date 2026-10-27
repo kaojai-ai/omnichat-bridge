@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 9;
+  const BRIDGE_PROTOCOL_VERSION = 10;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -618,6 +618,8 @@
           ? {}
           : { provider_account_id: message.provider_account_id }),
       }));
+      if (!automaticPoll) handleRecoveryPhase({ request_id: recoveryIdFrom(message.request_id),
+        provider_account_id: message.provider_account_id, phase: "saving_messages" });
       const result = await sendRuntimeMessage({
         type: "queue_messages",
         messages,
@@ -771,6 +773,7 @@
       provider_account_id: message.provider_account_id,
       request_id: message.request_id,
       phase: message.phase,
+      conversation_pages: message.conversation_pages,
       conversation_id: message.conversation_id,
       completed_conversations: message.completed_conversations,
       total_conversations: message.total_conversations,
@@ -787,7 +790,8 @@
       provider_account_id: message.provider_account_id,
       request_id: message.request_id,
       completed_conversations: message.completed_conversations,
-      total_conversations: message.total_conversations
+      total_conversations: message.total_conversations,
+      conversation_pages: message.conversation_pages,
     }, (error) => logAsyncError("sync_progress", error, {
       provider_account_id: message.provider_account_id,
     }));
@@ -1239,8 +1243,15 @@
       return false;
     }
     if (message?.type === "sync_now_v3") {
-      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id).then(respond, (error) => respond({ ok: false, error: String(error) }));
-      return true;
+      respond({ ok: true, started: true, request_id: message.request_id });
+      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id).then(
+        result => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,
+          provider_account_id: message.provider_account_id, request_id: message.request_id, result }),
+        error => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,
+          provider_account_id: message.provider_account_id, request_id: message.request_id,
+          result: { ok: false, error: String(error) } }),
+      );
+      return false;
     }
     if (message?.type === "cancel_sync_v3") {
       respond(cancelRecovery(message.request_id, message.provider_account_id));

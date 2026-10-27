@@ -258,11 +258,11 @@ test("bounds the provider sync handoff when a page reload interrupts its respons
   assert.match(source, /providerBridgeReinjections\.get\(tabId\)/);
 });
 
-test("resets a stale page-side recovery before reinjection and retries an overlapping sync", () => {
+test("resets stale page-side recovery before reinjection without replaying the scan", () => {
   assert.match(source, /async function resetProviderRecovery\(/);
   assert.match(source, /window\.__omnichatRealtimeBridgeControl/);
-  assert.match(source, /Recovery is already running\./);
-  assert.match(source, /operation: "retry sync request"/);
+  assert.doesNotMatch(source, /operation: "retry sync request"/);
+  assert.match(source, /await awaitProviderRecovery\(tab.id, syncMessage, control, signal\)/);
   assert.match(source, /state\.recoveryAbortController\?\.abort\(\)/);
 });
 
