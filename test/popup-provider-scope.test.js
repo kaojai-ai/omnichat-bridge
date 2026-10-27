@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const [html, css, popupSource, backgroundSource] = await Promise.all([
   readFile(new URL("../extension/popup.html", import.meta.url), "utf8"),
@@ -138,4 +139,73 @@ test("shows a lightweight shell before popup state finishes loading", () => {
 test("changes leader status only for the active provider", () => {
   assert.match(popupSource, /\{ type: "release_leader", provider: activeProviderAdapter\?\.id \}/);
   assert.match(popupSource, /\{ type: "claim_leader", provider: activeProviderAdapter\?\.id, tab_id: popupTabId \}/);
+});
+
+test("visible popup refreshes server selection without overlapping requests and stops when hidden or closed", async () => {
+  const callbacks = new Map();
+  const document = { visibilityState: "visible", addEventListener: (event, callback) => callbacks.set(event, callback) };
+  const dashboardScreen = { hidden: false };
+  let calls = 0;
+  let resolveRequest;
+  let tick;
+  let cleared = 0;
+  let allowed = true;
+  const scope = {
+    document, dashboardScreen, consented: () => allowed,
+    window: { addEventListener: (event, callback) => callbacks.set(event, callback) },
+    chrome: { runtime: { sendMessage: (request) => {
+      assert.equal(request.type, "get_live_state");
+      calls += 1;
+      return new Promise((resolve) => { resolveRequest = resolve; });
+    } } },
+    setInterval: (callback, delay) => { assert.equal(delay, 60_000); tick = callback; return 1; },
+    clearInterval: (timer) => { if (timer !== null) cleared += 1; },
+    reportPopupError: () => assert.fail("unexpected refresh failure"),
+  };
+  const source = popupSource.slice(popupSource.indexOf("function canRefreshLiveState()"), popupSource.indexOf("void load().catch"));
+  const api = vm.runInNewContext(`let liveRefreshTimer = null, liveRefreshPending = null, popupClosed = false;
+    ${source}
+    ({ updateLiveRefresh, refreshLiveState });`, scope);
+  api.updateLiveRefresh();
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  callbacks.get("focus")();
+  tick();
+  await Promise.resolve();
+  assert.equal(calls, 1, "focus and timer share the pending request");
+  resolveRequest({ ok: true });
+  await api.refreshLiveState();
+  tick();
+  await Promise.resolve();
+  assert.equal(calls, 2);
+  resolveRequest({ ok: true });
+  await api.refreshLiveState();
+  document.visibilityState = "hidden";
+  callbacks.get("visibilitychange")();
+  tick();
+  await Promise.resolve();
+  assert.equal(cleared, 1);
+  assert.equal(calls, 2);
+  document.visibilityState = "visible";
+  dashboardScreen.hidden = true;
+  callbacks.get("focus")();
+  await Promise.resolve();
+  assert.equal(calls, 2, "other popup screens do not poll");
+  dashboardScreen.hidden = false;
+  allowed = false;
+  api.updateLiveRefresh();
+  await Promise.resolve();
+  assert.equal(calls, 2, "consent gate does not poll");
+  allowed = true;
+  callbacks.get("visibilitychange")();
+  await Promise.resolve();
+  assert.equal(calls, 3);
+  resolveRequest({ ok: true });
+  await api.refreshLiveState();
+  callbacks.get("pagehide")();
+  callbacks.get("focus")();
+  tick();
+  await Promise.resolve();
+  assert.equal(cleared, 2);
+  assert.equal(calls, 3, "closed popup never restarts polling");
 });
