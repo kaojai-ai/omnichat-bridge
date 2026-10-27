@@ -160,10 +160,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     __CHAT_GLOBAL__: socket ? { socket } : {},
   };
   const clockStartedAt = Date.now();
+  let clockOffset = 0;
   const context = vm.createContext({
     window,
     document,
-    Date: class extends Date { static now() { return Date.parse("2026-08-20T12:00:00Z") + Date.now() - clockStartedAt; } },
+    Date: class extends Date { static now() { return Date.parse("2026-08-20T12:00:00Z") + Date.now() - clockStartedAt + clockOffset; } },
     URL,
     Headers,
     Request,
@@ -337,6 +338,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
 
   return {
     get state() { return window.__omnichatRealtimeState; },
+    advanceClock(ms) { clockOffset += ms; },
     setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
     checkStatus(requestId) {
       for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
@@ -365,6 +367,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       }, origin);
     },
     get state() { return window.__omnichatRealtimeState; },
+    advanceClock(ms) { clockOffset += ms; },
     setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
     checkStatus(requestId) {
       for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
@@ -1320,5 +1323,179 @@ test("Shopee recovery reports fetched conversation pages and actual message work
     assert.ok(phases.some(post => post.phase === "fetching_messages" && post.conversation_id === "progress-conversation"));
     assert.equal(phases.at(-1).phase, "conversation_complete");
     assert.equal(phases.at(-1).completed_conversations, 1);
+  } finally { bridge.dispose(); }
+});
+
+
+test("combined Shopee metadata uses the same list pass while bootstrap still recovers only ten chats", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  const items = Array.from({ length: 105 }, (_, i) => ({ id: `combined-${i}`, shop_id: 100000001,
+    to_id: `customer-${i}`, to_name: `Customer ${i}`, last_message_time: "2026-08-20T11:00:00Z" }));
+  await bridge.fetch(path, items);
+  for (const item of items) bridge.setResponse(`${path}/${item.id}/messages`, []);
+  const before = bridge.requests.length;
+  const result = await bridge.sync("100000001", "combined", { refresh_metadata: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.metadata.ok, true);
+  assert.equal(result.metadata.profiles.length, 100);
+  assert.equal(result.metadata.partial, true);
+  assert.equal(result.metadata.account.provider_account_id, "100000001");
+  const requests = bridge.requests.slice(before);
+  assert.equal(requests.filter(request => request === path).length, 1);
+  assert.equal(requests.filter(request => request.startsWith(path + "/") && request.endsWith("/messages")).length, 10);
+  bridge.dispose();
+});
+
+test("Shopee recovery traverses later list pages after an old summary and probes unknown latest activity", async () => {
+  const bridge = createBridge({ pathname: "/portal", miniChatOpen: true });
+  await bridge.detect();
+  const path = "/webchat/api/v1.2/mini/conversations";
+  const old = { id: "old-first", shop_id: 100000001, to_id: "old-customer", next_timestamp_nano: "next-page", last_message_time: "2020-01-01T00:00:00Z" };
+  const unknown = { id: "unknown-later", shop_id: 100000001, to_id: "new-customer", next_timestamp_nano: "0", created_timestamp: 1500000000 };
+  await bridge.fetch(path, [old], { next_timestamp_nano: "stale-scroll" });
+  await bridge.fetch(`${path}/unknown-later/messages`, []);
+  const cursors = [];
+  bridge.setResponse(path, async request => {
+    const payload = await request.clone().json(); cursors.push(payload.next_timestamp_nano);
+    return new Response(JSON.stringify(payload.next_timestamp_nano === "0" ? [old] : [unknown]));
+  });
+  bridge.setResponse(`${path}/unknown-later/messages`, []);
+  const result = await bridge.sync("100000001", "unordered", { watermark: "2026-08-01T00:00:00Z", refresh_metadata: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(cursors, ["0", "next-page"]);
+  assert.equal(result.metadata.profiles.length, 2);
+  assert.ok(bridge.requests.includes(`${path}/unknown-later/messages`));
+  assert.equal(bridge.requests.includes(`${path}/old-first/messages`), false);
+  bridge.dispose();
+});
+
+test("Shopee repeated list cursor fails recovery rather than advancing its checkpoint", async () => {
+  const bridge = createBridge({ pathname: "/portal", miniChatOpen: true });
+  await bridge.detect();
+  const path = "/webchat/api/v1.2/mini/conversations";
+  const item = { id: "cycle", shop_id: 100000001, next_timestamp_nano: "again", last_message_time: "2026-08-20T11:00:00Z" };
+  await bridge.fetch(path, [item], { next_timestamp_nano: "0" });
+  await bridge.fetch(`${path}/cycle/messages`, []);
+  const result = await bridge.sync("100000001", "cyclic", { watermark: "2026-08-01T00:00:00Z", refresh_metadata: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason_code, "invalid_conversation_list");
+  assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+  bridge.dispose();
+});
+
+test("Shopee metadata collection stops at thirty seconds without failing message recovery", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  const item = { id: "slow-list", shop_id: 100000001, to_id: "customer", last_message_time: "2026-08-20T11:00:00Z" };
+  await bridge.fetch(path, [item]);
+  bridge.setResponse(path, () => { bridge.advanceClock(31000); return new Response(JSON.stringify([item])); });
+  bridge.setResponse(`${path}/slow-list/messages`, []);
+  const result = await bridge.sync("100000001", "slow-metadata", { watermark: "2026-08-01T00:00:00Z", refresh_metadata: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.metadata.profiles.length, 0);
+  assert.equal(result.metadata.partial, true);
+  assert.ok(bridge.requests.includes(`${path}/slow-list/messages`));
+  bridge.dispose();
+});
+
+
+test("Shopee combined sync resets captured GET offset and skips unchanged history", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  const item = { id: "unchanged", shop_id: 100000001, to_id: "customer", last_message_time: "2026-08-20T11:00:00Z", latest_message_id: "last" };
+  await bridge.fetch(path, [item]);
+  bridge.state.listTemplate = { ...bridge.state.listTemplate, url: `https://seller.shopee.co.th${path}?offset=50&limit=25`,
+    init: { ...bridge.state.listTemplate.init, method: "GET" }, body: null };
+  const offsets = [];
+  bridge.setResponse(path, request => { offsets.push(new URL(request.url).searchParams.get("offset")); return new Response(JSON.stringify([item])); });
+  const before = bridge.requests.length;
+  const result = await bridge.sync("100000001", "get-reset", { watermark: "2026-08-01T00:00:00Z", refresh_metadata: true,
+    conversations: { unchanged: { event_timestamp: item.last_message_time, message_id: "last" } } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(offsets, ["0"]);
+  assert.equal(result.metadata.profiles.length, 1);
+  assert.equal(bridge.requests.slice(before).some(request => request.endsWith("/messages")), false);
+  bridge.dispose();
+});
+
+test("new webchat body pagination stops only after a fully old ordered page", async () => {
+  const bridge = createBridge();
+  try {
+    const path = "/webchat/api/v1.2/conversations";
+    const row = (id, date, cursor) => ({ id, shop_id: 100000001, pinned: false,
+      last_message_time: date, next_timestamp_nano: cursor });
+    const pages = [
+      [row("new", "2026-08-20T11:00:00Z", "x"), row("old", "2026-07-01T00:00:00Z", "second")],
+      [row("older", "2026-06-01T00:00:00Z", "third")],
+      [row("oldest", "2026-05-01T00:00:00Z", "0")],
+    ];
+    await bridge.fetch(path, pages[0], { direction: "older", next_timestamp_nano: "stale-scroll" });
+    const cursors = [];
+    bridge.setResponse(path, async request => {
+      const { next_timestamp_nano: cursor } = await request.clone().json(); cursors.push(cursor);
+      return new Response(JSON.stringify(pages[{ 0: 0, second: 1, third: 2 }[cursor]]));
+    });
+    bridge.setResponse(`${path}/new/messages`, []);
+    const result = await bridge.sync("100000001", "ordered-cutoff", { watermark: "2026-08-01T00:00:00Z" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(cursors, ["0", "second"]);
+  } finally { bridge.dispose(); }
+});
+
+for (const variant of ["equal", "missing", "pinned", "unknown-pin", "disordered", "metadata", "required"]) {
+  test(`Shopee older-list shortcut falls through for ${variant}`, async () => {
+    const bridge = createBridge();
+    try {
+      const path = "/webchat/api/v1.2/conversations";
+      const row = (id, date, cursor) => ({ id, shop_id: 100000001, to_id: id, pinned: false,
+        last_message_time: date, next_timestamp_nano: cursor });
+      const first = row("first", "2026-07-01T00:00:00Z", "second");
+      if (variant === "equal") first.last_message_time = "2026-08-01T00:00:00Z";
+      if (variant === "missing") delete first.last_message_time;
+      if (variant === "pinned") first.pinned = true;
+      if (variant === "unknown-pin") delete first.pinned;
+      const firstPage = variant === "disordered"
+        ? [row("earlier", "2026-06-01T00:00:00Z", "unused"), first] : [first];
+      const last = row("last", "2026-05-01T00:00:00Z", "0");
+      await bridge.fetch(path, firstPage, { direction: "older", next_timestamp_nano: "0" });
+      const cursors = [];
+      bridge.setResponse(path, async request => {
+        const { next_timestamp_nano: cursor } = await request.clone().json(); cursors.push(cursor);
+        return new Response(JSON.stringify(cursor === "0" ? firstPage : [last]));
+      });
+      for (const id of ["first", "earlier", "last"]) bridge.setResponse(`${path}/${id}/messages`, []);
+      const checkpoint = { watermark: "2026-08-01T00:00:00Z",
+        ...(variant === "metadata" ? { refresh_metadata: true } : {}),
+        ...(variant === "required" ? { history_days: 30, history_since_ms: Date.parse("2026-07-01T00:00:00Z"), history_conversation_ids: ["last"] } : {}) };
+      const result = await bridge.sync("100000001", `guard-${variant}`, checkpoint);
+      assert.equal(result.ok, true);
+      assert.deepEqual(cursors, ["0", "second"]);
+      if (variant === "metadata") assert.equal(result.metadata.profiles.length, 2);
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("Shopee cross-page activity disorder disables subsequent checkpoint stops", async () => {
+  const bridge = createBridge();
+  try {
+    const path = "/webchat/api/v1.2/conversations";
+    const row = (id, date, cursor) => ({ id, shop_id: 100000001, pinned: false,
+      last_message_time: date, next_timestamp_nano: cursor });
+    const pages = [
+      [row("new", "2026-08-20T11:00:00Z", "unused"), row("old", "2026-05-01T00:00:00Z", "second")],
+      [row("out-of-order", "2026-06-01T00:00:00Z", "third")],
+      [row("last", "2026-04-01T00:00:00Z", "0")],
+    ];
+    await bridge.fetch(path, pages[0], { direction: "older", next_timestamp_nano: "0" });
+    const cursors = [];
+    bridge.setResponse(path, async request => {
+      const { next_timestamp_nano: cursor } = await request.clone().json(); cursors.push(cursor);
+      return new Response(JSON.stringify(pages[{ 0: 0, second: 1, third: 2 }[cursor]]));
+    });
+    bridge.setResponse(`${path}/new/messages`, []);
+    const result = await bridge.sync("100000001", "cross-page-disorder", { watermark: "2026-08-01T00:00:00Z" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(cursors, ["0", "second", "third"]);
   } finally { bridge.dispose(); }
 });

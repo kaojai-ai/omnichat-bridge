@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {} } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -99,6 +99,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           json: async () => ({
             list: chatId ? [{
               chatId,
+              ...(chatProfiles[chatId] ? { profile: chatProfiles[chatId] } : {}),
               ...(chatLatestEventTimestamps[chatId] !== undefined
                 ? { latestEvent: { type: "message", timestamp: chatLatestEventTimestamps[chatId] } }
                 : {}),
@@ -219,6 +220,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
 
   return {
     posts,
+    advanceClock(ms) { fixtureNow = (fixtureNow ?? Date.now()) + ms; },
     setAccounts(accounts) { availableAccounts = accounts; },
     setAccountError(error) { accountError = error; },
     requests,
@@ -295,6 +297,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       history_since_ms = null,
       history_conversation_ids = null,
       now = 5_000,
+      refresh_metadata = false,
     } = {}) {
       // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
       fixtureNow = now;
@@ -307,6 +310,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
             type: "sync_v3",
             request_id: requestId,
             checkpoint,
+            refresh_metadata,
             provider_account_id: providerAccountId,
             ...(botId ? { bot_id: botId } : {}),
             ...(history_days != null ? {
@@ -459,8 +463,8 @@ test("LINE OA recovers every chat and message page only after each page is ackno
     bridge.requests.map((url) => `${url.pathname}?${url.searchParams}`).sort(),
     [
       "/api/v1/bots?noFilter=true&limit=1000",
-      "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true",
-      "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=true&next=chat-page-2",
+      "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=false",
+      "/api/v2/bots/bot-1/chats?folderType=ALL&tagIds=&autoTagIds=&limit=25&prioritizePinnedChat=false&next=chat-page-2",
       "/api/v3/bots/bot-1/chats/chat-1/messages?limit=25",
       "/api/v3/bots/bot-1/chats/chat-1/messages?limit=24&backward=message-page-2",
       "/api/v3/bots/bot-1/chats/chat-2/messages?limit=25",
@@ -1549,3 +1553,156 @@ test("LINE manual recovery waits for active work and then runs before queued rou
     assert.ok(completed.every(post => post.ok));
   } finally { release(); bridge.dispose(); }
 });
+
+
+test("LINE explicit sync refreshes metadata from its existing account and conversation requests", async () => {
+  const bridge = createBridge({ chatCount: 2,
+    chatLatestEventTimestamps: { "chat-1": 1000, "chat-2": 1000 },
+    chatProfiles: { "chat-1": { userId: "buyer-1", displayName: "Fresh name", pictureUrl: "https://image.test/avatar" } },
+  });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true, checkpoint: { watermark: new Date(2000).toISOString() } });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.ok, true);
+    assert.equal(complete.metadata.account.provider_account_id, "@exampleoa");
+    assert.equal(complete.metadata.profiles.length, 2);
+    assert.equal(complete.metadata.profiles[0].display_name, "Fresh name");
+    assert.equal(complete.metadata.partial, false);
+    assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, 1);
+    assert.equal(bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages")).length, 2);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+    assert.ok(bridge.requests.filter(url => url.pathname.includes("/chats")).every(url => url.searchParams.get("prioritizePinnedChat") === "false"));
+    bridge.tick();
+    await settleBridge();
+    const routine = bridge.posts.filter(post => post.type === "recovery_complete" && post.request_id.startsWith("poll:"));
+    assert.ok(routine.length > 0);
+    assert.equal(routine.some(post => post.metadata !== undefined), false);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE metadata stops at 100 customers while recovery continues to the saved checkpoint", async () => {
+  const chatLatestEventTimestamps = Object.fromEntries(Array.from({ length: 125 }, (_, index) => [`chat-${index + 1}`, 1000]));
+  const bridge = createBridge({ chatCount: 125, chatLatestEventTimestamps });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true, checkpoint: { watermark: new Date(2000).toISOString() } });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 100);
+    assert.equal(complete.metadata.partial, true);
+    assert.equal(bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages")).length, 125);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE metadata collection deadline does not cancel checkpoint recovery", async () => {
+  let pages = 0;
+  const bridge = createBridge({ chatCount: 3,
+    chatLatestEventTimestamps: { "chat-1": 1000, "chat-2": 1000, "chat-3": 1000 },
+    beforeChatRequest() { if (++pages === 2) bridge.advanceClock(31_000); },
+  });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true, checkpoint: { watermark: new Date(2000).toISOString() } });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.ok, true);
+    assert.equal(complete.metadata.profiles.length, 1);
+    assert.equal(complete.metadata.partial, true);
+    assert.equal(pages, 3);
+  } finally { bridge.dispose(); }
+});
+
+for (const [latest, shouldFetch] of [[2999, false], [3000, true], [undefined, true]]) {
+  test(`LINE summary ${latest ?? "unknown"} respects the durable conversation boundary`, async () => {
+    const bridge = createBridge({ chatCount: 1, chatLatestEventTimestamps: { "chat-1": latest } });
+    try {
+      await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString(), conversations: {
+        "chat-1": { event_timestamp: new Date(3000).toISOString(), message_id: "last-known" },
+      } } });
+      assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), shouldFetch);
+    } finally { bridge.dispose(); }
+  });
+}
+
+
+test("LINE combined metadata refresh preserves limited onboarding history", async () => {
+  const bridge = createBridge({ chatCount: 11, chat1MessageCount: 30 });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 11);
+    assert.equal(complete.metadata.partial, false);
+    assert.equal(bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages")).length, 11);
+    const messages = bridge.posts.filter(post => post.type === "recovery_batch")
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+    assert.equal(messages.filter(message => String(message.id).startsWith("message-")).length, 34);
+    assert.equal(bridge.posts.find(post => post.type === "recovery_batch").body.conversations[0].messages.length, 25);
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE metadata can cover 100 summaries without widening onboarding message recovery", async () => {
+  const bridge = createBridge({ chatCount: 120 });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 100);
+    assert.equal(complete.metadata.partial, true);
+    const lists = bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages"));
+    assert.equal(lists.length, 100);
+    const fetchedChats = new Set(bridge.requests.filter(url => url.pathname.includes("/messages")).map(url => url.pathname.split("/").at(-2)));
+    assert.equal(fetchedChats.size, 10);
+    assert.equal(fetchedChats.has("chat-11"), false);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE metadata deadline bounds extra onboarding summary pages", async () => {
+  let pages = 0;
+  const bridge = createBridge({ chatCount: 120,
+    beforeChatRequest() { if (++pages === 12) bridge.advanceClock(31_000); },
+  });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 11);
+    assert.equal(complete.metadata.partial, true);
+    assert.equal(pages, 12);
+    const messageChats = new Set(bridge.requests.filter(url => url.pathname.includes("/messages")).map(url => url.pathname.split("/").at(-2)));
+    assert.equal(messageChats.size, 10);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE metadata-only continuation does not fetch messages beyond a configured history boundary", async () => {
+  const chatLatestEventTimestamps = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`chat-${index + 1}`, 1000]));
+  const bridge = createBridge({ chatCount: 12, chatLatestEventTimestamps });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true,
+      checkpoint: { watermark: new Date(3000).toISOString() }, history_days: 35, history_since_ms: 2000,
+    });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 12);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+  } finally { bridge.dispose(); }
+});
+
+
+for (const refreshMetadata of [false, true]) {
+  test(`LINE configured history finds newer chats after an older page with metadata ${refreshMetadata}`, async () => {
+    const bridge = createBridge({ chatCount: 2,
+      chatLatestEventTimestamps: { "chat-1": 1000, "chat-2": 3000 },
+    });
+    try {
+      const complete = await bridge.sync({ refresh_metadata: refreshMetadata,
+        checkpoint: { watermark: new Date(4000).toISOString() }, history_days: 35, history_since_ms: 2000,
+      });
+      assert.equal(complete.ok, true);
+      assert.equal(complete.recovered, 1);
+      const listRequests = bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages"));
+      assert.equal(listRequests.length, 2);
+      assert.deepEqual(bridge.requests.filter(url => url.pathname.includes("/messages")).map(url => url.pathname),
+        ["/api/v3/bots/bot-1/chats/chat-2/messages"]);
+      const messages = bridge.posts.filter(post => post.type === "recovery_batch")
+        .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0].timestamp, 3000);
+      assert.ok(bridge.posts.some(post => post.type === "history_window" && post.history_days === 35));
+    } finally { bridge.dispose(); }
+  });
+}

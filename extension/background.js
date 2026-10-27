@@ -69,7 +69,6 @@ function newCustomerMetadataCache() {
 let customerMetadata = newCustomerMetadataCache();
 let metadataEpoch = 0;
 let metadataErasing = false;
-const metadataRefreshes = new Map();
 // Persist only an opaque configuration fingerprint, never endpoint or credential values.
 const metadataScopes = new WeakMap();
 function metadataScope(context) {
@@ -88,12 +87,12 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 10;
+const BRIDGE_PROTOCOL_VERSION = 11;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 6;
 // Bump when an open Shopee page must replace its main-world bridge.
-const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 4;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -910,11 +909,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       () => respond({ ok: false, error: "Could not refresh this tab. Open its provider chat and sync again." }));
     return true;
   }
-  if (message?.type === "refresh_metadata") {
-    void refreshAccountMetadata(message.provider, message.provider_account_id, message.tab_id).then(respond,
-      () => respond({ ok: false, error: "Metadata refresh failed. Cached information was kept." }));
-    return true;
-  }
   if (message?.type === "cache_profiles") {
     void exclusive(async () => {
       const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
@@ -995,7 +989,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     diagnosticsSuspended = true;
     metadataErasing = true;
     metadataEpoch += 1;
-    metadataRefreshes.clear();
     const metadataDisposed = customerMetadata.dispose();
     void Promise.all([diagnosticBuffer.discard(), metadataDisposed]).then(() => exclusive(() => mutateLogs(async () => {
       await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
@@ -3184,33 +3177,24 @@ async function runLineTabSync(tabId, batch) {
     for (const context of owned) {
       await assertCurrent();
       const id = context.account.provider_account_id;
-      let metadata;
-      await updateScopedState(STORAGE.status, context.key, { phase: "refreshing_metadata" });
-      try {
-        metadata = await refreshAccountMetadata("line_oa", id, tabId, { shared_session: true, signal });
-      } catch (error) {
-        await assertCurrent();
-        metadata = { ok: false, error: "Metadata refresh failed. Cached information was kept." };
-      }
-      await assertCurrent();
       try {
         const result = await retryProviderAccount({ provider: "line_oa", provider_account_id: id,
-          tab_id: tabId, shared_session: true }, { controller: batch.controller });
-        results.push({ provider_account_id: id, metadata, result });
+          tab_id: tabId, shared_session: true, refresh_metadata: true }, { controller: batch.controller });
+        results.push({ provider_account_id: id, result });
       } catch (error) {
         await assertCurrent();
         const errorMessage = error.message || "LINE account sync failed.";
         await updateScopedState(STORAGE.status, context.key, current => current.sync_batch_id === batch.id
           ? { state: "error", phase: null, caught_up: false, sync_error: errorMessage, sync_error_at: new Date().toISOString() } : {});
-        results.push({ provider_account_id: id, metadata, error: errorMessage });
+        results.push({ provider_account_id: id, error: errorMessage });
       }
     }
-    return { ok: true, partial: results.some(item => item.skipped || item.error || item.result?.error || item.metadata?.ok === false), accounts: results };
+    return { ok: true, partial: results.some(item => item.skipped || item.error || item.result?.error || item.result?.metadata?.ok === false), accounts: results };
   } finally {
     for (const context of owned) {
       await updateScopedState(STORAGE.status, context.key, current => {
         if (current.sync_batch_id !== batch.id) return {};
-        return { sync_batch_id: null, ...(["waiting_recovery", "refreshing_metadata"].includes(current.phase)
+        return { sync_batch_id: null, ...(current.phase === "waiting_recovery"
           ? { state: "watching", phase: null, caught_up: false } : {}) };
       });
     }
@@ -3242,50 +3226,19 @@ async function exactProviderAccountTab(context, tabId, { shared_session = false 
   return tab;
 }
 
-async function refreshAccountMetadata(provider, providerAccountId, tabId = null, options = {}) {
-  const key = `${accountKey(provider, providerAccountId)}:${tabId ?? "any"}:${options.shared_session === true}`;
-  if (metadataRefreshes.has(key)) return metadataRefreshes.get(key);
-  const task = runAccountMetadataRefresh(provider, providerAccountId, tabId, options)
-    .finally(() => { if (metadataRefreshes.get(key) === task) metadataRefreshes.delete(key); });
-  metadataRefreshes.set(key, task);
-  return task;
-}
-
-async function runAccountMetadataRefresh(provider, providerAccountId, tabId = null, { shared_session = false, signal } = {}) {
-  throwIfSyncCancelled(signal);
-  if (metadataErasing) throw new Error("Local data is being erased.");
-  const startedEpoch = metadataEpoch;
-  const deadline = Date.now() + 30_000;
-  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
-  if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Consent required.");
-  const context = accountContextFor(stored, providerAccountId, provider);
-  if (!context) throw new Error("Configured account required.");
-  const epoch = providerSessionEpoch(provider);
-  let tab;
-  if (tabId !== null && tabId !== undefined) {
-    tab = await exactProviderAccountTab(context, tabId, { shared_session });
-  } else {
-    const tabs = await providerChatTabs(context.adapter);
-    for (const candidate of orderProviderTabs(context.adapter, tabs)) {
-      const status = await providerTabStatus(candidate);
-      const ids = provider === "line_oa" ? status?.accessible_account_ids : [status?.current_provider_account_id];
-      if (ids?.includes(providerAccountId)) { tab = candidate; break; }
-    }
-  }
-  if (!tab || Date.now() >= deadline) throw new Error("Open the matching provider account.");
-  const tabContext = providerTabContext(tab, provider);
-  await ensureProviderBridge(tab.id, context.adapter);
-  const result = await sendProviderMessage(tab.id, { type: "refresh_metadata_v3", provider,
-    provider_account_id: providerAccountId, deadline_at: deadline, limit: 100 }, {
-    label: "Metadata", operation: "refresh", timeoutMs: Math.max(1, deadline - Date.now()), signal,
-  });
+// Display metadata is applied only to the same configured account/session that requested it.
+// A combined scan bounds acquisition to 30 seconds; message recovery may finish later.
+async function persistAccountMetadata(result, context, { startedEpoch, epoch, tab, tabContext, signal }) {
+  const provider = context.adapter.id;
+  const providerAccountId = context.account.provider_account_id;
   return exclusive(async () => {
     const current = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
     throwIfSyncCancelled(signal);
     const currentContext = accountContextFor(current, providerAccountId, provider);
     const scope = await metadataScope(context);
     const currentScope = currentContext ? await metadataScope(currentContext) : null;
-    if (metadataErasing || startedEpoch !== metadataEpoch || Date.now() >= deadline || epoch !== providerSessionEpoch(provider)
+    throwIfSyncCancelled(signal);
+    if (metadataErasing || startedEpoch !== metadataEpoch || epoch !== providerSessionEpoch(provider)
       || tabContext !== providerTabContext(tab, provider) || !currentContext
       || !hasLocalConsent(current[STORAGE.consent]) || scope !== currentScope) {
       throw new Error("Account context changed during refresh.");
@@ -3297,6 +3250,7 @@ async function runAccountMetadataRefresh(provider, providerAccountId, tabId = nu
       current[STORAGE.detectedAccounts], [account], { refreshMetadata: true }) });
     const profiles = (Array.isArray(result.profiles) ? result.profiles : []).slice(0, 100)
       .filter((profile) => profile.provider_account_id === providerAccountId);
+    throwIfSyncCancelled(signal);
     const count = await customerMetadata.refresh(scope, profiles);
     let persistenceFailed = false;
     try { await customerMetadata.flush(); } catch {
@@ -3609,7 +3563,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
-            && window.__omnichatLineOABridgeControl?.metadata_refresh === true
+            && window.__omnichatLineOABridgeControl?.combined_metadata_sync === true
             && window.__omnichatLineOABridgeControl?.bounded_message_ids === true
             && window.__omnichatLineOABridgeControl?.grace_classification === true
             // Existing page scripts predate this field and use compatibility v1.
@@ -3619,7 +3573,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
-            && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
+            && window.__omnichatRealtimeBridgeControl?.combined_metadata_sync === true
             && window.__omnichatRealtimeBridgeControl?.fresh_provider_status === true
             && window.__omnichatRealtimeBridgeControl?.bounded_message_ids === true
             && window.__omnichatRealtimeBridgeControl?.grace_classification === true
@@ -4058,10 +4012,15 @@ async function syncOpenProvider(control, context) {
       throw new Error("The selected provider tab changed. Retry from its current page.");
     }
   }
+  const metadataGuard = control.refreshMetadata ? {
+    startedEpoch: metadataEpoch, epoch: providerSessionEpoch(adapter.id),
+    tab, tabContext: providerTabContext(tab, adapter.id), signal,
+  } : null;
   control.providerRequestId = crypto.randomUUID();
   const syncMessage = {
     type: "sync_now_v3",
     request_id: control.providerRequestId,
+    refresh_metadata: control.refreshMetadata === true,
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...(context.config.bot_id || context.account.bot_id
@@ -4073,6 +4032,16 @@ async function syncOpenProvider(control, context) {
   if (!result?.ok) throw Object.assign(new Error(result?.error ?? `${label} recovery failed.`),
     { ...(result?.reason_code === "superseded" ? { reason_code: "superseded" } : {}),
       recovery_diagnostic_recorded: result?.recovery_diagnostic_recorded === true });
+  if (metadataGuard) {
+    try {
+      result.metadata = await persistAccountMetadata(result.metadata, context, metadataGuard);
+    } catch {
+      throwIfSyncCancelled(signal);
+      result.metadata = { ok: false, customer_count: 0, error: "Metadata refresh failed. Cached information was kept." };
+    }
+  } else {
+    delete result.metadata;
+  }
   return result;
 }
 
@@ -4088,7 +4057,8 @@ async function retryProviderAccount(message, { controller } = {}) {
     && activeSyncControl?.adapter?.id === requested.adapter.id) || providerAutomaticRecoveries.has(requested.key);
   if (alreadySyncing()) return { skipped: "already_syncing" };
   const control = { controller: controller ?? new AbortController(), manualRestart: true, accountKey: requested.key,
-    sharedSession: message.provider === "line_oa" && message.shared_session === true };
+    sharedSession: message.provider === "line_oa" && message.shared_session === true,
+    refreshMetadata: message.refresh_metadata === true };
   throwIfSyncCancelled(control.controller.signal);
   let context;
   if (message.tab_id !== null && message.tab_id !== undefined) {
@@ -4376,6 +4346,7 @@ async function runAccountSync(trigger, control, context) {
       queued: recovered.queued ?? 0,
       sent: delivered.sent,
       pending: delivered.pending,
+      ...(recovered.metadata ? { metadata: recovered.metadata } : {}),
     };
     await updateScopedState(STORAGE.status, context.key, {
       state: "watching",

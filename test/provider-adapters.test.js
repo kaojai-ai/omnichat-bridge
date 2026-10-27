@@ -37,8 +37,8 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   assert.equal((await status()).ready, false, "legacy scripts must be replaced for account-scoped recovery");
   control.compatibility_version = Number(actual[1]);
   control.bridge_version = "line-oa-poll-999";
-  assert.equal((await status()).ready, false, "missing metadata refresh support requires reattachment");
-  control.metadata_refresh = true;
+  assert.equal((await status()).ready, false, "missing combined metadata sync support requires reattachment");
+  control.combined_metadata_sync = true;
   control.bounded_message_ids = true;
   control.grace_classification = true;
   assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
@@ -313,8 +313,8 @@ test("Shopee readiness requires the current main bridge compatibility", async ()
   const status = () => context.providerMainBridgeStatus(42, { id: "shopee" });
   assert.equal((await status()).ready, false);
   control.compatibility_version = actual;
-  assert.equal((await status()).ready, false, "metadata refresh support requires reattachment");
-  control.metadata_refresh = true;
+  assert.equal((await status()).ready, false, "combined metadata sync support requires reattachment");
+  control.combined_metadata_sync = true;
   control.bounded_message_ids = true;
   control.grace_classification = true;
   assert.equal((await status()).ready, false, "fresh status support requires reattachment");

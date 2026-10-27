@@ -156,12 +156,18 @@ Bootstrap, resume, retry, and **Sync messages** use one checkpointed sync flow.
 
 - Without a completed checkpoint, initial sync covers the last 1 day, reading
   the 10 newest conversations and at most 25 newest messages from each.
-- With a checkpoint, sync follows changed conversations back to their cursor
-  or the last 5 days, whichever is newer. Polling ignores older conversation
-  summaries and messages. There are no additional caps on recent traffic.
+- With a checkpoint, sync follows changed conversations back to their saved
+  cursor without an arbitrary age cutoff. Summary activity and message IDs skip
+  unchanged history; missing or ambiguous activity remains eligible.
 - Only explicit `history_days` settings allow older historical imports within
   their configured date window.
-- Conversation-list and message-history pages are requested sequentially.
+- Conversation-list and message-history pages are requested sequentially. Manual
+  Sync reuses conversation summaries for up to 100 metadata records within
+  30 seconds, with no separate metadata list pass. Recognized POST lists with
+  `direction: older` can stop at a fully older page only while all observed rows
+  have descending activity timestamps and explicit `pinned: false`. Missing or
+  ambiguous ordering evidence disables this shortcut; metadata and required
+  conversations can require further pages.
 - Every history page is saved to the local queue immediately. A conversation
   cursor advances only after all required pages for that conversation finish.
 - Realtime capture starts only after bootstrap completes and pauses while a

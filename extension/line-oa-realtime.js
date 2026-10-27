@@ -2,7 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_VERSION = "line-oa-poll-11";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 5;
+  const COMPATIBILITY_VERSION = 6;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -271,7 +271,7 @@
     url.searchParams.set("tagIds", "");
     url.searchParams.set("autoTagIds", "");
     url.searchParams.set("limit", String(CHAT_PAGE_LIMIT));
-    url.searchParams.set("prioritizePinnedChat", "true");
+    url.searchParams.set("prioritizePinnedChat", "false");
     if (next) url.searchParams.set("next", next);
     return url.toString();
   }
@@ -339,15 +339,31 @@
     }
   }
 
-  function captureChatProfile(providerAccountId, chat) {
+  function captureChatProfile(providerAccountId, chat, candidate = null) {
     const conversationId = value(chat?.chatId);
-    const profile = chat?.profile;
-    const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+    const id = value(chat?.profile?.userId ?? chat?.profile?.groupId) || conversationId;
     if (!providerAccountId || !conversationId || !id) return;
     const profiles = metadataProfilesByAccount.get(providerAccountId) ?? new Map();
     metadataProfilesByAccount.set(providerAccountId, profiles);
     const key = `${conversationId}:${id}`;
     const previous = profiles.get(key) ?? {};
+    if (previous.display_name && previous.avatar_url) return;
+    const parsed = candidate ?? chatMetadataProfile(providerAccountId, chat, previous);
+    const additions = {
+      ...(!previous.display_name && parsed?.display_name ? { display_name: parsed.display_name } : {}),
+      ...(!previous.avatar_url && parsed?.avatar_url ? { avatar_url: parsed.avatar_url } : {}),
+    };
+    if (!Object.keys(additions).length) return;
+    profiles.set(key, { ...previous, ...additions });
+    while (profiles.size > 1_000) profiles.delete(profiles.keys().next().value);
+    post({ type: "profiles_detected", profiles: [{ conversation_id: conversationId, id, provider_account_id: providerAccountId, ...additions }] });
+  }
+
+  function chatMetadataProfile(providerAccountId, chat, previous = {}) {
+    const conversationId = value(chat?.chatId);
+    const profile = chat?.profile;
+    const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+    if (!providerAccountId || !conversationId || !id) return null;
     const displayName = previous.display_name ? "" : value(profile?.displayName ?? profile?.name);
     let avatarUrl = "";
     if (!previous.avatar_url) {
@@ -356,11 +372,8 @@
         if (url.protocol === "https:") avatarUrl = url.toString();
       } catch { /* Optional metadata. */ }
     }
-    if (!displayName && !avatarUrl) return;
-    const additions = { ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
-    profiles.set(key, { ...previous, ...additions });
-    while (profiles.size > 1_000) profiles.delete(profiles.keys().next().value);
-    post({ type: "profiles_detected", profiles: [{ conversation_id: conversationId, id, provider_account_id: providerAccountId, ...additions }] });
+    return { conversation_id: conversationId, id, provider_account_id: providerAccountId,
+      ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
   }
 
   async function queueMessagePage({ requestId, providerAccountId, chat, messages, page }) {
@@ -567,13 +580,24 @@
     }
   }
 
-  async function poll(requestId, providerAccountId, botId, checkpoint, generation, history) {
+  async function poll(requestId, providerAccountId, botId, checkpoint, generation, history, refreshMetadata = false) {
     const scanStartedAt = Date.now();
     const completedCursors = { ...(checkpoint?.conversations ?? {}) };
+    const metadata = refreshMetadata === true && !String(requestId).startsWith("poll:")
+      ? { ok: false, profiles: [], partial: false } : null;
+    const metadataDeadline = scanStartedAt + 30_000;
+    const metadataChats = new Set();
     try {
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!pollIsActive(generation)) return;
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
+      if (metadata) {
+        const account = accessibleAccounts.find(item => item.provider_account_id === normalizeBasicId(providerAccountId));
+        if (account && Date.now() < metadataDeadline) {
+          metadata.account = { provider: "line_oa", ...account };
+          metadata.ok = true;
+        } else metadata.partial = true;
+      }
       const selection = historySelection(history);
       if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
@@ -594,6 +618,7 @@
       let completedConversations = 0;
       let conversationPages = 0;
       let nonTargetConversations = 0;
+      let recoveryListComplete = false;
       let totalConversations = null;
       const seenCursors = new Set();
       const trackedRequest = !String(requestId).startsWith("poll:");
@@ -608,6 +633,21 @@
         if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
         conversationPages += 1;
         const chats = globalThis.OmnichatLineOA.chatItems(body);
+        if (metadata && !metadata.partial) {
+          for (const chat of chats) {
+            if (Date.now() >= metadataDeadline) { metadata.partial = true; break; }
+            const conversationId = value(chat?.chatId);
+            if (!conversationId || metadataChats.has(conversationId)) continue;
+            if (metadataChats.size >= 100) { metadata.partial = true; break; }
+            metadataChats.add(conversationId);
+            const profile = chatMetadataProfile(providerAccountId, chat);
+            if (profile) {
+              metadata.profiles.push(profile);
+              captureChatProfile(providerAccountId, chat, profile);
+            }
+          }
+          if (metadataChats.size >= 100 && cursor(body?.next)) metadata.partial = true;
+        }
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
           const visibleTotal = bootstrap && !historyWindow && pendingIds.size === 0
@@ -615,14 +655,12 @@
             : pageTotal;
           totalConversations = Math.max(totalConversations ?? 0, visibleTotal);
         }
-        const pageBeforeHistory = historyWindow
-          && chats.length > 0
-          && chats.every((chat) => chatBeforeHistory(chat, selection.sinceMs));
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
         const chatsToRecover = [];
         for (const chat of chats) {
+          if (recoveryListComplete) continue;
           const chatId = value(chat?.chatId);
           if (chatId) seenChatIds.add(chatId);
           const targeted = Boolean(chatId && pendingIds.has(chatId));
@@ -647,7 +685,7 @@
           const chatId = value(chat?.chatId);
           if (!chatId) continue;
           const deep = pendingIds.has(chatId);
-          const result = deep || shouldRecoverChat(chat, historyWindow ? selection.sinceMs : checkpointMs)
+          const result = deep || shouldRecoverChat(chat, historyWindow ? selection.sinceMs : Math.max(checkpointMs, timeMs(completedCursors[chatId]?.event_timestamp)))
             ? await recoverChat({
               requestId,
               providerAccountId,
@@ -689,8 +727,13 @@
             });
           }
         }
-        if (pageBeforeHistory) break;
-        if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
+        if (bootstrap && !historyWindow && pendingIds.size === 0
+          && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) recoveryListComplete = true;
+        const needsMetadata = metadata && !metadata.partial && metadataChats.size < 100 && Date.now() < metadataDeadline;
+        if (recoveryListComplete && !needsMetadata) {
+          if (metadata && cursor(body?.next)) metadata.partial = true;
+          break;
+        }
         const nextCursor = cursor(body?.next);
         if (!nextCursor) break;
         if (seenCursors.has(nextCursor)) throw new Error("LINE OA conversation pagination repeated a cursor.");
@@ -749,7 +792,7 @@
         };
       }
       postProviderStatus();
-      post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
+      post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
       if (error?.providerCheckUnavailable) markProviderCheckFailure(error);
       if (pollIsActive(generation)) {
@@ -772,19 +815,19 @@
     if (next) startPoll(next);
   }
 
-  function startPoll({ requestId, providerAccountId, botId, checkpoint, history }) {
+  function startPoll({ requestId, providerAccountId, botId, checkpoint, history, refreshMetadata = false }) {
     const generation = { epoch: pollGeneration, cancelled: false };
     const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
     if (!String(requestId).startsWith("poll:")) {
       post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase: "loading_conversations" });
     }
-    const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history);
+    const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history, refreshMetadata);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
   }
 
-  function start(requestId, providerAccountId, botId, checkpoint, history) {
+  function start(requestId, providerAccountId, botId, checkpoint, history, refreshMetadata = false) {
     const accountId = value(providerAccountId);
     stopTimer();
     const previous = pollingAccounts.get(accountId);
@@ -794,7 +837,7 @@
       history: history === undefined ? previous?.history ?? null : history,
     };
     pollingAccounts.set(accountId, account);
-    const request = { requestId, providerAccountId: accountId, ...account };
+    const request = { requestId, providerAccountId: accountId, ...account, refreshMetadata: refreshMetadata === true };
     if (activePoll) {
       const firstRoutine = queuedSyncs.findIndex((queued) => String(queued.requestId).startsWith("poll:"));
       if (!String(requestId).startsWith("poll:") && firstRoutine >= 0) queuedSyncs.splice(firstRoutine, 0, request);
@@ -1113,81 +1156,9 @@
     }
   }
 
-  // Read only account/chat lists. Never fetch message history for metadata.
-  async function refreshMetadata(command) {
-    const requestId = value(command?.request_id);
-    const accountId = normalizeBasicId(command?.provider_account_id);
-    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
-    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
-    const locationAtStart = window.location.href;
-    const sessionEpoch = metadataSessionEpoch;
-    const profiles = [];
-    let account;
-    const assertCurrent = () => {
-      if (disposed || sessionEpoch !== metadataSessionEpoch || window.location.href !== locationAtStart) throw new Error("LINE OA session changed during metadata refresh.");
-      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
-    };
-    try {
-      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
-      assertCurrent();
-      const accountsBody = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`, deadlineAt - Date.now());
-      assertCurrent();
-      if (!Array.isArray(accountsBody?.list)) throw new Error("LINE OA account list was invalid.");
-      const bot = accountsBody.list.find((item) => normalizeBasicId(item?.basicSearchId ?? item?.basicId) === accountId);
-      const botId = value(bot?.botId ?? bot?.id);
-      if (!botId) throw new Error("This LINE OA is not accessible to the signed-in user.");
-      const name = value(bot?.name ?? bot?.displayName);
-      account = { provider: "line_oa", provider_account_id: accountId, bot_id: botId,
-        ...(name ? { display_name: name } : {}) };
-      let next = null;
-      let count = 0;
-      const seenCursors = new Set();
-      const seenChats = new Set();
-      let partial = false;
-      do {
-        assertCurrent();
-        const url = new URL(chatUrl(botId, next));
-        url.searchParams.set("limit", String(Math.min(CHAT_PAGE_LIMIT, limit - count)));
-        url.searchParams.set("prioritizePinnedChat", "false");
-        const body = await json(url.toString(), deadlineAt - Date.now());
-        assertCurrent();
-        if (!Array.isArray(body?.list)) throw new Error("LINE OA returned an invalid conversation list.");
-        const chats = globalThis.OmnichatLineOA.chatItems(body);
-        for (const chat of chats) {
-          if (count >= limit) break;
-          const conversationId = value(chat?.chatId);
-          if (!conversationId || seenChats.has(conversationId)) continue;
-          seenChats.add(conversationId);
-          count += 1;
-          const profile = chat?.profile;
-          const id = value(profile?.userId ?? profile?.groupId) || conversationId;
-          const displayName = value(profile?.displayName ?? profile?.name);
-          const avatar = value(profile?.pictureUrl ?? profile?.imageUrl ?? profile?.avatarUrl);
-          let avatarUrl = "";
-          try { const parsed = new URL(avatar); if (parsed.protocol === "https:") avatarUrl = parsed.toString(); } catch { /* Optional metadata. */ }
-          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
-            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
-        }
-        next = cursor(body?.next);
-        if (next && seenCursors.has(next)) { partial = true; break; }
-        if (next) seenCursors.add(next);
-        if (next && count >= limit) partial = true;
-      } while (next && count < limit);
-      assertCurrent();
-      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
-    } catch (error) {
-      const current = !disposed && sessionEpoch === metadataSessionEpoch && window.location.href === locationAtStart && Date.now() < deadlineAt;
-      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
-        ...(current && account ? { account } : {}), profiles: current ? profiles : [], partial: Boolean(current && account),
-        error: error instanceof Error ? error.message : "Metadata refresh failed." });
-    }
-  }
-
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "refresh_metadata_v3") {
-      void refreshMetadata(event.data);
-    } else if (event.data.type === "detect_account_v3") {
+    if (event.data.type === "detect_account_v3") {
       void availableAccounts().then((accounts) => {
         postProviderStatus();
         post({
@@ -1211,6 +1182,7 @@
         event.data.bot_id,
         event.data.checkpoint,
         historySelection(event.data),
+        event.data.refresh_metadata === true,
       );
     } else if (event.data.type === "cancel_sync_v3") {
       cancelPolling("LINE OA recovery was cancelled.", {
@@ -1234,7 +1206,7 @@
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
     compatibility_version: COMPATIBILITY_VERSION,
-    metadata_refresh: true,
+    combined_metadata_sync: true,
     bounded_message_ids: true,
     grace_classification: true,
     resetRecovery,

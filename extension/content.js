@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 10;
+  const BRIDGE_PROTOCOL_VERSION = 11;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -17,7 +17,6 @@
   const providerLabel = providerAdapter.displayName || providerAdapter.id;
   const recoveries = new Map();
   const accountDetections = new Map();
-  const metadataRefreshRequests = new Map();
   let providerStatusRequest = null;
   const profilesByConversation = new Map();
   const routingByConversation = new Map();
@@ -324,7 +323,7 @@
   }
 
   const preparingRecoveries = new Map();
-  async function requestRecovery(providerAccountId, botId = "", attemptId = "") {
+  async function requestRecovery(providerAccountId, botId = "", attemptId = "", refreshMetadata = false) {
     if (!providerAdapter.supports("message_recovery")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
     }
@@ -357,7 +356,8 @@
       post({
         type: "sync_v3",
         request_id: requestId,
-        checkpoint: syncState.checkpoint,
+        checkpoint: { ...syncState.checkpoint, refresh_metadata: refreshMetadata === true },
+        refresh_metadata: refreshMetadata === true,
         provider: providerAdapter.id,
         provider_account_id: accountId,
         ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
@@ -404,22 +404,6 @@
       ...(accountId ? { provider_account_id: accountId } : {}),
     });
     return { ok: true, cancelled: cancelled > 0 };
-  }
-
-  function requestMetadataRefresh(message) {
-    const requestId = crypto.randomUUID();
-    const deadline = Math.min(Number(message.deadline_at) || 0, Date.now() + 30_000);
-    if (deadline <= Date.now()) return Promise.resolve({ ok: false, error: "Metadata refresh expired." });
-    const result = new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        metadataRefreshRequests.delete(requestId);
-        resolve({ ok: false, error: "Metadata refresh timed out." });
-      }, deadline - Date.now());
-      metadataRefreshRequests.set(requestId, { resolve, timeout, accountId: message.provider_account_id, deadline });
-    });
-    post({ type: "refresh_metadata_v3", request_id: requestId,
-      provider_account_id: message.provider_account_id, deadline_at: deadline, limit: 100 });
-    return result;
   }
 
   async function requestAccountDetection() {
@@ -896,6 +880,7 @@
       recovered: message.recovered ?? 0,
       queued: message.queued ?? 0,
       watermark: message.watermark ?? null,
+      ...(message.metadata ? { metadata: message.metadata } : {}),
     };
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRecovery = JSON.stringify({
@@ -1051,13 +1036,6 @@
       void observeAsync("accounts_detected", () => handleAccountsDetected(event.data));
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
-    } else if (event.data.type === "metadata_refresh_result") {
-      const pending = metadataRefreshRequests.get(event.data.request_id);
-      if (!pending) return;
-      metadataRefreshRequests.delete(event.data.request_id);
-      clearTimeout(pending.timeout);
-      if (Date.now() >= pending.deadline) pending.resolve({ ok: false, error: "Metadata refresh expired." });
-      else pending.resolve(event.data);
     } else if (event.data.type === "profiles_detected") {
       handleProfilesDetected(event.data);
     } else if (event.data.type === "active_conversation") {
@@ -1244,7 +1222,7 @@
     }
     if (message?.type === "sync_now_v3") {
       respond({ ok: true, started: true, request_id: message.request_id });
-      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id).then(
+      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id, message.refresh_metadata === true).then(
         result => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,
           provider_account_id: message.provider_account_id, request_id: message.request_id, result }),
         error => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,
@@ -1256,10 +1234,6 @@
     if (message?.type === "cancel_sync_v3") {
       respond(cancelRecovery(message.request_id, message.provider_account_id));
       return false;
-    }
-    if (message?.type === "refresh_metadata_v3") {
-      void requestMetadataRefresh(message).then(respond, () => respond({ ok: false }));
-      return true;
     }
     if (message?.type === "detect_account_v3") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
@@ -1319,11 +1293,6 @@
       pending.resolve({ ok: false, error: reason });
     }
     accountDetections.clear();
-    for (const pending of metadataRefreshRequests.values()) {
-      clearTimeout(pending.timeout);
-      pending.resolve({ ok: false, error: reason });
-    }
-    metadataRefreshRequests.clear();
     for (const pending of pendingApiSends.values()) {
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);

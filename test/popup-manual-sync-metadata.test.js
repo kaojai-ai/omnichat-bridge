@@ -11,7 +11,7 @@ const accounts = [
   { provider: "line_oa", provider_account_id: "@two", bot_id: "bot-two" },
   { provider: "shopee", provider_account_id: "shop" },
 ];
-function harness({ provider = "shopee", action = "sync", refreshMode = "deferred", unknown = false } = {}) {
+function harness({ provider = "shopee", action = "sync", unknown = false } = {}) {
   let click;
   let finishPermission;
   let finishPreparation;
@@ -35,12 +35,8 @@ function harness({ provider = "shopee", action = "sync", refreshMode = "deferred
       runtime: { sendMessage: message => {
         requests.push(message);
         if (message.type === "detect_account") return Promise.resolve({ ok: true, accounts });
-        if (message.type === "sync_line_tab") return new Promise(resolve => refreshes.push(resolve));
-        if (message.type === "refresh_metadata") {
-          if (refreshMode === "failed") return Promise.reject(new Error("Provider unavailable"));
-          if (refreshMode === "partial") return Promise.resolve({ ok: true, partial: true, customer_count: 10 });
-          return new Promise(resolve => refreshes.push(resolve));
-        }
+        if (["sync_line_tab", "sync_account"].includes(message.type)) return new Promise(resolve => refreshes.push(resolve));
+        if (message.type === "refresh_metadata") throw new Error("Manual sync must reuse its conversation scan.");
         return Promise.resolve({ ok: true });
       } },
       tabs: { get: async () => ({ id: 7, url: provider === "line_oa" ? "https://chat.line.biz/bot-one/chats" : "https://seller.shopee.co.th/webchat" }), sendMessage: message => { requests.push(message); return new Promise(resolve => { finishPreparation = resolve; }); } },
@@ -68,9 +64,11 @@ for (const provider of ["shopee", "line_oa"]) {
       assert.equal(batch[0].tab_id, 7);
       assert.equal(h.requests.some(value => value.type === "refresh_metadata" || value.type === "sync_account"), false);
     } else {
-      const refreshes = h.requests.filter(value => value.type === "refresh_metadata");
-      assert.deepEqual(refreshes.map(value => value.provider_account_id), ["shop"]);
-      assert.equal(refreshes[0].tab_id, 7);
+      const syncs = h.requests.filter(value => value.type === "sync_account");
+      assert.deepEqual(syncs.map(value => value.provider_account_id), ["shop"]);
+      assert.equal(syncs[0].tab_id, 7);
+      assert.equal(syncs[0].refresh_metadata, true);
+      assert.equal(h.requests.some(value => value.type === "refresh_metadata"), false);
     }
     assert.equal(h.results.length, 0);
     h.refreshes.forEach(resolve => resolve({ ok: true }));
@@ -82,29 +80,16 @@ for (const provider of ["shopee", "line_oa"]) {
   });
 }
 
-for (const refreshMode of ["failed", "partial"]) {
-  test(`metadata ${refreshMode} does not block message sync or replace its result`, async () => {
-    const h = harness({ refreshMode });
-    const task = h.click();
-    await turn();
-    h.allowPermission();
-    await task;
-    assert.equal(h.requests.at(-1).type, "sync_account");
-    assert.equal(h.results.length, 1);
-    assert.equal(h.results[0].ok, true);
-  });
-}
-
-test("cancel or newer action during metadata refresh cannot launch a delayed sync", async () => {
+test("cancelled popup action cannot replace the newer UI when background sync finishes", async () => {
   const h = harness();
   const task = h.click();
   await turn();
   h.allowPermission();
   await turn();
+  assert.equal(h.requests.filter(value => value.type === "sync_account").length, 1);
   h.cancel();
   h.refreshes.forEach(resolve => resolve({ ok: true }));
   await task;
-  assert.equal(h.requests.some(value => value.type === "sync_account"), false);
   assert.equal(h.results.length, 0);
 });
 

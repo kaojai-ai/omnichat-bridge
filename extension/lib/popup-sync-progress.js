@@ -11,7 +11,6 @@ export const SYNC_PHASE_LABELS = Object.freeze({
   conversation_complete: "Recovering conversation messages…",
   sending_recovered: "Sending recovered messages to your server…",
   saving_messages: "Saving recovered messages…",
-  refreshing_metadata: "Refreshing account and customer info…",
 });
 
 const COUNTED_PHASES = new Set([
@@ -65,13 +64,13 @@ export function syncProgressPresentation(progressState, { locale = "en", compact
     const shortPhase = (thai ? {
       preparing: "กำลังเตรียม…", checking_session: "กำลังตรวจสอบสิทธิ์…", queued: "รอคิว",
       connecting_provider: "กำลังเชื่อมต่อ…", waiting_recovery: "รอคิว",
-      refreshing_metadata: "กำลังรีเฟรชข้อมูล", saving_messages: "กำลังบันทึก", sending_pending: "กำลังส่งต่อ", loading_conversations: "กำลังโหลดแชต",
+      saving_messages: "กำลังบันทึก", sending_pending: "กำลังส่งต่อ", loading_conversations: "กำลังโหลดแชต",
       checking_conversations: "กำลังตรวจสอบแชต", fetching_messages: "กำลังโหลดข้อความ",
       conversation_complete: "กำลังโหลดข้อความ", sending_recovered: "กำลังส่งต่อ",
     } : {
       preparing: "Preparing…", checking_session: "Checking access…", queued: "Queued",
       connecting_provider: "Connecting…", waiting_recovery: "Queued",
-      refreshing_metadata: "Refreshing info", saving_messages: "Saving messages", sending_pending: "Forwarding", loading_conversations: "Loading chats",
+      saving_messages: "Saving messages", sending_pending: "Forwarding", loading_conversations: "Loading chats",
       checking_conversations: "Checking chats", fetching_messages: "Loading messages",
       conversation_complete: "Loading messages", sending_recovered: "Forwarding",
     })[phase] ?? (thai ? "กำลังซิงค์…" : "Syncing…");

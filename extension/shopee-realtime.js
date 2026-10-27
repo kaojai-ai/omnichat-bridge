@@ -609,6 +609,7 @@
     if (!expectedId || value(account?.provider_account_id) !== expectedId) {
       throw Object.assign(new Error("Shopee signed-in shop does not match this operation. Open the matching shop and retry."), { reason_code: "session_changed" });
     }
+    return account;
   };
   const captureAccounts = (response, sessionEpoch) => {
     void response.clone().json().then((body) => {
@@ -1526,7 +1527,7 @@
   };
 
   const conversationTime = (conversation) => timeMs(
-    conversation?.last_message_time ?? conversation?.created_timestamp,
+    conversation?.last_message_time,
   );
 
   const nextConversationUrl = (currentUrl, body, items) => {
@@ -1555,14 +1556,18 @@
     return null;
   };
 
-  const nextConversationRequest = async (request, body, items) => {
-    // Mini-chat paginates in the POST body, with a nanosecond cursor kept as a string.
-    if (isSellerCentreSurface() && request.method === "POST") {
+  const nextConversationRequest = async (request, body, items, strict = false) => {
+    // Both observed Shopee chat surfaces paginate this POST schema with a string cursor.
+    if (request.method === "POST") {
       let payload;
       try { payload = await request.clone().json(); } catch { return null; }
       if (payload && typeof payload === "object" && Object.hasOwn(payload, "next_timestamp_nano")) {
         const cursor = value(items.at(-1)?.next_timestamp_nano);
-        if (!cursor || cursor === "0" || cursor === String(payload.next_timestamp_nano)) return null;
+        if (!cursor || cursor === "0") return null;
+        if (cursor === String(payload.next_timestamp_nano)) {
+          if (strict) throw Object.assign(new Error("Shopee conversation pagination repeated a cursor."), { reason_code: "invalid_conversation_list" });
+          return null;
+        }
         return new Request(request.url, {
           ...(await templateFrom(request.clone())).init,
           body: JSON.stringify({ ...payload, next_timestamp_nano: cursor }),
@@ -1578,9 +1583,9 @@
 
   const lookupTemplateFrom = async (template) => {
     const lookup = { ...template, init: { ...template.init }, body: template.body?.slice(0) ?? null };
-    // This initial cursor is observed in mini-chat traffic. Other paging schemes
+    // This initial cursor is observed in both chat surfaces. Other paging schemes
     // retain their captured values; an exhausted scoped list is never proof of absence.
-    if (isSellerCentreSurface() && template.init.method === "POST" && template.body) {
+    if (template.init.method === "POST" && template.body) {
       try {
         const payload = await new Request(template.url, { ...template.init, body: template.body.slice(0) }).json();
         if (payload && Object.hasOwn(payload, "next_timestamp_nano")) {
@@ -1591,7 +1596,30 @@
     return lookup;
   };
 
-  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true, sendLookup = false, deadlineAt = Infinity) {
+  async function initialRecoveryListTemplate() {
+    const template = await lookupTemplateFrom(state.listTemplate);
+    if (template.init.method === "GET") {
+      const url = new URL(template.url);
+      if (url.searchParams.has("offset")) url.searchParams.set("offset", "0");
+      url.searchParams.delete("cursor");
+      url.searchParams.delete("next_cursor");
+      template.url = url.toString();
+    }
+    return template;
+  }
+
+  function metadataProfile(conversation, accountId) {
+    const conversationId = value(conversation?.id);
+    const id = value(conversation?.to_id);
+    if (!conversationId || !id || value(conversation?.shop_id) !== accountId) return null;
+    const displayName = value(conversation?.to_name);
+    let avatarUrl = "";
+    try { const url = new URL(value(conversation?.to_avatar)); if (url.protocol === "https:") avatarUrl = url.toString(); } catch { /* Optional metadata. */ }
+    return { conversation_id: conversationId, id, provider_account_id: accountId,
+      ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
+  }
+
+  async function fetchConversationPage(requestUrl = state.listTemplate.url, accountId = null, publish = true, sendLookup = false, deadlineAt = Infinity, strict = false) {
     const request = requestUrl instanceof Request ? requestUrl : new Request(requestUrl, {
       ...state.listTemplate.init,
       body: state.listTemplate.body?.slice(0),
@@ -1611,7 +1639,8 @@
     return {
       items,
       raw_count: allItems.length,
-      next: await nextConversationRequest(request, body, allItems),
+      raw_items: allItems,
+      next: await nextConversationRequest(request, body, allItems, strict),
     };
   }
 
@@ -1620,21 +1649,33 @@
   }
 
   async function fetchConversationPages({
-    checkpointMs = 0,
     requiredIds = null,
     maxItems = null,
     accountId = null,
     sendLookup = false,
     deadlineAt = Infinity,
     onProgress = null,
+    metadata = null,
+    checkpointMs = 0,
   } = {}) {
     const conversations = [];
     const seenIds = new Set();
     const required = requiredIds ? new Set(requiredIds) : null;
     const template = sendLookup
       ? state.lookupListTemplate ?? await lookupTemplateFrom(state.listTemplate)
-      : state.listTemplate;
+      : await initialRecoveryListTemplate();
     let url = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
+    // Live older-direction POST lists are descending by last activity. Only use
+    // that shortcut while every observed row confirms the contract (including
+    // other shops); unknown/pinned/unordered rows disable it for this scan.
+    let orderedOlder = false;
+    if (!sendLookup && checkpointMs > 0 && url.method === "POST") {
+      try {
+        const payload = await url.clone().json();
+        orderedOlder = payload?.direction === "older" && Object.hasOwn(payload, "next_timestamp_nano");
+      } catch { /* Opaque/unknown list schemes require a complete scan. */ }
+    }
+    let previousActivity = Infinity;
     let firstPage = [];
     const seenPages = new Set();
     let exhausted = false;
@@ -1644,11 +1685,21 @@
       if (sendLookup && Date.now() >= deadlineAt) throw new Error("Reply deadline expired before sending.");
       const pageKey = url instanceof Request
         ? `${url.url}:${await url.clone().text()}` : url;
-      if (seenPages.has(pageKey)) { stopReason = "repeated_page"; break; }
+      if (seenPages.has(pageKey)) {
+        if (!sendLookup) throw Object.assign(new Error("Shopee conversation pagination repeated a page."), { reason_code: "invalid_conversation_list" });
+        stopReason = "repeated_page"; break;
+      }
       seenPages.add(pageKey);
       onProgress?.("loading_conversations", pages);
-      const page = await fetchConversationPage(url, accountId, true, sendLookup, deadlineAt);
+      const page = await fetchConversationPage(url, accountId, true, sendLookup, deadlineAt, !sendLookup);
       pages += 1;
+      let allOlder = page.raw_items.length > 0;
+      if (orderedOlder) for (const item of page.raw_items) {
+        const activity = conversationTime(item);
+        if (!(activity > 0) || item?.pinned !== false || activity > previousActivity) orderedOlder = false;
+        if (!(activity < checkpointMs)) allOlder = false;
+        previousActivity = activity;
+      }
       onProgress?.("checking_conversations", pages);
       exhausted = !page.next;
       if (!firstPage.length) firstPage = page.items;
@@ -1661,99 +1712,33 @@
         required?.delete(id);
         added += 1;
       }
-      if (maxItems && conversations.length >= maxItems) break;
-      const oldest = page.items.reduce((value, conversation) => {
-        const candidate = conversationTime(conversation);
-        return candidate && candidate < value ? candidate : value;
-      }, Number.POSITIVE_INFINITY);
-      if (required && (required.size === 0 || (sendLookup && [...required].every((id) => routeComplete(cachedRoute(id, accountId)))))) {
+      if (metadata?.collecting) {
+        if (Date.now() >= metadata.deadlineAt) { metadata.partial = true; metadata.collecting = false; }
+        else for (const conversation of page.items) {
+          const id = value(conversation?.id);
+          if (!id || metadata.seen.has(id)) continue;
+          if (metadata.seen.size >= 100 || Date.now() >= metadata.deadlineAt) { metadata.partial = true; metadata.collecting = false; continue; }
+          metadata.seen.add(id);
+          const profile = metadataProfile(conversation, accountId);
+          if (profile) metadata.profiles.push(profile);
+        }
+        if (metadata.seen.size >= 100) {
+          metadata.collecting = false;
+          if (page.next) metadata.partial = true;
+        }
+      }
+      const needsMetadata = metadata?.collecting === true;
+      if (maxItems && conversations.length >= maxItems && !needsMetadata) break;
+      if (required && !needsMetadata && (required.size === 0 || (sendLookup && [...required].every((id) => routeComplete(cachedRoute(id, accountId)))))) {
         stopReason = "target_found"; break;
       }
-      if (!required && checkpointMs && oldest < checkpointMs) break;
+      if (orderedOlder && allOlder && !needsMetadata && (!required || required.size === 0)) {
+        stopReason = "checkpoint_reached"; break;
+      }
       if (!page.next || (!added && !page.raw_count)) break;
       url = page.next;
     }
     return { conversations, firstPage, exhausted, pages, stopReason };
-  }
-
-  // Manual metadata refresh never enters message recovery or advances a cursor.
-  async function refreshMetadata(command) {
-    const requestId = value(command?.request_id);
-    const accountId = value(command?.provider_account_id);
-    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
-    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
-    const epoch = state.routeSessionEpoch;
-    const profiles = [];
-    let account;
-    const assertCurrent = () => {
-      if (!isBridgeActive() || epoch !== state.routeSessionEpoch || state.currentAccountId !== accountId) {
-        throw new Error("Shopee session changed during metadata refresh.");
-      }
-      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
-    };
-    try {
-      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
-      assertCurrent();
-      const detected = await detectSessionAccount({ timeoutMs: deadlineAt - Date.now() });
-      assertCurrent();
-      account = detected.find((item) => value(item?.provider_account_id) === accountId);
-      if (!account) throw new Error("Shopee signed-in shop does not match metadata refresh.");
-      if (!state.listTemplate) throw new Error("Open the Shopee conversation list before refreshing customer info.");
-      const template = await lookupTemplateFrom(state.listTemplate);
-      // Captured GET lists can point at a scrolled page. Begin at the first
-      // page for the paging parameters this bridge already understands.
-      if (template.init.method === "GET") {
-        const initialUrl = new URL(template.url);
-        if (initialUrl.searchParams.has("offset")) initialUrl.searchParams.set("offset", "0");
-        initialUrl.searchParams.delete("cursor");
-        initialUrl.searchParams.delete("next_cursor");
-        template.url = initialUrl.toString();
-      }
-      assertCurrent();
-      let request = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
-      const seenPages = new Set();
-      const seenConversations = new Set();
-      let count = 0;
-      let partial = false;
-      while (request && count < limit) {
-        assertCurrent();
-        const pageKey = `${request.url}:${await request.clone().text()}`;
-        if (seenPages.has(pageKey)) { partial = true; break; }
-        seenPages.add(pageKey);
-        const body = await fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now());
-        assertCurrent();
-        if (shopeeError(body) || (!Array.isArray(body) && ![
-          body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
-        ].some(Array.isArray))) throw new Error("Shopee returned an invalid conversation list.");
-        const items = conversationItems(body);
-        for (const conversation of items) {
-          if (count >= limit) break;
-          const conversationId = value(conversation?.id);
-          if (!conversationId || seenConversations.has(conversationId)
-            || value(conversation?.shop_id) !== accountId) continue;
-          seenConversations.add(conversationId);
-          count += 1;
-          const id = value(conversation?.to_id);
-          if (!id) continue;
-          const displayName = value(conversation?.to_name);
-          const avatar = value(conversation?.to_avatar);
-          let avatarUrl = "";
-          try { const url = new URL(avatar); if (url.protocol === "https:") avatarUrl = url.toString(); } catch { /* Optional metadata. */ }
-          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
-            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
-        }
-        request = await nextConversationRequest(request, body, items);
-        assertCurrent();
-        if (count >= limit && request) partial = true;
-      }
-      assertCurrent();
-      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
-    } catch (error) {
-      const current = isBridgeActive() && epoch === state.routeSessionEpoch && state.currentAccountId === accountId && Date.now() < deadlineAt;
-      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
-        ...(current && account ? { account } : {}), profiles: current && Date.now() < deadlineAt ? profiles : [],
-        partial: Boolean(current && account), error: error instanceof Error ? error.message : "Metadata refresh failed." });
-    }
   }
 
   async function detectCurrentAccount(requestId) {
@@ -1849,6 +1834,8 @@
     state.recoveryRequestId = requestId;
     state.recoveryAbortController = new AbortController();
     const startedAt = Date.now();
+    const metadata = checkpoint.refresh_metadata === true
+      ? { deadlineAt: startedAt + 30_000, seen: new Set(), profiles: [], collecting: true, partial: false, account: null } : null;
     let parsed = 0;
     let queued = 0;
     let checked = 0;
@@ -1859,7 +1846,11 @@
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
       await ensureSellerCentreChatOpen();
-      await verifySessionAccount(accountId);
+      const verifiedAccount = await verifySessionAccount(accountId);
+      if (metadata) {
+        if (Date.now() < metadata.deadlineAt) metadata.account = verifiedAccount;
+        else metadata.partial = true;
+      }
       assertSessionUnchanged();
       await waitForTemplate();
       assertSessionUnchanged();
@@ -1889,6 +1880,7 @@
         : null;
       const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
       const pages = await fetchConversationPages({
+        metadata,
         checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
         requiredIds: pageRequired.length ? pageRequired : null,
         maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
@@ -2151,6 +2143,8 @@
         queued,
         conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
+        ...(metadata ? { metadata: { ok: Boolean(metadata.account), account: metadata.account,
+          profiles: metadata.profiles, partial: metadata.partial } } : {}),
         watermark: Number.isFinite(nextWatermarkMs)
           ? new Date(nextWatermarkMs).toISOString()
           : checkpoint?.watermark ?? null,
@@ -2372,6 +2366,7 @@
       const providerAccountId = value(event.data.provider_account_id);
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
+        ...(event.data.refresh_metadata === true ? { refresh_metadata: true } : {}),
         ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
         ...(Number.isInteger(event.data.history_days) ? {
           history_days: event.data.history_days,
@@ -2387,8 +2382,6 @@
       }
     } else if (event.data.type === "reset_recovery_v3") {
       resetRecovery();
-    } else if (event.data.type === "refresh_metadata_v3") {
-      void refreshMetadata(event.data);
     } else if (event.data.type === "detect_account_v3") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api_v3") {
@@ -2444,8 +2437,8 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
-    compatibility_version: 3,
-    metadata_refresh: true,
+    compatibility_version: 4,
+    combined_metadata_sync: true,
     fresh_provider_status: true,
     bounded_message_ids: true,
     grace_classification: true,

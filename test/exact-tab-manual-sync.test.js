@@ -33,7 +33,7 @@ function fixture(provider = "line_oa") {
     findProviderChatTab: () => assert.fail("Must not fall back to another tab"),
     providerChatTabs: () => assert.fail("Must not enumerate alternative tabs"),
   });
-  vm.runInContext(section("async function exactProviderAccountTab(", "async function refreshAccountMetadata(")
+  vm.runInContext(section("async function exactProviderAccountTab(", "// Display metadata is applied")
     + section("async function retryProviderAccount(", "function restartSync(")
     + section("async function cancelActiveSync(", "async function clearPersistedSync("), runtime);
   return { runtime, contexts, calls, recoveries,
@@ -90,43 +90,6 @@ test("tab-scoped cancellation stops only its matching account recovery", async (
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].message.request_id, "attempt-A");
   assert.equal(h.calls[0].id, 42);
-});
-
-test("exact metadata refresh cannot adopt another tab's in-flight refresh", async () => {
-  const h = fixture();
-  const requests = [];
-  let finish;
-  Object.assign(h.runtime, { metadataRefreshes: new Map(), metadataErasing: false, metadataEpoch: 1,
-    accountKey: (provider, account) => `${provider}:${account}`,
-    accountContextFor: (_stored, id) => h.contexts.find(context => context.account.provider_account_id === id),
-    providerSessionEpoch: () => 1, metadataScope: async context => context.key,
-    exclusive: operation => operation(), mergeDetectedAccounts: () => [],
-    customerMetadata: { refresh: async () => 0, flush: async () => {} },
-    sendProviderMessage: async (id, message) => { requests.push({ id, message }); return new Promise(resolve => { finish = resolve; }); },
-  });
-  vm.runInContext(section("async function refreshAccountMetadata(", "async function detectOpenProviderAccount("), h.runtime);
-  const first = h.runtime.refreshAccountMetadata("line_oa", "A", 42);
-  const other = h.runtime.refreshAccountMetadata("line_oa", "A", 43);
-  const outcomes = Promise.allSettled([first, other]);
-  while (!finish) await new Promise(resolve => setImmediate(resolve));
-  finish({ ok: true, profiles: [] });
-  const [valid, invalid] = await outcomes;
-  assert.equal(valid.status, "fulfilled");
-  assert.equal(invalid.status, "rejected");
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].id, 42);
-});
-
-test("exact LINE metadata refresh rejects another accessible bot without fallback", async () => {
-  const h = fixture();
-  Object.assign(h.runtime, { metadataRefreshes: new Map(), metadataErasing: false, metadataEpoch: 1,
-    accountKey: (provider, account) => `${provider}:${account}`,
-    accountContextFor: (_stored, id) => h.contexts.find(context => context.account.provider_account_id === id),
-    providerSessionEpoch: () => 1,
-  });
-  vm.runInContext(section("async function refreshAccountMetadata(", "async function detectOpenProviderAccount("), h.runtime);
-  await assert.rejects(h.runtime.refreshAccountMetadata("line_oa", "B", 42), /Open this LINE account/);
-  assert.equal(h.calls.length, 0);
 });
 
 test("tab-scoped cancellation waits for old recovery cleanup before a fresh sync", async () => {
