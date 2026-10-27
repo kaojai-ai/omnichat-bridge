@@ -41,7 +41,7 @@ for (const provider of ["line_oa", "shopee"]) {
   test(`reopening ${provider} refreshes account readiness before publishing live status without a popup`, async () => {
     const calls = [];
     const start = source.indexOf("async function reconnectProviderTab(tab)");
-    const end = source.indexOf("\nchrome.tabs.onUpdated", start);
+    const end = source.indexOf("\nfunction invalidateProviderSession", start);
     const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
       providerAdapters: { list: () => [{ id: provider, matchesUrl: () => true }] },
       STORAGE: { consent: "consent" }, readStorage: async () => ({ consent: true }),
@@ -121,7 +121,8 @@ test("keeps connection status compatible with the server's strict version 1 enve
   assert.match(statusSource, /schema: "omnichat\.connection_status"/);
   assert.match(statusSource, /version: 1/);
   assert.match(statusSource, /ready,/);
-  assert.match(statusSource, /reason_code: session && !session\.eligible \? session\.reason_code : health\.reason_code/);
+  assert.match(statusSource, /current\?\.reason_code === "ready" \? health\.reason_code/);
+  assert.match(statusSource, /readiness_grace_expires_at/);
   assert.match(statusSource, /chrome\.runtime\.getPlatformInfo/);
   assert.match(statusSource, /client: \{ platform: platform\.os \}/);
   assert.match(statusSource, /last_sync_at: health\.last_sync_at/);
@@ -371,16 +372,17 @@ test("requires an already-open Shopee tab for outbound replies", () => {
   assert.match(source, /The browser selected to send this reply has no/);
 });
 
-test("prepares fallback Seller Centre while respecting surface priority", () => {
+test("command selection consumes shared readiness without independent preparation", () => {
   const commandStart = source.indexOf("async function commandTab(");
   const commandEnd = source.indexOf("\n}\n\nfunction providerAdapterForCommand", commandStart);
   assert.ok(commandStart >= 0);
   assert.ok(commandEnd > commandStart);
   const commandSource = source.slice(commandStart, commandEnd);
   assert.match(commandSource, /prepareForSend = false/);
-  assert.match(commandSource, /prepareProviderTab\(candidate, adapter\)/);
+  assert.match(commandSource, /await providerReadiness/);
+  assert.doesNotMatch(commandSource, /prepareProviderTab\(/);
   assert.match(commandSource, /for \(const candidate of orderedTabs\)/);
-  assert.match(commandSource, /if \(!tab && prepareForSend && adapter.id === "shopee"\)/);
+  assert.match(commandSource, /policy\?\.evidence\?\.tab/);
   assert.match(commandSource, /orderedTabs\[0\] \?\? selectedTab/);
   assert.match(source, /function orderProviderTabs\(adapter, tabs, preferredTabId = null\)/);
   assert.match(source, /leftRank !== rightRank/);
@@ -416,7 +418,7 @@ test("does not cross-send a Seller Centre command through the standalone endpoin
   const sendSource = source.slice(sendStart, sendEnd);
   assert.match(sendSource, /prepareForSend: true/);
   assert.doesNotMatch(sendSource, /sendPath|webchat\/api\/v1\.2\/messages/);
-  assert.match(source, /surfaceForUrl\?\.\(tab\.url\) === "seller-centre"/);
+  assert.match(sendSource, /sessionEligibility\.isCurrent/);
 });
 
 test("keeps tab creation limited to an explicit open-tab action", () => {

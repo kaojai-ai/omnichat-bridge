@@ -1,3 +1,4 @@
+import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import { createStatusReporter } from "../extension/lib/status-reporter.js";
 import assert from "node:assert/strict";
@@ -7,7 +8,9 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
 function fn(name, next, globals) {
-  return vm.runInNewContext(`(${source.slice(source.indexOf(`async function ${name}(`), source.indexOf(next)).trim()})`, globals);
+  const scope = vm.createContext(globals);
+  installProviderPolicy(scope);
+  return vm.runInContext(`(${source.slice(source.indexOf(`async function ${name}(`), source.indexOf(next)).trim()})`, scope);
 }
 const context = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" },
   adapter: { id: "shopee", tabQueryPattern: "https://seller.shopee.co.th/*", matchesUrl: () => true, sendCommands: ["send_text"] } };
@@ -22,7 +25,7 @@ test("live presence advertises sends only for a responding tab belonging to this
   const snapshot = fn("connectionStatusSnapshot", "\nfunction statusPublishKey", {
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: {}, readStorage: async () => ({}), chrome: { tabs: { query: async () => tabs }, runtime: { getManifest: () => ({ version: "test" }), getPlatformInfo: async () => ({ os: "mac" }) } },
-    orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
+    providerChatTabs: async () => tabs, orderProviderTabs: (_adapter, input) => input, providerTabStatus: async () => status,
     providerTabHealthy: (input) => input?.ok === true && input?.realtime_connected === true,
     providerTabCanSend: canSend, providerTabIsReady: (input) => input?.ok === true,
     persistProviderSurfaceState: async () => {}, detectedAccounts: () => [context.account],

@@ -154,8 +154,26 @@ const providerAutomaticRetryAttempts = new Map();
 const providerAutomaticRetryAt = new Map();
 const providerRecoveryTabLocks = new Map();
 let providerHealthWatchdogPromise = null;
+const providerSessionEpochs = new Map();
+const providerTabEpochs = new Map();
+const providerPolicyTabIds = new Map();
+const providerPolicyObservations = new Map();
+let providerObservationSequence = 0;
+const providerStatusProbes = new Map();
+const providerPolicyContexts = new Map();
 const sessionEligibility = createSessionEligibility({
-  onRecheck: () => runProviderHealthWatchdog(),
+  onRecheck: () => ensureLiveConnection(),
+  onEvent: (key, event, details) => {
+    const context = providerPolicyContexts.get(key);
+    return recordLog(event === "needs_attention" ? "warn" : "info", "readiness", event,
+      event === "grace_started" ? "Provider check is temporarily unavailable; retaining recent readiness."
+        : event === "recovered" ? "Provider readiness check recovered."
+          : event === "grace_expired" ? "Provider readiness grace expired; replies are unavailable."
+            : event === "needs_attention" ? "Provider checks have remained unavailable for sixty seconds."
+              : "Provider readiness verification started.", {
+        provider: context?.account.provider, provider_account_id: context?.account.provider_account_id, ...details,
+      });
+  },
 });
 
 function mutateLogs(task) {
@@ -345,12 +363,101 @@ function liveCommandContexts(contexts) {
   return contexts.filter((context) => (context?.adapter?.sendCommands?.length ?? 0) > 0);
 }
 
-// Access is local to this browser session, never inferred from shared config.
-async function lineSessionContexts(contexts, { refresh = false } = {}) {
+// A single observation drives status, session eligibility and command selection.
+// Only a missing response can use evidence from the same tab/session context.
+function providerSessionEpoch(provider) {
+  return providerSessionEpochs.get(provider) ?? 0;
+}
+
+function providerTabContext(tab, provider) {
+  return `${provider}:${providerSessionEpoch(provider)}:${tab.id}:${providerTabEpochs.get(tab.id) ?? 0}:${tab.url ?? ""}`;
+}
+
+function providerCommandCapabilities(status, context) {
+  if (context.adapter.id === "line_oa") return status?.command_capabilities_by_account?.[context.account.provider_account_id];
+  return providerTabCanSend(status, context)
+    ? context.adapter.sendCommands.filter((command) => command !== "send_video" || status?.capabilities?.send_video === true)
+    : [];
+}
+
+function providerStatusMeetsPolicy(status, context) {
+  const capabilities = providerCommandCapabilities(status, context);
+  return providerTabCanSend(status, context) && providerTabHealthy(status, context.adapter)
+    && Array.isArray(capabilities) && capabilities.includes("send_text");
+}
+
+async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
+  const adapter = context.adapter;
+  providerPolicyContexts.set(context.key, context);
+  const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
+  const observedTabs = tabs ?? await providerChatTabs(adapter);
+  const observedTabContexts = tabContexts ?? observedTabs.map((tab) => providerTabContext(tab, adapter.id));
+  const observedStatuses = statuses ?? await Promise.all(observedTabs.map(providerTabStatus));
+  // Navigation/replacement invalidates pending reads; a late response never restores readiness.
+  if (observedEpoch !== providerSessionEpoch(adapter.id)
+    || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
+  if ((providerPolicyObservations.get(context.key) ?? 0) > observation) return sessionEligibility.state(context.key);
+  providerPolicyObservations.set(context.key, observation);
+  const previous = sessionEligibility.state(context.key);
+  const identityMatches = (status) => adapter.id === "shopee"
+    ? status?.current_provider_account_id === context.account.provider_account_id
+    : status?.account_access_verified === true && status.accessible_account_ids?.includes(context.account.provider_account_id);
+  const identities = new Set(observedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  const conflict = adapter.id === "shopee" && identities.size > 1;
+  const matchingTab = orderProviderTabs(adapter, observedTabs).find((candidate) => {
+    const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
+    return identityMatches(status) && providerStatusMeetsPolicy(status, context);
+  });
+  const matchingIndex = matchingTab ? observedTabs.findIndex((tab) => tab.id === matchingTab.id) : -1;
+  const previousTabId = previous?.last_evidence?.tab.id;
+  const previousIndex = observedTabs.findIndex((tab) => tab.id === previousTabId);
+  const matching = observedStatuses.findIndex(identityMatches);
+  const index = matchingIndex >= 0 ? matchingIndex : previousIndex >= 0 ? previousIndex : matching >= 0 ? matching : 0;
+  const tab = observedTabs[index];
+  const status = observedStatuses[index] ?? null;
+  const mismatch = conflict || (adapter.id === "shopee"
+    ? identities.size > 0 && !identities.has(context.account.provider_account_id)
+    : observedStatuses.some((item) => item?.account_access_verified === true) && matching < 0);
+  const responded = Boolean(status);
+  const verified = responded && identityMatches(status) && !conflict;
+  const ready = verified && providerStatusMeetsPolicy(status, context);
+  providerPolicyTabIds.set(context.key, tab?.id ?? null);
+  const policy = sessionEligibility.observe(context.key, {
+    hasTab: observedTabs.length > 0,
+    verified: responded, // A confirmed negative cannot consume missing-response grace.
+    account_verified: verified,
+    explicitMismatch: mismatch,
+    identity: mismatch ? adapter.id === "shopee" ? [...identities].sort().join(",") : "inaccessible" : context.account.provider_account_id,
+    context: tab ? providerTabContext(tab, adapter.id) : `${adapter.id}:${observedEpoch}:missing`,
+    ready,
+    reason_code: !verified ? "provider_account_unverified" : !providerTabCanSend(status, context)
+      ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
+    evidence: ready ? { tab, status, command_capabilities: providerCommandCapabilities(status, context) } : null,
+  });
+  const active = policy.eligible;
+  await updateLiveState(context, {
+    eligibility_reason_code: policy.reason_code,
+    session_generation: policy.generation,
+    active_in_profile: active,
+    active_provider_account_id: active ? context.account.provider_account_id : null,
+    provider_session_reason_code: active ? null : conflict ? "session_conflict" : mismatch ? "account_mismatch" : policy.reason_code,
+    readiness_grace_expires_at: policy.readiness_grace_expires_at ?? null,
+    ...(!policy.retain_transport ? { socket: "inactive", leader: false, leader_installation_id: null,
+      provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
+  });
+  if (observedEpoch !== providerSessionEpoch(adapter.id)
+    || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
+  return { ...policy, observed_status: status, observed_tab: tab };
+}
+
+async function lineSessionContexts(contexts, { refresh = false, forRecovery = true } = {}) {
   const line = contexts.filter((context) => context.adapter.id === "line_oa");
   if (!line.length) return contexts;
   const adapter = line[0].adapter;
+  const epoch = providerSessionEpoch(adapter.id);
+  const observation = ++providerObservationSequence;
   const tabs = await providerChatTabs(adapter);
+  const tabContexts = tabs.map((tab) => providerTabContext(tab, adapter.id));
   const statuses = await Promise.all(tabs.map(async (tab) => {
     if (refresh) {
       try {
@@ -358,93 +465,45 @@ async function lineSessionContexts(contexts, { refresh = false } = {}) {
         const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: adapter.id }, {
           label: "LINE OA", operation: "access check", timeoutMs: 25_000,
         });
-        if (!result?.ok) return null;
+        if (!result?.ok) return { ok: false };
       } catch { return null; }
     }
     return providerTabStatus(tab);
   }));
-  const verified = statuses.filter((status) => status?.account_access_verified === true);
-  const ids = new Set(verified.flatMap((status) => status.accessible_account_ids ?? []));
+  const eligible = new Set();
   for (const context of line) {
-    const active = ids.has(context.account.provider_account_id);
-    const eligibility = sessionEligibility.observe(context.key, {
-      hasTab: tabs.length > 0, verified: active,
-      explicitMismatch: !active && verified.length > 0,
-      identity: active ? context.account.provider_account_id : null,
-    });
-    await updateLiveState(context, {
-      eligibility_reason_code: eligibility.reason_code,
-      session_generation: eligibility.generation,
-      active_in_profile: active,
-      provider_session_reason_code: active ? null : eligibility.reason_code,
-      ...(!active && eligibility.reason_code !== "checking_session" ? { socket: "inactive", leader: false, leader_installation_id: null,
-        provider_recovery_state: null, provider_recovery_reason: null, provider_recovery_tab_id: null } : {}),
-    });
+    const policy = await providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation });
+    if (policy?.eligible || (forRecovery && policy?.account_verified)) eligible.add(context.key);
   }
-  return contexts.filter((context) => context.adapter.id !== "line_oa" || ids.has(context.account.provider_account_id));
+  return contexts.filter((context) => context.adapter.id !== "line_oa" || eligible.has(context.key));
 }
 
-let activeShopeeStatusPromise = null;
-const shopeeSessionStates = new Map();
-async function activeLiveCommandContexts(contexts) {
-  const candidates = await lineSessionContexts(liveCommandContexts(contexts));
-  if (!candidates.some((context) => context.adapter.id === "shopee")) return candidates;
-  if (!activeShopeeStatusPromise) {
-    activeShopeeStatusPromise = providerChatTabs(shopeeAdapter)
-      .then(async (tabs) => {
-        const statuses = await Promise.all(tabs.map(providerTabStatus));
-        if (new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean)).size <= 1) return statuses;
-        // Refresh conflicting cached identities once per coalesced check. A stale
-        // tab must neither keep its previous shop connected nor pause us forever.
-        const refreshed = await Promise.all(tabs.map(async (tab) => {
-          try {
-            const detected = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: "shopee" }, {
-              label: "Shopee", operation: "session check", timeoutMs: 15_000,
-            });
-            return detected?.ok ? await providerTabStatus(tab) : null;
-          } catch { return null; }
-        }));
-        return refreshed.every((status) => status?.current_provider_account_id) ? refreshed : statuses;
-      })
-      .finally(() => { activeShopeeStatusPromise = null; });
+async function activeLiveCommandContexts(contexts, { forRecovery = false } = {}) {
+  const candidates = await lineSessionContexts(liveCommandContexts(contexts), { forRecovery });
+  const shopee = candidates.filter((context) => context.adapter.id === "shopee");
+  if (!shopee.length) return candidates;
+  const epoch = providerSessionEpoch("shopee");
+  const observation = ++providerObservationSequence;
+  const tabs = await providerChatTabs(shopeeAdapter);
+  const tabContexts = tabs.map((tab) => providerTabContext(tab, "shopee"));
+  let statuses = await Promise.all(tabs.map(providerTabStatus));
+  if (new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean)).size > 1) {
+    const refreshed = await Promise.all(tabs.map(async (tab) => {
+      try {
+        const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: "shopee" }, {
+          label: "Shopee", operation: "session check", timeoutMs: 15_000,
+        });
+        return result?.ok ? await providerTabStatus(tab) : null;
+      } catch { return null; }
+    }));
+    if (refreshed.every((status) => status?.current_provider_account_id)) statuses = refreshed;
   }
-  const statuses = await activeShopeeStatusPromise;
-  const observedIds = new Set(statuses.map((status) => status?.current_provider_account_id).filter(Boolean));
-  // One Shopee session per local browser profile. Conflicting pages must not
-  // advertise both shops while one of them still holds a stale login snapshot.
-  const currentId = observedIds.size === 1 ? [...observedIds][0] : null;
-  const activeIds = new Set(currentId ? [currentId] : []);
-  for (const context of candidates.filter((item) => item.adapter.id === "shopee")) {
-    const active = activeIds.has(context.account.provider_account_id);
-    const reasonCode = active ? null : observedIds.size > 1 ? "session_conflict"
-      : currentId ? "account_mismatch" : "session_unverified";
-    const eligibility = sessionEligibility.observe(context.key, {
-      hasTab: statuses.length > 0, verified: active,
-      explicitMismatch: !active && (Boolean(currentId) || observedIds.size > 1),
-      identity: currentId,
-    });
-    await updateLiveState(context, {
-      eligibility_reason_code: eligibility.reason_code,
-      session_generation: eligibility.generation,
-      active_in_profile: active,
-      active_provider_account_id: currentId,
-      provider_session_reason_code: reasonCode,
-      ...(!active && eligibility.reason_code !== "checking_session" ? {
-        socket: "inactive", leader: false, leader_installation_id: null,
-        provider_recovery_state: null, provider_recovery_reason: null,
-        provider_recovery_tab_id: null,
-      } : {}),
-    });
-    const sessionState = `${currentId ?? ""}:${reasonCode ?? "active"}`;
-    if (shopeeSessionStates.get(context.key) !== sessionState) {
-      shopeeSessionStates.set(context.key, sessionState);
-      await recordLog("info", "session", "state_changed", "Shopee browser session status changed.", {
-        provider: "shopee", provider_account_id: context.account.provider_account_id,
-        current_provider_account_id: currentId, reason_code: reasonCode ?? "session_active",
-      });
-    }
+  const eligible = new Set();
+  for (const context of shopee) {
+    const policy = await providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation });
+    if (policy?.eligible || (forRecovery && policy?.account_verified)) eligible.add(context.key);
   }
-  return candidates.filter((context) => context.adapter.id !== "shopee" || activeIds.has(context.account.provider_account_id));
+  return candidates.filter((context) => context.adapter.id !== "shopee" || eligible.has(context.key));
 }
 
 function messageProviderAccountId(message) {
@@ -1268,6 +1327,14 @@ function rememberCommandTab(account, tabId) {
 async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
+  if (prepareForSend) {
+    const policy = await providerReadiness({ ...context, adapter });
+    const tab = policy?.evidence?.tab;
+    if (!policy?.eligible || !tab?.id) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
+    // The page sender still verifies the command's exact account before its one provider attempt.
+    await rememberCommandTab(context.key, tab.id);
+    return tab;
+  }
   const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
@@ -1286,26 +1353,6 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
     if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
       tab = candidate;
       break;
-    }
-  }
-  if (!tab && prepareForSend && adapter.id === "shopee") {
-    for (const candidate of orderedTabs.filter((tab) => adapter.surfaceForUrl?.(tab.url) === "seller-centre")) {
-      const status = await providerTabStatus(candidate);
-      if (status?.current_provider_account_id
-        && status.current_provider_account_id !== context.account.provider_account_id) continue;
-      try {
-        await prepareProviderTab(candidate, adapter);
-        if (providerTabCanSend(await providerTabStatus(candidate), context)) {
-          tab = candidate;
-          break;
-        }
-      } catch (error) {
-        await recordLog("warn", "provider", "surface_unready", `${label} Seller Centre could not be prepared for an outbound reply.`, {
-          provider: adapter.id,
-          surface: "seller-centre",
-          ...diagnosticErrorDetails(error),
-        });
-      }
     }
   }
   if (!tab) tab = orderedTabs[0] ?? selectedTab ?? null;
@@ -1328,9 +1375,6 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
       provider: adapter.id,
       surface: adapter.surfaceForUrl?.(tab.url) ?? null,
     });
-    if (prepareForSend && adapter.id === "shopee") {
-      throw new Error(`${label} on the selected browser is not ready for this account. Open the matching chat and wait for Omnichat Bridge to connect.`);
-    }
   }
   await rememberCommandTab(context.key, tab.id);
   return tab;
@@ -1355,6 +1399,7 @@ async function sendViaProvider(message) {
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
+  const selectedGeneration = sessionEligibility.generation(context.key);
   await ensureProviderBridge(tab.id, adapter);
   let imagePayload = {};
   if (["send_image", "send_video", "send_file"].includes(commandType)) {
@@ -1390,6 +1435,9 @@ async function sendViaProvider(message) {
     imagePayload = commandType === "send_image"
       ? { image_base64: btoa(binary), image_type: imageType }
       : { media_base64: btoa(binary), media_type: imageType };
+  }
+  if (!sessionEligibility.isCurrent(context.key, selectedGeneration)) {
+    return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry." };
   }
   const result = await chrome.tabs.sendMessage(tab.id, {
     ...message,
@@ -1977,7 +2025,7 @@ async function runProviderHealthWatchdogOnce() {
     const providerContexts = providerRecoveryContexts(contexts, adapter);
     let matchingContexts = adapter.id === "line_oa"
       ? await lineSessionContexts(providerContexts, { refresh: true })
-      : await activeLiveCommandContexts(providerContexts);
+      : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
     if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
       // A missing content bridge is not an account conflict. Repair it before
       // deciding which shop can recover; never infer identity from configuration.
@@ -1991,7 +2039,7 @@ async function runProviderHealthWatchdogOnce() {
           await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
         }
       }
-      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts);
+      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts, { forRecovery: true });
     }
     if (!matchingContexts.length) {
       // Missing tabs may still be restored by the existing opt-in recovery.
@@ -2237,8 +2285,12 @@ async function openCommandTab() {
   return { ok: true };
 }
 
-function stopAccountLiveConnection(key, connection) {
+function stopAccountLiveConnection(key, connection, reason = "provider_context_removed") {
   liveConnections.delete(key);
+  void recordLog("info", "live", "local_cleanup", "Live channel closed after local context teardown.", {
+    provider: connection.context?.account.provider, provider_account_id: connection.context?.account.provider_account_id,
+    reason_code: reason,
+  });
   connection.ticketController?.abort();
   clearTimeout(connection.ticketTimer);
   clearTimeout(connection.stableTimer);
@@ -2250,8 +2302,8 @@ function stopAccountLiveConnection(key, connection) {
   connection.socket?.close();
 }
 
-function stopLiveConnection() {
-  for (const [key, connection] of liveConnections) stopAccountLiveConnection(key, connection);
+function stopLiveConnection(reason = "configuration_or_consent_unavailable") {
+  for (const [key, connection] of liveConnections) stopAccountLiveConnection(key, connection, reason);
 }
 
 function scheduleLiveReconnect(context) {
@@ -2314,59 +2366,30 @@ async function connectionStatusSnapshot(context) {
     STORAGE.status,
   ]);
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
-  const tabs = adapter
-    ? (await chrome.tabs.query({ url: adapter.tabQueryPattern }))
-      .filter((tab) => adapter.matchesUrl(tab.url))
-    : [];
-  let providerStatus = null;
-  let providerStatusTab = null;
-  for (const tab of orderProviderTabs(adapter, tabs)) {
-    if (!tab.id) continue;
-    const result = await providerTabStatus(tab);
-    if (!result) continue;
-    if (!providerStatus) {
-      providerStatus = result;
-      providerStatusTab = tab;
-    }
-    if (providerTabCanSend(result, context)) {
-      providerStatus = result;
-      providerStatusTab = tab;
-      break;
-    }
-  }
+  const policy = await providerReadiness({ ...context, adapter });
+  const providerStatus = policy?.evidence?.status ?? policy?.observed_status ?? null;
+  const providerStatusTab = policy?.evidence?.tab ?? policy?.observed_tab ?? null;
   await persistProviderSurfaceState(context, adapter, providerStatus, providerStatusTab);
-
-  const accountDetected = detectedAccounts(stored).some(
-    (account) => account.provider === context.account.provider
-      && account.provider_account_id === context.account.provider_account_id,
-  );
-  const accountMatches = adapter?.id === "shopee"
-    ? providerStatus?.current_provider_account_id === context.account.provider_account_id
-    : accountDetected;
   const status = readAccountState(stored[STORAGE.status], context.key, {});
   const pending = readAccountState(stored[STORAGE.pending], context.key, []);
   const deviceName = normalizeDeviceName(stored[STORAGE.deviceName]);
   const health = buildConnectionHealth({
     provider: context.account.provider,
-    tabCount: tabs.length,
-    contentReady: adapter?.id === "shopee" ? providerTabIsReady(providerStatus, adapter) : Boolean(providerStatus),
-    accountDetected,
-    accountMatches,
-    realtimeConnected: providerTabHealthy(providerStatus, adapter),
+    tabCount: providerStatusTab ? 1 : 0,
+    contentReady: Boolean(policy?.eligible),
+    accountDetected: Boolean(policy?.eligible),
+    accountMatches: Boolean(policy?.eligible),
+    realtimeConnected: Boolean(policy?.eligible),
     lastRealtimeConnectedAt: providerStatus?.last_realtime_connected_at,
     pendingMessages: pending.length,
     status,
   });
-  const commandCapabilities = adapter?.id === "line_oa"
-    ? providerStatus?.command_capabilities_by_account?.[context.account.provider_account_id]
-    : providerTabCanSend(providerStatus, context)
-      ? adapter.sendCommands.filter((command) => command !== "send_video" || providerStatus?.capabilities?.send_video === true)
-      : [];
-  const session = sessionEligibility.state(context.key);
-  const ready = (!session || session.eligible) && ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].every((key) => (
-    health.checks.some((check) => check.key === key && check.status === "pass")
-  ));
+  const commandCapabilities = policy?.eligible ? policy.evidence?.command_capabilities : [];
   const platform = await chrome.runtime.getPlatformInfo();
+  const id = await installationId();
+  const current = sessionEligibility.state(context.key);
+  const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
+  const ready = samePolicy && current?.eligible === true;
 
   return {
     type: "connection_status",
@@ -2374,15 +2397,16 @@ async function connectionStatusSnapshot(context) {
     version: 1,
     provider: context.account.provider,
     provider_account_id: canonicalProviderAccountId(context),
-    installation_id: await installationId(),
+    installation_id: id,
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
     ready,
-    reason_code: session && !session.eligible ? session.reason_code : health.reason_code,
+    reason_code: !samePolicy ? "checking_session" : current?.reason_code === "ready" ? health.reason_code : current?.reason_code ?? "checking_session",
+    ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
     client: { platform: platform.os },
     last_sync_at: health.last_sync_at,
-    ...(Array.isArray(commandCapabilities) ? { command_capabilities: commandCapabilities } : {}),
+    ...(Array.isArray(commandCapabilities) ? { command_capabilities: ready ? commandCapabilities : [] } : {}),
   };
 }
 
@@ -2390,6 +2414,7 @@ function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
     reason_code: status.reason_code,
+    readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
     device_name: status.device_name,
     command_capabilities: status.command_capabilities ?? null,
     extension_version: status.extension_version ?? null,
@@ -2423,6 +2448,7 @@ async function sendConnectionStatus(socket, context) {
     provider_account_id: context.account.provider_account_id,
     ready: status.ready,
     reason_code: status.reason_code,
+    readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
   });
 }
 
@@ -2463,7 +2489,7 @@ async function ensureLiveConnection() {
     for (const context of configuredContexts) {
       if (contexts.some((item) => item.key === context.key)) continue;
       const existing = liveConnections.get(context.key);
-      if (sessionEligibility.state(context.key)?.reason_code === "checking_session"
+      if (sessionEligibility.state(context.key)?.retain_transport
         && existing?.socket?.readyState === WebSocket.OPEN) {
         contexts.push(context);
       }
@@ -2613,7 +2639,7 @@ async function ensureMigratedAccountLiveConnection(context) {
     connecting: false,
   };
   if (existing.config && JSON.stringify(existing.config) !== JSON.stringify(context.config)) {
-    stopAccountLiveConnection(context.key, existing);
+    stopAccountLiveConnection(context.key, existing, "configuration_changed");
     existing = { socket: null, reconnectTimer: null, heartbeatTimer: null, leaderStatusTimer: null,
       lastStatusKey: null, reconnectAttempt: 0, connecting: false };
   }
@@ -2666,6 +2692,7 @@ async function ensureMigratedAccountLiveConnection(context) {
       clearTimeout(existing.handshakeTimer);
       openedAt = Date.now();
       existing.lastActivityAt = openedAt;
+      existing.lastInboundAt = openedAt;
       existing.stableTimer = setTimeout(() => {
         if (liveConnections.get(context.key)?.socket === socket) existing.reconnectAttempt = 0;
       }, 30_000);
@@ -2689,6 +2716,7 @@ async function ensureMigratedAccountLiveConnection(context) {
     socket.addEventListener("message", (event) => {
       if (liveConnections.get(context.key)?.socket !== socket) return;
       existing.lastActivityAt = Date.now();
+      existing.lastInboundAt = existing.lastActivityAt;
       scheduleKeepalive(context, socket);
       void handleLiveCommand(event.data, context, socket);
     });
@@ -2711,6 +2739,7 @@ async function ensureMigratedAccountLiveConnection(context) {
           close_code: event.code,
           was_clean: event.wasClean,
           open_duration_ms: openedAt === null ? null : Date.now() - openedAt,
+          since_last_inbound_ms: existing.lastInboundAt == null ? null : Date.now() - existing.lastInboundAt,
         });
         if (migrationSource && openedAt === null) {
           void markMigrationPending(context, new Error("New server connection could not be established. The previous configuration is still active."))
@@ -2854,6 +2883,9 @@ async function handleLiveCommand(raw, context, socket) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
+  if (changes[STORAGE.config] || changes[STORAGE.consent]) {
+    for (const adapter of providerAdapters.list()) invalidateProviderSession(adapter.id, "configuration_or_consent_changed");
+  }
   if (changes[STORAGE.unattendedRecovery]) {
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
   }
@@ -2887,7 +2919,30 @@ async function reconnectProviderTab(tab) {
   await ensureLiveConnection();
 }
 
+function invalidateProviderSession(provider, reason) {
+  providerSessionEpochs.set(provider, providerSessionEpoch(provider) + 1);
+  for (const [key, context] of providerPolicyContexts) {
+    if (context.adapter.id !== provider) continue;
+    sessionEligibility.reset(key);
+    const connection = liveConnections.get(key);
+    if (connection) stopAccountLiveConnection(key, connection, reason);
+  }
+}
+
+function invalidateProviderTab(tabId, reason) {
+  providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
+  // Unused tabs cannot tear down another tab's validated account connection.
+  for (const [key, evidenceTabId] of providerPolicyTabIds) {
+    if (evidenceTabId !== tabId) continue;
+    sessionEligibility.reset(key);
+    providerPolicyTabIds.delete(key);
+    const connection = liveConnections.get(key);
+    if (connection) stopAccountLiveConnection(key, connection, reason);
+  }
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === "loading") invalidateProviderTab(tabId, "provider_tab_navigated");
   if (changeInfo.url) {
     void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
   }
@@ -2899,10 +2954,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  invalidateProviderTab(tabId, "provider_tab_closed");
   sellerCentreLandingStarts.delete(tabId);
   void markClosedProviderRecoveryTab(tabId)
     .then(() => ensureLiveConnection())
     .catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
+});
+
+chrome.tabs.onReplaced?.addListener((_addedTabId, removedTabId) => {
+  invalidateProviderTab(removedTabId, "provider_tab_replaced");
+  void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -3046,16 +3107,20 @@ function orderProviderTabs(adapter, tabs, preferredTabId = null) {
 
 async function providerTabStatus(tab) {
   if (!tab?.id) return null;
-  try {
-    const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
-      label: "Provider",
-      operation: "status request",
-      timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
-    });
-    return result?.ok ? result : null;
-  } catch {
-    return null;
-  }
+  const adapter = providerAdapters.list().find((item) => item.matchesUrl(tab.url));
+  if (!adapter) return null;
+  const key = providerTabContext(tab, adapter.id);
+  if (providerStatusProbes.has(key)) return providerStatusProbes.get(key);
+  const probe = (async () => {
+    try {
+      const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
+        label: "Provider", operation: "status request", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
+      });
+      return key === providerTabContext(tab, adapter.id) && result && typeof result === "object" ? result : null;
+    } catch { return null; }
+  })().finally(() => { if (providerStatusProbes.get(key) === probe) providerStatusProbes.delete(key); });
+  providerStatusProbes.set(key, probe);
+  return probe;
 }
 
 function providerTabIsReady(status, adapter) {
@@ -4010,11 +4075,16 @@ async function openSessionSyncContexts(contexts, control) {
   if (!shopee.length) return contexts;
   let tab = null;
   let currentId = null;
+  let observedStatus = null;
+  let tabContext = null;
+  const epoch = providerSessionEpoch("shopee");
+  const observation = ++providerObservationSequence;
   try {
     tab = await findReadyProviderChatTab(shopeeAdapter) ?? await findProviderChatTab(shopeeAdapter);
+    tabContext = tab ? providerTabContext(tab, "shopee") : null;
     const detected = tab ? await detectOpenProviderAccount("shopee", tab.id) : null;
-    const status = detected?.ok ? await providerTabStatus(tab) : null;
-    currentId = status?.current_provider_account_id ?? null;
+    observedStatus = detected?.ok ? await providerTabStatus(tab) : null;
+    currentId = observedStatus?.current_provider_account_id ?? null;
   } catch (error) {
     await recordUnexpected("session_detection", error, { provider: "shopee" });
   }
@@ -4042,10 +4112,8 @@ async function openSessionSyncContexts(contexts, control) {
       sync_error_at: null,
     });
   }
-  for (const context of shopee) sessionEligibility.observe(context.key, {
-    hasTab: Boolean(tab), verified: context.account.provider_account_id === currentId,
-    explicitMismatch: Boolean(currentId) && context.account.provider_account_id !== currentId,
-    identity: currentId,
+  for (const context of shopee) await providerReadiness(context, {
+    tabs: tab ? [tab] : [], statuses: tab ? [observedStatus] : [], epoch, tabContexts: tab ? [tabContext] : [], observation,
   });
   if (tab) control.preferredTabId = tab.id;
   return selected;

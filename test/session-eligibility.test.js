@@ -32,7 +32,9 @@ test("unknown probes never grant access or restart the bounded verification wind
   assert.equal(calls.length, 2);
   advance(30_000);
   assert.equal(calls.length, 3);
-  assert.equal(calls[2].reason_code, "needs_attention");
+  assert.equal(calls[2].reason_code, "checking_session");
+  advance(60_000);
+  assert.equal(calls[3].reason_code, "needs_attention");
   assert.equal(session.observe("account", { hasTab: true }).reason_code, "needs_attention");
   assert.equal(session.isCurrent("account", initial.generation), false);
 });
@@ -43,8 +45,9 @@ test("loss, identity change and explicit mismatch invalidate previously queued w
   assert.equal(verified.reason_code, "ready");
   assert.equal(session.isCurrent("account", verified.generation), true);
   const unknown = session.observe("account", { hasTab: true, identity: "session-a" });
-  assert.notEqual(unknown.generation, verified.generation);
-  assert.equal(session.isCurrent("account", verified.generation), false);
+  assert.equal(unknown.generation, verified.generation);
+  assert.equal(unknown.reason_code, "provider_check_grace");
+  assert.equal(session.isCurrent("account", verified.generation), true);
   assert.equal(session.observe("account", { hasTab: true, identity: "session-a" }).generation, unknown.generation);
   const restored = session.observe("account", { hasTab: true, verified: true, identity: "session-a" });
   const switched = session.observe("account", { hasTab: true, verified: true, identity: "session-b" });
@@ -64,7 +67,7 @@ test("recovery and reset cancel stale callbacks without reusing generations", ()
   session.observe("first", { hasTab: true });
   session.observe("second", { hasTab: true });
   const ready = session.observe("first", { hasTab: true, verified: true });
-  assert.equal(timers.size, 3);
+  assert.equal(timers.size, 4);
   session.reset("second");
   assert.equal(timers.size, 0);
   advance(40_000);

@@ -1,3 +1,4 @@
+import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -9,7 +10,7 @@ const source = await readFile(new URL("../extension/background.js", import.meta.
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))); }
 
 test("shared config connects only the signed-in shop, retires its predecessor, and preserves queued messages", async () => {
-  const shopeeAdapter = { id: "shopee", sendCommands: ["send"] };
+  const shopeeAdapter = { id: "shopee", sendCommands: ["send_text"] };
   const contexts = ["a", "b"].map(id => ({ key: `shopee:${id}`, account: { provider: "shopee", provider_account_id: id }, adapter: shopeeAdapter }));
   let active = "b";
   let now = 0;
@@ -26,7 +27,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
     configuredAccountContexts: () => contexts,
     hasServerInitialized: () => true, hasLocalConsent: v => v,
     providerChatTabs: async () => [{ id: 1 }],
-    providerTabStatus: async () => ({ current_provider_account_id: active }),
+    providerTabStatus: async () => active === null ? null : ({ current_provider_account_id: active }),
     updateLiveState: async (context, patch) => { live = writeAccountState(live, context.key, { ...readAccountState(live, context.key, {}), ...patch }); },
     apiPingContexts: c => c, ensureApiPingAlarm: async () => {}, ensureApiPings: () => {},
     ensureProviderHealthAlarm: async () => {}, clearProviderRecoveryLiveState: async () => {},
@@ -34,6 +35,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
     stopLiveConnection: () => { liveConnections.clear(); }, recordLog: async () => {},
     ensureAccountLiveConnection: async c => { connected.push(c.key); liveConnections.set(c.key, { socket: { readyState: 1 } }); },
   });
+  installProviderPolicy(sandbox);
   vm.runInContext(extract("function liveCommandContexts(", "function messageProviderAccountId(") + extract("async function ensureLiveConnection(", "async function ensureAccountLiveConnection("), sandbox);
   await sandbox.ensureLiveConnection();
   assert.deepEqual(connected, ["shopee:b"]);
@@ -47,13 +49,15 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
   active = null;
   await sandbox.ensureLiveConnection();
   assert.equal(liveConnections.size, 1, "transient uncertainty retains an already-open transport");
-  assert.equal(eligibility.state("shopee:a").eligible, false, "retained transport must not grant command eligibility");
-  assert.equal(readAccountState(live, "shopee:a", {}).active_in_profile, false);
+  assert.equal(eligibility.state("shopee:a").eligible, true, "recent unchanged session remains eligible during grace");
+  assert.equal(readAccountState(live, "shopee:a", {}).active_in_profile, true);
   now = 30_001;
   await sandbox.ensureLiveConnection();
-  assert.equal(liveConnections.size, 0, "expired uncertainty cannot retain the transport");
+  assert.equal(liveConnections.size, 1, "expired readiness does not tear down a healthy transport");
+  assert.equal(eligibility.state("shopee:a").eligible, false);
   now = 40_000;
   eligibility.reset();
+  liveConnections.clear(); // A restarted worker has neither readiness evidence nor sockets.
   const before = connected.length;
   await sandbox.ensureLiveConnection();
   assert.equal(connected.length, before, "uncertainty must not create a fresh transport");
@@ -72,6 +76,7 @@ test("automatic delivery respects retry time while explicit retry bypasses it", 
     flushAll: async () => { flushes++; return { sent: 1, pending: 0 }; },
     updateScopedState: async () => {},
   });
+  installProviderPolicy(sandbox);
   vm.runInContext(extract("const accountDeliveries =", "async function attemptAllDeliveries("), sandbox);
   assert.equal((await sandbox.attemptDelivery(context, { resetBackoff: false })).skipped, "backoff");
   assert.equal(flushes, 0);
@@ -81,7 +86,7 @@ test("automatic delivery respects retry time while explicit retry bypasses it", 
 
 
 test("conflicting Shopee pages pause both shops until fresh account detection agrees", async () => {
-  const shopeeAdapter = { id: "shopee", sendCommands: ["send"] };
+  const shopeeAdapter = { id: "shopee", sendCommands: ["send_text"] };
   const contexts = ["a", "b"].map(id => ({ key: id, account: { provider_account_id: id }, adapter: shopeeAdapter }));
   let refreshed = false;
   let agrees = false;
@@ -95,6 +100,7 @@ test("conflicting Shopee pages pause both shops until fresh account detection ag
     updateLiveState: async (context, patch) => { patches[context.key] = patch; },
     recordLog: async () => {},
   });
+  installProviderPolicy(sandbox);
   vm.runInContext(extract("function liveCommandContexts(", "function messageProviderAccountId("), sandbox);
   assert.equal((await sandbox.activeLiveCommandContexts(contexts)).length, 0);
   assert.equal(patches.a.provider_session_reason_code, "session_conflict");

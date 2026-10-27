@@ -1,3 +1,4 @@
+import { installProviderPolicy } from "./helpers/provider-policy.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -6,7 +7,7 @@ import { readFile } from "node:fs/promises";
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const extract = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const adapter = {
-  id: "shopee", surfacePriority: ["new-webchat", "webchat", "seller-centre"],
+  id: "shopee", sendCommands: ["send_text"], surfacePriority: ["new-webchat", "webchat", "seller-centre"],
   surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : url.includes("/webchat/") ? "webchat" : "seller-centre",
   matchesUrl: url => url.startsWith("https://seller.shopee.co.th/"),
 };
@@ -27,6 +28,7 @@ function sandbox(tabs, statuses) {
     chrome: { tabs: { query: async () => tabs, create: async options => { created.push(options); return { ...options, id: 3 }; } } },
     recordLog: async () => {}, providerLabel: () => "Shopee",
   });
+  installProviderPolicy(context);
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
     + extract("async function resolveProviderRecoveryTab(", "function ensureProviderRecoveryTab("), context);
   return { context, created };
@@ -70,6 +72,7 @@ function commandHarness({ primaryReady = true, miniShop = "shop" } = {}) {
     prepareProviderTab: async tab => { preparations.push(tab.id); miniReady = true; },
     rememberCommandTab: async () => {}, recordLog: async () => {},
   });
+  installProviderPolicy(context);
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
     + extract("async function commandTab(", "function providerAdapterForCommand("), context);
   return { preparations, run: () => context.commandTab(commandContext, { prepareForSend: true }) };
@@ -81,10 +84,10 @@ test("ready New Webchat sends without initializing closed mini-chat first", asyn
   assert.deepEqual(h.preparations, []);
 });
 
-test("mini-chat is prepared only when no ready primary exists and its shop matches", async () => {
+test("confirmed unready surfaces fail immediately without preparing or retrying a send", async () => {
   const fallback = commandHarness({ primaryReady: false });
-  assert.equal((await fallback.run()).id, mini.id);
-  assert.deepEqual(fallback.preparations, [mini.id]);
+  await assert.rejects(fallback.run(), /not ready for this account/);
+  assert.deepEqual(fallback.preparations, []);
   const wrongShop = commandHarness({ primaryReady: false, miniShop: "other-shop" });
   await assert.rejects(wrongShop.run(), /not ready for this account/);
   assert.deepEqual(wrongShop.preparations, []);

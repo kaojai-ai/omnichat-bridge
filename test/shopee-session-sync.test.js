@@ -1,3 +1,4 @@
+import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { webcrypto as crypto } from "node:crypto";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
@@ -5,14 +6,19 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
+function runWithPolicy(code, globals) {
+  const scope = vm.createContext(globals);
+  installProviderPolicy(scope);
+  return vm.runInContext(code, scope);
+}
 const start = source.indexOf("async function openSessionSyncContexts(");
 const end = source.indexOf("\nasync function runUnifiedSync", start);
-const context = (provider, id) => ({ key: id, adapter: { id: provider }, account: { provider, provider_account_id: id } });
+const context = (provider, id) => ({ key: id, adapter: { id: provider, sendCommands: ["send_text"] }, account: { provider, provider_account_id: id } });
 for (const currentId of ["A", "B", null]) {
   test(`sync follows current Shopee session ${currentId} and retains all LINE accounts`, async () => {
     const contexts = [context("shopee", "A"), context("shopee", "B"), context("line_oa", "L1"), context("line_oa", "L2")];
     const skipped = [];
-    const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+    const select = runWithPolicy(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
@@ -31,7 +37,7 @@ for (const currentId of ["A", "B", null]) {
   });
 }
 test("LINE-only sync does not inspect a Shopee session", async () => {
-  const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+  const select = runWithPolicy(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
@@ -42,7 +48,7 @@ test("LINE-only sync does not inspect a Shopee session", async () => {
 
 test("a failed fresh lookup cannot reuse the previous shop ID", async () => {
   const contexts = [context("shopee", "A"), context("line_oa", "L1")];
-  const select = vm.runInNewContext(`(${source.slice(start, end)})`, {
+  const select = runWithPolicy(`(${source.slice(start, end)})`, {
       throwIfSyncCancelled: () => {},
       lineSessionContexts: async (contexts) => contexts,
       providerAutomaticRecoveries: new Map(),
@@ -58,9 +64,9 @@ test("a failed fresh lookup cannot reuse the previous shop ID", async () => {
 
 test("Shopee tab recovery continues when the owner is between logins", async () => {
   const start = source.indexOf("async function reconnectProviderTab(tab)");
-  const end = source.indexOf("\nchrome.tabs.onUpdated", start);
+  const end = source.indexOf("\nfunction invalidateProviderSession", start);
   const calls = [];
-  const reconnect = vm.runInNewContext(`(${source.slice(start, end)})`, {
+  const reconnect = runWithPolicy(`(${source.slice(start, end)})`, {
     providerAdapters: { list: () => [{ id: "shopee", matchesUrl: () => true }] },
     crypto, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     ensureProviderBridge: async () => calls.push("bridge"),
@@ -83,7 +89,7 @@ for (const failureAt of ["tab_lookup", "detection", "status"]) {
       return result;
     };
     const syncEnd = source.indexOf("\nasync function resumeSync", end);
-    const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+    const run = runWithPolicy(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
       shopeeAdapter: {}, crypto, STORAGE: {},
       findReadyProviderChatTab: () => lookup("tab_lookup", { id: 42 }),
       detectOpenProviderAccount: () => lookup("detection", { ok: true }),
@@ -116,7 +122,7 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
     const control = { controller: new AbortController() };
     const logs = [];
     const states = [];
-    const run = vm.runInNewContext(source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts")) + "\nrunAccountSync", {
+    const run = runWithPolicy(source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts")) + "\nrunAccountSync", {
       activeSyncControl: control, isCurrentSyncControl: candidate => candidate === control,
       crypto, STORAGE: {}, RESUME_SYNC_COOLDOWN_MS: 0,
       exclusive: async () => ({ context: context("shopee", "A") }),
@@ -147,7 +153,7 @@ for (const outcome of ["selected", "failed"]) {
     const probe = new Promise((resolve, reject) => { resolveProbe = resolve; rejectProbe = reject; });
     const states = new Map(), synced = [];
     const syncEnd = source.indexOf("\nasync function resumeSync", end);
-    const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+    const run = runWithPolicy(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
       crypto, STORAGE: { status: "status" }, readStorage: async () => ({}),
       configuredAccountContexts: () => candidates, hasLocalConsent: () => true,
       throwIfSyncCancelled: () => {},
@@ -200,7 +206,7 @@ for (const outcome of ["selected", "failed"]) {
 test("manual sync preserves an account already recovering automatically", async () => {
   const candidate = context("line_oa", "A");
   const syncEnd = source.indexOf("\nasync function resumeSync", end);
-  const run = vm.runInNewContext(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
+  const run = runWithPolicy(`${source.slice(start, syncEnd)}\nrunUnifiedSync`, {
     crypto, STORAGE: {}, readStorage: async () => ({}),
     configuredAccountContexts: () => [candidate], hasLocalConsent: () => true,
     providerAutomaticRecoveries: new Map([[candidate.key, {}]]),
@@ -236,6 +242,7 @@ function preflightHarness({ accounts = [context("line_oa", "A")], runAccount, ac
   const unified = source.slice(source.indexOf("async function runUnifiedSync("), source.indexOf("\nasync function resumeSync("));
   const accountSync = actualAccountSync
     ? source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts(")) : "";
+  installProviderPolicy(runtime);
   vm.runInContext(accountSync + unified, runtime);
   return { runtime, states, accounts };
 }

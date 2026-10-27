@@ -133,11 +133,24 @@ bridge requests and target requests. These are measurements, not speedup claims.
 LINE selects configured accounts confirmed accessible in the current browser;
 Shopee selects the configured shop matching the verified login. A background tab
 is sufficient. Missing tabs display waiting-for-tab and are opened only with
-existing automatic recovery opt-in. Uncertain sessions block commands and retry
-at 5/15 seconds, displaying needs-attention after 30 seconds. Existing sockets
-may remain open during that bounded check; uncertainty never creates a socket.
-Wrong-account evidence blocks immediately. Session generations fence queued
-commands and manual/automatic recovery. A provider waiting for verification must
+existing automatic recovery opt-in. **Planned — readiness grace:** one account policy drives browser readiness,
+status reports and command selection for both providers. A missing status response
+can retain previously ready evidence for 30 seconds only when the tab, navigation
+and account context remain unchanged. Repeated missing responses never move the
+deadline; a successful check ends the episode. Unknown sessions without recent
+ready evidence cannot send. At grace expiry, replies become unavailable with
+`checking_session`; sustained uncertainty becomes `needs_attention` at 60 seconds.
+Checks repeat at 5/15 seconds and at the two boundaries. Existing healthy sockets
+remain open through provider uncertainty, including after grace expiry; unknown
+sessions never create a fresh socket.
+Wrong-account evidence, logout, missing tabs, required-capability failures and
+confirmed realtime failures block readiness immediately. Navigation, replacement,
+configuration changes and worker restart invalidate retained evidence. Invalidating
+an unused tab does not close another tab's validated account connection. In-flight
+probes share one request per tab/session; navigation epochs and observation order
+fence stale results. Session generations survive temporary uncertainty and recovery
+to the same account within grace, but change on true context changes or expiry.
+They fence queued commands and manual/automatic recovery. A provider waiting for verification must
 not occupy the capture/storage queue. Unified recovery selects Shopee before
 LINE so a slow LINE access check cannot delay Shopee.
 
@@ -164,3 +177,23 @@ exports contain all retained entries.
 After a successful readiness acknowledgement on the current socket, refresh the
 server leader result again. Sync completion and acknowledgement alone never
 establish leadership; the compatible server release remains required.
+
+
+### Readiness-grace wire contract (Planned)
+
+During grace, version 1 `connection_status` reports include `ready: true`,
+`reason_code: "provider_check_grace"` and optional RFC3339
+`readiness_grace_expires_at`. The absolute deadline is retained across checks and
+cleared on recovery or expiry. Consumers must stop treating the report as ready
+when its deadline expires, even if no replacement report arrives. Release server,
+worker and Admin support before the extension. Database changes: none.
+
+Command preflight uses the same account policy, including the retained exact tab
+inside grace. The actual page sender retains its exact-account guard, and the
+background rechecks generation immediately before the single provider attempt.
+No message waits, automatic resends or additional provider attempts are added.
+An uncertain provider result remains uncertain and is deduplicated by request ID.
+
+Readiness logs record episode start, recovery duration, grace expiry and the
+60-second warning once per episode. Local transport cleanup identifies its reason;
+remote close diagnostics include time since the last inbound WebSocket message.
