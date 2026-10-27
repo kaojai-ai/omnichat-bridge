@@ -1724,7 +1724,8 @@ test("LINE incremental discovery stops at a fully older updatedAt page, acceptin
     assert.equal(complete.ok, true);
     assert.equal(conversationListRequests(bridge).length, 2);
     assert.equal(bridge.requests.some(url => url.searchParams.get("next") === "outgoing-only"), false);
-    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+    assert.deepEqual(bridge.requests.filter(url => url.pathname.includes("/messages")).map(url => url.pathname),
+      ["/api/v3/bots/bot-1/chats/chat-1/messages"]);
     assert.equal(complete.recovered, 0);
   } finally { bridge.dispose(); }
 });
@@ -1801,6 +1802,47 @@ for (const targeted of [false, true]) {
       assert.equal(conversationListRequests(bridge).length, 3);
       assert.ok(bridge.requests.some(url => url.pathname === "/api/v3/bots/bot-1/chats/chat-3/messages"));
       assert.equal(complete.recovered, 1);
+    } finally { bridge.dispose(); }
+  });
+}
+
+
+test("LINE repeated manual metadata sync skips old chats that omit latestEvent", async () => {
+  const bridge = createBridge({ chatPages: { first: { list: [
+    { chatId: "chat-1", updatedAt: 4000, lastReceivedAt: 3000, lastSentAt: 3500,
+      lastTalkedAt: 99000, lastReadAt: 99000, profile: { userId: "customer", displayName: "Customer" } },
+    { chatId: "chat-2", updatedAt: 3900, lastReceivedAt: 2000, lastTalkedAt: 99000, lastReadAt: 99000 },
+  ] } } });
+  try {
+    const first = await bridge.sync({ requestId: "manual-old-1", refresh_metadata: true,
+      checkpoint: { watermark: new Date(5000).toISOString() }, now: 10000 });
+    assert.equal(first.ok, true);
+    assert.equal(first.recovered, 0);
+    assert.equal(first.metadata.profiles.length, 2);
+    const second = await bridge.sync({ requestId: "manual-old-2", refresh_metadata: true,
+      checkpoint: { watermark: first.watermark, conversations: {} }, now: 11000 });
+    assert.equal(second.ok, true);
+    assert.equal(second.recovered, 0);
+    assert.equal(second.metadata.profiles.length, 2);
+    assert.equal(conversationListRequests(bridge).length, 2);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+  } finally { bridge.dispose(); }
+});
+
+for (const [name, fields, shouldFetch] of [
+  ["newer outgoing timestamp", { updatedAt: 3000, lastReceivedAt: 2000, lastSentAt: 9000 }, true],
+  ["newer latest event", { updatedAt: 3000, lastReceivedAt: 2000, latestEvent: { timestamp: 9000, type: "messageSent" } }, true],
+  ["received timestamp equal to checkpoint", { updatedAt: 3000, lastReceivedAt: 5000 }, true],
+  ["updatedAt fallback equal to checkpoint", { updatedAt: 5000 }, true],
+  ["all message activity unknown", { lastTalkedAt: 99000, lastReadAt: 99000 }, true],
+  ["read and talked timestamps alone advance", { updatedAt: 3000, lastReceivedAt: 2000, lastSentAt: 2500, lastTalkedAt: 99000, lastReadAt: 99000 }, false],
+]) {
+  test(`LINE activity evidence handles ${name}`, async () => {
+    const bridge = createBridge({ chatPages: { first: { list: [{ chatId: "chat-1", ...fields }] } } });
+    try {
+      const complete = await bridge.sync({ refresh_metadata: true, checkpoint: { watermark: new Date(5000).toISOString() } });
+      assert.equal(complete.ok, true);
+      assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), shouldFetch);
     } finally { bridge.dispose(); }
   });
 }

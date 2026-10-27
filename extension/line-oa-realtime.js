@@ -2,7 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v3";
   const BRIDGE_VERSION = "line-oa-poll-11";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 6;
+  const COMPATIBILITY_VERSION = 7;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -217,13 +217,19 @@
     return timeMs(event?.timestamp ?? event?.message?.timestamp ?? event?.createdAt ?? event?.created_at);
   }
 
-  function latestEventTimeMs(chat) {
-    return timeMs(chat?.latestEvent?.timestamp);
+  function chatActivityTimeMs(chat) {
+    // Live LINE lists can omit latestEvent on older chats while retaining sent
+    // and received timestamps (53 of 89 summaries observed on 2026-10-27).
+    // Missing latestEvent alone must not force the same history fetch on every
+    // Sync. Preserve outgoing activity; updatedAt is the accepted fallback.
+    // Use message timestamps rather than lastTalkedAt/lastReadAt read activity.
+    return Math.max(timeMs(chat?.latestEvent?.timestamp), timeMs(chat?.lastReceivedAt),
+      timeMs(chat?.lastSentAt), timeMs(chat?.updatedAt));
   }
 
   function shouldRecoverChat(chat, checkpointMs) {
-    const latestEventMs = latestEventTimeMs(chat);
-    return checkpointMs <= 0 || latestEventMs <= 0 || latestEventMs >= checkpointMs;
+    const activityMs = chatActivityTimeMs(chat);
+    return checkpointMs <= 0 || activityMs <= 0 || activityMs >= checkpointMs;
   }
 
   function supersededAccountCheck() {
@@ -540,7 +546,7 @@
   }
 
   function chatBeforeHistory(chat, sinceMs) {
-    const latest = latestEventTimeMs(chat);
+    const latest = chatActivityTimeMs(chat);
     return latest > 0 && latest < sinceMs;
   }
 
