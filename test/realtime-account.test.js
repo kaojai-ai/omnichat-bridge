@@ -4,7 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 import { latestMessageCursor } from "../extension/lib/sync-state.js";
 
-const source = await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
+const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
+const source = cacheSource + "\n" + await readFile(new URL("../extension/shopee-realtime.js", import.meta.url), "utf8");
 const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", import.meta.url), "utf8");
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");

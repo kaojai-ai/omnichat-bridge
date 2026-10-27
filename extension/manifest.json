@@ -10,24 +10,24 @@
   "content_scripts": [
     {
       "matches": ["https://seller.shopee.co.th/*"],
-      "js": ["lib/shopee-url.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "lib/shopee-video.js", "shopee-realtime.js"],
+      "js": ["lib/message-id-cache.js", "lib/shopee-url.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "lib/shopee-video.js", "shopee-realtime.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["https://seller.shopee.co.th/*"],
-      "js": ["lib/shopee-url.js", "lib/shopee.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "content.js"],
+      "js": ["lib/message-id-cache.js", "lib/shopee-url.js", "lib/shopee.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "content.js"],
       "run_at": "document_start"
     },
     {
       "matches": ["https://chat.line.biz/*"],
-      "js": ["lib/provider-adapters.js", "lib/line-oa.js", "line-oa-realtime.js"],
+      "js": ["lib/message-id-cache.js", "lib/provider-adapters.js", "lib/line-oa.js", "line-oa-realtime.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": ["https://chat.line.biz/*"],
-      "js": ["lib/provider-adapters.js", "lib/line-oa.js", "content.js"],
+      "js": ["lib/message-id-cache.js", "lib/provider-adapters.js", "lib/line-oa.js", "content.js"],
       "run_at": "document_start"
     }
   ],

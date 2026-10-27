@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 7;
+  const BRIDGE_PROTOCOL_VERSION = 8;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -24,7 +24,7 @@
   const pendingOutbound = new Map();
   const pendingApiSends = new Map();
   const pendingProviderPreparations = new Map();
-  const realtimeMessageKeys = new Set();
+  const realtimeMessageKeys = globalThis.OmnichatMessageIdCache.create();
   let activeConversationId = null;
   let realtimeConnected = false;
   let lastRealtimeConnectedAt = null;
@@ -811,9 +811,10 @@
         finishPendingApiSend(apiSend.requestId, apiSend.pending);
       }
 
-      const realtimeKey = `${message.conversation_id}:${message.id}`;
-      if (realtimeMessageKeys.has(realtimeKey)) continue;
-      realtimeMessageKeys.add(realtimeKey);
+      const accountId = message.provider_account_id ?? message.participant?.provider_account_id
+        ?? currentProviderAccountId ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "unverified");
+      if (realtimeMessageKeys.has(providerAdapter.id, accountId, message.conversation_id, message.id)) continue;
+      realtimeMessageKeys.add(providerAdapter.id, accountId, message.conversation_id, message.id);
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
@@ -1069,7 +1070,9 @@
         providerAccountIds = accountAccessVerified ? [...accessibleAccountIds] : [];
       }
       if (providerAdapter.id === "shopee") {
-        currentProviderAccountId = event.data.current_provider_account_id ?? null;
+        const nextAccountId = event.data.current_provider_account_id ?? null;
+        if (nextAccountId !== currentProviderAccountId) realtimeMessageKeys.clear(providerAdapter.id);
+        currentProviderAccountId = nextAccountId;
       }
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
@@ -1283,6 +1286,7 @@
     if (disposed) return false;
     disposed = true;
     clearTimeout(resumeSyncTimer);
+    realtimeMessageKeys.clear();
     if (providerStatusRequest) {
       clearTimeout(providerStatusRequest.timeout);
       providerStatusRequest.resolve({ ok: false, error: reason });

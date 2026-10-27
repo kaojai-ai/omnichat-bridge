@@ -131,7 +131,7 @@
     pendingSellerCentreMessages: new Map(),
     sellerCentreFetches: new Map(),
     sellerCentreCaptureEpoch: 0,
-    observedMessageKeys: new Set(),
+    observedMessageKeys: globalThis.OmnichatMessageIdCache.create(),
     sellerCentreListInitialized: false,
     sellerCentrePollingStarted: false,
     sellerCentrePollingTimer: null,
@@ -156,7 +156,7 @@
     state.pendingSellerCentreMessages = new Map();
     state.sellerCentreFetches = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
-    state.observedMessageKeys = new Set();
+    state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
     state.sellerCentreListInitialized = false;
     state.sellerCentrePollingStarted = false;
     state.sellerCentrePollingTimer = null;
@@ -188,7 +188,8 @@
   state.pendingSellerCentreMessages ??= new Map();
   state.sellerCentreFetches ??= new Map();
   state.sellerCentreCaptureEpoch ??= 0;
-  state.observedMessageKeys ??= new Set();
+  // Message IDs are disposable acceleration state; never retain an old unbounded Set.
+  state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
   state.sellerCentreListInitialized ??= false;
   state.sellerCentrePollingStarted ??= false;
   state.sellerCentrePollingTimer ??= null;
@@ -791,9 +792,10 @@
       if (!conversationId || !messageId) continue;
       const eventMs = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
       if (!eventMs || eventMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) continue;
-      const key = `${conversationId}:${messageId}`;
-      if (state.observedMessageKeys.has(key)) continue;
-      state.observedMessageKeys.add(key);
+      const accountId = state.currentAccountId;
+      if (!accountId) continue;
+      if (state.observedMessageKeys.has("shopee", accountId, conversationId, messageId)) continue;
+      state.observedMessageKeys.add("shopee", accountId, conversationId, messageId);
       accepted.push(message);
     }
     if (accepted.length) {
@@ -2364,6 +2366,7 @@
   const dispose = (reason = "Page bridge was replaced.") => {
     if (disposed) return false;
     disposed = true;
+    state.observedMessageKeys.clear();
     resetSellerCentreCapture();
     resetRecovery(reason);
     window.removeEventListener?.("popstate", onPageSessionChange);
@@ -2390,6 +2393,7 @@
     compatibility_version: 2,
     metadata_refresh: true,
     fresh_provider_status: true,
+    bounded_message_ids: true,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

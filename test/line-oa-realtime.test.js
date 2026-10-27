@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
+const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
+const source = cacheSource + "\n" + await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("LINE OA recovery paginates chat and message history", () => {

@@ -27,9 +27,9 @@
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
-  const knownChatIdsByAccount = new Map();
+  const knownChatIds = globalThis.OmnichatMessageIdCache.create();
   const metadataProfilesByAccount = new Map();
-  const knownMessageIdsByAccount = new Map();
+  const knownMessageIds = globalThis.OmnichatMessageIdCache.create();
   const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
@@ -375,11 +375,9 @@
     return !disposed && generation.epoch === pollGeneration && !generation.cancelled;
   }
 
-  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, knownMessageIdsByChat, maxMessages = null, sinceMs = 0 }) {
+  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0 }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
-    const knownMessageIds = knownMessageIdsByChat.get(chatId) ?? new Set();
-    knownMessageIdsByChat.set(chatId, knownMessageIds);
     let backward = null;
     let page = 0;
     let parsed = 0;
@@ -395,7 +393,7 @@
       const rawMessages = Array.isArray(body?.list) ? body.list : [];
       const allKnown = rawMessages.length > 0 && rawMessages.every((message) => {
         const id = messageId(message);
-        return id && knownMessageIds.has(id);
+        return id && knownMessageIds.has("line_oa", providerAccountId, chatId, id);
       });
       if (allKnown) break;
       const messages = rawMessages
@@ -439,7 +437,7 @@
       if (!pollIsActive(generation)) return { parsed, queued };
       for (const message of messages) {
         const id = messageId(message);
-        if (id) knownMessageIds.add(id);
+        if (id) knownMessageIds.add("line_oa", providerAccountId, chatId, id);
       }
       if (maxMessages !== null && accepted >= maxMessages) break;
       const nextBackward = cursor(body?.backward);
@@ -538,10 +536,6 @@
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!pollIsActive(generation)) return;
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
-      const knownChatIds = knownChatIdsByAccount.get(providerAccountId) ?? new Set();
-      const knownMessageIdsByChat = knownMessageIdsByAccount.get(providerAccountId) ?? new Map();
-      knownChatIdsByAccount.set(providerAccountId, knownChatIds);
-      knownMessageIdsByAccount.set(providerAccountId, knownMessageIdsByChat);
       const selection = historySelection(history);
       if (selection && !String(requestId).startsWith("poll:")) missingHistoryIds.clear();
       const checkpointMs = timeMs(checkpoint?.watermark);
@@ -582,7 +576,7 @@
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
-        const allKnown = chats.length > 0 && chats.every((chat) => knownChatIds.has(value(chat?.chatId)));
+        const allKnown = chats.length > 0 && chats.every((chat) => knownChatIds.has("line_oa", providerAccountId, "chats", value(chat?.chatId)));
         const chatsToRecover = [];
         for (const chat of chats) {
           const chatId = value(chat?.chatId);
@@ -615,7 +609,6 @@
               botId: resolvedBotId,
               chat,
               generation,
-              knownMessageIdsByChat,
               maxMessages: deep || historyWindow
                 ? null
                 : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
@@ -635,7 +628,7 @@
           }
           parsed += result.parsed;
           queued += result.queued;
-          knownChatIds.add(chatId);
+          knownChatIds.add("line_oa", providerAccountId, "chats", chatId);
           completedConversations += 1;
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
           if (trackedRequest) {
@@ -666,7 +659,6 @@
             botId: resolvedBotId,
             chat: { chatId },
             generation,
-            knownMessageIdsByChat,
             maxMessages: null,
             sinceMs: selection.sinceMs,
           });
@@ -801,13 +793,19 @@
       stopTimer();
       pollGeneration += 1;
       pollingAccounts.clear();
+      knownMessageIds.clear();
+      knownChatIds.clear();
       cancelAcknowledgements(reason);
     } else {
       const affectedAccounts = accountId ? [accountId] : interrupted.map((request) => request.providerAccountId);
       for (const id of affectedAccounts) {
         const hasReplacement = activePoll?.providerAccountId === id
           || queuedSyncs.some((request) => request.providerAccountId === id);
-        if (!hasReplacement) pollingAccounts.delete(id);
+        if (!hasReplacement) {
+          pollingAccounts.delete(id);
+          knownMessageIds.clear("line_oa", id);
+          knownChatIds.clear("line_oa", id);
+        }
       }
       if (!pollingAccounts.size) stopTimer();
       for (const request of interrupted) cancelAcknowledgements(reason, request.requestId);
@@ -1177,6 +1175,7 @@
     bridge_version: BRIDGE_VERSION,
     compatibility_version: COMPATIBILITY_VERSION,
     metadata_refresh: true,
+    bounded_message_ids: true,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

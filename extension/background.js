@@ -88,7 +88,7 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 7;
+const BRIDGE_PROTOCOL_VERSION = 8;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
@@ -3416,6 +3416,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
             && window.__omnichatLineOABridgeControl?.metadata_refresh === true
+            && window.__omnichatLineOABridgeControl?.bounded_message_ids === true
             // Existing page scripts predate this field and use compatibility v1.
             && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
@@ -3425,6 +3426,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
             && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
             && window.__omnichatRealtimeBridgeControl?.fresh_provider_status === true
+            && window.__omnichatRealtimeBridgeControl?.bounded_message_ids === true
             && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
@@ -3529,6 +3531,7 @@ async function reinjectProviderBridge(tabId, adapter) {
           ? [
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
             ...(mainStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
+            "lib/message-id-cache.js",
             "line-oa-realtime.js",
           ]
           : [
@@ -3536,6 +3539,7 @@ async function reinjectProviderBridge(tabId, adapter) {
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
             ...(mainStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
             "lib/shopee-video.js",
+            "lib/message-id-cache.js",
             "shopee-realtime.js",
           ];
         await chrome.scripting.executeScript({
@@ -3563,6 +3567,7 @@ async function reinjectProviderBridge(tabId, adapter) {
         ? [
           ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
           ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
+          "lib/message-id-cache.js",
           "content.js",
         ]
         : [
@@ -3570,6 +3575,7 @@ async function reinjectProviderBridge(tabId, adapter) {
           ...(isolatedStatus.hasShopee ? [] : ["lib/shopee.js"]),
           ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
           ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
+          "lib/message-id-cache.js",
           "content.js",
         ];
       await chrome.scripting.executeScript({
