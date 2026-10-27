@@ -313,6 +313,8 @@ test("Shopee readiness requires the current main bridge compatibility", async ()
   control.compatibility_version = actual;
   assert.equal((await status()).ready, false, "metadata refresh support requires reattachment");
   control.metadata_refresh = true;
+  assert.equal((await status()).ready, false, "fresh status support requires reattachment");
+  control.fresh_provider_status = true;
   assert.equal((await status()).ready, true);
   control.compatibility_version++;
   assert.equal((await status()).ready, false);

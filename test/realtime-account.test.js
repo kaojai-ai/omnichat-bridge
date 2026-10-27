@@ -336,6 +336,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
 
   return {
     get state() { return window.__omnichatRealtimeState; },
+    setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
+    checkStatus(requestId) {
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
+      return posts.findLast(post => post.type === "provider_status" && post.request_id === requestId);
+    },
     fetch,
     setResponse,
     seedRecoveryState,
@@ -359,6 +364,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       }, origin);
     },
     get state() { return window.__omnichatRealtimeState; },
+    setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
+    checkStatus(requestId) {
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
+      return posts.findLast(post => post.type === "provider_status" && post.request_id === requestId);
+    },
     dispose() { window.__omnichatRealtimeBridgeControl.dispose(); },
     get messageListenerCount() { return listeners.length; },
     get miniChatClicks() { return miniChatClicks; },
@@ -1138,5 +1148,36 @@ test("redirected Webchat discovers its shop, captures routing, and observes the 
     const inbound = bridge.posts.findLast(post => post.type === "realtime_event");
     assert.equal(inbound.capture_method, "realtime_socket");
     assert.equal(inbound.body.messages[0].id, "incoming-1");
+  } finally { bridge.dispose(); }
+});
+
+
+test("Shopee provider checks replace socket listeners without a recurring observer", async () => {
+  const makeSocket = () => ({ connected: true, handlers: new Map(),
+    on(event, handler) { this.handlers.set(event, handler); },
+    off(event) { this.handlers.delete(event); } });
+  const first = makeSocket();
+  const bridge = createBridge({ socket: first, captureIntervals: true });
+  try {
+    assert.equal(bridge.intervals.some(item => item.delay === 2_000), false);
+    await new Promise(resolve => setImmediate(resolve));
+    const staleDisconnect = first.handlers.get("disconnect");
+    const second = makeSocket();
+    bridge.setSocket(second);
+    const status = bridge.checkStatus("fresh-1");
+    assert.equal(status.realtime_connected, true);
+    assert.ok(status.last_provider_check_at);
+    assert.equal(first.handlers.size, 0);
+    assert.equal(second.handlers.size, 3);
+    const count = bridge.posts.length;
+    staleDisconnect();
+    assert.equal(bridge.posts.length, count);
+    second.connected = false;
+    second.handlers.get("disconnect")();
+    assert.equal(bridge.posts.at(-1).realtime_connected, false);
+    bridge.setSocket(null);
+    assert.equal(bridge.checkStatus("fresh-2").realtime_connected, false);
+    assert.equal(second.handlers.size, 0);
+    assert.equal(bridge.state.socket, null);
   } finally { bridge.dispose(); }
 });

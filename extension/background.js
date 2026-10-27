@@ -88,7 +88,7 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 6;
+const BRIDGE_PROTOCOL_VERSION = 7;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
@@ -3424,6 +3424,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && window.__omnichatRealtimeState
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
             && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
+            && window.__omnichatRealtimeBridgeControl?.fresh_provider_status === true
             && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"

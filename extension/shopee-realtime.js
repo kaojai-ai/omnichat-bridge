@@ -91,12 +91,10 @@
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 300;
-  const SOCKET_OBSERVER_INTERVAL_MS = 2_000;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
   const SELLER_CENTRE_CHAT_OPEN_POLL_MS = 250;
   let sellerCentreClickListener = null;
-  let socketObserverTimer = null;
   let pageMessageListener = null;
   let observedFetch = null;
   let fetchBeforeBridge = null;
@@ -245,7 +243,7 @@
     send_product: surfaceSendReady(),
   });
 
-  const publishSurfaceStatus = () => {
+  const publishSurfaceStatus = (requestId = null) => {
     const capabilities = surfaceCapabilities();
     const ready = Boolean(state.listTemplate && state.getTemplate);
     const chatOpen = isSellerCentreSurface()
@@ -256,6 +254,7 @@
       : null;
     post({
       type: "provider_status",
+      ...(requestId ? { request_id: requestId } : {}),
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
@@ -485,6 +484,7 @@
         state.sellerCentreListInitialized = false;
       }
       state.currentAccountId = nextId;
+      observeSocket();
       state.loginRequest = null;
       state.accountsById.clear();
       postLog("info", "session_account_changed", "Shopee session account changed; sync follows the open shop.", {
@@ -2239,24 +2239,30 @@
     socketListeners = null;
   };
 
-  function observeSocket() {
+  function observeSocket(requestId = null) {
     if (!isBridgeActive()) return;
     if (isSellerCentreSurface()) {
-      publishSurfaceStatus();
+      publishSurfaceStatus(requestId);
       return;
     }
     const socket = window.__CHAT_GLOBAL__?.socket;
     if (!socket?.on) {
-      publishSurfaceStatus();
+      detachObservedSocket();
+      state.socket = null;
+      state.lastProviderCheckAt = null;
+      publishSurfaceStatus(requestId);
       return;
     }
     const connected = typeof socket.connected === "boolean" ? socket.connected : true;
     if (connected) state.lastProviderCheckAt = new Date().toISOString();
-    publishSurfaceStatus();
-    if (state.socket === socket && observedSocket === socket) return;
+    if (state.socket === socket && observedSocket === socket) {
+      publishSurfaceStatus(requestId);
+      return;
+    }
     detachObservedSocket();
     state.socket = socket;
     observedSocket = socket;
+    publishSurfaceStatus(requestId);
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtime = connected ? "connected" : "disconnected";
     }
@@ -2265,19 +2271,19 @@
       postLog("info", "socket_connected", "Shopee realtime socket connected.");
     }
     const onConnect = () => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "connected";
       state.lastProviderCheckAt = new Date().toISOString();
       post({ type: "socket_connected" });
       publishSurfaceStatus();
     };
     const onDisconnect = () => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       if (document.documentElement) document.documentElement.dataset.omnichatRealtime = "disconnected";
       publishSurfaceStatus();
     };
     const onMessage = (event) => {
-      if (!isBridgeActive()) return;
+      if (!isBridgeActive() || observedSocket !== socket) return;
       const envelope = event?.data ?? event;
       if (envelope?.message_type !== "message") return;
       try {
@@ -2299,14 +2305,16 @@
 
   if (isSellerCentreSurface() && state.listTemplate) startSellerCentrePolling();
   void observeAsync("socket_observer", observeSocket);
-  socketObserverTimer = setInterval(() => {
-    void observeAsync("socket_observer", observeSocket);
-  }, SOCKET_OBSERVER_INTERVAL_MS);
+  const onPageSessionChange = () => { void observeAsync("socket_observer", observeSocket); };
+  window.addEventListener("popstate", onPageSessionChange);
+  window.addEventListener("pageshow", onPageSessionChange);
 
   pageMessageListener = (event) => {
     if (!isBridgeActive()) return;
     if (event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "sync_v3") {
+    if (event.data.type === "check_provider_status_v3") {
+      observeSocket(event.data.request_id);
+    } else if (event.data.type === "sync_v3") {
       const providerAccountId = value(event.data.provider_account_id);
       void observeAsync("recovery", () => recover(event.data.request_id, {
         ...(event.data.checkpoint ?? {}),
@@ -2358,8 +2366,8 @@
     disposed = true;
     resetSellerCentreCapture();
     resetRecovery(reason);
-    if (socketObserverTimer != null) clearInterval(socketObserverTimer);
-    socketObserverTimer = null;
+    window.removeEventListener?.("popstate", onPageSessionChange);
+    window.removeEventListener?.("pageshow", onPageSessionChange);
     if (state.sellerCentrePollingTimer != null) clearInterval(state.sellerCentrePollingTimer);
     state.sellerCentrePollingTimer = null;
     state.sellerCentrePollingStarted = false;
@@ -2381,6 +2389,7 @@
     source: SOURCE,
     compatibility_version: 2,
     metadata_refresh: true,
+    fresh_provider_status: true,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 6;
+  const BRIDGE_PROTOCOL_VERSION = 7;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -18,6 +18,7 @@
   const recoveries = new Map();
   const accountDetections = new Map();
   const metadataRefreshRequests = new Map();
+  let providerStatusRequest = null;
   const profilesByConversation = new Map();
   const routingByConversation = new Map();
   const pendingOutbound = new Map();
@@ -1058,6 +1059,8 @@
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
       requestResumeSync();
     } else if (event.data.type === "provider_status") {
+      if (providerAdapter.id === "shopee" && event.data.request_id
+        && event.data.request_id !== providerStatusRequest?.requestId) return;
       const wasSurfaceReady = providerSurfaceReady;
       if (providerAdapter.id === "line_oa") {
         accountAccessVerified = event.data.account_access_verified === true;
@@ -1106,6 +1109,13 @@
         && !automaticSellerCentreLandingStarted
       ) {
         requestResumeSync();
+      }
+      if (providerAdapter.id === "shopee" && event.data.request_id === providerStatusRequest?.requestId
+        && providerStatusRequest) {
+        const pending = providerStatusRequest;
+        providerStatusRequest = null;
+        clearTimeout(pending.timeout);
+        pending.resolve(providerStatusSnapshot());
       }
     } else if (event.data.type === "seller_centre_chat_opened") {
       requestResumeSync();
@@ -1157,6 +1167,43 @@
     }
   };
 
+  function providerStatusSnapshot() {
+    return {
+      ok: true,
+      surface: providerSurface,
+      provider_account_ids: providerAccountIds,
+      accessible_account_ids: [...accessibleAccountIds],
+      account_access_verified: accountAccessVerified,
+      current_provider_account_id: currentProviderAccountId,
+      surface_ready: providerSurfaceReady,
+      capabilities: { ...providerCapabilities },
+      command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
+      realtime_transport: providerRealtimeTransport,
+      chat_open: providerChatOpen,
+      realtime_connected: realtimeConnected,
+      provider_polling_active: providerPollingActive,
+      provider_polling_account_ids: [...providerPollingAccountIds],
+      last_realtime_connected_at: lastRealtimeConnectedAt,
+      last_provider_check_at: lastProviderCheckAt,
+      page_visible: document.visibilityState === "visible",
+    };
+  }
+
+  function requestFreshProviderStatus() {
+    if (providerStatusRequest) return providerStatusRequest.promise;
+    const requestId = crypto.randomUUID();
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    const timeout = setTimeout(() => {
+      if (providerStatusRequest?.requestId !== requestId) return;
+      providerStatusRequest = null;
+      resolve({ ok: false, error: "Provider status response timed out." });
+    }, 1500);
+    providerStatusRequest = { requestId, promise, resolve, timeout };
+    post({ type: "check_provider_status_v3", request_id: requestId });
+    return promise;
+  }
+
   const onRuntimeMessage = (message, _sender, respond) => {
     if (!isBridgeActive()) return undefined;
     if (message?.provider && message.provider !== providerAdapter.id) {
@@ -1168,25 +1215,11 @@
       return false;
     }
     if (message?.type === "get_provider_status_v3") {
-      respond({
-        ok: true,
-        surface: providerSurface,
-        provider_account_ids: providerAccountIds,
-        accessible_account_ids: [...accessibleAccountIds],
-        account_access_verified: accountAccessVerified,
-        current_provider_account_id: currentProviderAccountId,
-        surface_ready: providerSurfaceReady,
-        capabilities: { ...providerCapabilities },
-        command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
-        realtime_transport: providerRealtimeTransport,
-        chat_open: providerChatOpen,
-        realtime_connected: realtimeConnected,
-        provider_polling_active: providerPollingActive,
-        provider_polling_account_ids: [...providerPollingAccountIds],
-        last_realtime_connected_at: lastRealtimeConnectedAt,
-        last_provider_check_at: lastProviderCheckAt,
-        page_visible: document.visibilityState === "visible",
-      });
+      if (providerAdapter.id === "shopee") {
+        void requestFreshProviderStatus().then(respond);
+        return true;
+      }
+      respond(providerStatusSnapshot());
       return false;
     }
     if (message?.type === "auto_open_chat_and_sync_v3") {
@@ -1250,6 +1283,11 @@
     if (disposed) return false;
     disposed = true;
     clearTimeout(resumeSyncTimer);
+    if (providerStatusRequest) {
+      clearTimeout(providerStatusRequest.timeout);
+      providerStatusRequest.resolve({ ok: false, error: reason });
+      providerStatusRequest = null;
+    }
     for (const pending of recoveries.values()) {
       pending.resolve({ ok: false, error: reason });
     }

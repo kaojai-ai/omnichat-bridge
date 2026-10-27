@@ -211,3 +211,7 @@ Release the related server/worker/Admin readiness compatibility first, then exte
 ### Planned: manual provider-tab reload only
 
 Version 0.8.0 removes automatic provider-tab reloads after health-check failures. Health checks and bridge repair continue; opt-in recovery can still open a missing tab with bounded retry backoff. A genuinely stuck page requires the user to reload it manually. Extension-update reloads are unaffected.
+
+### Planned: Shopee socket checks on demand
+
+Version 0.8.0 removes the two-second socket observer. Startup, detected session/page events, and fresh provider-status requests attach listeners to the current socket. The existing minute watchdog requests a fresh page response; command checks also use this path. Message/connect/disconnect listeners remain immediate, and provider message polling is unchanged. A silent socket replacement can take up to the next watchdog check to discover (longer if Chrome delays scheduling). Missing page responses remain uncertainty under the readiness policy, not confirmed logout.

@@ -362,7 +362,11 @@ test("keeps Seller Centre chat-open state available to the popup status", async 
     chat_open: false,
   });
 
-  const result = await bridge.sendCommand({ type: "get_provider_status_v3" });
+  const pending = bridge.sendCommand({ type: "get_provider_status_v3" });
+  const request = bridge.runtimeMessages.findLast(message => message.type === "check_provider_status_v3");
+  await bridge.providerEvent({ type: "provider_status", request_id: request.request_id,
+    surface: "seller-centre", surface_ready: false, chat_open: false });
+  const result = await pending;
   assert.equal(result.chat_open, false);
   assert.equal(result.surface_ready, false);
 });
@@ -811,4 +815,54 @@ test("LINE verified empty detection settles and clears access without persisting
   assert.deepEqual(plain(status.accessible_account_ids), []);
   assert.deepEqual(plain(status.provider_account_ids), []);
   assert.equal(bridge.runtimeMessages.some(message => message.type === "accounts_detected"), false);
+});
+
+
+test("Shopee status checks coalesce and wait for a matching fresh page response", async () => {
+  const bridge = contentBridge();
+  await bridge.providerEvent({ type: "provider_status", surface_ready: true, realtime_connected: true });
+  const first = bridge.sendCommand({ type: "get_provider_status_v3" });
+  const second = bridge.sendCommand({ type: "get_provider_status_v3" });
+  let settled = false;
+  void first.then(() => { settled = true; });
+  const requests = bridge.runtimeMessages.filter(message => message.type === "check_provider_status_v3");
+  assert.equal(requests.length, 1);
+  await bridge.providerEvent({ type: "provider_status", request_id: "wrong-request", surface_ready: true });
+  await bridge.providerEvent({ type: "provider_status", surface_ready: true });
+  assert.equal(settled, false);
+  await bridge.providerEvent({ type: "provider_status", request_id: requests[0].request_id,
+    surface_ready: false, realtime_connected: false, current_provider_account_id: "new-account" });
+  const results = await Promise.all([first, second]);
+  for (const result of results) {
+    assert.equal(result.ok, true);
+    assert.equal(result.surface_ready, false);
+    assert.equal(result.realtime_connected, false);
+    assert.equal(result.current_provider_account_id, "new-account");
+  }
+});
+
+test("Shopee missing fresh status fails instead of returning cached readiness", async () => {
+  const bridge = contentBridge();
+  await bridge.providerEvent({ type: "provider_status", surface_ready: true, realtime_connected: true });
+  const result = await bridge.sendCommand({ type: "get_provider_status_v3" });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /timed out/);
+  assert.equal(result.surface_ready, undefined);
+  const next = bridge.sendCommand({ type: "get_provider_status_v3" });
+  const requests = bridge.runtimeMessages.filter(message => message.type === "check_provider_status_v3");
+  assert.equal(requests.length, 2);
+  let settled = false;
+  void next.then(() => { settled = true; });
+  await bridge.providerEvent({ type: "provider_status", request_id: requests[0].request_id, surface_ready: true });
+  assert.equal(settled, false);
+  await bridge.providerEvent({ type: "provider_status", request_id: requests[1].request_id, surface_ready: false });
+  assert.equal((await next).surface_ready, false);
+});
+
+test("replacing the content bridge cancels a pending Shopee status probe", async () => {
+  const bridge = contentBridge();
+  const result = bridge.sendCommand({ type: "get_provider_status_v3" });
+  bridge.reattach();
+  assert.equal((await result).ok, false);
+  assert.match((await result).error, /reattached/);
 });
