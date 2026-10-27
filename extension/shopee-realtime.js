@@ -137,6 +137,8 @@
     pollingConnected: false,
     pollingConnectedAt: null,
     lastProviderCheckAt: null,
+    sellerCentrePollOutcome: null,
+    sellerCentreCaptureOutcome: null,
     pollingRefreshInFlight: false,
     sellerCentreChatOpenPromise: null,
   };
@@ -162,6 +164,8 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
   }
@@ -204,6 +208,8 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.pollingRefreshInFlight = false;
     state.sellerCentreChatOpenPromise = null;
     state.socket = null;
@@ -252,8 +258,15 @@
         return launcher ? sellerCentreChatIsOpen(launcher) : null;
       })()
       : null;
+    const providerCheckOutcome = isSellerCentreSurface()
+      ? (!state.currentAccountId || chatOpen === false ? "failed"
+        : state.sellerCentreCaptureOutcome === "failed" || state.sellerCentrePollOutcome === "failed" ? "failed"
+        : state.sellerCentreCaptureOutcome === "unknown" || state.sellerCentrePollOutcome === "unknown" ? "unknown"
+        : state.pollingConnected && state.sellerCentreCaptureFailed !== true ? "passed" : "failed")
+      : null;
     post({
       type: "provider_status",
+      ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       ...(requestId ? { request_id: requestId } : {}),
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
@@ -481,6 +494,8 @@
         resetSellerCentreCapture();
         state.observedMessageKeys.clear();
         state.pollingConnected = false;
+        state.sellerCentrePollOutcome = null;
+        state.sellerCentreCaptureOutcome = null;
         state.sellerCentreListInitialized = false;
       }
       state.currentAccountId = nextId;
@@ -848,6 +863,13 @@
     state.pendingSellerCentreMessages.clear();
     state.sellerCentreFetches.clear();
     state.sellerCentreCaptureFailed = false;
+    state.sellerCentreCaptureOutcome = null;
+  };
+
+  const sellerCentreFailureOutcome = (error) => {
+    const status = error?.http_status;
+    return status >= 400 && status < 500 || error?.reason_code === "session_changed"
+      ? "failed" : "unknown";
   };
 
   async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
@@ -855,6 +877,9 @@
     if (!template) return false;
     const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template));
     if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
+    if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+      throw Object.assign(new Error("Shopee message capture returned an invalid response."), { reason_code: "invalid_message_history" });
+    }
     const messages = Array.isArray(body)
       ? body
       : conversationItems(body);
@@ -927,6 +952,7 @@
         if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
         if (!captured) {
           state.sellerCentreCaptureFailed = true;
+          state.sellerCentreCaptureOutcome = "failed";
           continue;
         }
         state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
@@ -935,7 +961,10 @@
           state.pendingSellerCentreMessages.delete(conversationId);
         }
       } catch (error) {
-        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) state.sellerCentreCaptureFailed = true;
+        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
+          state.sellerCentreCaptureFailed = true;
+          if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
+        }
         logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
       } finally {
         if (state.sellerCentreFetches.get(conversationId) === token) {
@@ -943,7 +972,10 @@
         }
       }
     }
-    if (!state.pendingSellerCentreMessages.size) state.sellerCentreCaptureFailed = false;
+    if (!state.pendingSellerCentreMessages.size) {
+      state.sellerCentreCaptureFailed = false;
+      state.sellerCentreCaptureOutcome = null;
+    }
   }
 
   async function refreshSellerCentreConversations() {
@@ -956,6 +988,9 @@
         body: state.listTemplate.body?.slice(0),
       }));
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+        throw Object.assign(new Error("Shopee conversation polling returned an invalid response."), { reason_code: "invalid_conversation_list" });
+      }
       await captureSellerCentreConversationList(body);
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       state.lastProviderCheckAt = new Date().toISOString();
@@ -975,10 +1010,12 @@
           await refreshSellerCentreConversations();
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = true;
+          state.sellerCentrePollOutcome = "passed";
           state.pollingConnectedAt ??= new Date().toISOString();
         } catch (error) {
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = false;
+          state.sellerCentrePollOutcome = sellerCentreFailureOutcome(error);
           postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
         } finally {
           publishSurfaceStatus();
@@ -2198,6 +2235,7 @@
         captureAccount(response, null, requestSessionEpoch);
       } else if (isSellerCentreSurface() && path === surfaceProfile().syncPath && request.method === "POST") {
         state.pollingConnected = response.ok;
+        if (!response.ok) state.sellerCentrePollOutcome = response.status >= 500 ? "unknown" : "failed";
         if (state.pollingConnected) {
           state.pollingConnectedAt ??= new Date().toISOString();
           state.lastProviderCheckAt = new Date().toISOString();
@@ -2373,6 +2411,8 @@
     state.pollingConnected = false;
     state.pollingConnectedAt = null;
     state.lastProviderCheckAt = null;
+    state.sellerCentrePollOutcome = null;
+    state.sellerCentreCaptureOutcome = null;
     state.sellerCentreChatOpenPromise = null;
     detachObservedSocket();
     state.socket = null;
@@ -2389,6 +2429,7 @@
     metadata_refresh: true,
     fresh_provider_status: true,
     bounded_message_ids: true,
+    grace_classification: true,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

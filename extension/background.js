@@ -88,7 +88,7 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 8;
+const BRIDGE_PROTOCOL_VERSION = 9;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
@@ -417,13 +417,19 @@ function providerStatusMeetsPolicy(status, context) {
     && Array.isArray(capabilities) && capabilities.includes("send_text");
 }
 
+// A transport/probe failure is missing evidence, not a provider rejection.
+function providerStatusEvidence(status) {
+  return status?.provider_check_outcome === "unknown" ? null : status;
+}
+
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
   const adapter = context.adapter;
   providerPolicyContexts.set(context.key, context);
   const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
   const observedTabs = tabs ?? await providerChatTabs(adapter);
   const observedTabContexts = tabContexts ?? observedTabs.map((tab) => providerTabContext(tab, adapter.id));
-  const observedStatuses = statuses ?? await Promise.all(observedTabs.map(providerTabStatus));
+  const reportedStatuses = statuses ?? await Promise.all(observedTabs.map(providerTabStatus));
+  const observedStatuses = reportedStatuses.map(providerStatusEvidence);
   // Navigation/replacement invalidates pending reads; a late response never restores readiness.
   if (observedEpoch !== providerSessionEpoch(adapter.id)
     || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
@@ -433,7 +439,8 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const identityMatches = (status) => adapter.id === "shopee"
     ? status?.current_provider_account_id === context.account.provider_account_id
     : status?.account_access_verified === true && status.accessible_account_ids?.includes(context.account.provider_account_id);
-  const identities = new Set(observedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
+  // A known different Shopee account still blocks even when its polling check is unavailable.
+  const identities = new Set(reportedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
   const conflict = adapter.id === "shopee" && identities.size > 1;
   const matchingTab = orderProviderTabs(adapter, observedTabs).find((candidate) => {
     const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
@@ -496,7 +503,7 @@ async function lineSessionContexts(contexts, { refresh = false, forRecovery = tr
         const result = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: adapter.id }, {
           label: "LINE OA", operation: "access check", timeoutMs: 25_000,
         });
-        if (!result?.ok) return { ok: false };
+        if (!result?.ok) return { ok: false, provider_check_outcome: result?.provider_check_outcome };
       } catch { return null; }
     }
     return providerTabStatus(tab);
@@ -3417,6 +3424,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
             && window.__omnichatLineOABridgeControl?.metadata_refresh === true
             && window.__omnichatLineOABridgeControl?.bounded_message_ids === true
+            && window.__omnichatLineOABridgeControl?.grace_classification === true
             // Existing page scripts predate this field and use compatibility v1.
             && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
@@ -3427,6 +3435,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
             && window.__omnichatRealtimeBridgeControl?.fresh_provider_status === true
             && window.__omnichatRealtimeBridgeControl?.bounded_message_ids === true
+            && window.__omnichatRealtimeBridgeControl?.grace_classification === true
             && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"

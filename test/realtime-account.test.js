@@ -1243,3 +1243,62 @@ test("Shopee rejects malformed conversation lists without advancing recovery", a
   assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
   bridge.dispose();
 });
+
+for (const status of [503, 403]) {
+  test(`Seller Centre classifies polling ${status} as ${status === 503 ? "unknown" : "failed"} and recovers`, async () => {
+    const bridge = await pollingRetryBridge();
+    try {
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("before-failure").provider_check_outcome, "passed");
+      bridge.setResponse(retryListPath, () => new Response("{}", { status }));
+      await bridge.runIntervals();
+      const failed = bridge.checkStatus("after-failure");
+      assert.equal(failed.provider_check_outcome, status === 503 ? "unknown" : "failed");
+      assert.equal(failed.realtime_connected, false);
+      assert.equal(failed.current_provider_account_id, "100000001");
+      bridge.setResponse(retryListPath, [retryConversation("m1")]);
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("after-recovery").provider_check_outcome, "passed");
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("Seller Centre timeout reports missing evidence and clears it after a successful poll", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true, requestTimeoutMs: 20 });
+  try {
+    await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+    await bridge.fetch(retryListPath, [retryConversation("m1")]);
+    await bridge.runIntervals();
+    bridge.setResponse(retryListPath, () => new Promise(() => {}));
+    await bridge.runIntervals();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(bridge.checkStatus("timeout").provider_check_outcome, "unknown");
+    bridge.setResponse(retryListPath, [retryConversation("m1")]);
+    await bridge.runIntervals();
+    assert.equal(bridge.checkStatus("recovered-timeout").provider_check_outcome, "passed");
+  } finally { bridge.dispose(); }
+});
+
+for (const status of [503, 403]) {
+  test(`Seller Centre successful list cannot hide required history ${status}`, async () => {
+    const bridge = await pollingRetryBridge();
+    try {
+      bridge.setResponse(retryListPath, [retryConversation("m2")]);
+      bridge.setResponse(retryHistoryPath, () => new Response("{}", { status }));
+      await bridge.runIntervals();
+      assert.equal(bridge.state.pollingConnected, true);
+      assert.equal(bridge.checkStatus("capture-failure").provider_check_outcome, status === 503 ? "unknown" : "failed");
+      if (status === 403) {
+        bridge.setResponse(retryHistoryPath, () => new Response("{}", { status: 503 }));
+        await bridge.runIntervals();
+        assert.equal(bridge.checkStatus("capture-still-failed").provider_check_outcome, "failed");
+      }
+      bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+      await bridge.runIntervals();
+      assert.equal(bridge.checkStatus("capture-recovered").provider_check_outcome, "passed");
+      await bridge.fetch("/webchat/api/v1.2/mini/user/setting", () => new Response("{}", { status: 401 }));
+      assert.equal(bridge.checkStatus("logged-out").provider_check_outcome, "failed");
+      assert.equal(bridge.checkStatus("logged-out-account").current_provider_account_id, null);
+    } finally { bridge.dispose(); }
+  });
+}

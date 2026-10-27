@@ -21,6 +21,7 @@
   const pollingAccounts = new Map();
   let accessibleAccounts = [];
   let accountAccessVerified = false;
+  let providerCheckOutcome = "unknown";
   let accountAccessRequest = null;
   let metadataSessionEpoch = 0;
   let pollGeneration = 0;
@@ -111,6 +112,7 @@
       command_capabilities_by_account: commandCapabilitiesByAccount,
       accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
       account_access_verified: accountAccessVerified,
+      provider_check_outcome: providerCheckOutcome,
       realtime_transport: "authenticated_polling",
       realtime_connected: !lastProviderCheckAt || Date.now() - Date.parse(lastProviderCheckAt) < 45_000,
       connected_at: new Date().toISOString(),
@@ -131,6 +133,8 @@
     try {
       const request = input instanceof Request ? input : null;
       const url = new URL(request?.url ?? String(input), window.location.origin);
+      if (url.origin === window.location.origin && /^\/api\/v\d+\/bots(?:\/|$)/.test(url.pathname)
+        && [401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
       const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
       const rawBody = init?.body ?? null;
       if (method === "POST" && typeof rawBody === "string" && messageSendPath(url)) {
@@ -143,8 +147,28 @@
     return response;
   };
 
+  function markProviderCheckFailure(error) {
+    const confirmedFailure = [401, 403].includes(error?.providerDiagnostics?.http_status);
+    if (confirmedFailure) {
+      metadataSessionEpoch += 1;
+      providerCheckOutcome = "failed";
+      accessibleAccounts = [];
+    } else if (providerCheckOutcome !== "failed") {
+      providerCheckOutcome = "unknown";
+    }
+    accountAccessVerified = false;
+    postProviderStatus();
+  }
+
+  function invalidProviderResponse(message) {
+    const error = new Error(message);
+    markProviderCheckFailure(error);
+    return error;
+  }
+
   async function availableAccounts() {
     if (accountAccessRequest) return accountAccessRequest;
+    const sessionEpoch = metadataSessionEpoch;
     accountAccessRequest = (async () => {
       try {
         const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`);
@@ -155,9 +179,11 @@
           display_name: value(bot?.name ?? bot?.displayName),
         })).filter((account) => account.provider_account_id && account.bot_id);
         if (disposed) return [];
+        if (sessionEpoch !== metadataSessionEpoch) throw new Error("LINE OA account check was superseded by a session change.");
         if (accessibleAccounts.some((previous) => !accounts.some((account) => account.provider_account_id === previous.provider_account_id && account.bot_id === previous.bot_id))) metadataSessionEpoch += 1;
         accessibleAccounts = accounts;
         accountAccessVerified = true;
+        providerCheckOutcome = "passed";
         const ids = new Set(accounts.map((account) => account.provider_account_id));
         for (const id of pollingAccounts.keys()) {
           if (!ids.has(id)) cancelPolling("This LINE OA is not accessible to the signed-in user.", { providerAccountId: id });
@@ -165,9 +191,7 @@
         postProviderStatus();
         return accounts;
       } catch (error) {
-        // A failed request cannot prove that access was revoked.
-        accountAccessVerified = false;
-        postProviderStatus();
+        markProviderCheckFailure(error);
         throw error;
       }
     })().finally(() => { accountAccessRequest = null; });
@@ -211,7 +235,6 @@
         ...(controller ? { signal: controller.signal } : {}),
       });
       if (!response.ok) {
-        if ([401, 403].includes(response.status)) metadataSessionEpoch += 1;
         let format = "json";
         const body = await response.json().catch(() => { format = "non_json"; return null; });
         const error = new Error(`LINE OA request failed (${response.status}).`);
@@ -222,8 +245,10 @@
       lastProviderCheckAt = new Date().toISOString();
       return body;
     } catch (error) {
-      if (error?.name === "AbortError") throw new Error("LINE OA request timed out.");
-      throw error;
+      const failure = error?.name === "AbortError" ? new Error("LINE OA request timed out.") : error;
+      failure.providerCheckUnavailable = true;
+      if ([401, 403].includes(failure?.providerDiagnostics?.http_status)) markProviderCheckFailure(failure);
+      throw failure;
     } finally {
       clearTimeout(timeout);
     }
@@ -389,7 +414,7 @@
       if (remaining <= 0) break;
       const body = await json(messagesUrl(botId, chatId, backward, Math.min(PAGE_LIMIT, remaining)));
       if (!pollIsActive(generation)) return { parsed, queued };
-      if (!Array.isArray(body?.list)) throw new Error("LINE OA message history response is invalid.");
+      if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA message history response is invalid.");
       const rawMessages = body.list;
       const messages = rawMessages
         .filter((message) => {
@@ -557,7 +582,7 @@
       while (pollIsActive(generation)) {
         const body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
-        if (!Array.isArray(body?.list)) throw new Error("LINE OA conversation list response is invalid.");
+        if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
@@ -700,9 +725,7 @@
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark });
     } catch (error) {
-      if ([401, 403].includes(error?.providerDiagnostics?.http_status)) {
-        await availableAccounts().catch(() => undefined);
-      }
+      if (error?.providerCheckUnavailable) markProviderCheckFailure(error);
       if (pollIsActive(generation)) {
         postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
@@ -985,6 +1008,7 @@
         httpStatus = upload.status;
         const uploaded = await upload.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
         if (!upload.ok) {
+          if ([401, 403].includes(upload.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: upload.status } });
           providerDetails = providerErrorDetails(uploaded);
           throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
         }
@@ -1008,7 +1032,7 @@
       httpStatus = response.status;
       const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
       if (!response.ok) {
-        if ([401, 403].includes(response.status)) void availableAccounts().catch(() => undefined);
+        if ([401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
         providerDetails = providerErrorDetails(responseBody);
         post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
@@ -1134,6 +1158,7 @@
       }).catch((error) => {
         post({
           type: "account_detection_failed",
+          provider_check_outcome: providerCheckOutcome,
           request_id: event.data.request_id,
           error: "LINE OA account detection failed.",
           diagnostics: failedOperationDiagnostics(error, "initialize"),
@@ -1171,6 +1196,7 @@
     compatibility_version: COMPATIBILITY_VERSION,
     metadata_refresh: true,
     bounded_message_ids: true,
+    grace_classification: true,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

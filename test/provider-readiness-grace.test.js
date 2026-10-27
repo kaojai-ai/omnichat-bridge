@@ -230,3 +230,48 @@ test("late older positive observations cannot overwrite a newer confirmed failur
   assert.equal(stale.eligible, false);
   assert.equal(h.policy.state(h.context.key).generation, blocked.generation);
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: typed missing probe results use fixed grace, confirmed failures still block`, async () => {
+    const h = fixture(provider);
+    await h.assess();
+    h.result = { ok: false, provider_check_outcome: "unknown", error: "Provider check timed out." };
+    const grace = await h.snapshot();
+    assert.equal(grace.ready, true);
+    assert.equal(grace.reason_code, "provider_check_grace");
+    assert.equal(grace.readiness_grace_expires_at, new Date(130_000).toISOString());
+    h.now = 129_000;
+    assert.equal((await h.snapshot()).readiness_grace_expires_at, grace.readiness_grace_expires_at);
+    h.now = 130_000;
+    assert.equal((await h.snapshot()).ready, false);
+    h.result = h.healthy;
+    assert.equal((await h.snapshot()).ready, true);
+    h.result = { ok: false, provider_check_outcome: "failed" };
+    assert.equal((await h.snapshot()).ready, false);
+    h.result = { ok: false, provider_check_outcome: "unknown" };
+    assert.equal((await h.snapshot()).ready, false, "missing evidence cannot resurrect a confirmed failed session");
+  });
+}
+
+test("LINE refreshed access-check uncertainty reaches the same readiness policy", async () => {
+  const h = fixture("line_oa");
+  await h.assess();
+  h.scope.ensureProviderBridge = async () => {};
+  vm.runInContext(part("async function lineSessionContexts(", "async function activeLiveCommandContexts("), h.scope);
+  h.result = { ok: false, provider_check_outcome: "unknown" };
+  assert.equal((await h.scope.lineSessionContexts([h.context], { refresh: true })).length, 1);
+  assert.equal(h.policy.state(h.context.key).reason_code, "provider_check_grace");
+  h.result = { ok: false, provider_check_outcome: "failed" };
+  assert.equal((await h.scope.lineSessionContexts([h.context], { refresh: true })).length, 0);
+  assert.equal(h.policy.state(h.context.key).eligible, false);
+});
+
+
+test("Shopee polling uncertainty cannot hide a known account switch", async () => {
+  const h = fixture("shopee");
+  await h.assess();
+  h.result = { ...h.healthy, provider_check_outcome: "unknown", current_provider_account_id: "other" };
+  const result = await h.snapshot();
+  assert.equal(result.ready, false);
+  assert.equal(result.reason_code, "wrong_account");
+});

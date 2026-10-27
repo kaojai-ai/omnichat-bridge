@@ -848,6 +848,7 @@ test("Shopee missing fresh status fails instead of returning cached readiness", 
   const result = await bridge.sendCommand({ type: "get_provider_status_v3" });
   assert.equal(result.ok, false);
   assert.match(result.error, /timed out/);
+  assert.equal(result.provider_check_outcome, "unknown");
   assert.equal(result.surface_ready, undefined);
   const next = bridge.sendCommand({ type: "get_provider_status_v3" });
   const requests = bridge.runtimeMessages.filter(message => message.type === "check_provider_status_v3");
@@ -867,3 +868,20 @@ test("replacing the content bridge cancels a pending Shopee status probe", async
   assert.equal((await result).ok, false);
   assert.match((await result).error, /reattached/);
 });
+
+
+for (const outcome of ["unknown", "failed"]) {
+  test(`LINE ${outcome} provider evidence survives both status and account detection`, async () => {
+    const bridge = contentBridge("/account/bot/chat", { provider: "line_oa" });
+    await bridge.providerEvent({ type: "provider_status", provider_check_outcome: outcome,
+      account_access_verified: false, accessible_account_ids: [] });
+    const status = await bridge.sendCommand({ type: "get_provider_status_v3" });
+    assert.equal(status.provider_check_outcome, outcome);
+    const pending = bridge.sendCommand({ type: "detect_account_v3", provider: "line_oa" });
+    await new Promise(resolve => setImmediate(resolve));
+    const request = bridge.runtimeMessages.findLast(message => message.type === "detect_account_v3");
+    await bridge.providerEvent({ type: "account_detection_failed", request_id: request.request_id,
+      provider_check_outcome: outcome, error: "Provider check failed." });
+    assert.equal((await pending).provider_check_outcome, outcome);
+  });
+}

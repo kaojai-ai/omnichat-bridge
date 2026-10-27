@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -75,6 +75,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         return { ok: sendStatus === 200, status: sendStatus, json: async () => { if (sendNonJson) throw new SyntaxError("secret provider HTML"); return sendResponseBody === undefined ? ({ id: `sent-${sentPayloads.length}` }) : sendResponseBody; } };
       }
       if (url.pathname === "/api/v1/bots") {
+        if (beforeAccountRequest) await beforeAccountRequest();
         if (accountError) throw accountError;
         return {
           ok: true,
@@ -1295,3 +1296,96 @@ for (const [name, options] of [
     } finally { bridge.dispose(); }
   });
 }
+
+for (const [name, error, expected] of [
+  ["network error", new TypeError("network unavailable"), "unknown"],
+  ["timeout", Object.assign(new Error("request aborted"), { name: "AbortError" }), "unknown"],
+  ["server error", Object.assign(new Error("server unavailable"), { providerDiagnostics: { http_status: 503 } }), "unknown"],
+  ["unauthorized", Object.assign(new Error("unauthorized"), { providerDiagnostics: { http_status: 401 } }), "failed"],
+  ["forbidden", Object.assign(new Error("forbidden"), { providerDiagnostics: { http_status: 403 } }), "failed"],
+]) {
+  test(`LINE OA account ${name} reports ${expected} without verified access`, async () => {
+    const bridge = createBridge({ chatCount: 0 });
+    try {
+      await bridge.sync();
+      assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+      bridge.setAccountError(error);
+      const result = await bridge.detect();
+      const status = lastPollingStatus(bridge);
+      assert.equal(result.type, "account_detection_failed");
+      assert.equal(result.provider_check_outcome, expected);
+      assert.equal(status.provider_check_outcome, expected);
+      assert.equal(status.account_access_verified, false);
+      if (expected === "failed") assert.deepEqual(status.accessible_account_ids, []);
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("LINE OA malformed account list is uncertainty and a valid response restores passed", async () => {
+  const bridge = createBridge({ chatCount: 0 });
+  try {
+    await bridge.sync();
+    bridge.setAccounts({ unexpected: true });
+    const failed = await bridge.detect();
+    assert.equal(failed.provider_check_outcome, "unknown");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    bridge.setAccounts([{ botId: "bot-1", basicSearchId: "@exampleoa" }]);
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, true);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA polling authorization failure remains failed through subsequent unknown checks", async () => {
+  const error = Object.assign(new Error("permission denied"), { providerDiagnostics: { http_status: 403 } });
+  const bridge = createBridge({ chatError: error });
+  try {
+    const result = await bridge.sync();
+    assert.equal(result.ok, false);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    bridge.setAccountError(new TypeError("network unavailable"));
+    const unknown = await bridge.detect();
+    assert.equal(unknown.provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    bridge.setAccountError(null);
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE OA late account success cannot overwrite a newer authorization failure", async () => {
+  let block = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ chatCount: 0, sendStatus: 401,
+    beforeAccountRequest: async () => { if (block) await gate; },
+  });
+  try {
+    await bridge.sync();
+    block = true;
+    const detection = bridge.detect();
+    await settleBridge();
+    await bridge.captureManualSend({ type: "text", text: "Fixture", sendId: "fixture-send" });
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    release();
+    const stale = await detection;
+    assert.equal(stale.type, "account_detection_failed");
+    assert.equal(stale.provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    block = false;
+    await bridge.detect();
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+  } finally { release(); bridge.dispose(); }
+});
+
+test("LINE OA send authorization rejection immediately reports a confirmed failed check", async () => {
+  const bridge = createBridge({ sendStatus: 403 });
+  try {
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply" });
+    assert.equal(result.ok, false);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
+    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+  } finally { bridge.dispose(); }
+});

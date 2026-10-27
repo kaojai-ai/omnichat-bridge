@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 8;
+  const BRIDGE_PROTOCOL_VERSION = 9;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -35,6 +35,7 @@
   let providerAccountIds = [];
   let accessibleAccountIds = [];
   let accountAccessVerified = false;
+  let providerCheckOutcome = null;
   let currentProviderAccountId = null;
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
@@ -435,7 +436,7 @@
       const timeout = setTimeout(() => {
         accountDetections.delete(requestId);
         log("warn", "account_detection_timeout", `${providerLabel} account detection timed out.`);
-        resolve({ ok: false, error: `Refresh ${providerLabel} to detect the account ID.` });
+        resolve({ ok: false, provider_check_outcome: "unknown", error: `Refresh ${providerLabel} to detect the account ID.` });
       }, 20_000);
       accountDetections.set(requestId, { resolve, timeout });
     });
@@ -510,7 +511,10 @@
       ...providerFailureDiagnostics(message),
       request_id: message.request_id,
     });
-    pending.resolve({ ok: false, error: message.error ?? `${providerLabel} account ID was not found.` });
+    pending.resolve({ ok: false,
+      ...(["unknown", "failed", "passed"].includes(message.provider_check_outcome)
+        ? { provider_check_outcome: message.provider_check_outcome } : {}),
+      error: message.error ?? `${providerLabel} account ID was not found.` });
   }
 
   function profileField(profile, field) {
@@ -1063,6 +1067,8 @@
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
       const wasSurfaceReady = providerSurfaceReady;
+      providerCheckOutcome = ["unknown", "failed", "passed"].includes(event.data.provider_check_outcome)
+        ? event.data.provider_check_outcome : null;
       if (providerAdapter.id === "line_oa") {
         accountAccessVerified = event.data.account_access_verified === true;
         accessibleAccountIds = Array.isArray(event.data.accessible_account_ids)
@@ -1177,6 +1183,7 @@
       provider_account_ids: providerAccountIds,
       accessible_account_ids: [...accessibleAccountIds],
       account_access_verified: accountAccessVerified,
+      ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
       surface_ready: providerSurfaceReady,
       capabilities: { ...providerCapabilities },
@@ -1200,7 +1207,7 @@
     const timeout = setTimeout(() => {
       if (providerStatusRequest?.requestId !== requestId) return;
       providerStatusRequest = null;
-      resolve({ ok: false, error: "Provider status response timed out." });
+      resolve({ ok: false, provider_check_outcome: "unknown", error: "Provider status response timed out." });
     }, 1500);
     providerStatusRequest = { requestId, promise, resolve, timeout };
     post({ type: "check_provider_status_v3", request_id: requestId });
@@ -1289,7 +1296,7 @@
     realtimeMessageKeys.clear();
     if (providerStatusRequest) {
       clearTimeout(providerStatusRequest.timeout);
-      providerStatusRequest.resolve({ ok: false, error: reason });
+      providerStatusRequest.resolve({ ok: false, provider_check_outcome: "unknown", error: reason });
       providerStatusRequest = null;
     }
     for (const pending of recoveries.values()) {

@@ -230,3 +230,7 @@ Conversation cursors advance only after every required page for that conversatio
 Validation covers 8/30-day absence, interrupted newest-first pagination, warm/cold recovery equivalence, same-timestamp messages, initial bounds, cache caps, malformed responses, and failed-scan realtime capture. Synthetic cache cardinality is bounded under sustained input; no live heap, CPU, or incoming-latency improvement has been measured.
 
 Synthetic validation: 48,000 distinct IDs retain 20,000 entries under the configured cache cap. For the same three-conversation fixed-checkpoint LINE fixture, message requests are 4 for both warm and fresh bridges; the prior warm-cache shortcut made 1 request. These are fixture counts, not production request-rate or heap measurements.
+
+### Planned: explicit check outcomes
+
+Provider checks distinguish passed, unknown, and failed outcomes through the page/content/background boundary. Shopee page-response/polling timeouts and LINE transient account-check failures are unknown and use the same fixed 30-second grace for a previously ready, unchanged session. LINE authentication/access rejection is failed and blocks immediately; a later missing response cannot restore grace after a confirmed failure. A valid new account check is required for recovery. Late account-check results cannot overwrite a newer authentication failure. Internal content protocol 9 and provider classification capabilities ensure existing page bridges are replaced.

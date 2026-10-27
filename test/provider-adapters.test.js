@@ -40,6 +40,7 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   assert.equal((await status()).ready, false, "missing metadata refresh support requires reattachment");
   control.metadata_refresh = true;
   control.bounded_message_ids = true;
+  control.grace_classification = true;
   assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
   control.compatibility_version += 1;
   assert.equal((await status()).ready, false, "breaking interfaces require reattachment");
@@ -315,6 +316,7 @@ test("Shopee readiness requires the current main bridge compatibility", async ()
   assert.equal((await status()).ready, false, "metadata refresh support requires reattachment");
   control.metadata_refresh = true;
   control.bounded_message_ids = true;
+  control.grace_classification = true;
   assert.equal((await status()).ready, false, "fresh status support requires reattachment");
   control.fresh_provider_status = true;
   assert.equal((await status()).ready, true);
