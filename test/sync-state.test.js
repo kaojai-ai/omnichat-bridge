@@ -65,3 +65,12 @@ test("realtime remains deferred until backlog recovery completes", () => {
     in_progress: false,
   }), false);
 });
+
+
+test("failed or cancelled scan keeps later realtime cursors deferred until successful recovery", () => {
+  const state = { watermark: "2026-07-01T00:00:00Z", in_progress: false,
+    started_at: "2026-08-01T00:00:00Z", completed_at: "2026-07-01T00:00:00Z" };
+  assert.equal(hasScanBacklog({ ...state, failed_at: "2026-08-01T00:01:00Z" }), true);
+  assert.equal(hasScanBacklog({ ...state, cancelled_at: "2026-08-01T00:01:00Z" }), true);
+  assert.equal(hasScanBacklog({ ...state, completed_at: "2026-08-01T00:02:00Z" }), false);
+});

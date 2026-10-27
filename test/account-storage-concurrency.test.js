@@ -176,3 +176,17 @@ test("capture during an active upload wakes one follow-up drain without parallel
   assert.equal(result.sent, 3);
   assert.equal(result.pending, 0);
 });
+
+
+test("realtime after a failed scan cannot advance past unrecovered historical pages", async () => {
+  const h = harness();
+  const a = context("a");
+  const checkpoint = { event_timestamp: "2026-09-01T00:00:00Z", message_id: "old" };
+  h.state[STORAGE.scanState] = writeAccountState(null, a.key, { version: 1,
+    watermark: "2026-09-01T00:00:00Z", in_progress: false,
+    started_at: "2026-10-25T00:00:00Z", completed_at: "2026-09-01T00:00:00Z",
+    failed_at: "2026-10-25T00:01:00Z", conversations: { conversation: checkpoint } });
+  await h.runtime.queueMessagesForContext([message("new-realtime")], a, false);
+  assert.deepEqual(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation, checkpoint);
+  assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 1);
+});

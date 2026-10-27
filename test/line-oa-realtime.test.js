@@ -3,8 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
-const source = cacheSource + "\n" + await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
+const source = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test("LINE OA recovery paginates chat and message history", () => {
@@ -46,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -87,6 +86,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       if (url.pathname === "/api/v2/bots/bot-1/chats") {
         if (beforeChatRequest) await beforeChatRequest(url);
         if (chatError) throw chatError;
+        if (chatPages) return { ok: true, json: async () => chatPages[url.searchParams.get("next") ?? "first"] ?? { list: [] } };
         const next = url.searchParams.get("next");
         const pageIndex = next ? Number(String(next).replace("chat-page-", "")) - 1 : 0;
         const chatId = chatIds[pageIndex];
@@ -104,6 +104,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
         };
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
+        if (beforeMessageRequest) await beforeMessageRequest(url);
+        if (messagePages) return { ok: true, json: async () => messagePages[url.searchParams.get("backward") ?? "first"] ?? { list: [] } };
         if (sentPayloads.length && confirmError) throw confirmError;
         if (sentPayloads.length && sendResponseBody === undefined) {
           const body = JSON.parse(sentPayloads.at(-1).body);
@@ -458,16 +460,16 @@ test("LINE OA recovers every chat and message page only after each page is ackno
   );
 });
 
-test("LINE OA saves a per-conversation cursor after each persisted message page", async () => {
+test("LINE OA saves a per-conversation cursor only after all its pages persist", async () => {
   const bridge = createBridge();
 
   await bridge.sync();
 
   const cursors = bridge.posts.filter((post) => post.type === "recovery_cursor");
-  assert.equal(cursors.length, 3);
+  assert.equal(cursors.length, 2);
   assert.deepEqual(
     cursors.map((post) => post.conversation_id),
-    ["chat-1", "chat-1", "chat-2"],
+    ["chat-1", "chat-2"],
   );
   assert.ok(cursors.every((post) => post.cursor?.event_timestamp && post.cursor?.message_id));
 });
@@ -879,17 +881,17 @@ test("LINE OA rejects malformed mention commands before sending", async () => {
 });
 
 
-test("LINE OA stale checkpoints cannot import messages older than 5 days", async () => {
-  const bridge = createBridge();
-  const complete = await bridge.sync({
-    checkpoint: { watermark: "1970-01-01T00:00:00.900Z" },
-    now: 6 * 24 * 60 * 60 * 1_000,
+for (const days of [8, 30]) {
+  test(`LINE OA resumes ${days}-day-old checkpoints without a rolling cutoff`, async () => {
+    const bridge = createBridge();
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: "1970-01-01T00:00:00.900Z" }, now: days * 24 * 60 * 60 * 1_000 });
+      assert.equal(complete.ok, true);
+      assert.equal(complete.recovered, 3);
+      assert.ok(bridge.requests.some(url => url.searchParams.has("backward")));
+    } finally { bridge.dispose(); }
   });
-  assert.equal(complete.ok, true);
-  assert.equal(complete.recovered, 0);
-  assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
-  assert.equal(bridge.requests.some(url => url.searchParams.has("backward")), false);
-});
+}
 
 
 test("LINE OA initial setup excludes two-day-old history", async () => {
@@ -900,7 +902,7 @@ test("LINE OA initial setup excludes two-day-old history", async () => {
   assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
 });
 
-test("LINE OA reconnect includes two-day-old messages within the five-day maximum", async () => {
+test("LINE OA reconnect includes messages newer than its saved checkpoint", async () => {
   const bridge = createBridge({ chatCount: 1 });
   const complete = await bridge.sync({
     now: 2 * 24 * 60 * 60 * 1_000 + 2_000,
@@ -1215,3 +1217,81 @@ test("LINE queued deadlines renew only while the active account makes real progr
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
   bridge.dispose();
 });
+
+
+test("LINE OA interrupted newest-first recovery retains the boundary for older pages", async () => {
+  let failOlder = true;
+  const bridge = createBridge({ chatCount: 1,
+    messagePages: { first: { list: [{ id: "newer", timestamp: 3000 }], backward: "older" }, older: { list: [{ id: "older", timestamp: 2000 }] } },
+    beforeMessageRequest(url) { if (failOlder && url.searchParams.get("backward") === "older") throw new Error("Temporary provider failure"); },
+  });
+  try {
+    const checkpoint = { watermark: "1970-01-01T00:00:01.000Z" };
+    const failed = await bridge.sync({ requestId: "failed-scan", checkpoint });
+    assert.equal(failed.ok, false);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+    failOlder = false;
+    const recovered = await bridge.sync({ requestId: "retry-scan", checkpoint });
+    assert.equal(recovered.ok, true);
+    const messages = bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith("retry-scan:"))
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+    assert.deepEqual(messages.map(message => message.id), ["newer", "older"]);
+    const saved = bridge.posts.find(post => post.type === "recovery_cursor");
+    assert.equal(saved.cursor.message_id, "newer");
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA successful recovery watermark is the scan start boundary", async () => {
+  const bridge = createBridge({ chatCount: 1 });
+  try {
+    const complete = await bridge.sync({ now: 5000 });
+    assert.equal(complete.watermark, new Date(5000).toISOString());
+  } finally { bridge.dispose(); }
+});
+
+test("LINE OA durable conversation cursor bounds message history without hiding same-time IDs", async () => {
+  const bridge = createBridge({ chatCount: 1, messagePages: {
+    first: { list: [{ id: "same-time-new-id", timestamp: 3000 }, { id: "older", timestamp: 2000 }] },
+  } });
+  try {
+    await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString(), conversations: { "chat-1": { event_timestamp: new Date(3000).toISOString(), message_id: "same-time-old-id" } } } });
+    const batch = bridge.posts.find(post => post.type === "recovery_batch");
+    assert.deepEqual(batch.body.conversations[0].messages.map(message => message.id), ["same-time-new-id"]);
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE OA warm recovery and a fresh bridge cover the same checkpoint range", async () => {
+  const checkpoint = { watermark: new Date(900).toISOString() };
+  const warm = createBridge({ chatCount: 3 });
+  const cold = createBridge({ chatCount: 3 });
+  try {
+    await warm.sync({ requestId: "warm-up", checkpoint });
+    const beforeRequests = warm.requests.length;
+    await warm.sync({ requestId: "warm-again", checkpoint });
+    await cold.sync({ requestId: "cold", checkpoint });
+    const ids = (bridge, requestId) => bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith(`${requestId}:`))
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages.map(message => message.id)));
+    assert.deepEqual(ids(warm, "warm-again"), ids(cold, "cold"));
+    const messageRequests = requests => requests.filter(url => url.pathname.includes("/messages")).length;
+    assert.equal(messageRequests(warm.requests.slice(beforeRequests)), messageRequests(cold.requests));
+  } finally { warm.dispose(); cold.dispose(); }
+});
+
+
+for (const [name, options] of [
+  ["invalid messages", { messagePages: { first: { unexpected: true } } }],
+  ["invalid conversations", { chatPages: { first: { unexpected: true } } }],
+  ["repeated message cursor", { messagePages: { first: { list: [{ id: "first", timestamp: 3000 }], backward: "repeat" }, repeat: { list: [{ id: "second", timestamp: 2000 }], backward: "repeat" } } }],
+  ["repeated conversation cursor", { chatPages: { first: { list: [], next: "repeat" }, repeat: { list: [], next: "repeat" } } }],
+]) {
+  test(`LINE OA ${name} cannot complete recovery or advance its watermark`, async () => {
+    const bridge = createBridge({ chatCount: 1, ...options });
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString() } });
+      assert.equal(complete.ok, false);
+      assert.equal(complete.watermark, undefined);
+      if (name.includes("message")) assert.equal(bridge.posts.some(post => post.type === "recovery_cursor"), false);
+    } finally { bridge.dispose(); }
+  });
+}

@@ -21,7 +21,7 @@
     },
     {
       "matches": ["https://chat.line.biz/*"],
-      "js": ["lib/message-id-cache.js", "lib/provider-adapters.js", "lib/line-oa.js", "line-oa-realtime.js"],
+      "js": ["lib/provider-adapters.js", "lib/line-oa.js", "line-oa-realtime.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },

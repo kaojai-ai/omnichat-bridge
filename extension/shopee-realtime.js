@@ -87,7 +87,6 @@
   });
   const HISTORY_LIMIT = 100;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
-  const MAX_HISTORY_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
   const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 300;
@@ -791,7 +790,7 @@
       const messageId = messageIdOf(message);
       if (!conversationId || !messageId) continue;
       const eventMs = timeMs(message.created_timestamp ?? message.created_at ?? message.timestamp);
-      if (!eventMs || eventMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) continue;
+      if (!eventMs) continue;
       const accountId = state.currentAccountId;
       if (!accountId) continue;
       if (state.observedMessageKeys.has("shopee", accountId, conversationId, messageId)) continue;
@@ -905,12 +904,6 @@
       state.latestMessageIdsByConversation.set(conversationId, latestId);
       // The first list is a baseline; bootstrap/recovery owns its history.
       if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
-      const summaryMs = conversationTime(conversation);
-      if (summaryMs && summaryMs < Date.now() - MAX_HISTORY_LOOKBACK_MS) {
-        state.pendingSellerCentreMessages.delete(conversationId);
-        state.capturedMessageIdsByConversation.set(conversationId, latestId);
-        continue;
-      }
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
         state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
@@ -1567,7 +1560,7 @@
       body: state.listTemplate.body?.slice(0),
     });
     const body = await (sendLookup ? fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now()) : recoveryFetchJson(request.clone()));
-    if (sendLookup && (!Array.isArray(body) && ![
+    if ((!Array.isArray(body) && ![
       body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
     ].some(Array.isArray) || shopeeError(body))) {
       throw Object.assign(new Error("Shopee returned an invalid conversation list."), { reason_code: "invalid_conversation_list" });
@@ -1765,7 +1758,9 @@
         headers,
         body: undefined,
       }));
-      if (!Array.isArray(pageMessages)) break;
+      if (!Array.isArray(pageMessages)) {
+        throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
+      }
       let currentMessages = pageMessages
         .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
         .sort((left, right) => {
@@ -1828,7 +1823,7 @@
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
       const bootstrap = !watermarkMs;
-      const defaultSinceMs = Date.now() - (bootstrap ? INITIAL_SYNC_LOOKBACK_MS : MAX_HISTORY_LOOKBACK_MS);
+      const defaultSinceMs = bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : watermarkMs;
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
@@ -1916,7 +1911,7 @@
           return { decision: "history_job", reason: "configured_history", cursor, deep: true };
         }
         if (summaryMs && summaryMs < defaultSinceMs) {
-          return { decision: "skip", reason: "older_than_default_window", cursor };
+          return { decision: "skip", reason: bootstrap ? "older_than_initial_window" : "summary_older_than_checkpoint", cursor };
         }
         if (bootstrap) return { decision: "history_job", reason: "bootstrap", cursor };
         if (!summaryMs) return { decision: "probe", reason: "missing_summary_time", cursor };
@@ -2119,7 +2114,7 @@
       // Content owns the recovery outcome log. Keep diagnostic fields bounded;
       // preserve the existing UI error separately.
       const status = error?.http_status;
-      const reasonCode = ["provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list",
+      const reasonCode = ["provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list", "invalid_message_history",
         "history_not_ready", "session_changed", "persistence_failed"].includes(error?.reason_code) ? error.reason_code : "recovery_failed";
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: accountId,
         ok: false, error: String(error), reason_code: reasonCode, conversations_checked: checked,

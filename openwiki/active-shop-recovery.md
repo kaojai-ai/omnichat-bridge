@@ -215,3 +215,18 @@ Version 0.8.0 removes automatic provider-tab reloads after health-check failures
 ### Planned: Shopee socket checks on demand
 
 Version 0.8.0 removes the two-second socket observer. Startup, detected session/page events, and fresh provider-status requests attach listeners to the current socket. The existing minute watchdog requests a fresh page response; command checks also use this path. Message/connect/disconnect listeners remain immediate, and provider message polling is unchanged. A silent socket replacement can take up to the next watchdog check to discover (longer if Chrome delays scheduling). Missing page responses remain uncertainty under the readiness policy, not confirmed logout.
+
+
+### Planned: bounded message IDs and checkpoint recovery
+
+Version 0.8.0 uses one shared insertion-order ID cache for Shopee event capture and the content bridge used by both providers. Limits are 200 IDs per conversation, 10,000 per provider account, and 20,000 per bridge instance. Reads do not refresh order; eviction removes empty indexes. No timers, cache persistence, or age-based expiry are involved. Account/session changes and disposal release the relevant IDs. These limits do not bound the separate durable pending-message queue.
+
+LINE's former known-message and known-chat sets are removed: they were used to stop pagination, which could hide unrecovered pages. LINE now relies on saved recovery boundaries. This can increase summary-page requests; unchanged old conversations do not require message-history fetches. Memory IDs never authorize sending or determine recovery coverage.
+
+Normal recovery resumes from the saved account watermark and conversation cursor without a five-day cutoff. Initial sync retains at most 10 conversations, 25 messages each, within one day, unless explicit history configuration requests otherwise. Provider retention may still limit available history.
+
+Conversation cursors advance only after every required page for that conversation is durably captured. Failed or cancelled scans keep realtime cursor advancement deferred until recovery completes. LINE advances its successful watermark to scan start, preserving messages arriving during the scan. Invalid provider response shapes and pagination cycles fail recovery instead of reporting completion. Existing pending delivery and single-attempt outgoing sends remain independent.
+
+Validation covers 8/30-day absence, interrupted newest-first pagination, warm/cold recovery equivalence, same-timestamp messages, initial bounds, cache caps, malformed responses, and failed-scan realtime capture. Synthetic cache cardinality is bounded under sustained input; no live heap, CPU, or incoming-latency improvement has been measured.
+
+Synthetic validation: 48,000 distinct IDs retain 20,000 entries under the configured cache cap. For the same three-conversation fixed-checkpoint LINE fixture, message requests are 4 for both warm and fresh bridges; the prior warm-cache shortcut made 1 request. These are fixture counts, not production request-rate or heap measurements.

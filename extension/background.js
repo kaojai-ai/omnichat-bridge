@@ -3531,7 +3531,6 @@ async function reinjectProviderBridge(tabId, adapter) {
           ? [
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
             ...(mainStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
-            "lib/message-id-cache.js",
             "line-oa-realtime.js",
           ]
           : [

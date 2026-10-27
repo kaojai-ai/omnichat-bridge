@@ -8,7 +8,6 @@
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
   const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
-  const INCREMENTAL_SYNC_LOOKBACK_MS = 5 * 24 * 60 * 60 * 1_000;
   const REQUEST_TIMEOUT_MS = 20_000;
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -27,9 +26,7 @@
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
-  const knownChatIds = globalThis.OmnichatMessageIdCache.create();
   const metadataProfilesByAccount = new Map();
-  const knownMessageIds = globalThis.OmnichatMessageIdCache.create();
   const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
   const nativeFetch = window.fetch.bind(window);
@@ -375,6 +372,7 @@
     return !disposed && generation.epoch === pollGeneration && !generation.cancelled;
   }
 
+  // Persisted boundaries own recovery; evictable IDs must never stop pagination.
   async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0 }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
@@ -383,6 +381,7 @@
     let parsed = 0;
     let queued = 0;
     let accepted = 0;
+    let latestCursor = null;
     const seenCursors = new Set();
 
     while (pollIsActive(generation)) {
@@ -390,12 +389,8 @@
       if (remaining <= 0) break;
       const body = await json(messagesUrl(botId, chatId, backward, Math.min(PAGE_LIMIT, remaining)));
       if (!pollIsActive(generation)) return { parsed, queued };
-      const rawMessages = Array.isArray(body?.list) ? body.list : [];
-      const allKnown = rawMessages.length > 0 && rawMessages.every((message) => {
-        const id = messageId(message);
-        return id && knownMessageIds.has("line_oa", providerAccountId, chatId, id);
-      });
-      if (allKnown) break;
+      if (!Array.isArray(body?.list)) throw new Error("LINE OA message history response is invalid.");
+      const rawMessages = body.list;
       const messages = rawMessages
         .filter((message) => {
           const timestamp = messageTimeMs(message);
@@ -416,7 +411,8 @@
       if (!messages.length && (pageIsBeforeCheckpoint || limitReached)) break;
       if (!messages.length && sinceMs > 0) {
         const nextBackward = cursor(body?.backward);
-        if (!nextBackward || seenCursors.has(nextBackward)) break;
+        if (!nextBackward) break;
+        if (seenCursors.has(nextBackward)) throw new Error("LINE OA message history pagination repeated a cursor.");
         seenCursors.add(nextBackward);
         backward = nextBackward;
         page += 1;
@@ -427,26 +423,23 @@
       parsed += result.parsed;
       queued += result.queued;
       accepted += messages.length;
-      await advanceRecoveryCursor({
-        requestId,
-        providerAccountId,
-        chat,
-        page,
-        latestCursor: result.latestCursor,
-      });
+      const candidate = result.latestCursor;
+      if (candidate && (!latestCursor || timeMs(candidate.event_timestamp) > timeMs(latestCursor.event_timestamp)
+        || (timeMs(candidate.event_timestamp) === timeMs(latestCursor.event_timestamp)
+          && String(candidate.message_id) > String(latestCursor.message_id)))) latestCursor = candidate;
       if (!pollIsActive(generation)) return { parsed, queued };
-      for (const message of messages) {
-        const id = messageId(message);
-        if (id) knownMessageIds.add("line_oa", providerAccountId, chatId, id);
-      }
       if (maxMessages !== null && accepted >= maxMessages) break;
       const nextBackward = cursor(body?.backward);
-      if (!nextBackward || seenCursors.has(nextBackward) || pageIsBeforeCheckpoint) break;
+      if (!nextBackward || pageIsBeforeCheckpoint) break;
+      if (seenCursors.has(nextBackward)) throw new Error("LINE OA message history pagination repeated a cursor.");
       seenCursors.add(nextBackward);
       backward = nextBackward;
       page += 1;
     }
-    return { parsed, queued };
+    if (pollIsActive(generation) && latestCursor) {
+      await advanceRecoveryCursor({ requestId, providerAccountId, chat, page, latestCursor });
+    }
+    return { parsed, queued, latestCursor };
   }
 
   function numberFrom(body, keys) {
@@ -532,6 +525,8 @@
   }
 
   async function poll(requestId, providerAccountId, botId, checkpoint, generation, history) {
+    const scanStartedAt = Date.now();
+    const completedCursors = { ...(checkpoint?.conversations ?? {}) };
     try {
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!pollIsActive(generation)) return;
@@ -545,7 +540,7 @@
         ? selection.sinceMs
         : bootstrap
           ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
-          : Math.max(Date.now() - INCREMENTAL_SYNC_LOOKBACK_MS, checkpointMs);
+          : checkpointMs;
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
       );
@@ -562,6 +557,7 @@
       while (pollIsActive(generation)) {
         const body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
+        if (!Array.isArray(body?.list)) throw new Error("LINE OA conversation list response is invalid.");
         const chats = globalThis.OmnichatLineOA.chatItems(body);
         const pageTotal = numberFrom(body, ["total", "totalCount", "total_count"]);
         if (pageTotal !== null) {
@@ -576,7 +572,6 @@
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
         }
-        const allKnown = chats.length > 0 && chats.every((chat) => knownChatIds.has("line_oa", providerAccountId, "chats", value(chat?.chatId)));
         const chatsToRecover = [];
         for (const chat of chats) {
           const chatId = value(chat?.chatId);
@@ -612,10 +607,11 @@
               maxMessages: deep || historyWindow
                 ? null
                 : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
-              sinceMs: deep || historyWindow ? selection.sinceMs : lowerBoundMs,
+              sinceMs: deep || historyWindow ? selection.sinceMs : Math.max(lowerBoundMs, timeMs(completedCursors[chatId]?.event_timestamp)),
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
+          if (result.latestCursor) completedCursors[chatId] = result.latestCursor;
           if (deep) {
             await markHistoryBackfill({
               requestId,
@@ -628,7 +624,6 @@
           }
           parsed += result.parsed;
           queued += result.queued;
-          knownChatIds.add("line_oa", providerAccountId, "chats", chatId);
           completedConversations += 1;
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
           if (trackedRequest) {
@@ -646,7 +641,8 @@
         if (pageBeforeHistory) break;
         if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) break;
         const nextCursor = cursor(body?.next);
-        if (!nextCursor || seenCursors.has(nextCursor) || (allKnown && pendingIds.size === 0)) break;
+        if (!nextCursor) break;
+        if (seenCursors.has(nextCursor)) throw new Error("LINE OA conversation pagination repeated a cursor.");
         seenCursors.add(nextCursor);
         next = nextCursor;
       }
@@ -663,6 +659,7 @@
             sinceMs: selection.sinceMs,
           });
           if (!pollIsActive(generation)) return;
+          if (result.latestCursor) completedCursors[chatId] = result.latestCursor;
           await markHistoryBackfill({
             requestId,
             providerAccountId,
@@ -689,11 +686,13 @@
           checkpoint,
         });
       }
-      const watermark = new Date().toISOString();
+      const watermark = new Date(scanStartedAt).toISOString();
       const state = pollingAccounts.get(providerAccountId);
       if (state) {
         state.checkpoint = {
+          ...checkpoint,
           watermark,
+          conversations: completedCursors,
           ...(checkpoint?.history_backfill ? { history_backfill: checkpoint.history_backfill } : {}),
           ...(checkpoint?.history_window_days ? { history_window_days: checkpoint.history_window_days } : {}),
         };
@@ -793,8 +792,6 @@
       stopTimer();
       pollGeneration += 1;
       pollingAccounts.clear();
-      knownMessageIds.clear();
-      knownChatIds.clear();
       cancelAcknowledgements(reason);
     } else {
       const affectedAccounts = accountId ? [accountId] : interrupted.map((request) => request.providerAccountId);
@@ -803,8 +800,6 @@
           || queuedSyncs.some((request) => request.providerAccountId === id);
         if (!hasReplacement) {
           pollingAccounts.delete(id);
-          knownMessageIds.clear("line_oa", id);
-          knownChatIds.clear("line_oa", id);
         }
       }
       if (!pollingAccounts.size) stopTimer();
