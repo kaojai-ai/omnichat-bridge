@@ -64,3 +64,23 @@ export function popupAccountsForSession(accounts, liveState, pageAccounts = []) 
     || (account.provider === "shopee" && pageKeys.has(accountConfigKey(account))))
     .sort((left, right) => Number(isActive(right)) - Number(isActive(left)));
 }
+
+// Combined sync can process accounts outside the popup's current provider view.
+export function activeSyncAccount(config, detectedAccounts, status, pending) {
+  for (const configured of config.accounts) {
+    const key = accountConfigKey(configured);
+    const syncState = readAccountState(status, key, null);
+    if (!["discovering", "syncing"].includes(syncState?.state)) continue;
+    const account = detectedAccounts.find(candidate => accountConfigKey(candidate) === key) ?? configured;
+    return { account, syncState, pending: readAccountState(pending, key, []) };
+  }
+  return null;
+}
+
+export function currentTabAccount(config, accounts, provider, tabUrl) {
+  const detected = (Array.isArray(accounts) ? accounts : []).filter(account => account.provider === provider);
+  const botId = provider === "line_oa" ? lineBotIdFromUrl(tabUrl) : null;
+  const matches = detected.filter(account => provider !== "line_oa" || (botId && account.bot_id === botId));
+  if (matches.length !== 1) return null;
+  return findAccountConfig(config, matches[0]) ? matches[0] : null;
+}

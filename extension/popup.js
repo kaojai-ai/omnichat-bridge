@@ -21,7 +21,7 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
-import { hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
+import { activeSyncAccount, currentTabAccount, hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
 import { createCoalescedRefresh, syncProgressPresentation } from "./lib/popup-sync-progress.js";
 import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
 
@@ -775,9 +775,7 @@ function renderDashboard(message = "", isError = false) {
     && configuredStates.some((item) => (
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
-  const progressAccount = accountStates.filter((item) => item.config).find((item) => (
-    ["discovering", "syncing"].includes(item.syncState?.state)
-  ));
+  const progressAccount = activeSyncAccount(storedConfig, detectedAccounts, storedStatus, pendingStates);
   const latestResult = configuredStates
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
@@ -957,7 +955,7 @@ function renderLogs() {
   logEmpty.hidden = visible.length !== 0;
   copyLogsButton.disabled = visible.length === 0;
   downloadLogsButton.disabled = visible.length === 0;
-  clearLogsButton.disabled = logs.length === 0;
+  clearLogsButton.setAttribute("aria-disabled", String(logs.length === 0));
 }
 
 async function refreshStoredState() {
@@ -1248,23 +1246,24 @@ syncButton.addEventListener("click", async () => {
   pendingAction = activeProviderAdapter?.id === "line_oa" ? "checking" : "restarting";
   renderDashboard();
   try {
-    const provider = activeProviderAdapter?.id === "line_oa" ? "line_oa" : null;
-    await requestTargetPermission(accountOrigins(storedConfig));
+    const tab = await chrome.tabs.get(popupTabId);
+    const provider = providerAdapters.forPage(tab?.url)?.id;
+    if (!provider) throw new Error("Open the provider account chat to sync.");
+    const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
+    const account = detected?.ok ? currentTabAccount(storedConfig, detected.accounts, provider, tab.url) : null;
+    if (!account) throw new Error("Could not identify the configured account in this tab. Open its chat and retry.");
+    const config = findAccountConfig(storedConfig, account);
+    await requestTargetPermission(accountOrigins({ ...storedConfig, accounts: [config] }));
     if (actionId !== syncActionId) return;
-    const accounts = storedConfig.accounts.filter((account) => !provider || account.provider === provider);
+    const target = { provider, provider_account_id: account.provider_account_id, tab_id: tab.id };
     pendingAction = "refreshingInfo";
     renderDashboard();
-    // Display refresh is best effort; existing provider limits bound each request.
-    await Promise.allSettled(accounts.map(async (account) => chrome.runtime.sendMessage({
-      type: "refresh_metadata", provider: account.provider, provider_account_id: account.provider_account_id,
-    })));
+    // Display refresh is best effort; only the account open in this tab is refreshed.
+    await chrome.runtime.sendMessage({ type: "refresh_metadata", ...target }).catch(() => undefined);
     if (actionId !== syncActionId) return;
     pendingAction = "checking";
     renderDashboard();
-    const result = await chrome.runtime.sendMessage({
-      type: "sync_now",
-      ...(provider ? { provider } : {}),
-    });
+    const result = await chrome.runtime.sendMessage({ type: "sync_account", ...target });
     if (actionId === syncActionId) {
       pendingAction = "";
       await showSyncResult(result);
@@ -1302,8 +1301,7 @@ cancelSyncButton.addEventListener("click", async () => {
   setStatusAppearance("neutral", true);
   try {
     const result = await chrome.runtime.sendMessage({
-      type: "cancel_sync",
-      ...(activeProviderAdapter?.id === "line_oa" ? { provider: "line_oa" } : {}),
+      type: "cancel_sync", tab_id: popupTabId, provider: activeProviderAdapter?.id,
     });
     await refreshStoredState();
     renderDashboard(
@@ -1335,7 +1333,7 @@ function showLogsLoading() {
   logEmpty.hidden = false;
   copyLogsButton.disabled = true;
   downloadLogsButton.disabled = true;
-  clearLogsButton.disabled = true;
+  clearLogsButton.setAttribute("aria-disabled", "true");
 }
 
 async function loadLogs() {
@@ -1427,7 +1425,9 @@ downloadLogsButton.addEventListener("click", async () => {
 
 logLevel.addEventListener("change", renderLogs);
 
-clearLogsButton.addEventListener("click", async () => {
+clearLogsButton.addEventListener("click", async (event) => {
+  event.preventDefault();
+  if (!logs.length) return;
   if (!confirm("Clear all local operational logs?")) return;
   const result = await chrome.runtime.sendMessage({ type: "clear_logs" });
   if (!result?.ok) return;

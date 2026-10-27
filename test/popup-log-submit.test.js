@@ -26,6 +26,7 @@ test("log controls place highlighted Submit after neutral Download and Copy/Tras
   assert.doesNotMatch(toolbar, /id="(?:copy|clear)-logs"/);
   assert.ok(html.indexOf('id="copy-logs"') > html.indexOf('id="log-list"'));
   assert.ok(html.indexOf('id="clear-logs"') < html.indexOf('<footer>'));
+  assert.match(html, /<a id="clear-logs" class="log-clear-link"/);
 });
 
 test("logs submit starts only manually and coalesces clicks while busy", async () => {

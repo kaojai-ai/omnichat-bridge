@@ -30,7 +30,7 @@ test("log rendering bounds DOM rows while support export retains the complete bu
     chrome: { runtime: { getManifest: () => ({ version: "test" }) } },
     document: { querySelector: () => note, createElement: () => ({ dataset: {} }) },
     openLogsButton: {}, logList: { replaceChildren() { rows.length = 0; }, append(row) { rows.push(row); } },
-    logEmpty: {}, copyLogsButton: {}, downloadLogsButton: {}, clearLogsButton: {}, t: key => key,
+    logEmpty: {}, copyLogsButton: {}, downloadLogsButton: {}, clearLogsButton: { setAttribute() {} }, t: key => key,
   });
   vm.runInContext(helpers + source.slice(source.indexOf("function renderLogs()"), source.indexOf("async function refreshStoredState()")), context);
   vm.runInContext("renderLogs()", context);

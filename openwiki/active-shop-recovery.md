@@ -200,7 +200,7 @@ remote close diagnostics include time since the last inbound WebSocket message.
 
 ## Manual metadata refresh (0.8.0, Planned)
 
-Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields refresh when the user clicks **Sync messages**. The same action refreshes display metadata for the accounts included in that sync before starting message recovery. Metadata failure preserves cached values and does not block message sync. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
+Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields refresh when the user clicks **Sync messages**. The same action refreshes display metadata for the configured account open in the current tab before starting message recovery in that exact tab. LINE selects the bot in the tab URL, not every account accessible to the login. Unidentified or unconfigured accounts stop the action; it does not fall back to another tab or provider. Metadata failure preserves cached values and does not block message sync. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
 
 Manual refresh verifies the account and reads account/conversation lists only, with a 30-second overall deadline and at most 100 recent conversations. Partial failures keep valid completed results; context changes discard late results. No historical-message crawl, individual customer-profile fetch, message replay, or immediate rewrite of historical Admin customer records is performed. Refreshed information reaches KaoJai through subsequent ordinary ingestion.
 
@@ -250,4 +250,6 @@ Diagnostic logs remain bounded and stored locally. Remote uploads happen only wh
 
 ### Planned: bottom sync status
 
-The popup bottom status displays the active account and reported recovery phase with available conversation/message counters, including accounts outside the currently visible provider view during a combined sync. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.
+The popup bottom status displays the active account and reported recovery phase with available conversation/message counters. Manual Sync messages operates only on the account open in the current tab. The manual metadata refresh stage is identified separately. Account readiness continues to describe sending eligibility independently of sync progress.
+
+Logs controls place a full-width Copy below the log list and a red Clear logs text link underneath. Clearing still requires confirmation.

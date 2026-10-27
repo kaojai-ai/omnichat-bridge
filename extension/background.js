@@ -900,7 +900,7 @@ async function applyExtensionUpdate() {
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "refresh_metadata") {
-    void refreshAccountMetadata(message.provider, message.provider_account_id).then(respond,
+    void refreshAccountMetadata(message.provider, message.provider_account_id, message.tab_id).then(respond,
       () => respond({ ok: false, error: "Metadata refresh failed. Cached information was kept." }));
     return true;
   }
@@ -1098,7 +1098,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "cancel_sync") {
-    void cancelActiveSync(message.provider).then(
+    void cancelActiveSync(message.provider, message.tab_id).then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -3089,16 +3089,41 @@ async function providerChatTabById(adapter, tabId) {
   }
 }
 
-async function refreshAccountMetadata(provider, providerAccountId) {
-  const key = accountKey(provider, providerAccountId);
+async function exactProviderAccountTab(context, tabId) {
+  if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("A valid provider tab is required.");
+  const tab = await providerChatTabById(context.adapter, tabId);
+  if (!tab) throw new Error("The selected provider tab is no longer open.");
+  const tabContext = providerTabContext(tab, context.adapter.id);
+  await ensureProviderBridge(tab.id, context.adapter);
+  const status = await providerTabStatus(tab);
+  const current = await providerChatTabById(context.adapter, tabId);
+  if (!current || current.url !== tab.url || tabContext !== providerTabContext(tab, context.adapter.id)) {
+    throw new Error("The selected provider tab changed. Retry from its current page.");
+  }
+  if (context.adapter.id === "line_oa") {
+    const botId = context.account.bot_id || context.config.bot_id;
+    let openBotId = "";
+    try { openBotId = decodeURIComponent(new URL(tab.url).pathname.split("/")[1] ?? ""); } catch { /* Invalid URL cannot identify an account. */ }
+    if (!botId || openBotId !== botId || status?.account_access_verified !== true
+      || !status.accessible_account_ids?.includes(context.account.provider_account_id)) {
+      throw new Error("Open this LINE account in the selected tab before syncing.");
+    }
+  } else if (status?.current_provider_account_id !== context.account.provider_account_id) {
+    throw new Error("The selected provider tab is signed in to a different account.");
+  }
+  return tab;
+}
+
+async function refreshAccountMetadata(provider, providerAccountId, tabId = null) {
+  const key = `${accountKey(provider, providerAccountId)}:${tabId ?? "any"}`;
   if (metadataRefreshes.has(key)) return metadataRefreshes.get(key);
-  const task = runAccountMetadataRefresh(provider, providerAccountId)
+  const task = runAccountMetadataRefresh(provider, providerAccountId, tabId)
     .finally(() => { if (metadataRefreshes.get(key) === task) metadataRefreshes.delete(key); });
   metadataRefreshes.set(key, task);
   return task;
 }
 
-async function runAccountMetadataRefresh(provider, providerAccountId) {
+async function runAccountMetadataRefresh(provider, providerAccountId, tabId = null) {
   if (metadataErasing) throw new Error("Local data is being erased.");
   const startedEpoch = metadataEpoch;
   const deadline = Date.now() + 30_000;
@@ -3107,12 +3132,16 @@ async function runAccountMetadataRefresh(provider, providerAccountId) {
   const context = accountContextFor(stored, providerAccountId, provider);
   if (!context) throw new Error("Configured account required.");
   const epoch = providerSessionEpoch(provider);
-  const tabs = await providerChatTabs(context.adapter);
   let tab;
-  for (const candidate of orderProviderTabs(context.adapter, tabs)) {
-    const status = await providerTabStatus(candidate);
-    const ids = provider === "line_oa" ? status?.accessible_account_ids : [status?.current_provider_account_id];
-    if (ids?.includes(providerAccountId)) { tab = candidate; break; }
+  if (tabId !== null && tabId !== undefined) {
+    tab = await exactProviderAccountTab(context, tabId);
+  } else {
+    const tabs = await providerChatTabs(context.adapter);
+    for (const candidate of orderProviderTabs(context.adapter, tabs)) {
+      const status = await providerTabStatus(candidate);
+      const ids = provider === "line_oa" ? status?.accessible_account_ids : [status?.current_provider_account_id];
+      if (ids?.includes(providerAccountId)) { tab = candidate; break; }
+    }
   }
   if (!tab || Date.now() >= deadline) throw new Error("Open the matching provider account.");
   const tabContext = providerTabContext(tab, provider);
@@ -3791,18 +3820,25 @@ async function syncOpenProvider(control, context) {
   }
   const { signal } = control.controller;
   throwIfSyncCancelled(signal);
-  const stored = await readStorage([STORAGE.providerRecoveryTabs]);
-  const trackedTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
-  const preferredTabId = control.preferredTabId ?? trackedTabId;
-  const preferredTab = await providerChatTabById(adapter, preferredTabId);
   let tab = null;
-  if (adapter.id === "shopee") {
-    for (const candidate of orderProviderTabs(adapter, await providerChatTabs(adapter), preferredTabId)) {
-      if (providerTabCanSend(await providerTabStatus(candidate), context)) { tab = candidate; break; }
+  if (control.lockedTabId !== undefined) {
+    tab = await exactProviderAccountTab(context, control.lockedTabId);
+    if (control.lockedTabContext !== providerTabContext(tab, adapter.id)) {
+      throw new Error("The selected provider tab changed. Retry from its current page.");
     }
-  } else if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
-  if (!tab && adapter.id !== "shopee") tab = await findReadyProviderChatTab(adapter);
-  if (!tab) tab = preferredTab ?? await findProviderChatTab(adapter);
+  } else {
+    const stored = await readStorage([STORAGE.providerRecoveryTabs]);
+    const trackedTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
+    const preferredTabId = control.preferredTabId ?? trackedTabId;
+    const preferredTab = await providerChatTabById(adapter, preferredTabId);
+    if (adapter.id === "shopee") {
+      for (const candidate of orderProviderTabs(adapter, await providerChatTabs(adapter), preferredTabId)) {
+        if (providerTabCanSend(await providerTabStatus(candidate), context)) { tab = candidate; break; }
+      }
+    } else if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
+    if (!tab && adapter.id !== "shopee") tab = await findReadyProviderChatTab(adapter);
+    if (!tab) tab = preferredTab ?? await findProviderChatTab(adapter);
+  }
   if (!tab) throw new Error(`Open ${label} to sync messages.`);
   control.tabId = tab.id;
   control.adapter = adapter;
@@ -3835,6 +3871,12 @@ async function syncOpenProvider(control, context) {
   }
   if (adapter.id === "line_oa") {
     await updateScopedState(STORAGE.status, context.key, { phase: "waiting_recovery" });
+  }
+  if (control.lockedTabId !== undefined) {
+    const current = await providerChatTabById(adapter, control.lockedTabId);
+    if (!current || current.url !== tab.url || control.lockedTabContext !== providerTabContext(current, adapter.id)) {
+      throw new Error("The selected provider tab changed. Retry from its current page.");
+    }
   }
   control.providerRequestId = crypto.randomUUID();
   const syncMessage = {
@@ -3883,13 +3925,22 @@ async function retryProviderAccount(message) {
     && activeSyncControl?.adapter?.id === requested.adapter.id) || providerAutomaticRecoveries.has(requested.key);
   if (alreadySyncing()) return { skipped: "already_syncing" };
   const control = { controller: new AbortController(), manualRestart: true, accountKey: requested.key };
-  // Reuse provider-specific access verification, restricted to the requested
-  // account. A different signed-in Shopee shop must never replace this target.
-  const contexts = await openSessionSyncContexts([requested], control);
-  const context = contexts.find((item) => item.key === requested.key);
+  let context;
+  if (message.tab_id !== null && message.tab_id !== undefined) {
+    const tab = await exactProviderAccountTab(requested, message.tab_id);
+    control.lockedTabId = tab.id;
+    control.lockedTabContext = providerTabContext(tab, requested.adapter.id);
+    control.preferredTabId = tab.id;
+    control.tabId = tab.id;
+    context = requested;
+  } else {
+    // Legacy row retries retain provider-specific access verification and selection.
+    const contexts = await openSessionSyncContexts([requested], control);
+    context = contexts.find((item) => item.key === requested.key);
+  }
   if (!context) throw new Error("This account is not available to the current login. Open its provider chat and retry.");
   if (alreadySyncing()) return { skipped: "already_syncing" };
-  control.sessionGeneration = sessionEligibility.generation(context.key);
+  if (control.lockedTabId === undefined) control.sessionGeneration = sessionEligibility.generation(context.key);
   providerAutomaticRecoveries.set(context.key, control);
   try {
     await queueLiveStateWrite(() => writeStorage({ [STORAGE.serverInitialized]: true, [STORAGE.logUploadEnabled]: true }));
@@ -3943,7 +3994,20 @@ function startSync(trigger = "manual", restarting = false, provider = null) {
   return activeSync;
 }
 
-async function cancelActiveSync(provider = null) {
+async function cancelActiveSync(provider = null, requestedTabId = null) {
+  if (requestedTabId !== null && requestedTabId !== undefined) {
+    if (!Number.isInteger(requestedTabId) || requestedTabId <= 0) throw new Error("A valid provider tab is required.");
+    const controls = [...new Set([activeSyncControl, ...providerAutomaticRecoveries.values()])]
+      .filter((control) => control && control.tabId === requestedTabId
+        && (!provider || control.adapter?.id === provider || control.accountKey?.startsWith(`${provider}:`)));
+    for (const control of controls) control.controller.abort();
+    await Promise.allSettled(controls.map((control) => sendProviderMessage(requestedTabId, {
+      type: "cancel_sync_v3", provider,
+      ...(control.providerAccountId ? { provider_account_id: control.providerAccountId } : {}),
+      ...(control.providerRequestId ? { request_id: control.providerRequestId } : {}),
+    }, { label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS })));
+    return { cancelled: controls.length > 0 };
+  }
   if (provider === "line_oa") {
     const controls = [activeSyncControl, ...providerAutomaticRecoveries.values()].filter((control) => control
       && (control.adapter?.id === "line_oa" || control.providerScope === "line_oa"

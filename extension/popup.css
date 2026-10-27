@@ -972,10 +972,7 @@ textarea {
   border-color: #0d9686;
 }
 
-.log-clear-button:not(:disabled):hover {
-  background: #fef3f2;
-  color: var(--danger);
-}
+
 
 #config-status {
   color: var(--green);
@@ -1156,6 +1153,9 @@ footer a:hover,
   width: 4px;
 }
 
-.log-bottom-actions { align-items: center; display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.log-bottom-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.log-bottom-actions #copy-logs { width: 100%; }
+.log-clear-link { align-self: center; color: var(--danger); font-size: 12px; text-decoration: underline; }
+.log-clear-link:hover { color: var(--danger); }
 .log-submit-status { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 8px 0; }
 .log-submit-status[data-state="error"] { color: var(--danger); }

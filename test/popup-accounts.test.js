@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activeSyncAccount,
+  currentTabAccount,
   configuredProviderAccounts,
   popupAccountsForSession,
   hydrateDetectedAccounts,
@@ -149,4 +151,35 @@ test("a manually refreshed stored name stays visible after reopening the popup",
     config: lineConfig, providerId: "line_oa", activeTabUrl: "https://chat.line.biz/bot-1/",
   });
   assert.equal(accounts[0].display_name, "Refreshed OA");
+});
+
+test("combined sync reports LINE progress while popup only detects Shopee", () => {
+  const config = { accounts: [
+    { provider: "shopee", provider_account_id: "1", display_name: "Shop" },
+    { provider: "line_oa", provider_account_id: "@line", display_name: "LINE Shop" },
+  ] };
+  const progress = activeSyncAccount(config, [config.accounts[0]], { version: 2, accounts: {
+    "shopee:1": { state: "watching" },
+    "line_oa:@line": { state: "syncing", phase: "checking_conversations", completed_conversations: 7 },
+  } }, {});
+  assert.equal(progress.account.display_name, "LINE Shop");
+  assert.equal(progress.syncState.completed_conversations, 7);
+  assert.equal(activeSyncAccount(config, [], {}, {}), null);
+});
+
+test("current LINE tab selects its bot rather than every accessible account", () => {
+  const accounts = [
+    { provider: "line_oa", provider_account_id: "@one", bot_id: "bot-one" },
+    { provider: "line_oa", provider_account_id: "@two", bot_id: "bot-two" },
+  ];
+  const config = { accounts };
+  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/bot-two/chats"), accounts[1]);
+  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/"), null);
+  assert.equal(currentTabAccount(config, accounts, "line_oa", "https://chat.line.biz/unknown/chats"), null);
+});
+test("Shopee current tab requires one unambiguous configured detected account", () => {
+  const account = { provider: "shopee", provider_account_id: "shop" };
+  assert.equal(currentTabAccount({ accounts: [account] }, [account], "shopee", ""), account);
+  assert.equal(currentTabAccount({ accounts: [] }, [account], "shopee", ""), null);
+  assert.equal(currentTabAccount({ accounts: [account] }, [account, account], "shopee", ""), null);
 });
