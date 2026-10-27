@@ -619,6 +619,15 @@
       let conversationPages = 0;
       let nonTargetConversations = 0;
       let recoveryListComplete = false;
+      // Observed LINE unpinned lists follow updatedAt and match visible chat order.
+      // Verified 2026-10-27: a LINE UI send advances updatedAt; a KaoJai send
+      // advances latestEvent/lastSentAt but can leave updatedAt unchanged. We
+      // intentionally trust updatedAt for incremental discovery: outgoing-only
+      // changes below this boundary may be missed. It is not a message cursor.
+      // Explicit history stays exhaustive; missing/disordered timestamps disable
+      // the shortcut. Keep ties eligible and never cut off requested targets.
+      let orderedByUpdate = !bootstrap && !historyWindow;
+      let previousUpdatedAt = Infinity;
       let totalConversations = null;
       const seenCursors = new Set();
       const trackedRequest = !String(requestId).startsWith("poll:");
@@ -633,6 +642,13 @@
         if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
         conversationPages += 1;
         const chats = globalThis.OmnichatLineOA.chatItems(body);
+        let pageBeforeCheckpoint = chats.length > 0;
+        if (orderedByUpdate) for (const chat of chats) {
+          const updatedAt = timeMs(chat?.updatedAt);
+          if (updatedAt <= 0 || updatedAt > previousUpdatedAt) orderedByUpdate = false;
+          if (!(updatedAt > 0 && updatedAt < checkpointMs)) pageBeforeCheckpoint = false;
+          previousUpdatedAt = updatedAt;
+        }
         if (metadata && !metadata.partial) {
           for (const chat of chats) {
             if (Date.now() >= metadataDeadline) { metadata.partial = true; break; }
@@ -730,6 +746,9 @@
         if (bootstrap && !historyWindow && pendingIds.size === 0
           && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) recoveryListComplete = true;
         const needsMetadata = metadata && !metadata.partial && metadataChats.size < 100 && Date.now() < metadataDeadline;
+        if (orderedByUpdate && pageBeforeCheckpoint && pendingIds.size === 0 && !needsMetadata) {
+          recoveryListComplete = true;
+        }
         if (recoveryListComplete && !needsMetadata) {
           if (metadata && cursor(body?.next)) metadata.partial = true;
           break;

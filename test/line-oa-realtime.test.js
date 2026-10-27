@@ -1706,3 +1706,101 @@ for (const refreshMetadata of [false, true]) {
     } finally { bridge.dispose(); }
   });
 }
+
+const updateOrderedChat = (id, updatedAt, latestAt = 1000, eventType = "message") => ({
+  chatId: `chat-${id}`, ...(updatedAt === undefined ? {} : { updatedAt }),
+  latestEvent: { type: eventType, timestamp: latestAt },
+});
+const conversationListRequests = bridge => bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages"));
+
+test("LINE incremental discovery stops at a fully older updatedAt page, accepting omitted later outgoing-only changes", async () => {
+  const bridge = createBridge({ chatPages: {
+    first: { list: [updateOrderedChat(1, 6000)], next: "older" },
+    older: { list: [updateOrderedChat(2, 4000)], next: "outgoing-only" },
+    "outgoing-only": { list: [updateOrderedChat(3, 3000, 9000, "messageSent")] },
+  } });
+  try {
+    const complete = await bridge.sync({ checkpoint: { watermark: new Date(5000).toISOString() }, now: 10000 });
+    assert.equal(complete.ok, true);
+    assert.equal(conversationListRequests(bridge).length, 2);
+    assert.equal(bridge.requests.some(url => url.searchParams.get("next") === "outgoing-only"), false);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+    assert.equal(complete.recovered, 0);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE updatedAt equal to the checkpoint remains eligible for pagination", async () => {
+  const bridge = createBridge({ chatPages: {
+    first: { list: [updateOrderedChat(1, 5000)], next: "strictly-older" },
+    "strictly-older": { list: [updateOrderedChat(2, 4999)], next: "unneeded" },
+    unneeded: { list: [updateOrderedChat(3, 4000)] },
+  } });
+  try {
+    const complete = await bridge.sync({ checkpoint: { watermark: new Date(5000).toISOString() } });
+    assert.equal(complete.ok, true);
+    assert.equal(conversationListRequests(bridge).length, 2);
+    assert.equal(conversationListRequests(bridge)[1].searchParams.get("next"), "strictly-older");
+  } finally { bridge.dispose(); }
+});
+
+for (const [name, first, second] of [
+  ["missing timestamp", [updateOrderedChat(1, undefined)], [updateOrderedChat(2, 4000)]],
+  ["disorder within a page", [updateOrderedChat(1, 6000), updateOrderedChat(2, 7000)], [updateOrderedChat(3, 4000)]],
+  ["disorder across pages", [updateOrderedChat(1, 6000)], [updateOrderedChat(2, 7000)]],
+]) {
+  test(`LINE ${name} disables the updatedAt shortcut for the rest of the scan`, async () => {
+    const bridge = createBridge({ chatPages: {
+      first: { list: first, next: "second" }, second: { list: second, next: "third" },
+      third: { list: [updateOrderedChat(4, 3000)], next: "last" },
+      last: { list: [updateOrderedChat(5, 2000, 9000)] },
+    } });
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: new Date(5000).toISOString() } });
+      assert.equal(complete.ok, true);
+      assert.equal(conversationListRequests(bridge).length, 4);
+      assert.ok(bridge.requests.some(url => url.pathname === "/api/v3/bots/bot-1/chats/chat-5/messages"));
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("LINE updatedAt discovery boundary continues metadata collection to 100 summaries", async () => {
+  const chatPages = {};
+  for (let page = 0; page < 5; page++) {
+    chatPages[page === 0 ? "first" : `page-${page + 1}`] = {
+      list: Array.from({ length: 25 }, (_, index) => {
+        const id = page * 25 + index + 1;
+        return updateOrderedChat(id, 4000 - id);
+      }),
+      ...(page < 4 ? { next: `page-${page + 2}` } : {}),
+    };
+  }
+  const bridge = createBridge({ chatPages });
+  try {
+    const complete = await bridge.sync({ refresh_metadata: true, checkpoint: { watermark: new Date(5000).toISOString() } });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.metadata.profiles.length, 100);
+    assert.equal(complete.metadata.partial, true);
+    assert.equal(conversationListRequests(bridge).length, 4);
+    assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
+  } finally { bridge.dispose(); }
+});
+
+for (const targeted of [false, true]) {
+  test(`LINE updatedAt shortcut preserves ${targeted ? "an explicit later target" : "an explicit history window"}`, async () => {
+    const bridge = createBridge({ chatPages: {
+      first: { list: [updateOrderedChat(1, 4000, 1000)], next: "second" },
+      second: { list: [updateOrderedChat(2, 3000, 1000)], next: "last" },
+      last: { list: [updateOrderedChat(3, 2000, 3000)] },
+    } });
+    try {
+      const complete = await bridge.sync({ checkpoint: { watermark: new Date(5000).toISOString() },
+        history_days: 35, history_since_ms: 2000,
+        ...(targeted ? { history_conversation_ids: ["chat-3"] } : {}),
+      });
+      assert.equal(complete.ok, true);
+      assert.equal(conversationListRequests(bridge).length, 3);
+      assert.ok(bridge.requests.some(url => url.pathname === "/api/v3/bots/bot-1/chats/chat-3/messages"));
+      assert.equal(complete.recovered, 1);
+    } finally { bridge.dispose(); }
+  });
+}
