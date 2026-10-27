@@ -75,6 +75,9 @@ const logList = document.querySelector("#log-list");
 const logEmpty = document.querySelector("#log-empty");
 const copyLogsButton = document.querySelector("#copy-logs");
 const downloadLogsButton = document.querySelector("#download-logs");
+const submitLogsButton = document.querySelector("#submit-logs");
+const logSubmitStatus = document.querySelector("#log-submit-status");
+let submittingLogs = false;
 const clearLogsButton = document.querySelector("#clear-logs");
 const logLevel = document.querySelector("#log-level");
 const openPrivacyButton = document.querySelector("#open-privacy");
@@ -150,6 +153,8 @@ const TRANSLATIONS = {
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
     supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", detectedAccounts: "ACCOUNTS", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", thisBrowser: "This browser", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
+    submitLogs: "Submit", submittingLogs: "Submitting…", logsSubmitFailed: "Could not submit logs. Please try again.",
+    logsSubmitted: (count) => `Submitted ${count} log entries.`, logsSubmitRemaining: (count) => `${count} entries remain. Submit again to send them.`,
     refreshMetadata: "Refresh account & customer info", refreshingMetadata: "Refreshing info…", metadataRefreshFailed: "Could not refresh info. Cached info was kept.",
     metadataRefreshed: (count) => `Refreshed ${count} recent customer${count === 1 ? "" : "s"}.`,
     metadataPartial: "Some info could not be refreshed.", metadataAccountSkipped: "Account info could not be refreshed.", metadataOlder: "Up to 100 recent conversations; older customers may remain unchanged.",
@@ -162,6 +167,8 @@ const TRANSLATIONS = {
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
+    submitLogs: "ส่ง Logs", submittingLogs: "กำลังส่ง…", logsSubmitFailed: "ส่ง Logs ไม่สำเร็จ กรุณาลองอีกครั้ง",
+    logsSubmitted: (count) => `ส่ง Logs แล้ว ${count} รายการ`, logsSubmitRemaining: (count) => `เหลือ ${count} รายการ กดส่งอีกครั้งเพื่อส่งรายการที่เหลือ`,
     refreshMetadata: "รีเฟรชข้อมูลบัญชีและลูกค้า", refreshingMetadata: "กำลังรีเฟรชข้อมูล…", metadataRefreshFailed: "รีเฟรชข้อมูลไม่สำเร็จ ยังคงใช้ข้อมูลที่บันทึกไว้",
     metadataRefreshed: (count) => `รีเฟรชข้อมูลลูกค้าล่าสุดแล้ว ${count} ราย`,
     metadataPartial: "รีเฟรชข้อมูลบางส่วนไม่ได้", metadataAccountSkipped: "รีเฟรชข้อมูลบัญชีไม่ได้", metadataOlder: "สูงสุด 100 บทสนทนาล่าสุด ข้อมูลลูกค้าเก่าอาจยังไม่เปลี่ยนแปลง",
@@ -200,7 +207,7 @@ function applyTranslations() {
     ["#open-logs", t("logs")], ["#open-config", t("settings")], ["#open-privacy", t("privacy")], ["#clear", t("erase")],
     ["#config-screen h2", t("settings")], ["#save-config", t("save")], ["#logs-screen h2", t("logs")],
     ["#device-name-label", t("deviceName")], ["#config-label", t("configuration")],
-    ["#download-logs", t("download")], ["#copy-logs", t("copy")], ["#logs-description", t("logsDescription")], ["#log-level", t("filterLogs")], ["#clear-logs", t("clearLogs")], ["#footer-privacy", t("privacy")],
+    ["#submit-logs", t(submittingLogs ? "submittingLogs" : "submitLogs")], ["#download-logs", t("download")], ["#copy-logs", t("copy")], ["#logs-description", t("logsDescription")], ["#log-level", t("filterLogs")], ["#clear-logs", t("clearLogs")], ["#footer-privacy", t("privacy")],
   ]);
   for (const [selector, value] of text) {
     const element = document.querySelector(selector);
@@ -1402,6 +1409,36 @@ document.querySelector("#close-logs").addEventListener("click", () => {
   routeTo(screen);
   if (screen === "dashboard") renderDashboard();
 });
+async function submitLogs() {
+  if (submittingLogs) return;
+  submittingLogs = true;
+  submitLogsButton.disabled = true;
+  submitLogsButton.textContent = t("submittingLogs");
+  submitLogsButton.setAttribute("aria-busy", "true");
+  logSubmitStatus.hidden = false;
+  logSubmitStatus.dataset.state = "neutral";
+  logSubmitStatus.textContent = t("submittingLogs");
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "submit_logs" });
+    const submitted = Math.max(0, Number(result?.submitted) || 0);
+    const remaining = Math.max(0, Number(result?.remaining) || 0);
+    if (!result?.ok && submitted === 0) throw new Error("Log submission failed.");
+    logSubmitStatus.dataset.state = !result?.ok || remaining > 0 ? "partial" : "success";
+    logSubmitStatus.textContent = [t("logsSubmitted", submitted),
+      remaining > 0 ? t("logsSubmitRemaining", remaining) : "",
+      !result?.ok && remaining === 0 ? t("logsSubmitFailed") : ""].filter(Boolean).join(" ");
+  } catch {
+    logSubmitStatus.dataset.state = "error";
+    logSubmitStatus.textContent = t("logsSubmitFailed");
+  } finally {
+    submittingLogs = false;
+    submitLogsButton.disabled = false;
+    submitLogsButton.textContent = t("submitLogs");
+    submitLogsButton.setAttribute("aria-busy", "false");
+  }
+}
+submitLogsButton.addEventListener("click", () => void submitLogs());
+
 async function prepareLogExport() {
   const result = await chrome.runtime.sendMessage({ type: "flush_logs" });
   if (!result?.ok) throw new Error("Could not persist the latest diagnostics. Retry the export.");

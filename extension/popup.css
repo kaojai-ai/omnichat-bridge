@@ -962,12 +962,12 @@ textarea {
   padding: 5px 10px;
 }
 
-.log-download-button {
+.log-submit-button {
   background: #11baa6;
   border-color: #11baa6;
 }
 
-.log-download-button:not(:disabled):hover {
+.log-submit-button:not(:disabled):hover {
   background: #0d9686;
   border-color: #0d9686;
 }
@@ -1175,3 +1175,7 @@ footer a:hover,
 .account-metadata-refresh:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .account-metadata-result { color: var(--muted); font-size: 10px; line-height: 1.4; }
 .account-metadata-result[data-failed="true"] { color: #a34c43; }
+
+.log-bottom-actions { align-items: center; display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.log-submit-status { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 8px 0; }
+.log-submit-status[data-state="error"] { color: var(--danger); }

@@ -215,27 +215,6 @@ function mutateLogs(task) {
   return result;
 }
 
-async function scheduleLogUpload(delayInMinutes = 1) {
-  if (await chrome.alarms.get(LOG_UPLOAD_ALARM)) return;
-  chrome.alarms.create(LOG_UPLOAD_ALARM, { delayInMinutes });
-}
-
-async function resumeLogUpload() {
-  const stored = await readStorage([
-    STORAGE.serverInitialized,
-    STORAGE.logUploadEnabled,
-    STORAGE.logOutbox,
-  ]);
-  if (
-    hasServerInitialized(stored)
-    && stored[STORAGE.logUploadEnabled] === true
-    && Array.isArray(stored[STORAGE.logOutbox])
-    && stored[STORAGE.logOutbox].length
-  ) {
-    await scheduleLogUpload();
-  }
-}
-
 const filterRoutineLog = createRoutineLogFilter();
 
 let diagnosticsSuspended = false;
@@ -264,7 +243,6 @@ const diagnosticBuffer = createDiagnosticBuffer({
         && context?.config.logs_url) outbox.add(entry.id);
     }
     await writeStorage({ [STORAGE.logs]: logs, [STORAGE.logOutbox]: [...outbox] });
-    if (outbox.size) void scheduleLogUpload().catch(() => {});
   }),
 });
 
@@ -1021,6 +999,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       metadataErasing = false;
       diagnosticsSuspended = false;
     });
+    return true;
+  }
+  if (message?.type === "submit_logs") {
+    void submitLogs().then(respond, () => respond({ ok: false, submitted: 0, error: "Could not submit logs." }));
     return true;
   }
   if (message?.type === "flush_logs") {
@@ -3029,7 +3011,7 @@ chrome.tabs.onReplaced?.addListener((_addedTabId, removedTabId) => {
 
 chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
-  void resumeLogUpload();
+  void chrome.alarms.clear(LOG_UPLOAD_ALARM);
   void ensureLiveConnection();
   void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
   void attemptAllDeliveries({ resetBackoff: false });
@@ -3051,7 +3033,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
-void resumeLogUpload();
+void chrome.alarms.clear(LOG_UPLOAD_ALARM);
 void ensureLiveConnection();
 void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
 void resumeInterruptedSync().catch((error) => recordUnexpected("sync_resume", error));
@@ -4732,6 +4714,13 @@ async function sendLogBatch(context, logs) {
   }, 15_000);
 }
 
+let logSubmission = null;
+function submitLogs() {
+  if (logSubmission) return logSubmission;
+  logSubmission = flushLogBatch().finally(() => { logSubmission = null; });
+  return logSubmission;
+}
+
 async function flushLogBatch() {
   await diagnosticBuffer.drain();
   await logMutationQueue;
@@ -4746,40 +4735,46 @@ async function flushLogBatch() {
   ]);
   if (!hasLocalConsent(stored[STORAGE.consent])
     || !hasServerInitialized(stored)
-    || stored[STORAGE.logUploadEnabled] !== true) return;
+    || stored[STORAGE.logUploadEnabled] !== true) return { ok: false, submitted: 0, error: "Complete account setup before submitting logs." };
   const contexts = configuredAccountContexts(stored).filter((context) => context.config.logs_url);
-  if (!contexts.length) return;
+  if (!contexts.length) return { ok: false, submitted: 0, error: "No configured log destination." };
   const queuedIds = new Set(Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []);
   const entries = pruneLogs(stored[STORAGE.logs]);
-  let remaining = queuedIds.size;
+  let submitted = 0;
+  let failed = false;
   for (const context of contexts) {
-    const selected = entries
+    const pending = entries
       .filter((entry) => entry.account_key === context.key && queuedIds.has(entry.id))
-      .reverse()
-      .slice(0, MAX_LOG_UPLOAD_BATCH);
-    if (!selected.length) continue;
-    try {
-      await sendLogBatch(context, selected);
-      const deliveredIds = new Set(selected.map((entry) => entry.id));
-      await mutateLogs(async () => {
-        const current = await readStorage([STORAGE.logOutbox]);
-        const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
-          .filter((id) => !deliveredIds.has(id));
-        remaining = outbox.length;
-        await writeStorage({ [STORAGE.logOutbox]: outbox });
-      });
-      await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
-        provider_account_id: context.account.provider_account_id,
-        count: selected.length,
-      }, { remote: false });
-    } catch (error) {
-      await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
-        provider_account_id: context.account.provider_account_id,
-        ...diagnosticErrorDetails(error),
-      }, { remote: false });
+      .reverse();
+    for (let offset = 0; offset < pending.length; offset += MAX_LOG_UPLOAD_BATCH) {
+      const selected = pending.slice(offset, offset + MAX_LOG_UPLOAD_BATCH);
+      try {
+        await sendLogBatch(context, selected);
+        const deliveredIds = new Set(selected.map((entry) => entry.id));
+        await mutateLogs(async () => {
+          const current = await readStorage([STORAGE.logOutbox]);
+          const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
+            .filter((id) => !deliveredIds.has(id));
+          await writeStorage({ [STORAGE.logOutbox]: outbox });
+        });
+        submitted += selected.length;
+        await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
+          provider_account_id: context.account.provider_account_id,
+          count: selected.length,
+        }, { remote: false });
+      } catch (error) {
+        failed = true;
+        await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
+          provider_account_id: context.account.provider_account_id,
+          ...diagnosticErrorDetails(error),
+        }, { remote: false });
+        break; // Manual submission never retries a failed batch.
+      }
     }
   }
-  if (remaining) void scheduleLogUpload(5);
+  const remaining = entries.filter((entry) => queuedIds.has(entry.id)).length - submitted;
+  return { ok: !failed && remaining === 0, submitted, remaining,
+    ...(failed || remaining ? { error: "Some logs could not be submitted. Submit again to try the remaining logs." } : {}) };
 }
 
 function isMessageScopedDeliveryError(error) {
@@ -5200,12 +5195,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Transport repair must not wait for provider checks or queued uploads.
     void ensureLiveConnection().catch((error) => recordUnexpected("live_connection", error));
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
-  } else if (alarm.name === LOG_UPLOAD_ALARM) {
-    void flushLogBatch().catch(() => {
-      // Diagnostic failures must not recursively emit diagnostics or reject
-      // the alarm listener. The bounded buffer owns persistence retry.
-      void scheduleLogUpload().catch(() => {});
-    });
   }
 });
 
