@@ -200,7 +200,7 @@ remote close diagnostics include time since the last inbound WebSocket message.
 
 ## Manual metadata refresh (0.8.0, Planned)
 
-Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields change only through **Refresh account & customer info** in the extension. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
+Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields refresh when the user clicks **Sync messages**. The same action refreshes display metadata for the accounts included in that sync before starting message recovery. Metadata failure preserves cached values and does not block message sync. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
 
 Manual refresh verifies the account and reads account/conversation lists only, with a 30-second overall deadline and at most 100 recent conversations. Partial failures keep valid completed results; context changes discard late results. No historical-message crawl, individual customer-profile fetch, message replay, or immediate rewrite of historical Admin customer records is performed. Refreshed information reaches KaoJai through subsequent ordinary ingestion.
 

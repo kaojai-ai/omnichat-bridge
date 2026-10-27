@@ -38,7 +38,6 @@ for (const provider of ["line_oa", "shopee"]) {
       accountConfigKey: candidate => `${candidate.provider}:${candidate.provider_account_id}`,
       readAccountState: (state, _key, fallback) => state === pendingState ? ["one", "two"]
         : state === syncState ? { state: syncing ? "syncing" : "error", phase: "fetching_messages" } : fallback,
-      storedConfig: {}, findAccountConfig: () => account, metadataRefreshes: new Map(), metadataRefreshResults: new Map(),
       retryingAccounts: new Set(), createCopyIcon: () => element("svg"), copyProviderAccountId: () => {},
       openLogs: level => calls.push(["logs", level]),
       retryAccount: candidate => calls.push(["retry", candidate]),
@@ -97,82 +96,5 @@ for (const provider of ["line_oa", "shopee"]) {
       "providers without message recovery never offer an unsupported retry");
     assert.equal(unavailableActions.some(node => /Discard/.test(node.attributes["aria-label"])), true,
       "local pending-data actions remain available independently of recovery capability");
-  });
-}
-
-
-function metadataHarness() {
-  const account = { provider: "shopee", provider_account_id: "shop-a", display_name: "Shop A" };
-  const list = element("div");
-  const requests = [];
-  let finish;
-  let reloads = 0;
-  const scope = vm.createContext({
-    document: { createElement: element, createElementNS: (_namespace, tag) => element(tag) },
-    popupAccountsForSession: accounts => accounts,
-    detectedAccounts: [account], liveState: {}, pageAccounts: [], accountList: list,
-    accountListEmpty: element("div"), detectingAccount: false, activeProviderAdapter: { id: "shopee" },
-    adapterForAccount: () => ({ id: "shopee", displayName: "Shopee", accountName: "Shop", supports: () => true }),
-    accountRowStatus: () => ({ label: "READY", state: "ready", loading: false }),
-    lineChatUrl: () => null, syncProgressPresentation, storedStatus: {}, pendingStates: {}, scanStates: {},
-    accountConfigKey: candidate => `${candidate.provider}:${candidate.provider_account_id}`,
-    readAccountState: (_state, _key, fallback) => fallback,
-    storedConfig: {}, findAccountConfig: () => account,
-    metadataRefreshes: new Map(), metadataRefreshResults: new Map(), retryingAccounts: new Set(),
-    createCopyIcon: () => element("svg"), copyProviderAccountId: () => {},
-    chrome: { runtime: { sendMessage: message => { requests.push(message); return new Promise(resolve => { finish = resolve; }); } } },
-    refreshStoredState: async () => { reloads += 1; },
-    t: (key, count) => ({ refreshMetadata: "Refresh account & customer info", refreshingMetadata: "Refreshing info…",
-      metadataRefreshed: `Refreshed ${count} recent customers.`, metadataPartial: "Some info could not be refreshed.",
-      metadataOlder: "Up to 100 recent conversations; older customers may remain unchanged.",
-      metadataRefreshFailed: "Could not refresh info. Cached info was kept." }[key] ?? key),
-  });
-  const refreshStart = source.indexOf("async function refreshAccountMetadata(account) {");
-  const refreshEnd = source.indexOf("async function copyProviderAccountId", refreshStart);
-  vm.runInContext(labels + rendering + source.slice(refreshStart, refreshEnd), scope);
-  scope.renderDashboard = () => scope.renderDetectedAccounts();
-  scope.renderDetectedAccounts();
-  return { scope, account, requests, finish: value => finish(value), get reloads() { return reloads; },
-    nodes: () => flatten(list), button: () => flatten(list).find(node => node.className === "account-metadata-refresh") };
-}
-
-test("manual metadata action coalesces clicks and shows progress independently of readiness", async () => {
-  const h = metadataHarness();
-  assert.equal(h.button().textContent, "Refresh account & customer info");
-  const first = h.scope.refreshAccountMetadata(h.account);
-  const second = h.scope.refreshAccountMetadata(h.account);
-  await Promise.resolve();
-  assert.equal(h.requests.length, 1);
-  assert.equal(h.requests[0].type, "refresh_metadata");
-  assert.equal(h.requests[0].provider_account_id, "shop-a");
-  assert.equal(h.button().disabled, true);
-  assert.equal(h.button().textContent, "Refreshing info…");
-  assert.equal(h.nodes().find(node => node.className === "account-row-status").textContent, "READY");
-  h.finish({ ok: true, account_refreshed: true, customer_count: 10, partial: false });
-  await Promise.all([first, second]);
-  assert.equal(h.button().disabled, false);
-  assert.equal(h.reloads, 1);
-  const outcome = h.nodes().find(node => node.className === "account-metadata-result");
-  assert.match(outcome.textContent, /Refreshed 10 recent customers/);
-  assert.match(outcome.textContent, /older customers may remain unchanged/);
-  assert.equal(h.scope.retryingAccounts.size, 0);
-});
-
-for (const [name, result, expected] of [
-  ["partial", { ok: true, account_refreshed: true, customer_count: 25, partial: true }, /Some info could not be refreshed/],
-  ["failure", { ok: false, error: "Sensitive provider detail" }, /Could not refresh info. Cached info was kept/],
-]) {
-  test(`metadata ${name} settles its own result without changing the ready status`, async () => {
-    const h = metadataHarness();
-    const task = h.scope.refreshAccountMetadata(h.account);
-    await Promise.resolve();
-    h.finish(result);
-    await task;
-    const outcome = h.nodes().find(node => node.className === "account-metadata-result");
-    assert.match(outcome.textContent, expected);
-    assert.doesNotMatch(outcome.textContent, /Sensitive provider detail/);
-    assert.equal(h.button().disabled, false);
-    assert.equal(h.nodes().find(node => node.className === "account-row-status").dataset.state, "ready");
-    assert.equal(h.scope.retryingAccounts.size, 0);
   });
 }
