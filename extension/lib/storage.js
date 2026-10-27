@@ -2,6 +2,7 @@ export const STORAGE = {
   config: "config",
   consent: "local_consent",
   detectedAccounts: "detected_accounts",
+  customerMetadata: "customer_metadata_v1",
   installationId: "installation_id",
   deviceName: "device_name",
   pending: "pending_messages",
@@ -44,7 +45,7 @@ function normalizeDetectedAccount(value) {
   };
 }
 
-export function mergeDetectedAccounts(existing, incoming) {
+export function mergeDetectedAccounts(existing, incoming, { refreshMetadata = false } = {}) {
   const merged = [];
   const indexes = new Map();
   for (const value of [
@@ -59,7 +60,14 @@ export function mergeDetectedAccounts(existing, incoming) {
       indexes.set(key, merged.length);
       merged.push(account);
     } else {
-      merged[index] = { ...merged[index], ...account };
+      const previous = merged[index];
+      merged[index] = { ...previous, ...account };
+      for (const field of ["display_name", "avatar_url"]) {
+        if ((!refreshMetadata && previous[field]) || !account[field]) {
+          if (previous[field]) merged[index][field] = previous[field];
+          else delete merged[index][field];
+        }
+      }
     }
   }
   return merged;

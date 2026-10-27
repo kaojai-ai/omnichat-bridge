@@ -569,7 +569,7 @@ test("preserves provider uncertainty instead of reporting a definite rejection",
   assert.equal((await result).uncertain, true);
 });
 
-test("reuses a message buyer name on later unnamed hooks and accepts newer names", async () => {
+test("reuses cached buyer names without automatic replacement", async () => {
   const bridge = contentBridge("/portal/chat-management");
   for (const [id, participant] of [
     ["profile-1", { id: "buyer-1", display_name: "First name" }],
@@ -581,7 +581,7 @@ test("reuses a message buyer name on later unnamed hooks and accepts newer names
   }
   const names = bridge.runtimeMessages.filter((message) => message.type === "queue_messages")
     .map((message) => message.messages[0].participant?.display_name);
-  assert.deepEqual(names, ["First name", "First name", "Updated name", "Updated name"]);
+  assert.deepEqual(names, ["First name", "First name", "First name", "First name"]);
 });
 
 test("uses observed conversation mapping and preserves names through incomplete profile updates", async () => {
@@ -595,7 +595,7 @@ test("uses observed conversation mapping and preserves names through incomplete 
   }
   const names = bridge.runtimeMessages.filter((message) => message.type === "queue_messages")
     .map((message) => message.messages[0].participant?.display_name);
-  assert.deepEqual(names, ["List name", "List name", "New list name"]);
+  assert.deepEqual(names, ["List name", "List name", "List name"]);
 });
 
 

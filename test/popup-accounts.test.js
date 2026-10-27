@@ -47,7 +47,7 @@ test("keeps configured accounts visible before live detection finishes", () => {
   assert.equal(accounts[0].display_name, "Example OA");
 });
 
-test("merges live detection on top of configured seeds", () => {
+test("retains cached display metadata over configured seeds", () => {
   const accounts = hydrateDetectedAccounts({
     storedAccounts: [{
       provider: "line_oa",
@@ -140,4 +140,13 @@ test("accounts with explicit session problems stay visible without becoming acti
     assert.deepEqual(popupAccountsForSession(accounts, live), accounts);
     assert.ok(Object.values(live.accounts).every(state => state.active_in_profile === false));
   }
+});
+
+
+test("a manually refreshed stored name stays visible after reopening the popup", () => {
+  const accounts = hydrateDetectedAccounts({
+    storedAccounts: [{ provider: "line_oa", provider_account_id: "@exampleoa", bot_id: "bot-1", display_name: "Refreshed OA" }],
+    config: lineConfig, providerId: "line_oa", activeTabUrl: "https://chat.line.biz/bot-1/",
+  });
+  assert.equal(accounts[0].display_name, "Refreshed OA");
 });

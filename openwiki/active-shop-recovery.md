@@ -197,3 +197,13 @@ An uncertain provider result remains uncertain and is deduplicated by request ID
 Readiness logs record episode start, recovery duration, grace expiry and the
 60-second warning once per episode. Local transport cleanup identifies its reason;
 remote close diagnostics include time since the last inbound WebSocket message.
+
+## Manual metadata refresh (0.8.0, Planned)
+
+Account and customer names/avatars are cached locally. First encounters and missing fields are populated from existing provider responses; known fields change only through **Refresh account & customer info** in the extension. Connection Retry and message Retry do not refresh metadata. Routing/session/access evidence continues updating independently.
+
+Manual refresh verifies the account and reads account/conversation lists only, with a 30-second overall deadline and at most 100 recent conversations. Partial failures keep valid completed results; context changes discard late results. No historical-message crawl, individual customer-profile fetch, message replay, or immediate rewrite of historical Admin customer records is performed. Refreshed information reaches KaoJai through subsequent ordinary ingestion.
+
+The versioned customer cache persists only display metadata and IDs under an opaque configuration/account fingerprint. It is bounded to 1,000 records per account, 5,000 per installation, and 2 MiB (whichever limit is reached first). Storage writes are batched; erasure cancels pending cache work. Display cache failures do not authorize or block sending. Existing server contracts and SQL schema remain unchanged.
+
+Release the related server/worker/Admin readiness compatibility first, then extension 0.8.0. CPU/heap and live incoming-message latency still require comparison on an authenticated provider tab; reduced redundant work is not a measured performance claim.

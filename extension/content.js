@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 5;
+  const BRIDGE_PROTOCOL_VERSION = 6;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -17,6 +17,7 @@
   const providerLabel = providerAdapter.displayName || providerAdapter.id;
   const recoveries = new Map();
   const accountDetections = new Map();
+  const metadataRefreshRequests = new Map();
   const profilesByConversation = new Map();
   const routingByConversation = new Map();
   const pendingOutbound = new Map();
@@ -403,6 +404,22 @@
     return { ok: true, cancelled: cancelled > 0 };
   }
 
+  function requestMetadataRefresh(message) {
+    const requestId = crypto.randomUUID();
+    const deadline = Math.min(Number(message.deadline_at) || 0, Date.now() + 30_000);
+    if (deadline <= Date.now()) return Promise.resolve({ ok: false, error: "Metadata refresh expired." });
+    const result = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        metadataRefreshRequests.delete(requestId);
+        resolve({ ok: false, error: "Metadata refresh timed out." });
+      }, deadline - Date.now());
+      metadataRefreshRequests.set(requestId, { resolve, timeout, accountId: message.provider_account_id, deadline });
+    });
+    post({ type: "refresh_metadata_v3", request_id: requestId,
+      provider_account_id: message.provider_account_id, deadline_at: deadline, limit: 100 });
+    return result;
+  }
+
   async function requestAccountDetection() {
     if (!providerAdapter.supports("account_detection")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support account detection.` };
@@ -517,6 +534,7 @@
   }
 
   function handleProfilesDetected(message) {
+    const discovered = [];
     for (const profile of message.profiles ?? []) {
       const conversationId = String(profile?.conversation_id ?? "").trim();
       const id = String(profile?.id ?? "").trim();
@@ -542,9 +560,19 @@
           : {})
       };
       const key = JSON.stringify([normalizedProfile.provider_account_id ?? "", conversationId]);
-      const merged = mergeConversationProfiles(normalizedProfile, profilesByConversation.get(key));
-      if (merged) profilesByConversation.set(key, merged);
+      const cached = profilesByConversation.get(key);
+      const previous = cached?.id === id ? cached : null;
+      const fields = {
+        ...(!previous?.display_name && normalizedProfile.display_name ? { display_name: normalizedProfile.display_name } : {}),
+        ...(!previous?.avatar_url && normalizedProfile.avatar_url ? { avatar_url: normalizedProfile.avatar_url } : {}),
+      };
+      if (Object.keys(fields).length) {
+        profilesByConversation.set(key, { ...normalizedProfile, ...previous, ...fields });
+        if (profilesByConversation.size > 1_000) profilesByConversation.delete(profilesByConversation.keys().next().value);
+        discovered.push({ ...normalizedProfile, ...fields, conversation_id: conversationId });
+      }
     }
+    if (discovered.length) void sendRuntimeMessage({ type: "cache_profiles", provider: providerAdapter.id, profiles: discovered });
   }
 
   function addConversationProfile(messages) {
@@ -552,18 +580,24 @@
       const accountId = message.provider_account_id ?? message.participant?.provider_account_id
         ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "");
       const key = JSON.stringify([accountId, message.conversation_id]);
-      const profile = profilesByConversation.get(key);
+      const cached = profilesByConversation.get(key);
+      const profile = message.participant?.id && cached?.id !== message.participant.id ? null : cached;
       const participant = mergeConversationProfiles(message.participant, profile);
-      if (participant?.display_name) profilesByConversation.set(key, participant);
+      if (participant && profile) {
+        if (profile.display_name) participant.display_name = profile.display_name;
+        if (profile.avatar_url) participant.avatar_url = profile.avatar_url;
+      }
+      if (participant?.display_name) {
+        profilesByConversation.set(key, participant);
+        if (profilesByConversation.size > 1_000) profilesByConversation.delete(profilesByConversation.keys().next().value);
+      }
       const routing = routingByConversation.get(JSON.stringify([accountId, message.conversation_id]));
-      return participant
-        ? {
-          ...message,
-          ...(routing ? { omnichat: { routing } } : {}),
-          ...(accountId ? { provider_account_id: accountId } : {}),
-          participant,
-        }
-        : message;
+      return {
+        ...message,
+        ...(routing ? { omnichat: { routing } } : {}),
+        ...(accountId ? { provider_account_id: accountId } : {}),
+        ...(participant ? { participant } : {}),
+      };
     });
   }
 
@@ -1007,6 +1041,13 @@
       void observeAsync("accounts_detected", () => handleAccountsDetected(event.data));
     } else if (event.data.type === "account_detection_failed") {
       handleAccountDetectionFailed(event.data);
+    } else if (event.data.type === "metadata_refresh_result") {
+      const pending = metadataRefreshRequests.get(event.data.request_id);
+      if (!pending) return;
+      metadataRefreshRequests.delete(event.data.request_id);
+      clearTimeout(pending.timeout);
+      if (Date.now() >= pending.deadline) pending.resolve({ ok: false, error: "Metadata refresh expired." });
+      else pending.resolve(event.data);
     } else if (event.data.type === "profiles_detected") {
       handleProfilesDetected(event.data);
     } else if (event.data.type === "active_conversation") {
@@ -1162,6 +1203,10 @@
       respond(cancelRecovery(message.request_id, message.provider_account_id));
       return false;
     }
+    if (message?.type === "refresh_metadata_v3") {
+      void requestMetadataRefresh(message).then(respond, () => respond({ ok: false }));
+      return true;
+    }
     if (message?.type === "detect_account_v3") {
       void requestAccountDetection().then(respond, (error) => respond({ ok: false, error: String(error) }));
       return true;
@@ -1214,6 +1259,11 @@
       pending.resolve({ ok: false, error: reason });
     }
     accountDetections.clear();
+    for (const pending of metadataRefreshRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, error: reason });
+    }
+    metadataRefreshRequests.clear();
     for (const pending of pendingApiSends.values()) {
       clearTimeout(pending.timeout);
       if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);

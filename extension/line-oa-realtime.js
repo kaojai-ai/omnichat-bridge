@@ -23,10 +23,12 @@
   let accessibleAccounts = [];
   let accountAccessVerified = false;
   let accountAccessRequest = null;
+  let metadataSessionEpoch = 0;
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
   const knownChatIdsByAccount = new Map();
+  const metadataProfilesByAccount = new Map();
   const knownMessageIdsByAccount = new Map();
   const missingHistoryIds = new Set();
   const sendProfilesByBot = new Map();
@@ -156,6 +158,7 @@
           display_name: value(bot?.name ?? bot?.displayName),
         })).filter((account) => account.provider_account_id && account.bot_id);
         if (disposed) return [];
+        if (accessibleAccounts.some((previous) => !accounts.some((account) => account.provider_account_id === previous.provider_account_id && account.bot_id === previous.bot_id))) metadataSessionEpoch += 1;
         accessibleAccounts = accounts;
         accountAccessVerified = true;
         const ids = new Set(accounts.map((account) => account.provider_account_id));
@@ -201,9 +204,9 @@
     return checkpointMs <= 0 || latestEventMs <= 0 || latestEventMs >= checkpointMs;
   }
 
-  async function json(url) {
+  async function json(url, timeoutMs = REQUEST_TIMEOUT_MS) {
     const controller = typeof AbortController === "function" ? new AbortController() : null;
-    const timeout = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller?.abort(), Math.max(1, Math.min(REQUEST_TIMEOUT_MS, timeoutMs)));
     try {
       const response = await fetch(url, {
         credentials: "include",
@@ -211,6 +214,7 @@
         ...(controller ? { signal: controller.signal } : {}),
       });
       if (!response.ok) {
+        if ([401, 403].includes(response.status)) metadataSessionEpoch += 1;
         let format = "json";
         const body = await response.json().catch(() => { format = "non_json"; return null; });
         const error = new Error(`LINE OA request failed (${response.status}).`);
@@ -302,7 +306,32 @@
     }
   }
 
+  function captureChatProfile(providerAccountId, chat) {
+    const conversationId = value(chat?.chatId);
+    const profile = chat?.profile;
+    const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+    if (!providerAccountId || !conversationId || !id) return;
+    const profiles = metadataProfilesByAccount.get(providerAccountId) ?? new Map();
+    metadataProfilesByAccount.set(providerAccountId, profiles);
+    const key = `${conversationId}:${id}`;
+    const previous = profiles.get(key) ?? {};
+    const displayName = previous.display_name ? "" : value(profile?.displayName ?? profile?.name);
+    let avatarUrl = "";
+    if (!previous.avatar_url) {
+      try {
+        const url = new URL(value(profile?.pictureUrl ?? profile?.imageUrl ?? profile?.avatarUrl));
+        if (url.protocol === "https:") avatarUrl = url.toString();
+      } catch { /* Optional metadata. */ }
+    }
+    if (!displayName && !avatarUrl) return;
+    const additions = { ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) };
+    profiles.set(key, { ...previous, ...additions });
+    while (profiles.size > 1_000) profiles.delete(profiles.keys().next().value);
+    post({ type: "profiles_detected", profiles: [{ conversation_id: conversationId, id, provider_account_id: providerAccountId, ...additions }] });
+  }
+
   async function queueMessagePage({ requestId, providerAccountId, chat, messages, page }) {
+    captureChatProfile(providerAccountId, chat);
     if (!messages.length) return { parsed: 0, queued: 0 };
     const batchRequestId = `${requestId}:${value(chat?.chatId)}:${page}`;
     post({
@@ -1027,9 +1056,81 @@
     }
   }
 
+  // Read only account/chat lists. Never fetch message history for metadata.
+  async function refreshMetadata(command) {
+    const requestId = value(command?.request_id);
+    const accountId = normalizeBasicId(command?.provider_account_id);
+    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
+    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
+    const locationAtStart = window.location.href;
+    const sessionEpoch = metadataSessionEpoch;
+    const profiles = [];
+    let account;
+    const assertCurrent = () => {
+      if (disposed || sessionEpoch !== metadataSessionEpoch || window.location.href !== locationAtStart) throw new Error("LINE OA session changed during metadata refresh.");
+      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
+    };
+    try {
+      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
+      assertCurrent();
+      const accountsBody = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`, deadlineAt - Date.now());
+      assertCurrent();
+      if (!Array.isArray(accountsBody?.list)) throw new Error("LINE OA account list was invalid.");
+      const bot = accountsBody.list.find((item) => normalizeBasicId(item?.basicSearchId ?? item?.basicId) === accountId);
+      const botId = value(bot?.botId ?? bot?.id);
+      if (!botId) throw new Error("This LINE OA is not accessible to the signed-in user.");
+      const name = value(bot?.name ?? bot?.displayName);
+      account = { provider: "line_oa", provider_account_id: accountId, bot_id: botId,
+        ...(name ? { display_name: name } : {}) };
+      let next = null;
+      let count = 0;
+      const seenCursors = new Set();
+      const seenChats = new Set();
+      let partial = false;
+      do {
+        assertCurrent();
+        const url = new URL(chatUrl(botId, next));
+        url.searchParams.set("limit", String(Math.min(CHAT_PAGE_LIMIT, limit - count)));
+        url.searchParams.set("prioritizePinnedChat", "false");
+        const body = await json(url.toString(), deadlineAt - Date.now());
+        assertCurrent();
+        if (!Array.isArray(body?.list)) throw new Error("LINE OA returned an invalid conversation list.");
+        const chats = globalThis.OmnichatLineOA.chatItems(body);
+        for (const chat of chats) {
+          if (count >= limit) break;
+          const conversationId = value(chat?.chatId);
+          if (!conversationId || seenChats.has(conversationId)) continue;
+          seenChats.add(conversationId);
+          count += 1;
+          const profile = chat?.profile;
+          const id = value(profile?.userId ?? profile?.groupId) || conversationId;
+          const displayName = value(profile?.displayName ?? profile?.name);
+          const avatar = value(profile?.pictureUrl ?? profile?.imageUrl ?? profile?.avatarUrl);
+          let avatarUrl = "";
+          try { const parsed = new URL(avatar); if (parsed.protocol === "https:") avatarUrl = parsed.toString(); } catch { /* Optional metadata. */ }
+          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
+            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
+        }
+        next = cursor(body?.next);
+        if (next && seenCursors.has(next)) { partial = true; break; }
+        if (next) seenCursors.add(next);
+        if (next && count >= limit) partial = true;
+      } while (next && count < limit);
+      assertCurrent();
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
+    } catch (error) {
+      const current = !disposed && sessionEpoch === metadataSessionEpoch && window.location.href === locationAtStart && Date.now() < deadlineAt;
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
+        ...(current && account ? { account } : {}), profiles: current ? profiles : [], partial: Boolean(current && account),
+        error: error instanceof Error ? error.message : "Metadata refresh failed." });
+    }
+  }
+
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
-    if (event.data.type === "detect_account_v3") {
+    if (event.data.type === "refresh_metadata_v3") {
+      void refreshMetadata(event.data);
+    } else if (event.data.type === "detect_account_v3") {
       void availableAccounts().then((accounts) => {
         postProviderStatus();
         post({
@@ -1075,6 +1176,7 @@
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
     compatibility_version: COMPATIBILITY_VERSION,
+    metadata_refresh: true,
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

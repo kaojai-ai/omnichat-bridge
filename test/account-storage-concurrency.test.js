@@ -22,6 +22,8 @@ function harness(overrides = {}) {
   let failWrite = false;
   const runtime = vm.createContext({
     performance, STORAGE, readAccountState, writeAccountState,
+    metadataScope: async context => context.key,
+    customerMetadata: { enrich: async (_scope, message) => message },
     readStorage: async () => { const snapshot = structuredClone(state); await turn(); return snapshot; },
     writeStorage: async patch => { await turn(); if (failWrite) { failWrite = false; throw new Error("storage unavailable"); } Object.assign(state, structuredClone(patch)); },
     hasLocalConsent: value => value === true,

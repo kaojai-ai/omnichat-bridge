@@ -756,8 +756,20 @@
         ...(displayName ? { display_name: displayName } : {}),
         ...(avatarUrl ? { avatar_url: avatarUrl } : {})
       };
-      state.profilesByConversation.set(conversationId, profile);
-      profiles.push(profile);
+      const cachedProfile = state.profilesByConversation.get(conversationId);
+      const previous = cachedProfile?.id === id ? cachedProfile : null;
+      // Known display data is refreshed only by the explicit metadata command.
+      // Routing remains live and must reach content even when metadata is full.
+      const display = {
+        ...(previous?.display_name ? { display_name: previous.display_name } : profile.display_name ? { display_name: profile.display_name } : {}),
+        ...(previous?.avatar_url ? { avatar_url: previous.avatar_url } : profile.avatar_url ? { avatar_url: profile.avatar_url } : {}),
+      };
+      state.profilesByConversation.set(conversationId, { ...profile, ...display });
+      while (state.profilesByConversation.size > 1_000) state.profilesByConversation.delete(state.profilesByConversation.keys().next().value);
+      profiles.push({ conversation_id: conversationId, id, ...(profile.provider_account_id ? { provider_account_id: profile.provider_account_id } : {}),
+        ...(profile.omnichat ? { omnichat: profile.omnichat } : {}),
+        ...(!previous?.display_name && profile.display_name ? { display_name: profile.display_name } : {}),
+        ...(!previous?.avatar_url && profile.avatar_url ? { avatar_url: profile.avatar_url } : {}) });
     }
     if (profiles.length) post({ type: "profiles_detected", profiles });
   };
@@ -1629,6 +1641,86 @@
     return { conversations, firstPage, exhausted, pages, stopReason };
   }
 
+  // Manual metadata refresh never enters message recovery or advances a cursor.
+  async function refreshMetadata(command) {
+    const requestId = value(command?.request_id);
+    const accountId = value(command?.provider_account_id);
+    const deadlineAt = Math.min(Number(command?.deadline_at) || 0, Date.now() + 30_000);
+    const limit = Math.max(1, Math.min(100, Math.trunc(Number(command?.limit) || 100)));
+    const epoch = state.routeSessionEpoch;
+    const profiles = [];
+    let account;
+    const assertCurrent = () => {
+      if (!isBridgeActive() || epoch !== state.routeSessionEpoch || state.currentAccountId !== accountId) {
+        throw new Error("Shopee session changed during metadata refresh.");
+      }
+      if (Date.now() >= deadlineAt) throw new Error("Metadata refresh timed out.");
+    };
+    try {
+      if (!requestId || !accountId) throw new Error("Metadata refresh account is missing.");
+      assertCurrent();
+      const detected = await detectSessionAccount({ timeoutMs: deadlineAt - Date.now() });
+      assertCurrent();
+      account = detected.find((item) => value(item?.provider_account_id) === accountId);
+      if (!account) throw new Error("Shopee signed-in shop does not match metadata refresh.");
+      if (!state.listTemplate) throw new Error("Open the Shopee conversation list before refreshing customer info.");
+      const template = await lookupTemplateFrom(state.listTemplate);
+      // Captured GET lists can point at a scrolled page. Begin at the first
+      // page for the paging parameters this bridge already understands.
+      if (template.init.method === "GET") {
+        const initialUrl = new URL(template.url);
+        if (initialUrl.searchParams.has("offset")) initialUrl.searchParams.set("offset", "0");
+        initialUrl.searchParams.delete("cursor");
+        initialUrl.searchParams.delete("next_cursor");
+        template.url = initialUrl.toString();
+      }
+      assertCurrent();
+      let request = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
+      const seenPages = new Set();
+      const seenConversations = new Set();
+      let count = 0;
+      let partial = false;
+      while (request && count < limit) {
+        assertCurrent();
+        const pageKey = `${request.url}:${await request.clone().text()}`;
+        if (seenPages.has(pageKey)) { partial = true; break; }
+        seenPages.add(pageKey);
+        const body = await fetchProviderJson(request.clone(), undefined, deadlineAt - Date.now());
+        assertCurrent();
+        if (shopeeError(body) || (!Array.isArray(body) && ![
+          body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data,
+        ].some(Array.isArray))) throw new Error("Shopee returned an invalid conversation list.");
+        const items = conversationItems(body);
+        for (const conversation of items) {
+          if (count >= limit) break;
+          const conversationId = value(conversation?.id);
+          if (!conversationId || seenConversations.has(conversationId)
+            || value(conversation?.shop_id) !== accountId) continue;
+          seenConversations.add(conversationId);
+          count += 1;
+          const id = value(conversation?.to_id);
+          if (!id) continue;
+          const displayName = value(conversation?.to_name);
+          const avatar = value(conversation?.to_avatar);
+          let avatarUrl = "";
+          try { const url = new URL(avatar); if (url.protocol === "https:") avatarUrl = url.toString(); } catch { /* Optional metadata. */ }
+          profiles.push({ conversation_id: conversationId, id, provider_account_id: accountId,
+            ...(displayName ? { display_name: displayName } : {}), ...(avatarUrl ? { avatar_url: avatarUrl } : {}) });
+        }
+        request = await nextConversationRequest(request, body, items);
+        assertCurrent();
+        if (count >= limit && request) partial = true;
+      }
+      assertCurrent();
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: true, account, profiles, partial });
+    } catch (error) {
+      const current = isBridgeActive() && epoch === state.routeSessionEpoch && state.currentAccountId === accountId && Date.now() < deadlineAt;
+      post({ type: "metadata_refresh_result", request_id: requestId, ok: Boolean(current && account),
+        ...(current && account ? { account } : {}), profiles: current && Date.now() < deadlineAt ? profiles : [],
+        partial: Boolean(current && account), error: error instanceof Error ? error.message : "Metadata refresh failed." });
+    }
+  }
+
   async function detectCurrentAccount(requestId) {
     try {
       await discoverAccounts();
@@ -2233,6 +2325,8 @@
       }
     } else if (event.data.type === "reset_recovery_v3") {
       resetRecovery();
+    } else if (event.data.type === "refresh_metadata_v3") {
+      void refreshMetadata(event.data);
     } else if (event.data.type === "detect_account_v3") {
       void observeAsync("account_detection", () => detectCurrentAccount(event.data.request_id));
     } else if (event.data.type === "send_api_v3") {
@@ -2286,6 +2380,7 @@
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
     compatibility_version: 2,
+    metadata_refresh: true,
     generation: bridgeGeneration,
     dispose,
     resetRecovery,

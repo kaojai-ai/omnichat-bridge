@@ -20,6 +20,7 @@ import {
   logEntryForUpload,
   pruneLogs,
 } from "./lib/logs.js";
+import { createMetadataCache } from "./lib/metadata-cache.js";
 import { participantForBatch } from "./lib/message-batch.js";
 import { deliverWithIsolation } from "./lib/delivery-isolation.js";
 import { createDiagnosticBuffer } from "./lib/diagnostic-buffer.js";
@@ -54,10 +55,41 @@ import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 
+let metadataCacheWarningReported = false;
+function newCustomerMetadataCache() {
+  return createMetadataCache({
+    load: async () => (await readStorage([STORAGE.customerMetadata]))[STORAGE.customerMetadata],
+    save: (value) => writeStorage({ [STORAGE.customerMetadata]: value }),
+    onError: () => {
+      if (metadataCacheWarningReported) return;
+      metadataCacheWarningReported = true;
+      return recordLog("warn", "metadata", "cache_save_failed", "Display metadata could not be saved locally.");
+    },
+  });
+}
+let customerMetadata = newCustomerMetadataCache();
+let metadataEpoch = 0;
+let metadataErasing = false;
+const metadataRefreshes = new Map();
+// Persist only an opaque configuration fingerprint, never endpoint or credential values.
+const metadataScopes = new WeakMap();
+function metadataScope(context) {
+  let scopes = metadataScopes.get(context.config);
+  if (!scopes) { scopes = new Map(); metadataScopes.set(context.config, scopes); }
+  const key = accountKey(context.account.provider, context.account.provider_account_id);
+  if (!scopes.has(key)) scopes.set(key, sha256Hex(JSON.stringify([
+    context.config.events_url, context.config.api_url ?? context.config.commands_url,
+    context.config.tenant_id ?? null, context.config.user_id ?? null,
+    context.config.hmac_secret, // Opaque configuration fingerprint only; never persist the credential.
+    context.account.provider, context.account.provider_account_id,
+  ])));
+  return scopes.get(key);
+}
+
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 5;
+const BRIDGE_PROTOCOL_VERSION = 6;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 3;
@@ -876,6 +908,27 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "refresh_metadata") {
+    void refreshAccountMetadata(message.provider, message.provider_account_id).then(respond,
+      () => respond({ ok: false, error: "Metadata refresh failed. Cached information was kept." }));
+    return true;
+  }
+  if (message?.type === "cache_profiles") {
+    void exclusive(async () => {
+      const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+      if (metadataErasing || !hasLocalConsent(stored[STORAGE.consent])) return { ok: false };
+      const adapter = providerAdapterForId(message.provider);
+      if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return { ok: false };
+      for (const profile of (Array.isArray(message.profiles) ? message.profiles : []).slice(0, 100)) {
+        const context = accountContextFor(stored, profile.provider_account_id, message.provider);
+        if (context) await customerMetadata.enrich(await metadataScope(context), {
+          conversation_id: profile.conversation_id, participant: profile,
+        });
+      }
+      return { ok: true };
+    }).then(respond, () => respond({ ok: false }));
+    return true;
+  }
   if (message?.type === "check_extension_update") {
     void checkForExtensionUpdate().then(
       (update) => respond({ ok: true, update }),
@@ -905,8 +958,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       if (!hasLocalConsent(stored[STORAGE.consent])) {
         throw new Error("Provider browser bridge is not configured.");
       }
-      const detectedAccounts = mergeDetectedAccounts(stored[STORAGE.detectedAccounts], accounts);
-      await writeStorage({ [STORAGE.detectedAccounts]: detectedAccounts });
+      const previous = stored[STORAGE.detectedAccounts] ?? [];
+      const detectedAccounts = mergeDetectedAccounts(previous, accounts);
+      const needsWrite = accounts.some((account) => {
+        const cached = previous.find((item) => item.provider === account.provider
+          && item.provider_account_id === account.provider_account_id);
+        return !cached || ["display_name", "avatar_url"].some((field) => !cached[field] && account[field]);
+      });
+      if (needsWrite) await writeStorage({ [STORAGE.detectedAccounts]: detectedAccounts });
       return { accounts: detectedAccounts };
     }).then(
       (result) => respond({ ok: true, ...result }),
@@ -932,15 +991,23 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   }
   if (message?.type === "erase_local_data") {
     diagnosticsSuspended = true;
-    void diagnosticBuffer.discard().then(() => mutateLogs(async () => {
+    metadataErasing = true;
+    metadataEpoch += 1;
+    metadataRefreshes.clear();
+    const metadataDisposed = customerMetadata.dispose();
+    void Promise.all([diagnosticBuffer.discard(), metadataDisposed]).then(() => exclusive(() => mutateLogs(async () => {
       await chrome.alarms.clear(DELIVERY_RETRY_ALARM);
       await chrome.alarms.clear(PROVIDER_HEALTH_ALARM);
       await chrome.alarms.clear(LOG_UPLOAD_ALARM);
       await chrome.storage.local.clear();
-    })).then(
+    }))).then(
       () => respond({ ok: true }),
       () => respond({ ok: false, error: "Could not erase local extension data." }),
-    ).finally(() => { diagnosticsSuspended = false; });
+    ).finally(() => {
+      customerMetadata = newCustomerMetadataCache();
+      metadataErasing = false;
+      diagnosticsSuspended = false;
+    });
     return true;
   }
   if (message?.type === "flush_logs") {
@@ -3046,6 +3113,69 @@ async function providerChatTabById(adapter, tabId) {
   }
 }
 
+async function refreshAccountMetadata(provider, providerAccountId) {
+  const key = accountKey(provider, providerAccountId);
+  if (metadataRefreshes.has(key)) return metadataRefreshes.get(key);
+  const task = runAccountMetadataRefresh(provider, providerAccountId)
+    .finally(() => { if (metadataRefreshes.get(key) === task) metadataRefreshes.delete(key); });
+  metadataRefreshes.set(key, task);
+  return task;
+}
+
+async function runAccountMetadataRefresh(provider, providerAccountId) {
+  if (metadataErasing) throw new Error("Local data is being erased.");
+  const startedEpoch = metadataEpoch;
+  const deadline = Date.now() + 30_000;
+  const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+  if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Consent required.");
+  const context = accountContextFor(stored, providerAccountId, provider);
+  if (!context) throw new Error("Configured account required.");
+  const epoch = providerSessionEpoch(provider);
+  const tabs = await providerChatTabs(context.adapter);
+  let tab;
+  for (const candidate of orderProviderTabs(context.adapter, tabs)) {
+    const status = await providerTabStatus(candidate);
+    const ids = provider === "line_oa" ? status?.accessible_account_ids : [status?.current_provider_account_id];
+    if (ids?.includes(providerAccountId)) { tab = candidate; break; }
+  }
+  if (!tab || Date.now() >= deadline) throw new Error("Open the matching provider account.");
+  const tabContext = providerTabContext(tab, provider);
+  await ensureProviderBridge(tab.id, context.adapter);
+  const result = await sendProviderMessage(tab.id, { type: "refresh_metadata_v3", provider,
+    provider_account_id: providerAccountId, deadline_at: deadline, limit: 100 }, {
+    label: "Metadata", operation: "refresh", timeoutMs: Math.max(1, deadline - Date.now()),
+  });
+  return exclusive(async () => {
+    const current = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+    const currentContext = accountContextFor(current, providerAccountId, provider);
+    const scope = await metadataScope(context);
+    const currentScope = currentContext ? await metadataScope(currentContext) : null;
+    if (metadataErasing || startedEpoch !== metadataEpoch || Date.now() >= deadline || epoch !== providerSessionEpoch(provider)
+      || tabContext !== providerTabContext(tab, provider) || !currentContext
+      || !hasLocalConsent(current[STORAGE.consent]) || scope !== currentScope) {
+      throw new Error("Account context changed during refresh.");
+    }
+    if (!result?.ok) return { ok: false, customer_count: 0, error: "Metadata refresh failed. Cached information was kept." };
+    const account = result.account?.provider_account_id === providerAccountId
+      ? { ...result.account, provider } : null;
+    if (account) await writeStorage({ [STORAGE.detectedAccounts]: mergeDetectedAccounts(
+      current[STORAGE.detectedAccounts], [account], { refreshMetadata: true }) });
+    const profiles = (Array.isArray(result.profiles) ? result.profiles : []).slice(0, 100)
+      .filter((profile) => profile.provider_account_id === providerAccountId);
+    const count = await customerMetadata.refresh(scope, profiles);
+    let persistenceFailed = false;
+    try { await customerMetadata.flush(); } catch {
+      persistenceFailed = true;
+      if (!metadataCacheWarningReported) {
+        metadataCacheWarningReported = true;
+        void recordLog("warn", "metadata", "cache_save_failed", "Display metadata could not be saved locally.");
+      }
+    }
+    return { ok: true, account_refreshed: Boolean(account), customer_count: count,
+      partial: result.partial === true || persistenceFailed };
+  });
+}
+
 async function detectOpenProviderAccount(provider = shopeeAdapter.id, preferredTabId = null) {
   const adapter = providerAdapterForId(provider);
   if (!adapter) return { ok: false, error: `Unsupported provider: ${provider}.` };
@@ -3321,6 +3451,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
         providerId === "line_oa"
           ? globalThis.OmnichatProviderAdapters?.get?.("line_oa")
             && window.__omnichatLineOABridgeControl?.source === bridgeSource
+            && window.__omnichatLineOABridgeControl?.metadata_refresh === true
             // Existing page scripts predate this field and use compatibility v1.
             && (window.__omnichatLineOABridgeControl?.compatibility_version ?? 1) === lineCompatibilityVersion
             && typeof window.__omnichatLineOABridgeControl?.dispose === "function"
@@ -3328,6 +3459,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
             && globalThis.OmnichatProviderAdapters?.get?.("shopee")
             && window.__omnichatRealtimeState
             && window.__omnichatRealtimeBridgeControl?.source === bridgeSource
+            && window.__omnichatRealtimeBridgeControl?.metadata_refresh === true
             && (window.__omnichatRealtimeBridgeControl?.compatibility_version ?? 1) === shopeeCompatibilityVersion
             && typeof window.__omnichatRealtimeBridgeControl?.dispose === "function"
             && typeof window.__omnichatRealtimeBridgeControl?.resetRecovery === "function"
@@ -4245,7 +4377,11 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
       STORAGE.status,
     ]);
     if (!hasLocalConsent(stored[STORAGE.consent])) return null;
-    const scopedMessages = Array.isArray(messages) ? messages : [];
+    const scope = await metadataScope(context);
+    const scopedMessages = [];
+    for (const message of Array.isArray(messages) ? messages : []) {
+      scopedMessages.push(await customerMetadata.enrich(scope, message));
+    }
     let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
     const pending = readAccountState(stored[STORAGE.pending], context.key, []);
     const migrated = scanState?.version !== 1;

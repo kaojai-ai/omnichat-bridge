@@ -57,7 +57,7 @@ test("merges detected accounts by provider and account ID", () => {
       {
         provider: "shopee",
         provider_account_id: "shop-1",
-        display_name: "Updated Shopee shop",
+        display_name: "Shopee shop",
         detected_at: "2026-09-01T00:00:00.000Z",
       },
       { provider: "future_provider", provider_account_id: "shared-1" },
@@ -150,4 +150,13 @@ test("does not reset detected accounts when saved config is empty", async () => 
 
   assert.equal(await resetDetectedAccountsFromConfig(), false);
   assert.equal(writes, 0);
+});
+
+ test("manual account refresh overwrites metadata and omitted fields survive", () => {
+  const existing = [{ provider: "shopee", provider_account_id: "s", display_name: "Old", avatar_url: "https://img.test/old" }];
+  const incoming = [{ provider: "shopee", provider_account_id: "s", display_name: "New" }];
+  assert.equal(mergeDetectedAccounts(existing, incoming)[0].display_name, "Old");
+  const refreshed = mergeDetectedAccounts(existing, incoming, { refreshMetadata: true })[0];
+  assert.equal(refreshed.display_name, "New");
+  assert.equal(refreshed.avatar_url, "https://img.test/old");
 });
