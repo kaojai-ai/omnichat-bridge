@@ -365,7 +365,7 @@ test("requires an already-open Shopee tab for outbound replies", () => {
   assert.ok(sendStart >= 0);
   assert.ok(sendEnd > sendStart);
   const sendSource = source.slice(sendStart, sendEnd);
-  assert.match(sendSource, /commandTab\(context, \{ createIfMissing: false, prepareForSend: true \}\)/);
+  assert.match(sendSource, /selectSendContext\(context, \{ expectedGeneration \}\)/);
   assert.doesNotMatch(sendSource, /chrome\.tabs\.create\s*\(/);
   assert.match(source, /The browser selected to send this reply has no/);
 });
@@ -377,10 +377,10 @@ test("command selection consumes shared readiness without independent preparatio
   assert.ok(commandEnd > commandStart);
   const commandSource = source.slice(commandStart, commandEnd);
   assert.match(commandSource, /prepareForSend = false/);
-  assert.match(commandSource, /await providerReadiness/);
+  assert.match(commandSource, /await selectSendContext/);
   assert.doesNotMatch(commandSource, /prepareProviderTab\(/);
   assert.match(commandSource, /for \(const candidate of orderedTabs\)/);
-  assert.match(commandSource, /policy\?\.evidence\?\.tab/);
+  assert.match(source, /policy\?\.evidence\?\.tab/);
   assert.match(commandSource, /orderedTabs\[0\] \?\? selectedTab/);
   assert.match(source, /function orderProviderTabs\(adapter, tabs, preferredTabId = null\)/);
   assert.match(source, /leftRank !== rightRank/);
@@ -414,7 +414,7 @@ test("does not cross-send a Seller Centre command through the standalone endpoin
   assert.ok(sendStart >= 0);
   assert.ok(sendEnd > sendStart);
   const sendSource = source.slice(sendStart, sendEnd);
-  assert.match(sendSource, /prepareForSend: true/);
+  assert.match(sendSource, /selectSendContext/);
   assert.doesNotMatch(sendSource, /sendPath|webchat\/api\/v1\.2\/messages/);
   assert.match(sendSource, /sessionEligibility\.isCurrent/);
 });

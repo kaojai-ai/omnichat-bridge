@@ -74,7 +74,7 @@ function commandHarness({ primaryReady = true, miniShop = "shop" } = {}) {
   });
   installProviderPolicy(context);
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
-    + extract("async function commandTab(", "function providerAdapterForCommand("), context);
+    + extract("async function selectSendContext(", "function providerAdapterForCommand("), context);
   return { preparations, run: () => context.commandTab(commandContext, { prepareForSend: true }) };
 }
 

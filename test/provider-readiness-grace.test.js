@@ -44,7 +44,7 @@ function fixture(provider = "shopee") {
   vm.runInContext(part("function providerTabIsReady(", "async function isReadyProviderTab(")
     + part("async function providerTabStatus(", "function providerTabIsReady(")
     + part("async function connectionStatusSnapshot(", "function statusPublishKey(")
-    + part("async function commandTab(", "function providerAdapterForCommand(")
+    + part("async function selectSendContext(", "function providerAdapterForCommand(")
     + part("function invalidateProviderSession(", "chrome.tabs.onUpdated.addListener"), scope);
   const healthy = provider === "shopee"
     ? { ok: true, current_provider_account_id: "shop", surface_ready: true, realtime_connected: true,
@@ -275,3 +275,75 @@ test("Shopee polling uncertainty cannot hide a known account switch", async () =
   assert.equal(result.ready, false);
   assert.equal(result.reason_code, "wrong_account");
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: one readiness probe per queued send and no dispatch after a queued session change`, async () => {
+    const h = fixture(provider);
+    await h.assess();
+    const sent = [];
+    let finish;
+    wireSender(h, async (_tabId, message) => {
+      sent.push(message);
+      await new Promise(resolve => { finish = resolve; });
+      return { ok: true, provider_message_id: "sent" };
+    });
+    const socket = { readyState: 1, sent: [], send(value) { this.sent.push(JSON.parse(value)); } };
+    const command = { provider, provider_account_id: "shop", type: "send_text", conversation_id: "conversation", text: "reply" };
+    const before = h.probes;
+    const first = h.scope.handleLiveCommand(JSON.stringify({ ...command, request_id: "first" }), h.context, socket);
+    const second = h.scope.handleLiveCommand(JSON.stringify({ ...command, request_id: "queued" }), h.context, socket);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal(h.probes - before, 1, "ready tab is selected once after leaving the queue");
+    h.scope.invalidateProviderTab(h.tab.id, "provider_tab_navigated");
+    h.result = h.healthy;
+    await h.assess();
+    finish();
+    await Promise.all([first, second]);
+    assert.equal(sent.length, 1, "a verified replacement session cannot execute an older queued command");
+    assert.equal(socket.sent.find(result => result.request_id === "queued").ok, false);
+  });
+}
+
+test("missing bridge responses invalidate initialization reuse without changing provider-uncertainty rules", async () => {
+  const h = fixture("shopee");
+  await h.assess();
+  const certificate = { provider: "shopee", epoch: 0, verified: true };
+  h.scope.providerBridgeChecks.set(h.tab.id, certificate);
+  h.result = { ...h.healthy, provider_check_outcome: "unknown" };
+  await h.assess();
+  assert.equal(certificate.verified, true, "a responding bridge can report provider uncertainty");
+  h.result = { ok: false, provider_check_outcome: "unknown" };
+  await h.assess();
+  assert.equal(certificate.verified, false, "a missing page response must check or repair initialization before dispatch");
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: a replacement session during tab persistence cannot adopt an old send`, async () => {
+    const h = fixture(provider);
+    await h.assess();
+    let sends = 0;
+    wireSender(h, async () => { sends++; return { ok: true }; });
+    h.scope.rememberCommandTab = async () => {
+      h.scope.invalidateProviderTab(h.tab.id, "navigation");
+      await h.assess();
+    };
+    await assert.rejects(h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "stale", text: "reply" }), /session changed during tab selection/);
+    assert.equal(sends, 0);
+  });
+  test(`${provider}: bridge initialization cannot replace the selected send generation`, async () => {
+    const h = fixture(provider);
+    await h.assess();
+    let sends = 0;
+    wireSender(h, async () => { sends++; return { ok: true }; });
+    h.scope.ensureProviderBridge = async () => {
+      h.scope.invalidateProviderTab(h.tab.id, "navigation");
+      await h.assess();
+    };
+    const result = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "stale", text: "reply" });
+    assert.equal(result.ok, false);
+    assert.equal(sends, 0);
+  });
+}

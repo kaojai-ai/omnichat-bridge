@@ -171,6 +171,8 @@ let mutationQueue = Promise.resolve();
 const replyQueue = createReplyQueue();
 const deliveryScheduler = createDeliveryScheduler(2);
 let commandTabWriteQueue = Promise.resolve();
+const rememberedCommandTabs = new Map();
+const providerBridgeChecks = new Map();
 let logMutationQueue = Promise.resolve();
 let activeSync = null;
 let activeSyncControl = null;
@@ -415,6 +417,11 @@ function providerStatusMeetsPolicy(status, context) {
   const capabilities = providerCommandCapabilities(status, context);
   return providerTabCanSend(status, context) && providerTabHealthy(status, context.adapter)
     && Array.isArray(capabilities) && capabilities.includes("send_text");
+}
+
+function invalidateBridgeVerification(tabId) {
+  const check = providerBridgeChecks.get(tabId);
+  if (check) check.verified = false;
 }
 
 // A transport/probe failure is missing evidence, not a provider rejection.
@@ -1387,27 +1394,44 @@ async function startUnattendedSellerCentreSync(provider) {
 }
 
 function rememberCommandTab(account, tabId) {
+  if (rememberedCommandTabs.get(account) === tabId) return Promise.resolve();
+  // A queued replacement makes the old memo stale immediately.
+  rememberedCommandTabs.delete(account);
   // Different reply accounts can select tabs concurrently. Merge only while
   // holding this short storage queue, never during provider/network work.
   const result = commandTabWriteQueue.then(async () => {
+    if (rememberedCommandTabs.get(account) === tabId) return;
     const stored = await readStorage([STORAGE.commandTab]);
-    await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], account, tabId) });
+    if (readAccountState(stored[STORAGE.commandTab], account, null) !== tabId) {
+      await writeStorage({ [STORAGE.commandTab]: writeAccountState(stored[STORAGE.commandTab], account, tabId) });
+    }
+    rememberedCommandTabs.set(account, tabId);
   });
   commandTabWriteQueue = result.catch(() => undefined);
   return result;
 }
 
+async function selectSendContext(context, { expectedGeneration } = {}) {
+  const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const policy = await providerReadiness({ ...context, adapter });
+  const tab = policy?.evidence?.tab;
+  if (!policy?.eligible || !tab?.id) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
+  if (expectedGeneration !== undefined && policy.generation !== expectedGeneration) {
+    throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
+  }
+  await rememberCommandTab(context.key, tab.id);
+  if (!sessionEligibility.isCurrent(context.key, policy.generation)) {
+    throw new Error("Provider session changed during tab selection. Verify the account and retry.");
+  }
+  // Carry this generation through dispatch; never adopt a replacement session.
+  return { tab, generation: policy.generation };
+}
+
 async function commandTab(context, { createIfMissing = false, prepareForSend = false } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
-  if (prepareForSend) {
-    const policy = await providerReadiness({ ...context, adapter });
-    const tab = policy?.evidence?.tab;
-    if (!policy?.eligible || !tab?.id) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
-    // The page sender still verifies the command's exact account before its one provider attempt.
-    await rememberCommandTab(context.key, tab.id);
-    return tab;
-  }
+  if (prepareForSend) return (await selectSendContext(context)).tab;
   const label = providerLabel(adapter);
   const stored = await readStorage([STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
@@ -1457,7 +1481,7 @@ function providerAdapterForCommand(message) {
   return providerAdapterForId(messageProvider(message));
 }
 
-async function sendViaProvider(message) {
+async function sendViaProvider(message, { expectedGeneration } = {}) {
   const adapter = providerAdapterForCommand(message);
   if (!adapter?.supportsSend(message?.type)) return { ok: false, error: "Unsupported provider reply command." };
   const requestId = typeof message?.request_id === "string" ? message.request_id : "";
@@ -1471,9 +1495,8 @@ async function sendViaProvider(message) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
-  const selectedGeneration = sessionEligibility.generation(context.key);
-  await ensureProviderBridge(tab.id, adapter);
+  const { tab, generation: selectedGeneration } = await selectSendContext(context, { expectedGeneration });
+  await ensureProviderBridge(tab.id, adapter, { reuseVerified: true });
   let imagePayload = {};
   if (["send_image", "send_video", "send_file"].includes(commandType)) {
     const imageUrl = typeof (message.image_url ?? message.media_url) === "string" ? (message.image_url ?? message.media_url) : "";
@@ -2872,12 +2895,7 @@ async function handleLiveCommand(raw, context, socket) {
     cached = {
       expiresAt: Infinity,
       result: replyQueue.run(context.key, async () => {
-        const eligible = await activeLiveCommandContexts([context]);
-        if (!eligible.some((item) => item.key === context.key)
-          || !sessionEligibility.isCurrent(context.key, selectedGeneration)) {
-          return { ok: false, error: "Provider session changed while this command was queued. Verify the account and retry." };
-        }
-        const sent = await sendViaProvider(command);
+        const sent = await sendViaProvider(command, { expectedGeneration: selectedGeneration });
         // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
           acknowledge({ type: "send_result", request_id: command.request_id,
@@ -2921,6 +2939,7 @@ async function handleLiveCommand(raw, context, socket) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
+  if (changes[STORAGE.commandTab] || changes[STORAGE.config]) rememberedCommandTabs.clear();
   if (changes[STORAGE.config] || changes[STORAGE.consent]) {
     for (const adapter of providerAdapters.list()) invalidateProviderSession(adapter.id, "configuration_or_consent_changed");
   }
@@ -2958,6 +2977,9 @@ async function reconnectProviderTab(tab) {
 }
 
 function invalidateProviderSession(provider, reason) {
+  for (const [tabId, check] of providerBridgeChecks) {
+    if (check.provider === provider) providerBridgeChecks.delete(tabId);
+  }
   providerSessionEpochs.set(provider, providerSessionEpoch(provider) + 1);
   for (const [key, context] of providerPolicyContexts) {
     if (context.adapter.id !== provider) continue;
@@ -2968,6 +2990,7 @@ function invalidateProviderSession(provider, reason) {
 }
 
 function invalidateProviderTab(tabId, reason) {
+  providerBridgeChecks.delete(tabId);
   providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
   // Unused tabs cannot tear down another tab's validated account connection.
   for (const [key, evidenceTabId] of providerPolicyTabIds) {
@@ -3217,8 +3240,9 @@ async function providerTabStatus(tab) {
       const result = await sendProviderMessage(tab.id, { type: "get_provider_status_v3" }, {
         label: "Provider", operation: "status request", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS,
       });
+      if (!result || result.ok === false) invalidateBridgeVerification(tab.id);
       return key === providerTabContext(tab, adapter.id) && result && typeof result === "object" ? result : null;
-    } catch { return null; }
+    } catch { invalidateBridgeVerification(tab.id); return null; }
   })().finally(() => { if (providerStatusProbes.get(key) === probe) providerStatusProbes.delete(key); });
   providerStatusProbes.set(key, probe);
   return probe;
@@ -3267,7 +3291,29 @@ async function findReadyProviderChatTab(adapter) {
   return null;
 }
 
-async function ensureProviderBridge(tabId, adapter) {
+async function ensureProviderBridge(tabId, adapter, { reuseVerified = false } = {}) {
+  if (!adapter) throw new Error("Provider adapter is unavailable.");
+  const epoch = providerTabEpochs.get(tabId) ?? 0;
+  const existing = providerBridgeChecks.get(tabId);
+  if (existing?.provider === adapter.id && existing.epoch === epoch) {
+    if (existing.pending) return existing.pending;
+    if (reuseVerified && existing.verified) return;
+  }
+  const check = { provider: adapter.id, epoch, verified: false, pending: null };
+  providerBridgeChecks.set(tabId, check);
+  check.pending = verifyProviderBridge(tabId, adapter).then(() => {
+    if ((providerTabEpochs.get(tabId) ?? 0) !== epoch || providerBridgeChecks.get(tabId) !== check) {
+      throw new Error("Provider document changed during bridge verification. Retry after it is ready.");
+    }
+    check.verified = true;
+  }).catch((error) => {
+    if (providerBridgeChecks.get(tabId) === check) providerBridgeChecks.delete(tabId);
+    throw error;
+  }).finally(() => { check.pending = null; });
+  return check.pending;
+}
+
+async function verifyProviderBridge(tabId, adapter) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
   let response = null;
@@ -3453,6 +3499,7 @@ async function providerMainBridgeStatus(tabId, adapter) {
 }
 
 async function retireProviderMainBridge(tabId) {
+  invalidateBridgeVerification(tabId);
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -3512,6 +3559,7 @@ async function retireProviderMainBridge(tabId) {
 }
 
 async function retireProviderContentBridge(tabId) {
+  invalidateBridgeVerification(tabId);
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: "ISOLATED",

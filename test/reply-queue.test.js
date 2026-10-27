@@ -116,9 +116,9 @@ test("update waits for queued replies and their acknowledgements before restarti
 test("concurrent tab selections preserve both accounts", async () => {
   let stored = {};
   const start = source.indexOf("function rememberCommandTab(");
-  const end = source.indexOf("\nasync function commandTab", start);
+  const end = source.indexOf("\nasync function selectSendContext", start);
   const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
+    rememberedCommandTabs: new Map(), readAccountState: (state, key, fallback) => state?.[key] ?? fallback, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
     readStorage: async () => ({ tabs: { ...stored } }),
     writeAccountState: (current, account, tab) => ({ ...current, [account]: tab }),
     writeStorage: async ({ tabs }) => { await tick(); stored = tabs; },
@@ -128,23 +128,30 @@ test("concurrent tab selections preserve both accounts", async () => {
 });
 
 
-test("a queued reply cannot run after the account session changes and verifies again", async () => {
-  const first = deferred();
-  const started = [];
-  const h = harness(command => {
-    started.push(command.request_id);
-    return first.promise;
+
+test("unchanged selected tabs do not repeatedly read or write storage", async () => {
+  let reads = 0, writes = 0;
+  let stored = { "shopee:one": 1 };
+  const remembered = new Map();
+  const start = source.indexOf("function rememberCommandTab(");
+  const end = source.indexOf("\nasync function selectSendContext", start);
+  const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    rememberedCommandTabs: remembered, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
+    readAccountState: (state, key, fallback) => state?.[key] ?? fallback,
+    readStorage: async () => { reads++; return { tabs: { ...stored } }; },
+    writeAccountState: (current, account, tab) => ({ ...current, [account]: tab }),
+    writeStorage: async ({ tabs }) => { writes++; stored = tabs; },
   });
-  const running = h.send("first");
-  const queued = h.send("old-session");
-  await tick();
-  assert.deepEqual(started, ["first"]);
-  h.sessionEligibility.observe("shopee:shop", { hasTab: true, explicitMismatch: true, identity: "another-shop" });
-  h.sessionEligibility.observe("shopee:shop", { hasTab: true, verified: true, identity: "shop" });
-  first.resolve({ ok: true, provider_message_id: "receipt" });
-  await Promise.all([running, queued]);
-  assert.deepEqual(started, ["first"], "reverification must not revive queued work from the previous generation");
-  const rejected = h.socket.sent.find(result => result.request_id === "old-session");
-  assert.equal(rejected.ok, false);
-  assert.match(rejected.error, /session changed/);
+  await remember("shopee:one", 1);
+  await Promise.all([remember("shopee:one", 1), remember("shopee:one", 1)]);
+  assert.equal(reads, 1);
+  assert.equal(writes, 0);
+  await remember("shopee:one", 2);
+  assert.equal(writes, 1);
+  remembered.clear(); // Mirrors external settings changes.
+  stored = { "shopee:one": 3 };
+  await remember("shopee:one", 2);
+  assert.equal(writes, 2);
+  await Promise.all([remember("shopee:one", 4), remember("shopee:one", 2)]);
+  assert.equal(stored["shopee:one"], 2, "a pending replacement cannot hide a later selection of the previous tab");
 });

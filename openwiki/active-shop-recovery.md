@@ -234,3 +234,12 @@ Synthetic validation: 48,000 distinct IDs retain 20,000 entries under the config
 ### Planned: explicit check outcomes
 
 Provider checks distinguish passed, unknown, and failed outcomes through the page/content/background boundary. Shopee page-response/polling timeouts and LINE transient account-check failures are unknown and use the same fixed 30-second grace for a previously ready, unchanged session. LINE authentication/access rejection is failed and blocks immediately; a later missing response cannot restore grace after a confirmed failure. A valid new account check is required for recovery. Late account-check results cannot overwrite a newer authentication failure. Internal content protocol 9 and provider classification capabilities ensure existing page bridges are replaced.
+
+
+### Planned: shorter send preparation
+
+Queued commands perform one readiness/tab selection after leaving the account queue. The selection carries its original session generation through bridge initialization, media preparation and dispatch. A session replaced while selection storage or initialization is pending cannot adopt the older command. Direct commands use the same selection path.
+
+Sends reuse a successful bridge initialization check for the same provider and tab-document epoch. Background health/repair checks still validate the bridge, and concurrent initialization checks share work. Navigation, closure, configuration changes, explicit bridge retirement and missing bridge responses invalidate reuse. This cache contains code-initialization evidence only, never account authorization or provider readiness. A failed dispatch is not retried.
+
+Selected tabs are persisted only when changed; repeated selections reuse an in-memory hint. Final provider account verification, Shopee routing fallback, media handling, LINE confirmation and duplicate-command protection retain their behavior. Initialized provider-page helpers already avoid repeated template waits; no additional authorization cache is introduced. Tests validate one readiness probe per queued send and document/session changes around asynchronous preparation. Live latency savings have not been measured.

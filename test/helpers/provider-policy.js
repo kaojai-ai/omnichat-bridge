@@ -4,7 +4,7 @@ import { createSessionEligibility } from "../../extension/lib/session-eligibilit
 const source = readFileSync(new URL("../../extension/background.js", import.meta.url), "utf8");
 export function installProviderPolicy(scope) {
   const defaults = {
-    providerObservationSequence: 0, providerPolicyObservations: new Map(), providerSessionEpochs: new Map(), providerTabEpochs: new Map(), providerPolicyTabIds: new Map(), providerStatusProbes: new Map(), providerProbeTabs: new Map(), providerPolicyContexts: new Map(),
+    providerBridgeChecks: new Map(), providerObservationSequence: 0, providerPolicyObservations: new Map(), providerSessionEpochs: new Map(), providerTabEpochs: new Map(), providerPolicyTabIds: new Map(), providerStatusProbes: new Map(), providerProbeTabs: new Map(), providerPolicyContexts: new Map(),
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     providerChatTabs: async () => [{ id: 7 }], updateLiveState: async () => {},
     orderProviderTabs: (_adapter, tabs) => tabs,

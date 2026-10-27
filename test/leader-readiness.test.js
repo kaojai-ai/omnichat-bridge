@@ -59,7 +59,7 @@ test("unchanged readiness does not add status writes or repeated leader checks",
 });
 
 test("an outbound command cannot use a tab for another shop", async () => {
-  const commandTab = fn("commandTab", "\nfunction providerAdapterForCommand", {
+  const selectContext = fn("selectSendContext", "\nasync function commandTab", {
     STORAGE: {}, providerLabel: () => "Shopee Seller Chat", readStorage: async () => ({}), readAccountState: () => null,
     providerChatTabs: async () => [{ id: 1, url: "https://seller.shopee.co.th/" }], providerRecoveryRecord: () => null,
     getTab: async () => null, orderProviderTabs: (_adapter, tabs) => tabs,
@@ -67,7 +67,7 @@ test("an outbound command cannot use a tab for another shop", async () => {
     providerTabCanSend: canSend, providerTabStatus: async () => ({ ...ready, provider_account_ids: ["shop", "another-shop"], current_provider_account_id: "another-shop" }),
     recordLog: async () => {}, writeStorage: async () => assert.fail("must not select a mismatched tab"),
   });
-  await assert.rejects(() => commandTab(context, { prepareForSend: true }), /not ready for this account/);
+  await assert.rejects(() => selectContext(context), /not ready for this account/);
 });
 
 test("a delayed persisted readiness ACK refreshes real leader status, with stale socket/report fencing", async () => {
