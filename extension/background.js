@@ -3100,6 +3100,12 @@ async function refreshSyncTab(provider, tabId) {
   if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Consent required.");
   const tab = await providerChatTabById(adapter, tabId);
   if (!tab) throw new Error("The selected provider tab is no longer open.");
+  // Reopened popups must observe existing work instead of resetting it.
+  const controls = [activeSyncControl, ...providerAutomaticRecoveries.values()];
+  if (lineTabSyncs.has(tabId) || controls.some(control => control
+    && !control.controller?.signal.aborted
+    && (control.tabId === tabId || control.lockedTabId === tabId)
+    && control.adapter?.id === provider)) return { ok: true, already_syncing: true };
   await cancelActiveSync(provider, tabId);
   providerBridgeChecks.delete(tabId);
   // Fence pending probes without closing a healthy command socket.

@@ -118,3 +118,19 @@ test("unidentified current account stops before refresh or sync", async () => {
   await h.click();
   assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
 });
+
+for (const provider of ['line_oa', 'shopee']) {
+  test(`repeated ${provider} clicks do not reset or duplicate sync`, async () => {
+    const h = harness({ provider });
+    const task = h.click();
+    await h.click();
+    await turn();
+    h.allowPermission();
+    await turn();
+    await h.click();
+    assert.equal(h.requests.filter(x => x.type === 'prepare_sync_tab').length, 1);
+    assert.equal(h.requests.filter(x => ['sync_account', 'sync_line_tab'].includes(x.type)).length, 1);
+    h.refreshes.forEach(resolve => resolve({ ok: true }));
+    await task;
+  });
+}

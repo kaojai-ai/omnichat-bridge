@@ -820,7 +820,7 @@ function renderDashboard(message = "", isError = false) {
 
   status.classList.toggle("error", isError);
   setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
-  syncButton.disabled = activeProviderAdapter?.id === "line_oa" && Boolean(pendingAction);
+  syncButton.disabled = Boolean(pendingAction) || anySyncing;
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
     ? t("openWebchat")
@@ -1199,6 +1199,7 @@ closePrivacyButton.addEventListener("click", () => {
 
 let syncActionId = 0;
 syncButton.addEventListener("click", async () => {
+  if (syncButton.disabled) return;
   const actionId = ++syncActionId;
   if (syncButton.dataset.action === "configure") {
     openConfig();
@@ -1261,6 +1262,12 @@ syncButton.addEventListener("click", async () => {
     const prepared = await chrome.runtime.sendMessage({ type: "prepare_sync_tab", provider, tab_id: tab.id });
     if (actionId !== syncActionId) return;
     if (!prepared?.ok) throw new Error(prepared?.error || "Could not refresh this tab. Sync again.");
+    if (prepared.already_syncing) {
+      pendingAction = "";
+      await refreshStoredState();
+      renderDashboard();
+      return;
+    }
     const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
     const accounts = detected?.ok ? currentTabSyncAccounts(storedConfig, detected.accounts, provider) : [];
     if (!accounts.length) throw new Error("No configured account is available to this login.");

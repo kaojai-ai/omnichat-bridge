@@ -8,7 +8,7 @@ function harness(provider) {
   const tab = { id: 7, url: 'provider-chat' };
   const checks = new Map([[7, {}], [8, {}]]);
   const epochs = new Map();
-  const scope = vm.createContext({ Map, Number,
+  const scope = vm.createContext({ Map, Number, activeSyncControl: null, lineTabSyncs: new Map(), providerAutomaticRecoveries: new Map(),
     providerAdapterForId: id => id === provider ? { id } : null,
     STORAGE: { consent: 'consent' }, readStorage: async () => ({ consent: true }), hasLocalConsent: value => value,
     providerChatTabById: async () => tab, cancelActiveSync: async (...args) => calls.push(['cancel', ...args]),
@@ -61,3 +61,14 @@ test('BFCache channel closure stays a failure with a short actionable message', 
     return true;
   });
 });
+
+for (const provider of ['line_oa', 'shopee']) {
+  test(`reopened ${provider} popup preserves an active sync`, async () => {
+    const h = harness(provider);
+    h.scope.providerAutomaticRecoveries.set('account', { adapter: { id: provider }, tabId: 7,
+      controller: { signal: { aborted: false } } });
+    assert.equal((await h.scope.prepareSyncTab(provider, 7)).already_syncing, true);
+    assert.deepEqual(h.calls, []);
+    assert.equal(h.checks.has(7), true);
+  });
+}
