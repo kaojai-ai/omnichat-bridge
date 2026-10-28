@@ -118,6 +118,7 @@
   }
 
   function normalizeAccount(input, detectedAt = new Date().toISOString()) {
+    input = { ...input, ...(globalThis.location?.origin && globalThis.OmnichatShopeeUrl.countryForUrl(globalThis.location.origin) ? { seller_origin: globalThis.location.origin } : {}) };
     const accountId = value(input?.provider_account_id);
     if (!accountId) return null;
     const displayName = value(input?.display_name);
@@ -131,6 +132,10 @@
       ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
       ...(providerUserId ? { provider_user_id: providerUserId } : {}),
       ...(shopUserId ? { shop_user_id: shopUserId } : {}),
+      ...(globalThis.OmnichatShopeeUrl.countryForUrl(input?.seller_origin) ? {
+        country: globalThis.OmnichatShopeeUrl.countryForUrl(input.seller_origin),
+        seller_origin: new URL(input.seller_origin).origin,
+      } : input?.country ? { country: input.country } : {}),
       detected_at: detectedAt,
     };
   }
@@ -166,7 +171,12 @@
     adapterVersion: "shopee-realtime-2",
     routingFields: ["to_id", "to_shop_id", "biz_id"],
     chatUrl: "https://seller.shopee.co.th/new-webchat/conversations",
-    tabQueryPattern: "https://seller.shopee.co.th/*",
+    tabQueryPattern: Object.values(globalThis.OmnichatShopeeUrl.sellerOrigins).map(origin => `${origin}/*`),
+    chatUrlForAccount: account => `${globalThis.OmnichatShopeeUrl.originForAccount(account)}/new-webchat/conversations`,
+    matchesAccountUrl: (url, account) => {
+      try { return new URL(url).origin === globalThis.OmnichatShopeeUrl.originForAccount(account); }
+      catch { return false; }
+    },
     surfacePriority: ["new-webchat", "webchat", "seller-centre"],
     capabilities: ["account_detection", "message_observation", "message_recovery"],
     sendCommands: ["send_text", "send_image", "send_product", "send_video"],

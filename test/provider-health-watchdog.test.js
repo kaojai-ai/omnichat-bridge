@@ -83,6 +83,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     } },
   };
   const runtime = vm.createContext(globals);
+  vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), runtime);
   vm.runInContext([
     functionSource("resolveProviderRecoveryTab", "function ensureProviderRecoveryTab("),
     functionSource("handleProviderRecoveryFailure", "function startUnattendedProviderSync("),

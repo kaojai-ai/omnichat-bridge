@@ -91,6 +91,7 @@ export async function resetDetectedAccountsFromConfig() {
       .map((account) => ({
         provider: account.provider.trim(),
         provider_account_id: String(account.provider_account_id).trim(),
+        ...(account.country ? { country: account.country } : {}),
       }))
     : [];
   if (!accounts.length) return false;

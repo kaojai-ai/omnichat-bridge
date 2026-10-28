@@ -228,3 +228,9 @@ test("rejects a history window that is not a whole number of days", () => {
     accounts: [account],
   }), /history_days is required/);
 });
+
+test("regional account config survives import while unsupported countries are rejected", () => {
+  const account = { provider: "shopee", provider_account_id: "123", country: "my", events_url: "https://collector.example/events", api_url: "https://api.example/", hmac_secret: "test" };
+  assert.equal(validateConfigFile({ version: 3, accounts: [account] }).accounts[0].country, "MY");
+  assert.throws(() => validateConfigFile({ version: 3, accounts: [{ ...account, country: "US" }] }), /Unsupported Shopee account country/);
+});

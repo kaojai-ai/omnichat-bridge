@@ -9,18 +9,20 @@ const start = source.indexOf("async function resolveProviderRecoveryTab(");
 const end = source.indexOf("function providerRecoveryFailureReason(", start);
 
 function harness(provider, { tracked = true, url = "https://provider.example/chat", status = null,
-  lookupFails = false, queryFails = false, tabs = null, alternativeStatus = { healthy: true, current_provider_account_id: "account" } } = {}) {
+  lookupFails = false, queryFails = false, tabs = null, country, alternativeStatus = { healthy: true, current_provider_account_id: "account" } } = {}) {
   const original = { id: 42, url, status: "complete" };
   const alternative = { id: 43, url: "https://provider.example/chat" };
   const openTabs = tabs ?? [original, alternative];
   let record = tracked ? { tab_id: original.id, state: "needs_attention" } : null;
-  const calls = { created: 0, status: [] };
-  const adapter = { id: provider, matchesUrl: url => url === "https://provider.example/chat" };
-  const account = { account: { provider_account_id: "account" } };
+  const calls = { created: 0, status: [], recoveryKeys: [] };
+  const adapter = { id: provider, matchesUrl: url => country ? /^https:\/\/seller\.shopee\.(?:co\.th|com\.my|ph)\//.test(url) : url === "https://provider.example/chat",
+    ...(country ? { matchesAccountUrl: url => new URL(url).hostname === `seller.shopee.${country === "MY" ? "com.my" : "ph"}` } : {}),
+  };
+  const account = { account: { provider_account_id: "account", ...(country ? { country } : {}) } };
   const runtime = vm.createContext({
-    STORAGE: { providerRecoveryTabs: "recovery" }, PROVIDER_RECOVERY_STATES,
+    URL, STORAGE: { providerRecoveryTabs: "recovery" }, PROVIDER_RECOVERY_STATES,
     providerRecoveryTabLocks: new Map(),
-    readStorage: async () => ({ recovery: record }), providerRecoveryRecord: () => record,
+    readStorage: async () => ({ recovery: record }), providerRecoveryRecord: (_stored, key) => { calls.recoveryKeys.push(key); return record; },
     getTab: async id => lookupFails ? null : openTabs.find(tab => tab.id === id),
     providerChatTabs: async () => openTabs.filter(tab => adapter.matchesUrl(tab.url)),
     orderProviderTabs: (_, tabs) => tabs,
@@ -28,13 +30,14 @@ function harness(provider, { tracked = true, url = "https://provider.example/cha
     providerTabHealthy: status => status?.healthy === true,
     providerLabel: () => provider,
     updateProviderRecoveryTabState: async (_, patch) => (record = { ...record, ...patch }),
-    recoveryRetryDue: () => true, providerRecoveryUrl: () => "https://provider.example/chat",
+    recoveryRetryDue: () => true, providerRecoveryUrl: () => country ? `https://seller.shopee.${country === "MY" ? "com.my" : "ph"}/new-webchat/conversations` : "https://provider.example/chat",
     recordLog: async () => {},
     chrome: { tabs: {
       query: async () => { if (queryFails) throw new Error("Chrome unavailable"); return openTabs; },
       create: async ({ url }) => { calls.created++; const tab = { id: 100, url }; openTabs.push(tab); return tab; },
     } },
   });
+  vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), runtime);
   vm.runInContext(source.slice(start, end), runtime);
   return { calls, record: () => record, run: () => runtime.ensureProviderRecoveryTab(adapter, account, true) };
 }
@@ -100,4 +103,21 @@ test("Shopee never adopts a healthy alternative signed into another shop", async
   await h.run();
   assert.equal(h.record().tab_id, 42);
   assert.equal(h.calls.created, 0);
+});
+
+
+test("MY recovery ignores an existing TH tab and opens its own regional chat", async () => {
+  const h = harness("shopee", { country: "MY", tracked: false,
+    tabs: [{ id: 99, url: "https://seller.shopee.co.th/new-webchat/conversations" }] });
+  await h.run();
+  assert.equal(h.calls.created, 1);
+  assert.ok(h.calls.recoveryKeys.every(key => key === "shopee:MY"));
+});
+
+test("MY recovery refuses a healthy PH tab even when its account ID matches", async () => {
+  const h = harness("shopee", { country: "MY", url: "https://seller.shopee.ph/new-webchat/conversations",
+    status: { healthy: true, current_provider_account_id: "account" } });
+  const result = await h.run();
+  assert.equal(result.tab, null);
+  assert.equal(h.calls.created, 0, "an existing tracked tab needs attention, never speculative replacement");
 });

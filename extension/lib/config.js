@@ -1,3 +1,4 @@
+import "./shopee-url.js";
 export const CONFIG_VERSION = 3;
 export const MAX_HISTORY_DAYS = 366;
 const SUPPORTED_CONFIG_VERSIONS = new Set([2, CONFIG_VERSION]);
@@ -63,6 +64,10 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     };
   }
   const provider_account_id = requiredString(value.provider_account_id, "Shop ID is required.");
+  const country = value.country == null ? undefined : String(value.country).trim().toUpperCase();
+  if (country !== undefined && !Object.hasOwn(globalThis.OmnichatShopeeUrl.sellerOrigins, country)) {
+    throw new Error("Unsupported Shopee account country.");
+  }
   const hmac_secret = requiredString(value.hmac_secret, "HMAC secret is required.");
   const events_url = secureUrl(value.events_url, "https:", "Events URL must use HTTPS.");
   const image_server_url = value.image_server_url === undefined || value.image_server_url === ""
@@ -76,6 +81,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     return {
       provider,
       provider_account_id,
+      ...(country ? { country } : {}),
       events_url,
       api_url,
       ...(image_server_url ? { image_server_url } : {}),
@@ -87,6 +93,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
   return {
     provider,
     provider_account_id,
+    ...(country ? { country } : {}),
     events_url,
     commands_url,
     ...(image_server_url ? { image_server_url } : {}),

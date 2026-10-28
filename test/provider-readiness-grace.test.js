@@ -348,3 +348,17 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(sends, 0);
   });
 }
+
+test("MY readiness ignores another market's identity and refuses wrong-region sends", async () => {
+  const h = fixture();
+  h.context.account.country = "MY";
+  const myTab = { id: 2, url: "https://seller.shopee.com.my/new-webchat/conversations" };
+  const result = await h.scope.providerReadiness(h.context, {
+    tabs: [h.tab, myTab], statuses: [{ ...h.healthy, current_provider_account_id: "other-th-shop" }, h.healthy],
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.evidence.tab.id, 2);
+  h.tabs = [h.tab];
+  assert.equal((await h.assess()).eligible, false);
+  await assert.rejects(h.select, /not ready for this account/);
+});

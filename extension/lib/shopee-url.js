@@ -1,4 +1,25 @@
-const SHOPEE_SELLER_ORIGIN = "https://seller.shopee.co.th";
+const SHOPEE_SELLER_ORIGINS = Object.freeze({
+  TH: "https://seller.shopee.co.th",
+  MY: "https://seller.shopee.com.my",
+  PH: "https://seller.shopee.ph",
+  SG: "https://seller.shopee.sg",
+  ID: "https://seller.shopee.co.id",
+  VN: "https://banhang.shopee.vn",
+});
+
+function countryForUrl(value) {
+  try {
+    const origin = new URL(value).origin;
+    return Object.keys(SHOPEE_SELLER_ORIGINS).find(country => SHOPEE_SELLER_ORIGINS[country] === origin) ?? null;
+  } catch { return null; }
+}
+
+function originForAccount(account) {
+  const country = String(account?.country ?? "TH").trim().toUpperCase();
+  const origin = SHOPEE_SELLER_ORIGINS[country];
+  if (!origin) throw new Error("Unsupported Shopee account country.");
+  return origin;
+}
 const SHOPEE_CHAT_SURFACES = Object.freeze({
   "new-webchat": Object.freeze([
     "/new-webchat",
@@ -15,7 +36,7 @@ const SHOPEE_CHAT_SURFACES = Object.freeze({
 function isShopeePageUrl(value) {
   try {
     const url = new URL(value);
-    return url.origin === SHOPEE_SELLER_ORIGIN;
+    return Boolean(countryForUrl(url.href));
   } catch {
     return false;
   }
@@ -48,7 +69,7 @@ function surfaceForUrl(value) {
   if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    return url.origin === SHOPEE_SELLER_ORIGIN ? surfaceForPath(url.pathname) : null;
+    return Boolean(countryForUrl(url.href)) ? surfaceForPath(url.pathname) : null;
   } catch {
     return null;
   }
@@ -59,6 +80,9 @@ function isShopeeChatUrl(value) {
 }
 
 globalThis.OmnichatShopeeUrl = {
+  sellerOrigins: SHOPEE_SELLER_ORIGINS,
+  countryForUrl,
+  originForAccount,
   chatSurfaces: SHOPEE_CHAT_SURFACES,
   isShopeePageUrl,
   isShopeeChatPath,

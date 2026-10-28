@@ -36,3 +36,28 @@ test("keeps Shopee Seller Chat matching origin-locked", () => {
   assert.equal(isShopeeChatUrl("https://seller.shopee.co.th.evil.example/webchat/conversations"), false);
   assert.equal(isShopeeChatUrl("https://example.com/webchat/conversations"), false);
 });
+
+test("six supported markets use exact HTTPS origins and reject lookalikes", () => {
+  const expected = {
+    TH: "https://seller.shopee.co.th", MY: "https://seller.shopee.com.my", PH: "https://seller.shopee.ph",
+    SG: "https://seller.shopee.sg", ID: "https://seller.shopee.co.id", VN: "https://banhang.shopee.vn",
+  };
+  assert.deepEqual(JSON.parse(JSON.stringify(context.OmnichatShopeeUrl.sellerOrigins)), expected);
+  for (const [country, origin] of Object.entries(expected)) {
+    assert.equal(context.OmnichatShopeeUrl.countryForUrl(`${origin}/new-webchat`), country);
+    assert.equal(context.OmnichatShopeeUrl.originForAccount({ country }), origin);
+    assert.equal(isShopeeChatUrl(`${origin}/new-webchat/conversations`), true);
+    assert.equal(isShopeePageUrl(`${origin}.evil.example/`), false);
+    assert.equal(isShopeePageUrl(origin.replace("https:", "http:")), false);
+  }
+  assert.throws(() => context.OmnichatShopeeUrl.originForAccount({ country: "US" }), /Unsupported/);
+});
+
+test("manifest grants and injects exactly the supported Shopee markets", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
+  const patterns = Object.values(context.OmnichatShopeeUrl.sellerOrigins).map(origin => `${origin}/*`);
+  assert.deepEqual(manifest.host_permissions.filter(pattern => !pattern.includes("chat.line.biz")), patterns);
+  for (const script of manifest.content_scripts.filter(script => script.js.includes("lib/shopee-url.js"))) {
+    assert.deepEqual(script.matches, patterns);
+  }
+});

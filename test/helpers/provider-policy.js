@@ -15,6 +15,7 @@ export function installProviderPolicy(scope) {
     providerTabHealthy: (status) => Boolean(status) && status.ok !== false && status.ready !== false && status.realtime_connected !== false,
   };
   for (const [key, value] of Object.entries(defaults)) if (!(key in scope)) scope[key] = value;
+  vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), scope);
   vm.runInContext(source.slice(source.indexOf("function providerSessionEpoch("), source.indexOf("async function lineSessionContexts(")), scope);
   return scope;
 }

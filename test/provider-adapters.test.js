@@ -323,3 +323,12 @@ test("Shopee readiness requires the current main bridge compatibility", async ()
   control.compatibility_version++;
   assert.equal((await status()).ready, false);
 });
+
+test("Shopee retains observed regional origin and opens the configured market", () => {
+  const adapter = createRegistry().get("shopee");
+  const account = adapter.normalizeAccount({ provider_account_id: "123", seller_origin: "https://seller.shopee.ph/new-webchat" });
+  assert.equal(account.country, "PH");
+  assert.equal(account.seller_origin, "https://seller.shopee.ph");
+  assert.equal(adapter.chatUrlForAccount({ country: "MY" }), "https://seller.shopee.com.my/new-webchat/conversations");
+  assert.equal(adapter.matchesAccountUrl("https://seller.shopee.co.th/new-webchat", { country: "MY" }), false);
+});

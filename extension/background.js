@@ -347,7 +347,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
   const key = accountConfigKey(configuredAccount);
   const adapter = providerAdapterForAccount(configuredAccount);
   if (config && accountMigration(config, stored[STORAGE.config]?.version).status === "invalid") return null;
-  return key && config && adapter ? { key, config, account: configuredAccount, adapter } : null;
+  return key && config && adapter ? { key, config, account: { ...configuredAccount, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
 }
 
 function configuredAccountContexts(stored) {
@@ -366,7 +366,7 @@ function configuredAccountContexts(stored) {
     if (migration?.status === "invalid") {
       return null;
     }
-    return key && config && adapter ? { key, config, account, adapter } : null;
+    return key && config && adapter ? { key, config, account: { ...account, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
   }).filter(Boolean);
 }
 
@@ -411,9 +411,11 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const adapter = context.adapter;
   providerPolicyContexts.set(context.key, context);
   const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
-  const observedTabs = tabs ?? await providerChatTabs(adapter);
-  const observedTabContexts = tabContexts ?? observedTabs.map((tab) => providerTabContext(tab, adapter.id));
-  const reportedStatuses = statuses ?? await Promise.all(observedTabs.map(providerTabStatus));
+  const candidateTabs = tabs ?? await providerChatTabs(adapter);
+  const observedIndexes = candidateTabs.flatMap((tab, index) => providerAccountMatchesTab(adapter, context.account, tab) ? [index] : []);
+  const observedTabs = observedIndexes.map(index => candidateTabs[index]);
+  const observedTabContexts = tabContexts ? observedIndexes.map(index => tabContexts[index]) : observedTabs.map((tab) => providerTabContext(tab, adapter.id));
+  const reportedStatuses = statuses ? observedIndexes.map(index => statuses[index]) : await Promise.all(observedTabs.map(providerTabStatus));
   const observedStatuses = reportedStatuses.map(providerStatusEvidence);
   // Navigation/replacement invalidates pending reads; a late response never restores readiness.
   if (observedEpoch !== providerSessionEpoch(adapter.id)
@@ -1383,7 +1385,7 @@ async function selectSendContext(context, { expectedGeneration } = {}) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const policy = await providerReadiness({ ...context, adapter });
   const tab = policy?.evidence?.tab;
-  if (!policy?.eligible || !tab?.id) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
+  if (!policy?.eligible || !tab?.id || !providerAccountMatchesTab(adapter, context.account, tab)) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
   if (expectedGeneration !== undefined && policy.generation !== expectedGeneration) {
     throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
   }
@@ -1403,7 +1405,7 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
   const stored = await readStorage([STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
   const tabId = readAccountState(stored[STORAGE.commandTab], context.key, null);
   const tabs = await providerChatTabs(adapter);
-  const recoveryTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
+  const recoveryTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], providerRecoveryKey(adapter, context.account))?.tab_id;
   const trackedTab = await getTab(recoveryTabId);
   const selectedTab = trackedTab
     || (Number.isInteger(tabId) ? tabs.find((tab) => tab.id === tabId) ?? null : null);
@@ -1414,7 +1416,7 @@ async function commandTab(context, { createIfMissing = false, prepareForSend = f
   );
   let tab = null;
   for (const candidate of orderedTabs) {
-    if (adapter.matchesUrl(candidate.url) && providerTabCanSend(await providerTabStatus(candidate), context)) {
+    if (adapter.matchesUrl(candidate.url) && providerAccountMatchesTab(adapter, context.account, candidate) && providerTabCanSend(await providerTabStatus(candidate), context)) {
       tab = candidate;
       break;
     }
@@ -1675,6 +1677,15 @@ async function ensureProviderHealthAlarm(shouldRun) {
   });
 }
 
+function providerRecoveryKey(adapter, account) {
+  const country = adapter.id === "shopee" ? String(account?.country ?? "TH").toUpperCase() : "TH";
+  return country === "TH" ? adapter.id : `${adapter.id}:${country}`;
+}
+
+function providerAccountMatchesTab(adapter, account, tab) {
+  return typeof adapter.matchesAccountUrl !== "function" || adapter.matchesAccountUrl(tab?.url, account);
+}
+
 function providerRecoveryUrl(adapter, account) {
   if (typeof adapter?.recoveryUrlForAccount === "function") {
     return adapter.recoveryUrlForAccount(account);
@@ -1745,9 +1756,10 @@ async function getTab(tabId) {
 }
 
 async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
+  const recoveryKey = providerRecoveryKey(adapter, context?.account);
   const stored = await readStorage([STORAGE.providerRecoveryTabs]);
-  let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id);
-  const listedTabs = await providerChatTabs(adapter);
+  let record = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], recoveryKey);
+  const listedTabs = (await providerChatTabs(adapter)).filter(tab => providerAccountMatchesTab(adapter, context?.account, tab));
   let trackedTab = await getTab(record?.tab_id);
   // A failed lookup alone does not prove closure. If Chrome cannot enumerate
   // tabs either, fail this check instead of creating a speculative replacement.
@@ -1756,7 +1768,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   }
 
   if (!trackedTab && record?.tab_id !== null && record?.tab_id !== undefined) {
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       tab_id: null,
       reason: "The tracked provider tab is no longer open. A replacement will be created when recovery is enabled.",
@@ -1775,7 +1787,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
       || status?.current_provider_account_id === context?.account?.provider_account_id);
   let blockedReason = null;
   for (const tab of tabs) {
-    if (!adapter.matchesUrl(tab.url)) {
+    if (!adapter.matchesUrl(tab.url) || !providerAccountMatchesTab(adapter, context?.account, tab)) {
       if (tab.id === trackedTab?.id) {
         blockedReason = `${providerLabel(adapter)} recovery tab needs attention. Return to the provider or sign in using the existing tab.`;
       }
@@ -1795,7 +1807,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   const selected = candidates.find(healthyCandidate)
     ?? (trackedTab ? candidates.find(({ tab }) => tab.id === trackedTab.id) : candidates[0]);
   if (!selected && trackedTab) {
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.needsAttention, reason: blockedReason,
     });
     return { tab: null, record, reason: blockedReason };
@@ -1805,7 +1817,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     const isHealthy = healthyCandidate(selected);
     if (record?.tab_id !== trackedTab.id
       || (isHealthy && record?.state !== PROVIDER_RECOVERY_STATES.ready)) {
-      record = await updateProviderRecoveryTabState(adapter.id, {
+      record = await updateProviderRecoveryTabState(recoveryKey, {
         state: isHealthy ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
         tab_id: trackedTab.id,
         opened_by_extension: record?.tab_id === trackedTab.id ? record?.opened_by_extension === true : false,
@@ -1842,7 +1854,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   }
 
   const openingAt = Date.now();
-  record = await updateProviderRecoveryTabState(adapter.id, {
+  record = await updateProviderRecoveryTabState(recoveryKey, {
     state: PROVIDER_RECOVERY_STATES.opening,
     tab_id: null,
     opened_by_extension: true,
@@ -1854,7 +1866,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   try {
     chatUrl = providerRecoveryUrl(adapter, context?.account);
   } catch (error) {
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: `${providerLabel(adapter)} recovery URL could not be resolved. ${String(error).slice(0, 180)}`,
       failure_count: (record?.failure_count ?? 0) + 1,
@@ -1864,7 +1876,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     return { tab: null, record, reason: record.reason, error };
   }
   if (typeof chatUrl !== "string" || !chatUrl.trim()) {
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: `${providerLabel(adapter)} recovery URL is not configured.`,
       failure_count: (record?.failure_count ?? 0) + 1,
@@ -1876,7 +1888,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
   try {
     const created = await chrome.tabs.create({ url: chatUrl, active: false });
     if (!Number.isInteger(created?.id)) throw new Error("Chrome did not return a recovery tab ID.");
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.opening,
       tab_id: created.id,
       opened_by_extension: true,
@@ -1892,7 +1904,7 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
     });
     return { tab: created, record };
   } catch (error) {
-    record = await updateProviderRecoveryTabState(adapter.id, {
+    record = await updateProviderRecoveryTabState(recoveryKey, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: `${providerLabel(adapter)} tab could not be opened. ${String(error).slice(0, 180)}`,
       failure_count: (record?.failure_count ?? 0) + 1,
@@ -1904,14 +1916,15 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
 }
 
 function ensureProviderRecoveryTab(adapter, context, allowTabRecovery) {
-  const existing = providerRecoveryTabLocks.get(adapter.id);
+  const recoveryKey = providerRecoveryKey(adapter, context?.account);
+  const existing = providerRecoveryTabLocks.get(recoveryKey);
   if (existing) return existing;
   const operation = resolveProviderRecoveryTab(adapter, context, allowTabRecovery);
-  providerRecoveryTabLocks.set(adapter.id, operation);
+  providerRecoveryTabLocks.set(recoveryKey, operation);
   void operation.then(() => {
-    if (providerRecoveryTabLocks.get(adapter.id) === operation) providerRecoveryTabLocks.delete(adapter.id);
+    if (providerRecoveryTabLocks.get(recoveryKey) === operation) providerRecoveryTabLocks.delete(recoveryKey);
   }, () => {
-    if (providerRecoveryTabLocks.get(adapter.id) === operation) providerRecoveryTabLocks.delete(adapter.id);
+    if (providerRecoveryTabLocks.get(recoveryKey) === operation) providerRecoveryTabLocks.delete(recoveryKey);
   });
   return operation;
 }
@@ -1951,10 +1964,10 @@ async function markClosedProviderRecoveryTab(tabId) {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
   const contexts = configuredAccountContexts(stored);
   for (const provider of changedProviders) {
-    const adapter = providerAdapters.get(provider);
+    const adapter = providerAdapters.get(provider.split(":")[0]);
     if (!adapter) continue;
     const record = providerRecoveryRecord((await readStorage([STORAGE.providerRecoveryTabs]))[STORAGE.providerRecoveryTabs], provider);
-    const affected = await activeLiveCommandContexts(contexts);
+    const affected = await activeLiveCommandContexts(contexts.filter(context => providerRecoveryKey(context.adapter, context.account) === provider));
     await updateProviderRecoveryLiveState(affected, adapter, {
       state: PROVIDER_RECOVERY_STATES.needsAttention,
       reason: record?.reason,
@@ -1972,7 +1985,7 @@ async function handleProviderRecoveryFailure(adapter, tab, status, recovery, err
   const failureCount = previousCount + 1;
   const now = Date.now();
   const reason = providerRecoveryFailureReason(adapter, tab, status, error);
-  const record = await updateProviderRecoveryTabState(adapter.id, {
+  const record = await updateProviderRecoveryTabState(providerRecoveryKey(adapter, contexts[0]?.account), {
     state: PROVIDER_RECOVERY_STATES.needsAttention,
     tab_id: tab?.id ?? recovery.record?.tab_id ?? null,
     failure_count: failureCount,
@@ -2053,121 +2066,125 @@ async function runProviderHealthWatchdogOnce() {
   }
   const allowTabRecovery = stored[STORAGE.unattendedRecovery] === true;
   for (const adapter of providerAdapters.list()) {
-    const providerContexts = providerRecoveryContexts(contexts, adapter);
-    let matchingContexts = adapter.id === "line_oa"
-      ? await lineSessionContexts(providerContexts, { refresh: true })
-      : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
-    if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
-      // A missing content bridge is not an account conflict. Repair it before
-      // deciding which shop can recover; never infer identity from configuration.
-      let repaired = false;
-      for (const tab of await providerChatTabs(adapter)) {
-        if (await providerTabStatus(tab)) continue;
-        try {
-          await reconnectProviderTab(tab);
-          repaired = true;
-        } catch (error) {
-          await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
+    const allProviderContexts = providerRecoveryContexts(contexts, adapter);
+    const recoveryKeys = [...new Set(allProviderContexts.map(context => providerRecoveryKey(adapter, context.account)))];
+    for (const recoveryKey of recoveryKeys) {
+      const providerContexts = allProviderContexts.filter(context => providerRecoveryKey(adapter, context.account) === recoveryKey);
+      let matchingContexts = adapter.id === "line_oa"
+        ? await lineSessionContexts(providerContexts, { refresh: true })
+        : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
+      if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
+        // A missing content bridge is not an account conflict. Repair it before
+        // deciding which shop can recover; never infer identity from configuration.
+        let repaired = false;
+        for (const tab of await providerChatTabs(adapter)) {
+          if (await providerTabStatus(tab)) continue;
+          try {
+            await reconnectProviderTab(tab);
+            repaired = true;
+          } catch (error) {
+            await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
+          }
         }
+        if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts, { forRecovery: true });
       }
-      if (repaired) matchingContexts = await activeLiveCommandContexts(providerContexts, { forRecovery: true });
-    }
-    if (!matchingContexts.length) {
-      // Missing tabs may still be restored by the existing opt-in recovery.
-      // Opening a generic chat page does not make any configured shop ready.
-      if (["shopee", "line_oa"].includes(adapter.id) && providerContexts.length && allowTabRecovery
-        && !(await providerChatTabs(adapter)).length) {
-        await ensureProviderRecoveryTab(adapter, providerContexts[0], true);
+      if (!matchingContexts.length) {
+        // Missing tabs may still be restored by the existing opt-in recovery.
+        // Opening a generic chat page does not make any configured shop ready.
+        if (["shopee", "line_oa"].includes(adapter.id) && providerContexts.length && allowTabRecovery
+          && !(await providerChatTabs(adapter)).some(tab => providerAccountMatchesTab(adapter, providerContexts[0].account, tab))) {
+          await ensureProviderRecoveryTab(adapter, providerContexts[0], true);
+        }
+        continue;
       }
-      continue;
-    }
-    const context = matchingContexts[0];
-    let recovery;
-    try {
-      recovery = await ensureProviderRecoveryTab(adapter, context, allowTabRecovery);
-    } catch (error) {
-      await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
-      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention,
-        reason: `${providerLabel(adapter)} recovery check failed. ${String(error).slice(0, 180)}`,
-      });
-      continue;
-    }
-    if (recovery.error) {
-      await recordUnexpected("provider_watchdog", recovery.error, { provider: adapter.id });
-    }
-    if (!recovery.tab) {
-      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
-        state: allowTabRecovery
-          ? recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention
-          : PROVIDER_RECOVERY_STATES.needsAttention,
-        reason: recovery.reason,
-        tabId: recovery.record?.tab_id,
-      });
-      continue;
-    }
-    const tab = recovery.tab;
-    const closedChatStatus = adapter.id === "shopee" ? await providerTabStatus(tab) : null;
-    if (closedChatStatus?.surface === "seller-centre" && closedChatStatus.chat_open === false) {
-      for (const item of matchingContexts) await persistProviderSurfaceState(item, adapter, closedChatStatus, tab);
-      const reason = "Open Shopee mini-chat to continue syncing.";
-      await updateProviderRecoveryTabState(adapter.id, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention,
-        reason, failure_count: 0, last_failure_at: null, next_retry_at: null,
-      });
-      await updateProviderRecoveryLiveState(matchingContexts, adapter, {
-        state: PROVIDER_RECOVERY_STATES.needsAttention, reason, tabId: tab.id,
-      });
-      continue;
-    }
-    try {
-      if (!adapter.matchesUrl(tab.url)) {
-        await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
+      const context = matchingContexts[0];
+      let recovery;
+      try {
+        recovery = await ensureProviderRecoveryTab(adapter, context, allowTabRecovery);
+      } catch (error) {
+        await recordUnexpected("provider_watchdog", error, { provider: adapter.id });
+        await updateProviderRecoveryLiveState(matchingContexts, adapter, {
+          state: PROVIDER_RECOVERY_STATES.needsAttention,
+          reason: `${providerLabel(adapter)} recovery check failed. ${String(error).slice(0, 180)}`,
+        });
+        continue;
+      }
+      if (recovery.error) {
+        await recordUnexpected("provider_watchdog", recovery.error, { provider: adapter.id });
+      }
+      if (!recovery.tab) {
+        await updateProviderRecoveryLiveState(matchingContexts, adapter, {
+          state: allowTabRecovery
+            ? recovery.record?.state ?? PROVIDER_RECOVERY_STATES.needsAttention
+            : PROVIDER_RECOVERY_STATES.needsAttention,
+          reason: recovery.reason,
+          tabId: recovery.record?.tab_id,
+        });
+        continue;
+      }
+      const tab = recovery.tab;
+      const closedChatStatus = adapter.id === "shopee" ? await providerTabStatus(tab) : null;
+      if (closedChatStatus?.surface === "seller-centre" && closedChatStatus.chat_open === false) {
+        for (const item of matchingContexts) await persistProviderSurfaceState(item, adapter, closedChatStatus, tab);
+        const reason = "Open Shopee mini-chat to continue syncing.";
+        await updateProviderRecoveryTabState(recoveryKey, {
+          state: PROVIDER_RECOVERY_STATES.needsAttention,
+          reason, failure_count: 0, last_failure_at: null, next_retry_at: null,
+        });
+        await updateProviderRecoveryLiveState(matchingContexts, adapter, {
+          state: PROVIDER_RECOVERY_STATES.needsAttention, reason, tabId: tab.id,
+        });
+        continue;
+      }
+      try {
+        if (!adapter.matchesUrl(tab.url)) {
+          await recordLog("warn", "recovery", "provider_tab_redirected", `${providerLabel(adapter)} tracked tab is on a redirect or sign-in page.`, {
+            provider: adapter.id,
+            tab_id: tab.id,
+          });
+          throw new Error(`${providerLabel(adapter)} tab is on a redirect or sign-in page.`);
+        }
+        await reconnectProviderTab(tab);
+        const status = await providerTabStatus(tab);
+        if (adapter.id === "shopee" && status?.current_provider_account_id !== context.account.provider_account_id) {
+          await activeLiveCommandContexts(providerContexts);
+          continue;
+        }
+        if (!providerTabHealthy(status, adapter)) {
+          throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+        }
+        const record = recovery.record?.tab_id === tab.id
+          ? await updateProviderRecoveryTabState(recoveryKey, {
+            state: PROVIDER_RECOVERY_STATES.ready,
+            reason: null,
+            failure_count: 0,
+            last_failure_at: null,
+            next_retry_at: null,
+          })
+          : recovery.record;
+        for (const item of matchingContexts) {
+          const polling = adapter.id === "shopee"
+            ? status.current_provider_account_id === item.account.provider_account_id
+            : (status.provider_polling_active === true
+            && Array.isArray(status.provider_polling_account_ids)
+            && status.provider_polling_account_ids.includes(item.account.provider_account_id));
+          if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
+          await updateProviderRecoveryLiveState([item], adapter, {
+            state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
+            reason: polling ? null : adapter.id === "shopee"
+              ? "Shopee account changed. Check the connection for this browser."
+              : "LINE OA polling is not running for this account. Sync this account to resume.",
+            tabId: record?.tab_id ?? tab.id,
+          });
+        }
+      } catch (error) {
+        await recordUnexpected("provider_watchdog", error, {
           provider: adapter.id,
           tab_id: tab.id,
         });
-        throw new Error(`${providerLabel(adapter)} tab is on a redirect or sign-in page.`);
+        const status = await providerTabStatus(tab);
+        await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
       }
-      await reconnectProviderTab(tab);
-      const status = await providerTabStatus(tab);
-      if (adapter.id === "shopee" && status?.current_provider_account_id !== context.account.provider_account_id) {
-        await activeLiveCommandContexts(providerContexts);
-        continue;
-      }
-      if (!providerTabHealthy(status, adapter)) {
-        throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
-      }
-      const record = recovery.record?.tab_id === tab.id
-        ? await updateProviderRecoveryTabState(adapter.id, {
-          state: PROVIDER_RECOVERY_STATES.ready,
-          reason: null,
-          failure_count: 0,
-          last_failure_at: null,
-          next_retry_at: null,
-        })
-        : recovery.record;
-      for (const item of matchingContexts) {
-        const polling = adapter.id === "shopee"
-          ? status.current_provider_account_id === item.account.provider_account_id
-          : (status.provider_polling_active === true
-          && Array.isArray(status.provider_polling_account_ids)
-          && status.provider_polling_account_ids.includes(item.account.provider_account_id));
-        if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
-        await updateProviderRecoveryLiveState([item], adapter, {
-          state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
-          reason: polling ? null : adapter.id === "shopee"
-            ? "Shopee account changed. Check the connection for this browser."
-            : "LINE OA polling is not running for this account. Sync this account to resume.",
-          tabId: record?.tab_id ?? tab.id,
-        });
-      }
-    } catch (error) {
-      await recordUnexpected("provider_watchdog", error, {
-        provider: adapter.id,
-        tab_id: tab.id,
-      });
-      const status = await providerTabStatus(tab);
-      await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
     }
   }
   await ensureLiveConnection();
@@ -3211,6 +3228,7 @@ async function exactProviderAccountTab(context, tabId, { shared_session = false 
   if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("A valid provider tab is required.");
   const tab = await providerChatTabById(context.adapter, tabId);
   if (!tab) throw new Error("The selected provider tab is no longer open.");
+  if (context.adapter.matchesAccountUrl && !context.adapter.matchesAccountUrl(tab.url, context.account)) throw new Error("The selected provider tab is in a different country.");
   const tabContext = providerTabContext(tab, context.adapter.id);
   await ensureProviderBridge(tab.id, context.adapter);
   const status = await providerTabStatus(tab);
@@ -3968,12 +3986,12 @@ async function syncOpenProvider(control, context) {
     }
   } else {
     const stored = await readStorage([STORAGE.providerRecoveryTabs]);
-    const trackedTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], adapter.id)?.tab_id;
+    const trackedTabId = providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], providerRecoveryKey(adapter, context.account))?.tab_id;
     const preferredTabId = control.preferredTabId ?? trackedTabId;
     const preferredTab = await providerChatTabById(adapter, preferredTabId);
     if (adapter.id === "shopee") {
       for (const candidate of orderProviderTabs(adapter, await providerChatTabs(adapter), preferredTabId)) {
-        if (providerTabCanSend(await providerTabStatus(candidate), context)) { tab = candidate; break; }
+        if (providerAccountMatchesTab(adapter, context.account, candidate) && providerTabCanSend(await providerTabStatus(candidate), context)) { tab = candidate; break; }
       }
     } else if (preferredTab && await isReadyProviderTab(preferredTab, adapter)) tab = preferredTab;
     if (!tab && adapter.id !== "shopee") tab = await findReadyProviderChatTab(adapter);

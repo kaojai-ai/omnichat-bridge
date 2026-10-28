@@ -27,12 +27,18 @@ import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoverySta
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
+function updateShopeeProviderLink(account) {
+  const link = document.querySelector("#shopee-provider-link");
+  if (link) link.href = shopeeAdapter.chatUrlForAccount(account);
+}
+
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const sampleConfig = {
   version: CONFIG_VERSION,
   accounts: [{
     provider: shopeeAdapter.id,
     provider_account_id: "123456789",
+    country: "TH",
     events_url: "https://your-server.example.com/omnichat/events",
     api_url: "https://your-server.example.com/omnichat/api",
     image_server_url: "https://your-images.example.com",
@@ -981,6 +987,7 @@ async function refreshStoredState() {
     return;
   }
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1114,6 +1121,7 @@ async function load() {
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1473,6 +1481,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
       } : {}),
     });
     storedConfig = config;
+    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
     storedDeviceName = deviceName;
     renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
@@ -1514,6 +1523,7 @@ configFile.addEventListener("change", async () => {
       [STORAGE.logOutbox]: [],
     });
     storedConfig = config;
+    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
     logPopup("info", "configuration_imported", "Configuration imported.", {
       accounts: config.accounts.length,
       logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),

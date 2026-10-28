@@ -4,18 +4,18 @@
   "version": "0.8.2",
   "description": "Syncs supported provider chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "scripting", "storage"],
-  "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*"],
+  "host_permissions": ["https://seller.shopee.co.th/*", "https://seller.shopee.com.my/*", "https://seller.shopee.ph/*", "https://seller.shopee.sg/*", "https://seller.shopee.co.id/*", "https://banhang.shopee.vn/*", "https://chat.line.biz/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
     {
-      "matches": ["https://seller.shopee.co.th/*"],
+      "matches": ["https://seller.shopee.co.th/*", "https://seller.shopee.com.my/*", "https://seller.shopee.ph/*", "https://seller.shopee.sg/*", "https://seller.shopee.co.id/*", "https://banhang.shopee.vn/*"],
       "js": ["lib/message-id-cache.js", "lib/shopee-url.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "lib/shopee-video.js", "shopee-realtime.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://seller.shopee.co.th/*"],
+      "matches": ["https://seller.shopee.co.th/*", "https://seller.shopee.com.my/*", "https://seller.shopee.ph/*", "https://seller.shopee.sg/*", "https://seller.shopee.co.id/*", "https://banhang.shopee.vn/*"],
       "js": ["lib/message-id-cache.js", "lib/shopee-url.js", "lib/shopee.js", "lib/provider-adapters.js", "lib/shopee-adapter.js", "content.js"],
       "run_at": "document_start"
     },
