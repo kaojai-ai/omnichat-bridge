@@ -53,10 +53,14 @@ test("six supported markets use exact HTTPS origins and reject lookalikes", () =
   assert.throws(() => context.OmnichatShopeeUrl.originForAccount({ country: "US" }), /Unsupported/);
 });
 
-test("manifest grants and injects exactly the supported Shopee markets", async () => {
+test("manifest keeps required access unchanged for existing Thai and LINE users", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
-  const patterns = Object.values(context.OmnichatShopeeUrl.sellerOrigins).map(origin => `${origin}/*`);
-  assert.deepEqual(manifest.host_permissions.filter(pattern => !pattern.includes("chat.line.biz")), patterns);
+  const patterns = ["https://seller.shopee.co.th/*"];
+  assert.deepEqual(manifest.host_permissions, [...patterns, "https://chat.line.biz/*"]);
+  assert.deepEqual(manifest.optional_host_permissions, ["https://*/*"]);
+  assert.deepEqual(manifest.permissions, ["alarms", "scripting", "storage"]);
+  assert.deepEqual([...new Set(manifest.content_scripts.flatMap(script => script.matches))],
+    ["https://seller.shopee.co.th/*", "https://chat.line.biz/*"]);
   for (const script of manifest.content_scripts.filter(script => script.js.includes("lib/shopee-url.js"))) {
     assert.deepEqual(script.matches, patterns);
   }

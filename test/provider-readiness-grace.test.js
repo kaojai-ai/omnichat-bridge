@@ -362,3 +362,14 @@ test("MY readiness ignores another market's identity and refuses wrong-region se
   assert.equal((await h.assess()).eligible, false);
   await assert.rejects(h.select, /not ready for this account/);
 });
+
+test("revoked country access cannot borrow ready status from already injected regional tabs", async () => {
+  const h = fixture();
+  h.context.account.country = "MY";
+  h.scope.hasRegionalShopeePermission = async () => false;
+  const result = await h.scope.providerReadiness(h.context, {
+    tabs: [{ id: 2, url: "https://seller.shopee.com.my/new-webchat/conversations" }], statuses: [h.healthy],
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.evidence, null);
+});

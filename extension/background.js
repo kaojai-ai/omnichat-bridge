@@ -1,3 +1,4 @@
+import { hasRegionalShopeePermission, reconcileRegionalShopeeScripts } from "./lib/regional-permissions.js";
 import { withRequestTimeout } from "./lib/request-timeout.js";
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, historySyncSettings } from "./lib/config.js";
@@ -411,7 +412,9 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const adapter = context.adapter;
   providerPolicyContexts.set(context.key, context);
   const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
-  const candidateTabs = tabs ?? await providerChatTabs(adapter);
+  const countryAllowed = !(context.account.provider === "shopee" && context.account.country && context.account.country !== "TH")
+    || await hasRegionalShopeePermission(globalThis.chrome, context.account);
+  const candidateTabs = countryAllowed ? tabs ?? await providerChatTabs(adapter) : [];
   const observedIndexes = candidateTabs.flatMap((tab, index) => providerAccountMatchesTab(adapter, context.account, tab) ? [index] : []);
   const observedTabs = observedIndexes.map(index => candidateTabs[index]);
   const observedTabContexts = tabContexts ? observedIndexes.map(index => tabContexts[index]) : observedTabs.map((tab) => providerTabContext(tab, adapter.id));
@@ -901,6 +904,11 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "refresh_regional_permissions") {
+    void refreshRegionalShopeePermissions().then(() => respond({ ok: true }),
+      () => respond({ ok: false, error: "Could not enable regional access." }));
+    return true;
+  }
   if (message?.type === "sync_line_tab") {
     void syncLineTab(message.tab_id).then(respond,
       error => respond({ ok: false, error: error.message || "LINE sync failed." }));
@@ -2070,6 +2078,9 @@ async function runProviderHealthWatchdogOnce() {
     const recoveryKeys = [...new Set(allProviderContexts.map(context => providerRecoveryKey(adapter, context.account)))];
     for (const recoveryKey of recoveryKeys) {
       const providerContexts = allProviderContexts.filter(context => providerRecoveryKey(adapter, context.account) === recoveryKey);
+      if (providerContexts[0]?.account.provider === "shopee" && providerContexts[0].account.country
+        && providerContexts[0].account.country !== "TH"
+        && !await hasRegionalShopeePermission(globalThis.chrome, providerContexts[0].account)) continue;
       let matchingContexts = adapter.id === "line_oa"
         ? await lineSessionContexts(providerContexts, { refresh: true })
         : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
@@ -2601,6 +2612,12 @@ async function persistAccountMigration(context, source) {
 }
 
 async function ensureAccountLiveConnection(context) {
+  if (context.account?.provider === "shopee" && context.account.country && context.account.country !== "TH"
+    && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
+    const connection = liveConnections.get(context.key);
+    if (connection) stopAccountLiveConnection(context.key, connection, "regional_permission_required");
+    return;
+  }
   if (migrationConnections.has(context.key)) return migrationConnections.get(context.key);
   const attempt = ensureMigratedAccountLiveConnection(context).finally(() => migrationConnections.delete(context.key));
   migrationConnections.set(context.key, attempt);
@@ -2926,6 +2943,9 @@ async function handleLiveCommand(raw, context, socket) {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.commandTab] || changes[STORAGE.config]) rememberedCommandTabs.clear();
+  if (changes[STORAGE.config]) {
+    void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
+  }
   if (changes[STORAGE.config] || changes[STORAGE.consent]) {
     for (const adapter of providerAdapters.list()) invalidateProviderSession(adapter.id, "configuration_or_consent_changed");
   }
@@ -2940,8 +2960,37 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 chrome.permissions.onAdded.addListener(() => {
-  void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
+  void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
 });
+chrome.permissions.onRemoved.addListener(() => {
+  void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
+});
+
+async function refreshRegionalShopeePermissions() {
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
+  await reconcileRegionalShopeeScripts(chrome, stored[STORAGE.config]);
+  for (const context of configuredAccountContexts(stored)) {
+    if (await hasRegionalShopeePermission(globalThis.chrome, context.account)) continue;
+    const tabIds = new Set([providerPolicyTabIds.get(context.key),
+      readAccountState(stored[STORAGE.commandTab], context.key, null),
+      providerRecoveryRecord(stored[STORAGE.providerRecoveryTabs], providerRecoveryKey(context.adapter, context.account))?.tab_id,
+      ...[activeSyncControl, ...providerAutomaticRecoveries.values()]
+        .filter(control => control?.accountKey === context.key).map(control => control.tabId)]);
+    for (const tabId of tabIds) {
+      if (!Number.isInteger(tabId)) continue;
+      void cancelActiveSync("shopee", tabId).catch(() => {});
+      void chrome.tabs.sendMessage(tabId, { type: "cancel_sync_v3", provider: "shopee",
+        provider_account_id: context.account.provider_account_id }).catch(() => {});
+    }
+    sessionEligibility.reset(context.key);
+    providerPolicyTabIds.delete(context.key);
+    const connection = liveConnections.get(context.key);
+    if (connection) stopAccountLiveConnection(context.key, connection, "regional_permission_required");
+    await updateLiveState(context, { provider_recovery_state: "needs_attention",
+      provider_recovery_reason: "Allow access to this Shopee country in extension settings." });
+  }
+  await reattachOpenProviderBridges();
+}
 
 async function reconnectProviderTab(tab) {
   const tabId = tab?.id;
@@ -3023,7 +3072,7 @@ chrome.runtime.onStartup.addListener(() => {
   void recordLog("info", "extension", "started", "Extension service worker started.");
   void chrome.alarms.clear(LOG_UPLOAD_ALARM);
   void ensureLiveConnection();
-  void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
+  void refreshRegionalShopeePermissions().catch((error) => recordUnexpected("provider_bridge_startup", error));
   void attemptAllDeliveries({ resetBackoff: false });
 });
 
@@ -3045,7 +3094,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 void recordLog("info", "extension", "loaded", "Extension service worker loaded.");
 void chrome.alarms.clear(LOG_UPLOAD_ALARM);
 void ensureLiveConnection();
-void reattachOpenProviderBridges().catch((error) => recordUnexpected("provider_bridge_startup", error));
+void refreshRegionalShopeePermissions().catch((error) => recordUnexpected("provider_bridge_startup", error));
 void resumeInterruptedSync().catch((error) => recordUnexpected("sync_resume", error));
 
 function isVersionBefore(value, target) {
@@ -4608,6 +4657,10 @@ function messageKey(message) {
 }
 
 async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
+  if (context.account.provider === "shopee" && context.account.country && context.account.country !== "TH"
+    && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
+    throw new Error("Shopee country access is required before syncing.");
+  }
   const startedAt = performance.now();
   const captured = await serializeAccountStorage(async () => {
     const stored = await readStorage([
@@ -5062,6 +5115,10 @@ async function flushBatch(context, signal) {
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
   if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !pending.length) {
     return { sent: 0, pending: pending.length };
+  }
+  if (context.account?.provider === "shopee" && context.account.country && context.account.country !== "TH"
+    && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
+    return { sent: 0, pending: pending.length, blocked: true };
   }
   await recordLog("debug", "delivery", "batch_preparing", "Preparing queued message batch.", {
     provider_account_id: context.account.provider_account_id,
