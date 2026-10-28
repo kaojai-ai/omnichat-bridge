@@ -104,7 +104,8 @@ test("reattaches an invalidated content bridge without refreshing the provider p
   assert.match(source, /world: "MAIN"/);
   assert.match(source, /world: "ISOLATED"/);
   assert.match(source, /bridge_reinjected/);
-  assert.match(source, /void reattachOpenProviderBridges\(\)\.catch/);
+  assert.match(source, /void refreshRegionalShopeePermissions\(\)\.catch/);
+  assert.match(source, /await reattachOpenProviderBridges\(\)/);
   assert.match(source, /existing\.socket\?\.readyState === WebSocket\.OPEN/);
   assert.match(source, /sendConnectionStatus\(existing\.socket, context\)/);
   assert.ok(manifest.permissions.includes("scripting"));

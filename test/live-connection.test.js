@@ -457,18 +457,21 @@ test("importing current configuration removes obsolete migration failure state",
 });
 
 
-test("granting browser permissions triggers live-state reconciliation", async () => {
-  let listener;
+test("granting and revoking browser permissions reconcile regional access", async () => {
+  const listeners = [];
   let calls = 0;
   const start = source.indexOf("chrome.permissions.onAdded.addListener(");
-  const end = source.indexOf("async function reconnectProviderTab(", start);
+  const end = source.indexOf("async function refreshRegionalShopeePermissions(", start);
   vm.runInNewContext(source.slice(start, end), {
-    chrome: { permissions: { onAdded: { addListener: (callback) => { listener = callback; } } } },
-    ensureLiveConnection: async () => { calls++; },
+    chrome: { permissions: {
+      onAdded: { addListener: callback => listeners.push(callback) },
+      onRemoved: { addListener: callback => listeners.push(callback) },
+    } },
+    refreshRegionalShopeePermissions: async () => { calls++; },
     recordUnexpected: () => assert.fail("unexpected reconciliation failure"),
   });
-  listener();
-  assert.equal(calls, 1);
+  for (const listener of listeners) listener();
+  assert.equal(calls, 2);
 });
 
 

@@ -22,6 +22,7 @@ export function configuredProviderAccounts(config, providerId) {
     .map((account) => ({
       provider: account.provider,
       provider_account_id: String(account.provider_account_id).trim(),
+      ...(account.country ? { country: account.country } : {}),
       ...(account.bot_id ? { bot_id: String(account.bot_id).trim() } : {}),
       ...(account.display_name ? { display_name: String(account.display_name).trim() } : {}),
     }));

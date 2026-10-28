@@ -1,3 +1,4 @@
+import { regionalShopeeOrigins } from "./lib/regional-permissions.js";
 import {
   CONFIG_VERSION,
   accountConfigKey,
@@ -27,12 +28,53 @@ import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoverySta
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
+function updateShopeeProviderLink(account) {
+  const link = document.querySelector("#shopee-provider-link");
+  if (link) link.href = shopeeAdapter.chatUrlForAccount(account);
+  void renderRegionalAccess();
+}
+
+async function renderRegionalAccess() {
+  const container = document.querySelector("#regional-access");
+  if (!container) return;
+  const config = storedConfig;
+  const missing = [];
+  for (const origin of regionalShopeeOrigins(config)) {
+    if (!await chrome.permissions.contains({ origins: [`${origin}/*`] })) missing.push(origin);
+  }
+  if (config !== storedConfig) return;
+  container.replaceChildren();
+  container.hidden = !missing.length || !consented();
+  for (const origin of missing) {
+    const country = globalThis.OmnichatShopeeUrl.countryForUrl(origin);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = t("allowRegionalShopee", country);
+    button.addEventListener("click", () => {
+      // Must run before any await: imported files and startup have no user gesture.
+      const request = chrome.permissions.request({ origins: [`${origin}/*`] });
+      button.disabled = true;
+      void request.then(async granted => {
+        if (!granted) return;
+        const result = await chrome.runtime.sendMessage({ type: "refresh_regional_permissions" });
+        if (!result?.ok) throw new Error(result?.error || "Could not enable regional access.");
+        await refreshStoredState();
+      }).catch(error => reportPopupError("regional_permission", error)).finally(() => {
+        button.disabled = false;
+        void renderRegionalAccess();
+      });
+    });
+    container.append(button);
+  }
+}
+
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const sampleConfig = {
   version: CONFIG_VERSION,
   accounts: [{
     provider: shopeeAdapter.id,
     provider_account_id: "123456789",
+    country: "TH",
     events_url: "https://your-server.example.com/omnichat/events",
     api_url: "https://your-server.example.com/omnichat/api",
     image_server_url: "https://your-images.example.com",
@@ -145,6 +187,7 @@ function renderExtensionUpdate(update) {
 
 const TRANSLATIONS = {
   en: {
+    allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
     review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
     transfers: "This extension transfers", transfersRest: "chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.",
@@ -159,6 +202,7 @@ const TRANSLATIONS = {
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
+    allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
@@ -228,6 +272,7 @@ function applyTranslations() {
     document.querySelector("#hint-screen .hint-guide").innerHTML = `${t("help")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">${t("documentation")}</a>.`;
   }
   renderExtensionUpdate(extensionUpdate);
+  void renderRegionalAccess();
 }
 
 function adapterForAccount(account) {
@@ -981,6 +1026,7 @@ async function refreshStoredState() {
     return;
   }
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1114,6 +1160,7 @@ async function load() {
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1473,6 +1520,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
       } : {}),
     });
     storedConfig = config;
+    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
     storedDeviceName = deviceName;
     renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
@@ -1514,6 +1562,7 @@ configFile.addEventListener("change", async () => {
       [STORAGE.logOutbox]: [],
     });
     storedConfig = config;
+    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
     logPopup("info", "configuration_imported", "Configuration imported.", {
       accounts: config.accounts.length,
       logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
