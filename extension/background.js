@@ -432,13 +432,19 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   // A known different Shopee account still blocks even when its polling check is unavailable.
   const identities = new Set(reportedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
   const conflict = adapter.id === "shopee" && identities.size > 1;
-  const matchingTab = orderProviderTabs(adapter, observedTabs).find((candidate) => {
+  const previousTabId = previous?.last_evidence?.tab.id;
+  const isMatchingTab = (candidate) => {
     const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
     return identityMatches(status) && providerStatusMeetsPolicy(status, context);
-  });
-  const matchingIndex = matchingTab ? observedTabs.findIndex((tab) => tab.id === matchingTab.id) : -1;
-  const previousTabId = previous?.last_evidence?.tab.id;
+  };
+  // Browser focus and one missed probe must not move an account's sender.
+  const previousTab = observedTabs.find((tab) => tab.id === previousTabId);
   const previousIndex = observedTabs.findIndex((tab) => tab.id === previousTabId);
+  const retainDuringGrace = previousTab && !observedStatuses[previousIndex] && previous?.eligible
+    && previous.context === providerTabContext(previousTab, adapter.id);
+  const matchingTab = previousTab && (isMatchingTab(previousTab) || retainDuringGrace) ? previousTab
+    : orderProviderTabs(adapter, observedTabs).find(isMatchingTab);
+  const matchingIndex = matchingTab ? observedTabs.findIndex((tab) => tab.id === matchingTab.id) : -1;
   const matching = observedStatuses.findIndex(identityMatches);
   const index = matchingIndex >= 0 ? matchingIndex : previousIndex >= 0 ? previousIndex : matching >= 0 ? matching : 0;
   const tab = observedTabs[index];
@@ -1469,11 +1475,13 @@ async function sendViaProvider(message, { expectedGeneration } = {}) {
     return { ok: false, error: "Reply command is invalid." };
   }
   if (Number.isFinite(message.deadline_at_ms) && message.deadline_at_ms <= Date.now()) return { ok: false, error: "Reply deadline expired before sending." };
-  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+  const deadlineAt = Math.min(Number.isFinite(message.deadline_at_ms) ? message.deadline_at_ms : Infinity, Date.now() + 30_000);
+  const withinDeadline = (operation) => withRequestTimeout(operation, Math.max(1, deadlineAt - Date.now()));
+  const stored = await withinDeadline(() => readStorage([STORAGE.config, STORAGE.detectedAccounts]));
   const context = accountContextFor(stored, messageProviderAccountId(message), adapter.id);
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
-  const { tab, generation: selectedGeneration } = await selectSendContext(context, { expectedGeneration });
-  await ensureProviderBridge(tab.id, adapter, { reuseVerified: true });
+  const { tab, generation: selectedGeneration } = await withinDeadline(() => selectSendContext(context, { expectedGeneration }));
+  await withinDeadline(() => ensureProviderBridge(tab.id, adapter, { reuseVerified: true }));
   let imagePayload = {};
   if (["send_image", "send_video", "send_file"].includes(commandType)) {
     const imageUrl = typeof (message.image_url ?? message.media_url) === "string" ? (message.image_url ?? message.media_url) : "";
@@ -1488,16 +1496,20 @@ async function sendViaProvider(message, { expectedGeneration } = {}) {
     if (parsedUrl.origin !== new URL(context.config.image_server_url).origin) {
       return { ok: false, error: "Reply image URL is not from the configured image server." };
     }
-    const response = await fetch(parsedUrl, { ...(adapter.id === "line_oa" ? { redirect: "error" } : {}), signal: AbortSignal.timeout(Math.max(1, Math.min(20_000, (message.deadline_at_ms ?? Date.now() + 20_000) - Date.now()))) });
-    const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
-    if (!response.ok || (commandType === "send_image" && !imageType.startsWith("image/")) || (adapter.id === "shopee" && commandType === "send_video" && imageType !== "video/mp4")) {
+    const { response, imageType, bytes } = await withRequestTimeout(async (signal) => {
+      const response = await fetch(parsedUrl, { ...(adapter.id === "line_oa" ? { redirect: "error" } : {}), signal });
+      const imageType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+      const valid = response.ok && (commandType !== "send_image" || imageType.startsWith("image/"))
+        && !(adapter.id === "shopee" && commandType === "send_video" && imageType !== "video/mp4");
+      return { response, imageType, bytes: valid ? new Uint8Array(await response.arrayBuffer()) : null };
+    }, Math.max(1, Math.min(20_000, deadlineAt - Date.now())));
+    if (!bytes) {
       return { ok: false, error: "Could not load reply image.", diagnostics: {
         diagnostic_version: 1, provider: adapter.id, operation: "upload", stage: "media_download", command_type: commandType,
         http_status: response.status, native_attempted: false, delivery_uncertain: false,
         failure_kind: "pre_dispatch_failure",
       } };
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
     if (!bytes.byteLength || bytes.byteLength > (commandType === "send_video" && adapter.id === "shopee" ? 5 * 1024 * 1024 : adapter.id === "line_oa" ? (commandType === "send_image" ? 20 : 32) * 1024 * 1024 : MAX_REPLY_IMAGE_BYTES)) {
       return { ok: false, error: adapter.id === "shopee" && commandType === "send_video" ? "Shopee video must be 5 MB or smaller." : adapter.id === "line_oa" ? `Reply attachment must be ${commandType === "send_image" ? 20 : 32} MB or smaller.` : "Reply image must be 10 MB or smaller." };
     }
@@ -1512,17 +1524,28 @@ async function sendViaProvider(message, { expectedGeneration } = {}) {
   if (!sessionEligibility.isCurrent(context.key, selectedGeneration)) {
     return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry." };
   }
-  const result = await chrome.tabs.sendMessage(tab.id, {
-    ...message,
-    ...imagePayload,
-    provider: adapter.id,
-    type: "send_api_v3",
-    command_type: commandType,
-    request_id: requestId,
-    conversation_id: conversationId,
-    ...(adapter.id === "line_oa" ? { browser_provider_account_id: context.account.provider_account_id } : {}),
-    ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-  });
+  if (deadlineAt <= Date.now()) return { ok: false, error: "Reply deadline expired before sending." };
+  let result;
+  try {
+    result = await withRequestTimeout(() => chrome.tabs.sendMessage(tab.id, {
+      ...message,
+      deadline_at_ms: deadlineAt,
+      ...imagePayload,
+      provider: adapter.id,
+      type: "send_api_v3",
+      command_type: commandType,
+      request_id: requestId,
+      conversation_id: conversationId,
+      ...(adapter.id === "line_oa" ? { browser_provider_account_id: context.account.provider_account_id } : {}),
+      ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+    }), Math.max(1, deadlineAt - Date.now()));
+  } catch (error) {
+    if (error?.name !== "TimeoutError") throw error;
+    // The page may have submitted the reply. Release the queue without retrying.
+    return { ok: false, uncertain: true, error: "Provider reply confirmation timed out. Check provider history before retrying.",
+      diagnostics: { diagnostic_version: 1, provider: adapter.id, operation: "send",
+        command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure", timed_out: true } };
+  }
   if (!result || typeof result !== "object") return result;
   const { diagnostics, ...reply } = result;
   const safeDiagnostics = sanitizeSendDiagnostics(diagnostics);
