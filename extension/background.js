@@ -437,12 +437,14 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
     const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
     return identityMatches(status) && providerStatusMeetsPolicy(status, context);
   };
-  // Browser focus is not an account/session change. Retain a healthy sender.
+  // Browser focus and one missed probe must not move an account's sender.
   const previousTab = observedTabs.find((tab) => tab.id === previousTabId);
-  const matchingTab = previousTab && isMatchingTab(previousTab) ? previousTab
+  const previousIndex = observedTabs.findIndex((tab) => tab.id === previousTabId);
+  const retainDuringGrace = previousTab && !observedStatuses[previousIndex] && previous?.eligible
+    && previous.context === providerTabContext(previousTab, adapter.id);
+  const matchingTab = previousTab && (isMatchingTab(previousTab) || retainDuringGrace) ? previousTab
     : orderProviderTabs(adapter, observedTabs).find(isMatchingTab);
   const matchingIndex = matchingTab ? observedTabs.findIndex((tab) => tab.id === matchingTab.id) : -1;
-  const previousIndex = observedTabs.findIndex((tab) => tab.id === previousTabId);
   const matching = observedStatuses.findIndex(identityMatches);
   const index = matchingIndex >= 0 ? matchingIndex : previousIndex >= 0 ? previousIndex : matching >= 0 ? matching : 0;
   const tab = observedTabs[index];

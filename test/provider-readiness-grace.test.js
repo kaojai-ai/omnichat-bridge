@@ -439,3 +439,46 @@ test("expired bridge preflight cannot dispatch a late reply", async () => {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(attempts, 0);
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: inactive tabs can send and transient probes do not switch senders`, async () => {
+    const h = fixture(provider);
+    h.tab.active = false;
+    const backup = { ...h.tab, id: 2 };
+    h.tabs = [h.tab, backup];
+    const assess = statuses => h.scope.providerReadiness(h.context, { tabs: [h.tab, backup], statuses });
+    const initial = await assess([h.healthy, h.healthy]);
+    assert.equal(initial.eligible, true);
+    assert.equal(initial.evidence.tab.id, h.tab.id);
+    const grace = await assess([null, h.healthy]);
+    assert.equal(grace.evidence.tab.id, h.tab.id);
+    assert.equal(grace.generation, initial.generation);
+    assert.equal(grace.reason_code, "provider_check_grace");
+    h.now = 129_999;
+    assert.equal((await assess([null, h.healthy])).evidence.tab.id, h.tab.id);
+    h.now = 130_000;
+    const replacement = await assess([null, h.healthy]);
+    assert.equal(replacement.evidence.tab.id, backup.id);
+    assert.equal(replacement.eligible, true);
+    assert.notEqual(replacement.generation, initial.generation);
+  });
+
+  test(`${provider}: closing the assigned background tab selects a verified background replacement`, async () => {
+    const h = fixture(provider);
+    h.tab.active = false;
+    const backup = { ...h.tab, id: 2 };
+    h.tabs = [h.tab, backup];
+    await h.assess();
+    h.scope.invalidateProviderTab(h.tab.id, "provider_tab_closed");
+    h.tabs = [backup];
+    const replacement = await h.assess();
+    assert.equal(replacement.eligible, true);
+    assert.equal(replacement.evidence.tab.id, backup.id);
+    const sent = [];
+    wireSender(h, async (tabId) => { sent.push(tabId); return { ok: true, provider_message_id: "receipt" }; });
+    const result = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "replacement" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(sent, [backup.id]);
+  });
+}
