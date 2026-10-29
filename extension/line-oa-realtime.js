@@ -310,14 +310,14 @@
     while (Date.now() < deadline) {
       // Always request the newest messages for this conversation. Do not walk
       // backward through history because a newly sent message appears at the front.
-      const body = await json(messagesUrl(botId, conversationId, null, PAGE_LIMIT));
+      const body = await json(messagesUrl(botId, conversationId, null, PAGE_LIMIT), deadline - Date.now());
       const messages = Array.isArray(body?.list) ? body.list : [];
       const confirmed = messages.find((message) => (
         messageConversationId(message) === conversationId
         && messageSendId(message) === sendId
       ));
       if (confirmed) return messageId(confirmed);
-      await new Promise((resolve) => setTimeout(resolve, SEND_CONFIRM_POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(SEND_CONFIRM_POLL_MS, deadline - Date.now()))));
     }
     return "";
   }
@@ -997,12 +997,31 @@
     };
   }
 
+  async function withinReplyDeadline(action, deadlineAt) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw new Error("LINE OA reply deadline expired.");
+    let timer;
+    try {
+      // Account discovery can be shared with recovery. Stop waiting without
+      // cancelling that shared read, and never continue this send after expiry.
+      return await Promise.race([
+        action(),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("LINE OA reply deadline expired.")), remaining);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function sendBrowserMessage(command) {
     const commandType = value(command?.command_type ?? command?.type);
     const browserAccountId = normalizeBasicId(command?.browser_provider_account_id ?? command?.provider_account_id);
     const conversationId = value(command?.conversation_id);
     const requestId = value(command?.request_id);
     const startedAt = Date.now();
+    const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, startedAt + 25_000);
     let operation = "initialize";
     let sendStarted = false;
     let httpStatus;
@@ -1025,7 +1044,7 @@
       return;
     }
     try {
-      const botId = await resolveBotId(browserAccountId, "");
+      const botId = await withinReplyDeadline(() => resolveBotId(browserAccountId), deadlineAt);
       const expectedType = commandType === "send_text" ? "text"
         : commandType === "send_sticker" ? "sticker"
           : commandType === "send_image" ? "image"
@@ -1083,7 +1102,6 @@
         payload.stickerId = stickerId;
       }
 
-      const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, Date.now() + 25_000);
       const remaining = () => deadlineAt - Date.now();
       const requestSignal = () => {
         if (remaining() <= 0) throw new Error("LINE OA reply deadline expired.");

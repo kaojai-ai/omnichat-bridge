@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
+import { withRequestTimeout } from "../extension/lib/request-timeout.js";
 import { createReplyQueue } from "../extension/lib/reply-queue.js";
 import { sanitizeSendDiagnostics } from "../extension/lib/logs.js";
 import { buildConnectionHealth } from "../extension/lib/connection-status.js";
@@ -42,7 +43,8 @@ function fixture(provider = "shopee") {
     rememberCommandTab: async () => {},
   });
   installProviderPolicy(scope);
-  vm.runInContext(part("function providerTabIsReady(", "async function isReadyProviderTab(")
+  vm.runInContext(part("function orderProviderTabs(", "async function providerTabStatus(")
+    + part("function providerTabIsReady(", "async function isReadyProviderTab(")
     + part("async function providerTabStatus(", "function providerTabIsReady(")
     + part("async function connectionStatusSnapshot(", "function statusPublishKey(")
     + part("async function selectSendContext(", "function providerAdapterForCommand(")
@@ -172,7 +174,7 @@ function wireSender(h, send) {
     messageProviderAccountId: (message) => message.provider_account_id,
     accountContextFor: (_stored, account) => account === "shop" ? h.context : null,
     ensureProviderBridge: async () => {},
-    sanitizeSendDiagnostics, replyQueue: createReplyQueue(), liveCommandResults: new Map(),
+    withRequestTimeout, sanitizeSendDiagnostics, replyQueue: createReplyQueue(), liveCommandResults: new Map(),
     WebSocket: { OPEN: 1 }, scheduleKeepalive: () => {},
     recordUnexpected: async () => {}, recordLog: async () => {}, sendConnectionStatus: async () => {},
     shopeeAdapter: globalThis.OmnichatProviderAdapters.get("shopee"),
@@ -372,4 +374,68 @@ test("revoked country access cannot borrow ready status from already injected re
   });
   assert.equal(result.eligible, false);
   assert.equal(result.evidence, null);
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: focus changes preserve the account sender and queued generation`, async () => {
+    const h = fixture(provider);
+    h.tab.active = true;
+    const other = { ...h.tab, id: 2, active: false };
+    h.tabs = [h.tab, other];
+    const initial = await h.assess();
+    h.tab.active = false;
+    other.active = true;
+    const stable = await h.assess();
+    assert.equal(stable.evidence.tab.id, h.tab.id);
+    assert.equal(stable.generation, initial.generation);
+    const selected = await h.scope.selectSendContext(h.context, { expectedGeneration: initial.generation });
+    assert.equal(selected.tab.id, h.tab.id);
+    h.tabs = [other];
+    const replacement = await h.assess();
+    assert.equal(replacement.evidence.tab.id, other.id);
+    assert.notEqual(replacement.generation, initial.generation);
+    await assert.rejects(h.scope.selectSendContext(h.context, { expectedGeneration: initial.generation }), /session changed/);
+  });
+}
+
+test("worker deadline releases a stalled reply queue and caches uncertain delivery", async () => {
+  const h = fixture("line_oa");
+  await h.assess();
+  const attempts = [];
+  wireSender(h, async (_tab, command) => {
+    attempts.push(command.request_id);
+    if (command.request_id === "stalled") return new Promise(() => {});
+    return { ok: true, provider_message_id: "next-receipt" };
+  });
+  const socket = { readyState: 1, sent: [], send(body) { this.sent.push(JSON.parse(body)); } };
+  const command = (request, deadline) => JSON.stringify({ provider: "line_oa", provider_account_id: "shop",
+    type: "send_text", conversation_id: "conversation", request_id: request, deadline_at_ms: deadline, text: "fixture" });
+  const stalled = command("stalled", 100_020);
+  await Promise.all([
+    h.scope.handleLiveCommand(stalled, h.context, socket),
+    h.scope.handleLiveCommand(command("next", 101_000), h.context, socket),
+  ]);
+  assert.deepEqual(attempts, ["stalled", "next"]);
+  const failure = socket.sent.find(result => result.request_id === "stalled");
+  assert.equal(failure.ok, false);
+  assert.equal(failure.uncertain, true);
+  const cached = await h.scope.liveCommandResults.get("line_oa:shop:stalled").result;
+  assert.equal(cached.diagnostics.delivery_uncertain, true);
+  assert.equal(socket.sent.find(result => result.request_id === "next").ok, true);
+  await h.scope.handleLiveCommand(stalled, h.context, socket);
+  assert.equal(attempts.filter(id => id === "stalled").length, 1);
+});
+
+test("expired bridge preflight cannot dispatch a late reply", async () => {
+  const h = fixture();
+  await h.assess();
+  let finish;
+  let attempts = 0;
+  wireSender(h, async () => { attempts++; return { ok: true }; });
+  h.scope.ensureProviderBridge = () => new Promise(resolve => { finish = resolve; });
+  await assert.rejects(h.scope.sendViaProvider({ provider: "shopee", provider_account_id: "shop", type: "send_text",
+    conversation_id: "conversation", request_id: "expired", deadline_at_ms: 100_020 }), { name: "TimeoutError" });
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 0);
 });

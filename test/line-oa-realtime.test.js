@@ -76,7 +76,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       }
       if (url.pathname === "/api/v1/bots") {
         if (beforeAccountRequest) {
-          const response = await beforeAccountRequest();
+          const response = await beforeAccountRequest(init);
           if (response) return response;
         }
         if (accountError) throw accountError;
@@ -110,7 +110,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       }
       if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
         if (beforeMessageRequest) {
-          const response = await beforeMessageRequest(url);
+          const response = await beforeMessageRequest(url, init);
           if (response) return response;
         }
         if (messagePages) return { ok: true, json: async () => messagePages[url.searchParams.get("backward") ?? "first"] ?? { list: [] } };
@@ -1846,3 +1846,45 @@ for (const [name, fields, shouldFetch] of [
     } finally { bridge.dispose(); }
   });
 }
+
+
+test("LINE OA reply expires during shared account lookup without a late submission", async () => {
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ beforeAccountRequest: async () => { await blocked; } });
+  try {
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply", deadline_at_ms: Date.now() + 20 });
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics.operation, "initialize");
+    assert.equal(result.diagnostics.native_attempted, false);
+    assert.equal(result.diagnostics.delivery_uncertain, false);
+    assert.equal(result.diagnostics.timed_out, true);
+    release();
+    await settleBridge();
+    assert.equal(bridge.sentPayloads.length, 0);
+  } finally {
+    release();
+    bridge.dispose();
+  }
+});
+
+test("LINE OA stalled confirmation is aborted within its confirmation budget", async () => {
+  let confirmationSignal;
+  const bridge = createBridge({ beforeMessageRequest: async (_url, init) => {
+    confirmationSignal = init.signal;
+    return await new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" })), { once: true });
+    });
+  } });
+  try {
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply" });
+    assert.equal(confirmationSignal.aborted, true);
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics.operation, "confirm");
+    assert.equal(result.diagnostics.delivery_uncertain, true);
+    assert.equal(result.diagnostics.timed_out, true);
+    assert.equal(bridge.sentPayloads.length, 1);
+  } finally {
+    bridge.dispose();
+  }
+});
