@@ -477,8 +477,8 @@
     const nextId = value(account?.provider_account_id);
     const previousId = state.currentAccountId ?? null;
     if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate))) {
-      state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
       if (previousId || !nextId) {
+        state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
         if (cancelRecovery) resetRecovery("Shopee session changed. Retry sync for the open shop.");
         state.listTemplate = null;
         state.lookupListTemplate = null;
@@ -708,6 +708,9 @@
       postLog("warn", "shop_discovery_failed", "Shopee shop discovery failed during page startup.", {
         ...errorDetails(error),
       });
+    }).finally(() => {
+      // A failed startup check must not prevent a later native capture retry.
+      state.automaticAccountDiscoveryStarted = false;
     });
   };
 
@@ -2279,9 +2282,9 @@
     window.fetch = observedFetch;
   }
 
-  if (isSellerCentreSurface()) {
-    void observeAsync("seller_centre_session_account", detectSessionAccount);
-  }
+  // Identity discovery is independent of conversation traffic. The popup uses
+  // the same discoverAccounts request, joining an active check or retrying it.
+  startAutomaticAccountDiscovery();
 
   const detachObservedSocket = () => {
     if (!observedSocket || !socketListeners) return;

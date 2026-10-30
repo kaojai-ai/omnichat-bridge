@@ -1499,3 +1499,22 @@ test("Shopee cross-page activity disorder disables subsequent checkpoint stops",
     assert.deepEqual(cursors, ["0", "second", "third"]);
   } finally { bridge.dispose(); }
 });
+
+test("standalone chat discovers its authenticated shop without conversation interception", async () => {
+  const bridge = createBridge();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(bridge.state.currentAccountId, "100000001");
+  assert.equal(bridge.state.listTemplate, null);
+  assert.ok(bridge.requests.includes("/api/v2/login/"));
+});
+
+test("manual discovery retries a failed standalone startup check", async () => {
+  const bridge = createBridge({ initialResponses: {
+    "/api/v2/login/": () => new Response("{}", { status: 503 }),
+  } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(bridge.state.automaticAccountDiscoveryStarted, false);
+  bridge.setResponse("/api/v2/login/", { data: { shop_id: 100000001 } });
+  await bridge.detect();
+  assert.equal(bridge.state.currentAccountId, "100000001");
+});
