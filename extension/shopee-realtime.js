@@ -2284,7 +2284,11 @@
 
   // Identity discovery is independent of conversation traffic. The popup uses
   // the same discoverAccounts request, joining an active check or retrying it.
-  startAutomaticAccountDiscovery();
+  if (isSellerCentreSurface()) {
+    void observeAsync("seller_centre_session_account", detectSessionAccount);
+  } else if (!state.currentAccountId) {
+    startAutomaticAccountDiscovery();
+  }
 
   const detachObservedSocket = () => {
     if (!observedSocket || !socketListeners) return;
