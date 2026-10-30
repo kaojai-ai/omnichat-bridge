@@ -199,7 +199,10 @@ browser user agent, cookies, login tokens, or passwords are included.
 
 ## Operational log batch
 
-An account may optionally configure `logs_url`. The extension sends safe
+The configuration may optionally set a root `logs_url`, used by default for
+all accounts and installation diagnostics. An account `logs_url` overrides it
+for that account. Existing account-only configurations remain supported.
+The extension sends safe
 operational metadata to that HTTPS endpoint using the same timestamp, nonce,
 provider-account, and HMAC signature headers described above. Uploads are
 enabled when sync is initialized (manually or through configured automatic sync), are best-effort, and do

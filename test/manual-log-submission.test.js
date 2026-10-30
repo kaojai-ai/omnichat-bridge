@@ -18,7 +18,7 @@ function fixture({ fail = false, automatic = false, busy = false, persisted, onS
     hasLocalConsent: () => true, hasServerInitialized: () => true,
     configuredAccountContexts: () => contexts ?? [{ key: 'shop', config: { logs_url: 'configured' }, account: { provider_account_id: 'shop' } }],
     pruneLogs: value => value, MAX_LOG_UPLOAD_BATCH: 100,
-    sendLogBatch: async (_, batch, options) => { batches.push(batch.length); await onSend?.(batch, options); if (fail) throw new Error('Unavailable'); },
+    sendLogBatch: async (context, batch, options) => { batches.push(batch.length); await onSend?.(batch, options, context); if (fail) throw new Error('Unavailable'); },
     recordLog: async (...args) => { telemetry.push(args); }, diagnosticErrorDetails: () => ({}),
   });
   return { submit, batches, stored, telemetry };
@@ -170,4 +170,20 @@ test('manual submit forwards all levels across accounts once without creating up
   assert.equal(stored.logs.length, 5);
   assert.equal(telemetry.length, 0, 'uploading logs must not create more logs to upload');
   assert.equal((await submit()).submitted, 0);
+});
+
+test('root destination receives all levels and installation logs while account overrides win', async () => {
+  const logs = [
+    { id: 'global', level: 'debug', scope: 'installation' },
+    { id: 'a', account_key: 'a', level: 'info' },
+    { id: 'b', account_key: 'b', level: 'error' },
+  ];
+  const stored = { config: { logs_url: 'root' }, logs, logOutbox: logs.map(log => log.id), logUploadEnabled: true };
+  const sent = [];
+  const { submit } = fixture({ persisted: stored,
+    contexts: [{ key: 'a', config: { logs_url: 'override' } }, { key: 'b', config: {} }],
+    onSend: (batch, _options, context) => sent.push([context.config.logs_url, batch.map(log => log.id)]),
+  });
+  assert.equal((await submit()).submitted, 3);
+  assert.deepEqual(sent, [['root', ['global']], ['override', ['a']], ['root', ['b']]]);
 });

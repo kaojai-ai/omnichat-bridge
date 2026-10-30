@@ -4732,7 +4732,7 @@ async function sendLogBatch(context, logs, { automatic = false, signal, batchId 
   const url = new URL(context.config.logs_url);
   if (url.protocol !== "https:") throw new Error("Logs server must use HTTPS.");
   const managedLogs = ["https://ingress.kaojai.ai", "https://ingress.kaojai.dev"].includes(url.origin)
-    && url.pathname === "/logs/omnichat";
+    && /^\/logs\/omnichat(?:\/[^/]+)?$/.test(url.pathname);
   const stored = await readStorage([STORAGE.deviceName]);
   const nodeId = await installationId();
   const payload = {
@@ -4828,8 +4828,17 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
   if (!hasLocalConsent(stored[STORAGE.consent])
     || !hasServerInitialized(stored)
     || stored[STORAGE.logUploadEnabled] !== true) return { ok: false, submitted: 0, error: "Complete account setup before submitting logs." };
-  const contexts = configuredAccountContexts(stored).filter((context) => context.config.logs_url);
+  const contexts = configuredAccountContexts(stored).map((context) => ({
+    ...context,
+    config: { ...context.config, logs_url: context.config.logs_url || stored[STORAGE.config]?.logs_url },
+  })).filter((context) => context.config.logs_url);
   if (!contexts.length) return { ok: false, submitted: 0, error: "No configured log destination." };
+  if (stored[STORAGE.config]?.logs_url) {
+    // Installation diagnostics use the root destination even when the signing
+    // account overrides its own logs destination.
+    contexts.unshift({ ...contexts[0], key: "installation:logs",
+      config: { ...contexts[0].config, logs_url: stored[STORAGE.config].logs_url } });
+  }
   const queuedIds = new Set(Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []);
   // Use one configured route for installation-wide diagnostics.
   const entries = routeLogEntries(contexts, pruneLogs(stored[STORAGE.logs]));

@@ -19,6 +19,7 @@ and the relevant signed-in provider page must remain available.
 ```json
 {
   "version": 3,
+  "logs_url": "https://your-server.example.com/omnichat/logs",
   "accounts": [
     {
       "provider": "shopee",
@@ -50,7 +51,7 @@ accessible configured accounts.
 | `api_url` | HTTPS base; the bridge appends `/ping`, `/tickets`, `/control`. |
 | `hmac_secret` | Server-issued signing secret, not a provider login token. |
 | `image_server_url` | Optional HTTPS media origin; required for outgoing attachments. |
-| `logs_url` | Optional HTTPS receiver for sanitized operational logs. |
+| `logs_url` | Optional root HTTPS receiver for all sanitized operational logs; an account value overrides it for that account. |
 
 LINE also preserves optional server-issued `canonical_provider_account_id`,
 `bot_id`, `tenant_id`, and `user_id`. Do not substitute these for the Basic ID.
