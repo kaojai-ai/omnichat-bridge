@@ -60,7 +60,8 @@ for (const provider of ["line_oa", "shopee"]) {
 }
 
 test("reports an unhealthy provider tab without reloading it", () => {
-  assert.doesNotMatch(source, /chrome\.tabs\.reload/);
+  assert.match(source, /record\?\.opened_by_extension === true/);
+  assert.match(source, /!activeProviderSendAccounts.has\(context.key\)/);
   assert.doesNotMatch(source, /allowTabRecovery && attempts >= 2/);
   assert.match(source, /PROVIDER_RECOVERY_STATES\.needsAttention/);
   assert.match(source, /providerRecoveryFailureReason\(/);

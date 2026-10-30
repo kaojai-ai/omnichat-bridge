@@ -80,7 +80,7 @@ test("simultaneous account migration writes preserve both accounts and imported 
   const newB = { ...oldB, api_url: "https://new.invalid/b" };
   let stored = { config: { version: 3, history_days: 5, accounts: [oldA, oldB] } };
   const implementation = source.slice(source.indexOf("let migrationWrites ="), source.indexOf("async function ensureAccountLiveConnection(context)"));
-  const persist = vm.runInNewContext(`(() => { ${implementation}; return persistAccountMigration; })()`, {
+  const persist = vm.runInNewContext(`(() => { ${implementation}; return persistAccountMigration; })()`, { preemptAutomaticLogUpload: () => {},
     STORAGE: { config: "config", status: "status" }, migrationRetries: new Map(),
     accountConfigKey: (value) => `${value.provider}:${value.provider_account_id}`,
     readStorage: async () => structuredClone(stored),
@@ -264,7 +264,7 @@ test("readiness diagnostics publish changed states once without recording messag
   const connection = { socket, lastStatusKey: null };
   const start = source.indexOf("function statusPublishKey(status)");
   const end = source.indexOf("function scheduleKeepalive(context, socket)");
-  const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, {
+  const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, { preemptAutomaticLogUpload: () => {},
     liveConnections: new Map([[account.key, connection]]),
     WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
     createStatusReporter: options => createStatusReporter({ ...options, id: () => "report", setTimer: () => 1, clearTimer: () => {} }),
@@ -315,8 +315,8 @@ test("duplicate commands share one provider operation and replay its acknowledge
   const command = { provider: "shopee", provider_account_id: "shop", request_id: "request", type: "send_text", text: "secret message" };
   const start = source.indexOf("async function handleLiveCommand(");
   const end = source.indexOf("\nchrome.storage.onChanged", start);
-  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
+    recordLog: async () => {}, liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     sessionEligibility: verifiedSession(account.key), activeLiveCommandContexts: async contexts => contexts,
     providerAdapterForCommand: () => ({ id: "shopee", supportsSend: () => true }),
     messageProviderAccountId: (value) => value.provider_account_id, canonicalProviderAccountId: () => "shop",
@@ -346,8 +346,8 @@ test("failed LINE commands retain safe provider evidence locally and in upload w
   const diagnostics = { diagnostic_version: 1, provider: "line_oa", operation: "send", http_status: 400,
     native_error_code: "INVALID_REQUEST", native_attempted: true, delivery_uncertain: false,
     body: "private message", cookie: "secret", access_token: "secret" };
-  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-    liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
+    recordLog: async () => {}, liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     sessionEligibility: verifiedSession("line_oa:oa"), activeLiveCommandContexts: async contexts => contexts,
     providerAdapterForCommand: () => ({ id: "line_oa", supportsSend: () => true }),
     messageProviderAccountId: value => value.provider_account_id, canonicalProviderAccountId: () => "oa",
@@ -367,7 +367,7 @@ test("failed LINE commands retain safe provider evidence locally and in upload w
     assert.equal(entry.details.native_error_code, "INVALID_REQUEST");
     assert.doesNotMatch(JSON.stringify(entry), /private message|secret|access_token|cookie/);
   }
-  assert.deepEqual(socket.sent, [{ type: "send_result", request_id: "request-line", ok: false, error: "LINE OA send failed (400)." }]);
+  assert.deepEqual(socket.sent, [{ type: "send_result", request_id: "request-line", ok: false, error: "LINE OA send failed (400).", execution_stage: "preparation", retryable: false }]);
 });
 
 
@@ -375,7 +375,7 @@ test("unexpected errors classify structured provider status and timeout while pr
   const entries = [];
   const start = source.indexOf("async function recordUnexpected(");
   const end = source.indexOf("\nfunction registerGlobalErrorHandlers", start);
-  const record = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+  const record = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
     sanitizeSendDiagnostics, diagnosticErrorDetails,
     recordLog: async (_level, _area, _event, _message, details) => entries.push(details),
   });

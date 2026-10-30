@@ -82,7 +82,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
       reload: async () => { calls.reloaded++; },
     } },
   };
-  const runtime = vm.createContext(globals);
+  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(), ...globals });
   vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), runtime);
   vm.runInContext([
     functionSource("resolveProviderRecoveryTab", "function ensureProviderRecoveryTab("),
@@ -201,7 +201,7 @@ for (const recoveryEnabled of [false, true]) {
 
 test("fresh matching provider health clears stale attention without hiding unhealthy or mismatched tabs", async () => {
   let patch;
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
     PROVIDER_RECOVERY_STATES,
     updateLiveState: async (_context, value) => { patch = value; },
     providerTabCanSend: (status) => status.matches === true,

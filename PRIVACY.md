@@ -33,8 +33,12 @@ message data.
 
 If the user adds an optional `logs_url`, the extension also sends sanitized
 operational logs to that configured HTTPS destination in signed batches.
-Upload starts when sync is initialized, manually or through configured
-automatic sync.
+After account setup is initialized, the installation-local **Forward Log** switch
+(default on) enables best-effort background uploads. It can be turned off in
+Settings without deleting local diagnostics. **Submit logs** sends a one-time
+batch of retained eligible logs even when automatic forwarding is off. Uploads
+yield to messaging and recovery; unavailable networks, retention limits, or a
+closed browser can prevent delivery. Verbose debug logs remain local.
 These logs describe extension lifecycle, provider readiness, sync progress,
 queue counts, delivery status, errors, provider account identifiers (including
 LINE IDs beginning with `@`), message and conversation identifiers, recovery

@@ -310,6 +310,9 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
     type: "api_send_result",
     request_id: "request-invalid-1",
     ok: false,
+    execution_stage: "preparation",
+    dispatch_started: false,
+    retryable: false,
     error: "Reply quote is invalid.",
   });
 });

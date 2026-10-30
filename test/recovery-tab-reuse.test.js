@@ -9,17 +9,17 @@ const start = source.indexOf("async function resolveProviderRecoveryTab(");
 const end = source.indexOf("function providerRecoveryFailureReason(", start);
 
 function harness(provider, { tracked = true, url = "https://provider.example/chat", status = null,
-  lookupFails = false, queryFails = false, tabs = null, country, alternativeStatus = { healthy: true, current_provider_account_id: "account" } } = {}) {
+  lookupFails = false, queryFails = false, tabs = null, country, alternativeStatus = { healthy: true, capabilities: { message_recovery: true }, current_provider_account_id: "account" } } = {}) {
   const original = { id: 42, url, status: "complete" };
   const alternative = { id: 43, url: "https://provider.example/chat" };
   const openTabs = tabs ?? [original, alternative];
   let record = tracked ? { tab_id: original.id, state: "needs_attention" } : null;
-  const calls = { created: 0, status: [], recoveryKeys: [] };
+  const calls = { created: 0, reloaded: 0, status: [], recoveryKeys: [] };
   const adapter = { id: provider, matchesUrl: url => country ? /^https:\/\/seller\.shopee\.(?:co\.th|com\.my|ph)\//.test(url) : url === "https://provider.example/chat",
     ...(country ? { matchesAccountUrl: url => new URL(url).hostname === `seller.shopee.${country === "MY" ? "com.my" : "ph"}` } : {}),
   };
   const account = { account: { provider_account_id: "account", ...(country ? { country } : {}) } };
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
     URL, STORAGE: { providerRecoveryTabs: "recovery" }, PROVIDER_RECOVERY_STATES,
     providerRecoveryTabLocks: new Map(),
     readStorage: async () => ({ recovery: record }), providerRecoveryRecord: (_stored, key) => { calls.recoveryKeys.push(key); return record; },
@@ -33,6 +33,7 @@ function harness(provider, { tracked = true, url = "https://provider.example/cha
     recoveryRetryDue: () => true, providerRecoveryUrl: () => country ? `https://seller.shopee.${country === "MY" ? "com.my" : "ph"}/new-webchat/conversations` : "https://provider.example/chat",
     recordLog: async () => {},
     chrome: { tabs: {
+      reload: async () => { calls.reloaded++; },
       query: async () => { if (queryFails) throw new Error("Chrome unavailable"); return openTabs; },
       create: async ({ url }) => { calls.created++; const tab = { id: 100, url }; openTabs.push(tab); return tab; },
     } },
@@ -49,7 +50,7 @@ for (const provider of ["shopee", "line_oa"]) {
     "arbitrary navigation": { url: "https://example.org/" },
     "sign-in redirect": { url: "https://access.line.me/" },
     "unhealthy provider": { status: { healthy: false } },
-    "wrong account": { status: { healthy: true, current_provider_account_id: "other" } },
+    "wrong account": { status: { healthy: true, capabilities: { message_recovery: true }, current_provider_account_id: "other" } },
   })) {
     test(`${provider}: ${scenario} uses a healthy existing matching tab without creating another`, async () => {
       const h = harness(provider, options);
@@ -62,7 +63,7 @@ for (const provider of ["shopee", "line_oa"]) {
     });
   }
   test(`${provider}: lookup failure does not replace a tab still in Chrome's tab list`, async () => {
-    const h = harness(provider, { lookupFails: true, status: { healthy: true, current_provider_account_id: "account" } });
+    const h = harness(provider, { lookupFails: true, status: { healthy: true, capabilities: { message_recovery: true }, current_provider_account_id: "account" } });
     await h.run();
     assert.equal(h.record().tab_id, 42);
     assert.equal(h.calls.created, 0);
@@ -116,8 +117,22 @@ test("MY recovery ignores an existing TH tab and opens its own regional chat", a
 
 test("MY recovery refuses a healthy PH tab even when its account ID matches", async () => {
   const h = harness("shopee", { country: "MY", url: "https://seller.shopee.ph/new-webchat/conversations",
-    status: { healthy: true, current_provider_account_id: "account" } });
+    status: { healthy: true, capabilities: { message_recovery: true }, current_provider_account_id: "account" } });
   const result = await h.run();
   assert.equal(result.tab, null);
   assert.equal(h.calls.created, 0, "an existing tracked tab needs attention, never speculative replacement");
+});
+
+
+test("uninitialized customer Shopee tab creates one inactive owned chat without reloading customer tab", async () => {
+  const h = harness("shopee", { tabs: [{ id: 42, url: "https://provider.example/chat" }],
+    status: { healthy: false, current_provider_account_id: "account", capabilities: { message_recovery: false } } });
+  await h.run();
+  assert.equal(h.calls.created, 1);
+  assert.equal(h.calls.reloaded, 0);
+  assert.equal(h.record().opened_by_extension, true);
+  await h.run();
+  await h.run();
+  assert.equal(h.calls.created, 1, "owned recovery tab is reused");
+  assert.ok(h.calls.reloaded <= 1, "at most one owned-tab initialization reload");
 });

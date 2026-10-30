@@ -1159,3 +1159,5 @@ footer a:hover,
 .log-clear-link:hover { color: var(--danger); }
 .log-submit-status { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 8px 0; }
 .log-submit-status[data-state="error"] { color: var(--danger); }
+
+.account-row-capabilities { display: block; font-size: 10px; color: var(--muted, #667085); line-height: 1.4; white-space: normal; }

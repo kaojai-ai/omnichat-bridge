@@ -8,14 +8,14 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
 function fn(name, next, globals) {
-  const scope = vm.createContext(globals);
+  const scope = vm.createContext({ preemptAutomaticLogUpload: () => {}, ...globals });
   installProviderPolicy(scope);
   return vm.runInContext(`(${source.slice(source.indexOf(`async function ${name}(`), source.indexOf(next)).trim()})`, scope);
 }
 const context = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" },
   adapter: { id: "shopee", tabQueryPattern: "https://seller.shopee.co.th/*", matchesUrl: () => true, sendCommands: ["send_text"] } };
-const ready = { ok: true, provider_account_ids: ["shop"], current_provider_account_id: "shop", realtime_connected: true };
-const canSend = vm.runInNewContext(`(${source.slice(source.indexOf("function providerTabCanSend("), source.indexOf("\nfunction providerTabHealthy(")).trim()})`, {
+const ready = { ok: true, surface_ready: true, capabilities: { send_text: true, message_recovery: true }, provider_account_ids: ["shop"], current_provider_account_id: "shop", realtime_connected: true };
+const canSend = vm.runInNewContext(`(${source.slice(source.indexOf("function providerTabCanSend("), source.indexOf("\nfunction providerTabHealthy(")).trim()})`, { preemptAutomaticLogUpload: () => {},
   providerTabIsReady: (status) => status?.ok === true,
 });
 
@@ -60,6 +60,7 @@ test("unchanged readiness does not add status writes or repeated leader checks",
 
 test("an outbound command cannot use a tab for another shop", async () => {
   const selectContext = fn("selectSendContext", "\nasync function commandTab", {
+    sendReadiness: async () => ({ eligible: false }),
     STORAGE: {}, providerLabel: () => "Shopee Seller Chat", readStorage: async () => ({}), readAccountState: () => null,
     providerChatTabs: async () => [{ id: 1, url: "https://seller.shopee.co.th/" }], providerRecoveryRecord: () => null,
     getTab: async () => null, orderProviderTabs: (_adapter, tabs) => tabs,

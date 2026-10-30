@@ -19,7 +19,7 @@ function harness(sendViaProvider) {
   const sessionEligibility = createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} });
   const background = deferred();
   const events = [];
-  const sandbox = {
+  const sandbox = { recordLog: async () => {}, preemptAutomaticLogUpload: () => {},
     sessionEligibility, activeLiveCommandContexts: async contexts => contexts,
     sanitizeSendDiagnostics, replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
     scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
@@ -48,7 +48,7 @@ function harness(sendViaProvider) {
   return {
     replyQueue, sessionEligibility, background, events, socket, update,
     send(request, account = "shop", provider = "shopee") {
-      sessionEligibility.observe(`${provider}:${account}`, { hasTab: true, verified: true });
+      sessionEligibility.observe(`${provider}:${account}`, { preemptAutomaticLogUpload: () => {}, hasTab: true, verified: true });
       return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request }),
         { key: `${provider}:${account}`, account: { provider, provider_account_id: account } }, socket);
     },
@@ -116,8 +116,8 @@ test("update waits for queued replies and their acknowledgements before restarti
 test("concurrent tab selections preserve both accounts", async () => {
   let stored = {};
   const start = source.indexOf("function rememberCommandTab(");
-  const end = source.indexOf("\nasync function selectSendContext", start);
-  const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+  const end = source.indexOf("\n// A slow extra tab", start);
+  const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
     rememberedCommandTabs: new Map(), readAccountState: (state, key, fallback) => state?.[key] ?? fallback, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
     readStorage: async () => ({ tabs: { ...stored } }),
     writeAccountState: (current, account, tab) => ({ ...current, [account]: tab }),
@@ -134,8 +134,8 @@ test("unchanged selected tabs do not repeatedly read or write storage", async ()
   let stored = { "shopee:one": 1 };
   const remembered = new Map();
   const start = source.indexOf("function rememberCommandTab(");
-  const end = source.indexOf("\nasync function selectSendContext", start);
-  const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+  const end = source.indexOf("\n// A slow extra tab", start);
+  const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
     rememberedCommandTabs: remembered, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
     readAccountState: (state, key, fallback) => state?.[key] ?? fallback,
     readStorage: async () => { reads++; return { tabs: { ...stored } }; },

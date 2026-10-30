@@ -43,7 +43,7 @@ export function sanitizeSendDiagnostics(input) {
   const enums = {
     provider: ["shopee", "line_oa"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
-    stage: ["media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation"],
+    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
     response_format: ["json", "non_json", "empty", "unreadable"],
     surface: ["new-webchat", "webchat", "seller-centre"],
@@ -80,6 +80,7 @@ export function sanitizeSendDiagnostics(input) {
   if (Number.isFinite(input.provider_duration_ms) && input.provider_duration_ms >= 0 && input.provider_duration_ms <= 300_000) {
     result.provider_duration_ms = input.provider_duration_ms;
   }
+  if (Number.isFinite(input.duration_ms) && input.duration_ms >= 0 && input.duration_ms <= 300_000) result.duration_ms = input.duration_ms;
   for (const key of SEND_DIAGNOSTIC_ID_KEYS) {
     const id = typeof input[key] === "number" || typeof input[key] === "string" ? String(input[key]) : "";
     if (/^\d{1,32}$/.test(id)) result[key] = id;

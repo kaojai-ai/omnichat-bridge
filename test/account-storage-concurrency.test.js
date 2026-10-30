@@ -20,7 +20,7 @@ function harness(overrides = {}) {
   const state = { [STORAGE.consent]: true, [STORAGE.serverInitialized]: true };
   const uploads = [];
   let failWrite = false;
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ preemptAutomaticLogUpload: () => {},
     performance, STORAGE, readAccountState, writeAccountState,
     metadataScope: async context => context.key,
     customerMetadata: { enrich: async (_scope, message) => message },
@@ -102,7 +102,7 @@ test("a failed storage write does not prevent another account from saving", asyn
 test("delivery triggers coalesce for one account while another account proceeds", { timeout: 3000 }, async () => {
   const started = [];
   const finish = [];
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ preemptAutomaticLogUpload: () => {},
     deliverPendingForAccount: (account, options) => new Promise((resolve, reject) => {
       started.push(account.key);
       finish.push(() => options.fail ? reject(new Error("upload failed")) : resolve({ sent: 1 }));
@@ -158,7 +158,7 @@ test("capture ACK waits for durable storage but not blocked target delivery or d
 
 test("capture during an active upload wakes one follow-up drain without parallel uploads", async () => {
   const finish = [];
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ preemptAutomaticLogUpload: () => {},
     deliverPendingForAccount: () => new Promise(resolve => finish.push(resolve)),
   });
   vm.runInContext(section("const accountDeliveries =", "async function deliverPendingForAccount("), runtime);
