@@ -24,7 +24,7 @@ import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
 import { activeSyncAccount, currentTabSyncAccounts, hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
 import { createCoalescedRefresh, syncProgressPresentation } from "./lib/popup-sync-progress.js";
-import { currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
+import { accountCapabilityStatus, accountCapabilitySummary, currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
@@ -105,6 +105,8 @@ const progressArea = document.querySelector("#progress-area");
 const status = document.querySelector("#status");
 const configCount = document.querySelector("#config-count");
 const configInput = document.querySelector("#config");
+let forwardLog = true;
+const forwardLogInput = document.querySelector("#forward-log");
 const deviceNameInput = document.querySelector("#device-name");
 const deviceNameBadge = document.querySelector("#device-name-badge");
 const configStatus = document.querySelector("#config-status");
@@ -187,6 +189,8 @@ function renderExtensionUpdate(update) {
 
 const TRANSLATIONS = {
   en: {
+    waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and sync", capConnected: "Connected", capDisconnected: "Not connected", sendReady: "Sending ready", sendUnavailable: "Sending unavailable", syncReady: "Sync ready", syncUnavailable: "Sync unavailable",
+    forwardLogDescription: "Automatically send diagnostic logs in the background.",
     allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
     review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
@@ -202,6 +206,8 @@ const TRANSLATIONS = {
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
+    waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมส่งและซิงค์", capConnected: "เชื่อมต่อแล้ว", capDisconnected: "ยังไม่เชื่อมต่อ", sendReady: "พร้อมส่ง", sendUnavailable: "ยังส่งไม่ได้", syncReady: "พร้อมซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
+    forwardLogDescription: "ส่งบันทึกการวินิจฉัยโดยอัตโนมัติในเบื้องหลัง",
     allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
@@ -262,6 +268,8 @@ function applyTranslations() {
     }
     else element.innerHTML = value;
   }
+  document.querySelector("#forward-log-label").textContent = "Forward Log";
+  document.querySelector("#forward-log-description").textContent = t("forwardLogDescription");
   deviceNameInput.placeholder = t("deviceNamePlaceholder");
   for (const [value, key] of [["info", "info"], ["warn", "warnings"], ["error", "errors"], ["debug", "debug"]]) {
     const option = logLevel.querySelector(`option[value="${value}"]`);
@@ -510,7 +518,7 @@ function accountRowStatus(account) {
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
   const session = sessionConnectionStatus(live);
-  if (session) return session;
+  if (session) return accountCapabilityStatus(live, t) || session;
   if (account.provider === "shopee" && !accountIsActiveHere(account)) {
     return { label: t("inactiveShop"), state: "neutral", hint: inactiveShopHint(live) };
   }
@@ -525,7 +533,7 @@ function accountRowStatus(account) {
   if (live?.endpoint_not_found && live.socket !== "connected") return accountConnectionStatus(live);
   const failure = currentAccountSyncFailure(syncState, live);
   if (failure) return { label: t("syncFailed"), state: "error", hint: failure, action: "logs" };
-  return accountConnectionStatus(live);
+  return accountCapabilityStatus(live, t) || accountConnectionStatus(live);
 }
 
 async function retryAccount(account) {
@@ -699,6 +707,13 @@ function renderAccountRow(account) {
   badge.textContent = providerBadgeLabel(account.provider, adapter);
   heading.append(badge, name);
   copy.append(heading, statusLabel);
+  const capabilityText = accountCapabilitySummary(readAccountState(liveState, accountConfigKey(account), null), t);
+  if (capabilityText) {
+    const capabilities = document.createElement("small");
+    capabilities.className = "account-row-capabilities";
+    capabilities.textContent = capabilityText;
+    copy.append(capabilities);
+  }
   const actions = document.createElement("div");
   actions.className = "account-row-actions";
   if (cardState.loading) {
@@ -1012,6 +1027,7 @@ async function refreshStoredState() {
     STORAGE.pending,
     STORAGE.live,
     STORAGE.deviceName,
+    STORAGE.forwardLog,
     STORAGE.unattendedRecovery,
     STORAGE.language,
     STORAGE.extensionUpdate,
@@ -1037,6 +1053,8 @@ async function refreshStoredState() {
     : "";
   unattendedRecovery = stored[STORAGE.unattendedRecovery] === true;
   unattendedRecoveryInput.checked = unattendedRecovery;
+  forwardLog = stored[STORAGE.forwardLog] !== false;
+  forwardLogInput.checked = forwardLog;
   applyTranslations();
   renderExtensionUpdate(extensionUpdate);
   detectedAccounts = bestEffortAccounts(
@@ -1082,6 +1100,7 @@ function renderConfigEditor() {
   const empty = storedConfig.accounts.length === 0;
   deviceNameInput.value = storedDeviceName;
   unattendedRecoveryInput.checked = unattendedRecovery;
+  forwardLogInput.checked = forwardLog;
   configInput.value = empty ? "" : JSON.stringify(storedConfig, null, 2);
   configInput.placeholder = JSON.stringify(sampleConfig, null, 2);
   configInput.disabled = false;
@@ -1152,6 +1171,7 @@ async function load() {
       STORAGE.pending,
       STORAGE.live,
       STORAGE.deviceName,
+      STORAGE.forwardLog,
       STORAGE.unattendedRecovery,
       STORAGE.language,
       STORAGE.extensionUpdate,
@@ -1172,6 +1192,8 @@ async function load() {
   language = stored[STORAGE.language] === "th" ? "th" : stored[STORAGE.language] === "en" ? "en" : defaultLanguage();
   unattendedRecovery = stored[STORAGE.unattendedRecovery] === true;
   unattendedRecoveryInput.checked = unattendedRecovery;
+  forwardLog = stored[STORAGE.forwardLog] !== false;
+  forwardLogInput.checked = forwardLog;
   applyTranslations();
   renderExtensionUpdate(extensionUpdate);
   if (installationIdButton.dataset.installationId) {
@@ -1668,7 +1690,7 @@ const scheduleStoredRefresh = createCoalescedRefresh(async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.commandTab] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language] || changes[STORAGE.extensionUpdate]) {
+  if (changes[STORAGE.forwardLog] || changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.commandTab] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language] || changes[STORAGE.extensionUpdate]) {
     stateRefreshPending = true;
     scheduleStoredRefresh();
   }
@@ -1686,4 +1708,11 @@ void load().then(() => {
   storedConsent = null;
   routeTo("consent");
   consentError.textContent = t("loadFailed");
+});
+
+forwardLogInput.addEventListener("change", async () => {
+  forwardLogInput.disabled = true;
+  try { await writeStorage({ [STORAGE.forwardLog]: forwardLogInput.checked }); forwardLog = forwardLogInput.checked; }
+  catch (error) { forwardLogInput.checked = !forwardLogInput.checked; reportPopupError("forward_log", error); }
+  finally { forwardLogInput.disabled = false; }
 });

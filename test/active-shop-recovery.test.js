@@ -19,7 +19,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
   const pending = { a: ["queued-message"] };
   let live = {};
   const liveConnections = new Map([["shopee:a", {}]]);
-  const sandbox = vm.createContext({
+  const sandbox = vm.createContext({ preemptAutomaticLogUpload: () => {},
     sessionEligibility: eligibility,
     shopeeAdapter, liveConnections, WebSocket: { OPEN: 1 },
     STORAGE: { consent: "consent" },
@@ -66,7 +66,7 @@ test("shared config connects only the signed-in shop, retires its predecessor, a
 test("automatic delivery respects retry time while explicit retry bypasses it", async () => {
   let flushes = 0;
   const context = { key: "shop", account: { provider_account_id: "shop" } };
-  const sandbox = vm.createContext({
+  const sandbox = vm.createContext({ preemptAutomaticLogUpload: () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: { consent: "consent", pending: "pending", deliveryRetry: "retry" },
     readStorage: async () => ({ consent: true, pending: { shop: ["message"] }, retry: { shop: { next_at: new Date(Date.now() + 60_000).toISOString() } } }),
@@ -91,7 +91,7 @@ test("conflicting Shopee pages pause both shops until fresh account detection ag
   let refreshed = false;
   let agrees = false;
   const patches = {};
-  const sandbox = vm.createContext({
+  const sandbox = vm.createContext({ preemptAutomaticLogUpload: () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     shopeeAdapter,
     providerChatTabs: async () => [{ id: 1 }, { id: 2 }],

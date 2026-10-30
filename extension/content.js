@@ -206,6 +206,10 @@
     clearTimeout(pending.timeout);
     pending.resolve({
       ok: false,
+      ...(["queue", "preparation", "provider_dispatch", "completed"].includes(pending.result.execution_stage)
+        ? { execution_stage: pending.result.execution_stage } : {}),
+      ...(typeof pending.result.dispatch_started === "boolean" ? { dispatch_started: pending.result.dispatch_started } : {}),
+      ...(typeof pending.result.retryable === "boolean" ? { retryable: pending.result.retryable } : {}),
       ...(pending.result.uncertain === true ? { uncertain: true } : {}),
       ...(pending.result.error_code ? { error_code: pending.result.error_code } : {}),
       ...(pending.result.diagnostics ? { diagnostics: pending.result.diagnostics } : {}),

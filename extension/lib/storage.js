@@ -4,6 +4,8 @@ export const STORAGE = {
   detectedAccounts: "detected_accounts",
   customerMetadata: "customer_metadata_v1",
   installationId: "installation_id",
+  forwardLog: "forward_log",
+  logForwardState: "log_forward_state",
   deviceName: "device_name",
   pending: "pending_messages",
   status: "status",

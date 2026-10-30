@@ -29,7 +29,7 @@ function fixture(provider = "shopee") {
   const closed = [];
   const policy = createSessionEligibility({ now: () => now, setTimer: (callback, delay) => { timerCallbacks.push({ callback, at: now + delay }); return callback; },
     clearTimer: () => {}, onEvent: (_key, event, details) => events.push({ event, ...details }) });
-  const scope = vm.createContext({
+  const scope = vm.createContext({ withRequestTimeout, preemptAutomaticLogUpload: () => {}, activeProviderSendAccounts: new Set(),
     Date: class extends Date { static now() { return now; } },
     sessionEligibility: policy, providerAdapters: globalThis.OmnichatProviderAdapters,
     providerChatTabs: async () => tabs, providerLabel: () => provider,
@@ -47,7 +47,7 @@ function fixture(provider = "shopee") {
     + part("function providerTabIsReady(", "async function isReadyProviderTab(")
     + part("async function providerTabStatus(", "function providerTabIsReady(")
     + part("async function connectionStatusSnapshot(", "function statusPublishKey(")
-    + part("async function selectSendContext(", "function providerAdapterForCommand(")
+    + part("async function sendReadiness(", "function providerAdapterForCommand(")
     + part("function invalidateProviderSession(", "chrome.tabs.onUpdated.addListener"), scope);
   const healthy = provider === "shopee"
     ? { ok: true, current_provider_account_id: "shop", surface_ready: true, realtime_connected: true,
@@ -102,7 +102,7 @@ for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: confirmed negatives and a restarted worker never borrow recent readiness`, async () => {
     const h = fixture(provider);
     await h.assess();
-    h.result = { ...h.healthy, realtime_connected: false };
+    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { capabilities: { ...h.healthy.capabilities, send_text: false } } : {}) };
     assert.equal((await h.snapshot()).ready, false);
     h.result = null;
     assert.equal((await h.snapshot()).ready, false, "negative evidence cannot become grace");
@@ -182,7 +182,7 @@ function wireSender(h, send) {
   h.scope.chrome.tabs = { sendMessage: send };
   vm.runInContext(part("function liveCommandContexts(", "function providerSessionEpoch(")
     + part("async function lineSessionContexts(", "function messageProviderAccountId(")
-    + part("async function sendViaProvider(", "async function selectCommandTab(")
+    + part("const activeProviderSendAccounts =", "async function selectCommandTab(")
     + part("async function handleLiveCommand(", "chrome.storage.onChanged.addListener"), h.scope);
 }
 for (const provider of ["shopee", "line_oa"]) {
@@ -227,7 +227,7 @@ test("navigation after tab selection blocks the final provider attempt", async (
 test("late older positive observations cannot overwrite a newer confirmed failure", async () => {
   const h = fixture();
   await h.assess();
-  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false }], observation: 100 });
+  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false, capabilities: { ...h.healthy.capabilities, send_text: false } }], observation: 100 });
   assert.equal(blocked.eligible, false);
   const stale = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [h.healthy], observation: 99 });
   assert.equal(stale.eligible, false);
@@ -331,8 +331,10 @@ for (const provider of ["shopee", "line_oa"]) {
       h.scope.invalidateProviderTab(h.tab.id, "navigation");
       await h.assess();
     };
-    await assert.rejects(h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
-      conversation_id: "conversation", request_id: "stale", text: "reply" }), /session changed during tab selection/);
+    const failure = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "stale", text: "reply" });
+    assert.equal(failure.dispatch_started, false);
+    assert.match(failure.error, /session changed during tab selection/);
     assert.equal(sends, 0);
   });
   test(`${provider}: bridge initialization cannot replace the selected send generation`, async () => {
@@ -433,15 +435,17 @@ test("expired bridge preflight cannot dispatch a late reply", async () => {
   let attempts = 0;
   wireSender(h, async () => { attempts++; return { ok: true }; });
   h.scope.ensureProviderBridge = () => new Promise(resolve => { finish = resolve; });
-  await assert.rejects(h.scope.sendViaProvider({ provider: "shopee", provider_account_id: "shop", type: "send_text",
-    conversation_id: "conversation", request_id: "expired", deadline_at_ms: 100_020 }), { name: "TimeoutError" });
+  const failure = await h.scope.sendViaProvider({ provider: "shopee", provider_account_id: "shop", type: "send_text",
+    conversation_id: "conversation", request_id: "expired", deadline_at_ms: 100_020 });
+  assert.equal(failure.dispatch_started, false);
+  assert.equal(failure.error_code, "OMNICHAT_PREPARATION_TIMEOUT");
   finish();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(attempts, 0);
 });
 
 for (const provider of ["shopee", "line_oa"]) {
-  test(`${provider}: inactive tabs can send and transient probes do not switch senders`, async () => {
+  test(`${provider}: inactive tabs can send and a verified backup replaces an unresponsive sender`, async () => {
     const h = fixture(provider);
     h.tab.active = false;
     const backup = { ...h.tab, id: 2 };
@@ -451,12 +455,8 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(initial.eligible, true);
     assert.equal(initial.evidence.tab.id, h.tab.id);
     const grace = await assess([null, h.healthy]);
-    assert.equal(grace.evidence.tab.id, h.tab.id);
-    assert.equal(grace.generation, initial.generation);
-    assert.equal(grace.reason_code, "provider_check_grace");
-    h.now = 129_999;
-    assert.equal((await assess([null, h.healthy])).evidence.tab.id, h.tab.id);
-    h.now = 130_000;
+    assert.equal(grace.evidence.tab.id, backup.id);
+    assert.notEqual(grace.generation, initial.generation);
     const replacement = await assess([null, h.healthy]);
     assert.equal(replacement.evidence.tab.id, backup.id);
     assert.equal(replacement.eligible, true);
@@ -482,3 +482,13 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.deepEqual(sent, [backup.id]);
   });
 }
+
+
+test("outbound selection does not await a stalled extra tab", async () => {
+  const h = fixture();
+  const backup = { ...h.tab, id: 2 };
+  h.tabs = [h.tab, backup];
+  h.scope.providerTabStatus = tab => tab.id === h.tab.id ? Promise.resolve(h.healthy) : new Promise(() => {});
+  const selected = await h.scope.sendReadiness(h.context);
+  assert.equal(selected.evidence.tab.id, h.tab.id);
+});

@@ -93,6 +93,11 @@ Optional `image_server_url` (required for outgoing attachments) and `logs_url`
 also use HTTPS. See the [shared setup guide](docs/setup.md) for additional
 fields and legacy Shopee version 2 support.
 
+Settings → **Forward Log** controls automatic diagnostic forwarding to your configured
+`logs_url`. It defaults on after setup and yields to messaging work. Turning it off
+keeps local diagnostics; **Submit logs** still sends a one-time batch. Forwarding
+is best effort and uses the existing local retention limits.
+
 ## Demo video
 
 [![Watch the video](https://img.youtube.com/vi/1jhDywbflmg/hqdefault.jpg)](https://youtu.be/1jhDywbflmg)

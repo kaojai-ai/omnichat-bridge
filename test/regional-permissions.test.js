@@ -122,9 +122,9 @@ test("revoked regional access cancels existing tab polling and closes only affec
 
 test("previously injected regional content cannot queue or forward after revocation", async () => {
   const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
-  const queue = source.slice(source.indexOf("async function queueMessagesForContext("), source.indexOf("  const startedAt = performance.now();", source.indexOf("async function queueMessagesForContext(")));
+  const queue = source.slice(source.indexOf("async function queueMessagesForContext("), source.indexOf("  const startedAt =", source.indexOf("async function queueMessagesForContext(")));
   const flush = source.slice(source.indexOf("async function flushBatch("), source.indexOf('  await recordLog("debug", "delivery", "batch_preparing"', source.indexOf("async function flushBatch(")));
-  const scope = vm.createContext({ hasRegionalShopeePermission, chrome: { permissions: { contains: async () => false } },
+  const scope = vm.createContext({ preemptAutomaticLogUpload: () => {}, hasRegionalShopeePermission, chrome: { permissions: { contains: async () => false } },
     readStorage: async () => ({}), STORAGE: {}, readAccountState: () => [{}], hasLocalConsent: () => true,
   });
   vm.runInContext(`${queue}return "accepted"; }\n${flush}return { sent: 1 }; }`, scope);

@@ -16,7 +16,7 @@ const primary = { id: 2, url: "https://seller.shopee.co.th/new-webchat/conversat
 function sandbox(tabs, statuses) {
   const created = [];
   let record = { tab_id: mini.id, state: "ready", opened_by_extension: false };
-  const context = vm.createContext({
+  const context = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
     STORAGE: { providerRecoveryTabs: "recovery" },
     PROVIDER_RECOVERY_STATES: { ready: "ready", needsAttention: "needs_attention", opening: "opening" },
     Date, Number, Map,
@@ -62,7 +62,7 @@ function commandHarness({ primaryReady = true, miniShop = "shop" } = {}) {
   const commandContext = { key: "shopee:shop", adapter, account: { provider_account_id: "shop" } };
   const status = tab => ({ ready: tab.id === primary.id ? primaryReady : miniReady,
     current_provider_account_id: tab.id === primary.id ? "shop" : miniShop });
-  const context = vm.createContext({
+  const context = vm.createContext({ withRequestTimeout: async operation => operation(),
     STORAGE: { commandTab: "command", providerRecoveryTabs: "recovery" },
     readStorage: async () => ({}), readAccountState: () => mini.id,
     providerRecoveryRecord: () => ({ tab_id: mini.id }), getTab: async () => mini,
@@ -74,7 +74,7 @@ function commandHarness({ primaryReady = true, miniShop = "shop" } = {}) {
   });
   installProviderPolicy(context);
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
-    + extract("async function selectSendContext(", "function providerAdapterForCommand("), context);
+    + extract("async function sendReadiness(", "function providerAdapterForCommand("), context);
   return { preparations, run: () => context.commandTab(commandContext, { prepareForSend: true }) };
 }
 

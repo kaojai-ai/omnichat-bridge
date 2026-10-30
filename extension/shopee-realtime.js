@@ -1253,18 +1253,26 @@
     let nativeAttempted = false;
     let nativeResponseReceived = false;
     const sendStartedAt = Date.now();
+    const sendStartedMono = globalThis.performance?.now() ?? Date.now();
+    const stage = (sendStage) => postLog("info", "send_stage", "Shopee send progressed.", {
+      request_id: requestId, conversation_id: conversationId, provider_account_id: message.provider_account_id,
+      execution_stage: sendStage, dispatch_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - sendStartedMono),
+      remaining_budget_ms: Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : 30_000,
+      dispatch_started: nativeAttempted,
+    });
+    stage("initialization");
     let providerRejected = false;
     let diagnostics = { diagnostic_version: 1, command_type: commandType, surface: state.surface };
     if (deadlineExpired()) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply deadline expired before sending." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Reply deadline expired before sending." });
       return;
     }
     if (!requestId || !conversationId || !clientMessageId || !providerAdapter.supportsSend(commandType)) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Reply command is invalid." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Reply command is invalid." });
       return;
     }
     if (commandType === "send_video" && (state.surface !== NEW_WEBCHAT_SURFACE || !globalThis.OmnichatShopeeVideo)) {
-      post({ type: "api_send_result", request_id: requestId, ok: false,
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error: "Shopee video sending requires initialized New Webchat." });
       return;
     }
@@ -1272,7 +1280,7 @@
       await ensureSellerCentreChatOpen();
       if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
     } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
       return;
     }
     if (isSellerCentreSurface() && (!state.listTemplate || !state.getTemplate)) {
@@ -1287,18 +1295,19 @@
     }
     if (!isBridgeActive()) return;
     if (isSellerCentreSurface() && typeof state.nativeFetch !== "function") {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: "Seller Centre native sender is unavailable." });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Seller Centre native sender is unavailable." });
       return;
     }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
     try {
+      stage("session_verification");
       await verifySessionAccount(accountId, deadlineAt - Date.now());
     } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, error: String(error) });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
       return;
     }
     if (state.currentAccountId && accountId !== state.currentAccountId) {
-      post({ type: "api_send_result", request_id: requestId, ok: false,
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error: "Shopee signed-in shop does not match the reply command." });
       return;
     }
@@ -1307,6 +1316,7 @@
     const sessionEpoch = state.routeSessionEpoch ?? 0;
     const sessionUnchanged = () => state.currentAccountId === sessionAccountId
       && (state.routeSessionEpoch ?? 0) === sessionEpoch;
+    stage("route_resolution");
     const supplied = providerAdapter.normalizeRouting?.(message.omnichat?.routing);
     const commandRouteValid = supplied?.fields.to_id && !/^0+$/.test(supplied.fields.to_id)
       && accountId && accountId === state.currentAccountId;
@@ -1341,7 +1351,7 @@
           postLog("warn", "send_route_resolution", "Shopee reply routing could not be resolved.", {
             request_id: requestId, route_resolution_version: 1, cache_reason: cacheReason, stop_reason: "lookup_failed",
           });
-          post({ type: "api_send_result", request_id: requestId, ok: false,
+          post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
             error: `Shopee conversation lookup failed: ${error instanceof Error ? error.message : String(error)}` });
           return;
         }
@@ -1359,7 +1369,7 @@
       route_resolved: routeComplete(routing),
     });
     if (!routeComplete(routing)) {
-      post({ type: "api_send_result", request_id: requestId, ok: false,
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error_code: "SHOPEE_CONVERSATION_MISSING",
         error: "Shopee conversation routing could not be resolved. Please check Seller Chat for the correct shop." });
       return;
@@ -1458,8 +1468,10 @@
         ...(Object.hasOwn(payload.choice_info ?? {}, "real_shop_id")
           ? { choice_shop_matches_route: value(payload.choice_info.real_shop_id) === value(routing.shop_id) } : {}) };
       nativeAttempted = true;
+      stage("provider_dispatch");
       const response = await sendThroughSurface(template, url.toString(), payload);
       nativeResponseReceived = true;
+      stage("provider_response");
       if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
       let body = response;
       if (typeof response?.clone === "function") {
@@ -1499,7 +1511,7 @@
       if (!knownAcceptance) {
         throw new Error("Shopee returned an unrecognized send result. Delivery is uncertain; check Seller Chat before retrying.");
       }
-      post({ type: "api_send_result", request_id: requestId, ok: true, provider_message_id: providerMessageId });
+      post({ type: "api_send_result", request_id: requestId, ok: true, execution_stage: "completed", dispatch_started: true, retryable: false, provider_message_id: providerMessageId });
     } catch (error) {
       diagnostics.provider_duration_ms = Math.min(300_000, Math.max(0, Date.now() - sendStartedAt));
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);
@@ -1512,7 +1524,7 @@
         scope: "send_api", request_id: requestId, conversation_id: conversationId, provider_account_id: accountId,
         ...diagnostics,
       });
-      post({ type: "api_send_result", request_id: requestId, ok: false, diagnostics, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: nativeAttempted ? "provider_dispatch" : "preparation", dispatch_started: nativeAttempted, retryable: false, diagnostics, ...(nativeAttempted && !providerRejected && !providerReason ? { uncertain: true } : {}), error: providerReason ?? (error instanceof Error ? error.message : String(error)) });
     }
   };
   const captureActiveConversation = (request) => {
