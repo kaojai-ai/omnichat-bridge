@@ -470,12 +470,12 @@ for (const provider of ["shopee", "line_oa"]) {
   });
 }
 
-test("Shopee session changes request verification without trusting a page account as sync scope", async () => {
+test("Shopee first verification preserves recovery; established shop changes invalidate it", async () => {
   const bridge = contentBridge("/new-webchat/conversations");
   await bridge.providerEvent({ type: "provider_status", current_provider_account_id: "shop-a" });
   await new Promise(resolve => setTimeout(resolve, 550));
   const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
-  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "shopee", reason: "session_changed" }]);
+  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "shopee", reason: "provider_ready" }]);
   await bridge.providerEvent({ type: "provider_status", current_provider_account_id: "shop-a" });
   await new Promise(resolve => setTimeout(resolve, 550));
   assert.equal(resumes().length, 1);
@@ -485,12 +485,12 @@ test("Shopee session changes request verification without trusting a page accoun
   assert.equal(resumes().length, 2);
 });
 
-test("LINE verified account-set changes request provider recovery without a single-account target", async () => {
+test("LINE first access discovery preserves recovery; established access changes invalidate it", async () => {
   const bridge = contentBridge("/bot-1/chats", { provider: "line_oa" });
   await bridge.providerEvent({ type: "provider_status", account_access_verified: true, accessible_account_ids: ["@one", "@two"] });
   await new Promise(resolve => setTimeout(resolve, 550));
   const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
-  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "line_oa", reason: "session_changed" }]);
+  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "line_oa", reason: "provider_ready" }]);
   await bridge.providerEvent({ type: "provider_status", account_access_verified: true, accessible_account_ids: ["@two", "@one"] });
   await new Promise(resolve => setTimeout(resolve, 550));
   assert.equal(resumes().length, 1);
@@ -893,9 +893,16 @@ test("LINE account reset during checkpoint loading leaves other OA recovery runn
 test("LINE reset after recovery completes forwards its account and retains per-account polling status", async () => {
   const bridge = contentBridge("/bot-1/chats", { provider: "line_oa" });
   await bridge.providerEvent({ type: "provider_status", provider_polling_active: true,
-    provider_polling_account_ids: ["oa-b"], surface_ready: true, realtime_connected: true });
+    provider_polling_account_ids: ["oa-b"], provider_polling_request_id: "poll:oa-b:1",
+    provider_polling_account_id: "oa-b", surface_ready: true, realtime_connected: true });
   const status = await bridge.requestMessage({ type: "get_provider_status_v3" });
   assert.deepEqual(plain(status.provider_polling_account_ids), ["oa-b"]);
+  assert.equal(status.provider_polling_request_id, "poll:oa-b:1");
+  assert.equal(status.provider_polling_account_id, "oa-b");
+  await bridge.providerEvent({ type: "provider_status", provider_polling_active: false });
+  const idle = await bridge.requestMessage({ type: "get_provider_status_v3" });
+  assert.equal(idle.provider_polling_request_id, null);
+  assert.equal(idle.provider_polling_account_id, null);
   await bridge.requestMessage({ type: "cancel_sync_v3", provider_account_id: "oa-a" });
   const cancellation = bridge.runtimeMessages.find(message => message.type === "cancel_sync_v3");
   assert.equal(cancellation.provider_account_id, "oa-a");

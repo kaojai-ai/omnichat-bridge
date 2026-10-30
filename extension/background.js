@@ -1289,14 +1289,37 @@ function syncControlForMessage(message, tabId) {
     && control.tabId === tabId && control.providerRequestId === requestId);
 }
 
+// Routine LINE polls outlive recovery jobs and service-worker lifetimes. Verify
+// their live page identity instead of granting authority to the poll prefix alone.
+async function pollingCheckpointGuard(message, tabId) {
+  const adapter = providerAdapterForId("line_oa");
+  const tab = await providerChatTabById(adapter, tabId);
+  if (!tab) throw syncCancelledError();
+  const epoch = providerTabContext(tab, adapter.id);
+  const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent]);
+  const context = accountContextFor(stored, message.provider_account_id, adapter.id);
+  if (!context || !hasLocalConsent(stored[STORAGE.consent])) throw syncCancelledError();
+  const status = await providerTabStatus(tab);
+  const requestId = String(message.request_id).split(":").slice(0, 2).join(":");
+  if (!status?.account_access_verified
+    || !status.accessible_account_ids?.includes(message.provider_account_id)
+    || status.provider_polling_request_id !== requestId
+    || status.provider_polling_account_id !== message.provider_account_id) throw syncCancelledError();
+  return () => {
+    if (epoch !== providerTabContext(tab, adapter.id)) throw syncCancelledError();
+  };
+}
+
 async function persistSyncCheckpoint(message, tabId) {
   const control = syncControlForMessage(message, tabId);
-  const assertCurrent = () => {
-    if (!control || !isCurrentSyncControl(control) || control.controller.signal.aborted
-      || control.adapter.id !== message.provider || control.providerAccountId !== message.provider_account_id) {
-      throw syncCancelledError();
-    }
-  };
+  const assertCurrent = message.provider === "line_oa" && String(message.request_id ?? "").startsWith("poll:")
+    ? await pollingCheckpointGuard(message, tabId)
+    : () => {
+      if (!control || !isCurrentSyncControl(control) || control.controller.signal.aborted
+        || control.adapter.id !== message.provider || control.providerAccountId !== message.provider_account_id) {
+        throw syncCancelledError();
+      }
+    };
   assertCurrent();
   return exclusive(() => {
     assertCurrent();

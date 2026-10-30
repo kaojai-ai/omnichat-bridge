@@ -220,3 +220,58 @@ test("revoking one LINE account preserves peers while cancelling the tab still a
   await Promise.all([second, rejected]);
   assert.equal(h.events.some(event => event.includes("line_oa:c")), false);
 });
+
+test("routine LINE checkpoints survive completed jobs but reject stale polls, access and session changes", async () => {
+  let epoch = 1;
+  let configured = true;
+  let consent = true;
+  let beforeWrite = () => {};
+  const writes = [];
+  const tab = { id: 7 };
+  const status = { account_access_verified: true, accessible_account_ids: ["a"],
+    provider_polling_request_id: "poll:current", provider_polling_account_id: "a" };
+  const sandbox = {
+    accountSyncs: new Map(), // Includes the service-worker restart case.
+    STORAGE: { config: "config", detectedAccounts: "detected", consent: "consent" },
+    providerAdapterForId: id => ({ id }),
+    providerChatTabById: async (_adapter, id) => id === 7 ? tab : null,
+    providerTabContext: () => String(epoch),
+    readStorage: async () => ({ consent }),
+    accountContextFor: (_stored, id) => configured && id === "a" ? { key: "line_oa:a" } : null,
+    hasLocalConsent: value => value === true,
+    providerTabStatus: async () => status,
+    syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+    exclusive: task => task(),
+    getAccountScanState: async () => ({ context: {} }),
+    writeAccountScanState: async (_context, patch) => { beforeWrite(); writes.push(patch({ conversations: {} })); },
+    compareMessageCursor: () => 1,
+  };
+  const start = source.indexOf("function isCurrentSyncControl(");
+  const end = source.indexOf("async function initializeAndStartSync(", start);
+  const cursorStart = source.indexOf("async function advanceScanCursor(");
+  const cursorEnd = source.indexOf("function exclusive(", cursorStart);
+  const persist = vm.runInNewContext(`(() => { ${source.slice(start, end)}\n${source.slice(cursorStart, cursorEnd)}; return persistSyncCheckpoint; })()`, sandbox);
+  const message = { type: "advance_scan_cursor", provider: "line_oa", provider_account_id: "a",
+    request_id: "poll:current:chat:cursor:0", conversation_id: "first",
+    cursor: { event_timestamp: "2026-10-30T00:00:00Z", message_id: "1" } };
+  await persist(message, 7);
+  await persist({ ...message, conversation_id: "second" }, 7);
+  assert.equal(writes.length, 2, "routine scans can advance beyond their first conversation");
+  await assert.rejects(persist({ ...message, request_id: "poll:previous:chat:cursor:0" }, 7), { name: "AbortError" });
+  await assert.rejects(persist(message, 8), { name: "AbortError" });
+  status.provider_polling_account_id = "b";
+  await assert.rejects(persist(message, 7), { name: "AbortError" });
+  status.provider_polling_account_id = "a";
+  status.accessible_account_ids = [];
+  await assert.rejects(persist(message, 7), { name: "AbortError" });
+  status.accessible_account_ids = ["a"];
+  configured = false;
+  await assert.rejects(persist(message, 7), { name: "AbortError" });
+  configured = true;
+  consent = false;
+  await assert.rejects(persist(message, 7), { name: "AbortError" });
+  consent = true;
+  beforeWrite = () => { epoch++; };
+  await assert.rejects(persist(message, 7), { name: "AbortError" });
+  assert.equal(writes.length, 2, "session invalidation during storage waiting cannot advance checkpoints");
+});

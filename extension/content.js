@@ -41,6 +41,8 @@
   let providerChatOpen = null;
   let providerPollingActive = false;
   let providerPollingAccountIds = [];
+  let providerPollingRequestId = null;
+  let providerPollingAccountId = null;
   let lastProviderCheckAt = null;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -1091,6 +1093,10 @@
       providerPollingAccountIds = Array.isArray(event.data.provider_polling_account_ids)
         ? event.data.provider_polling_account_ids.filter((id) => typeof id === "string")
         : [];
+      providerPollingRequestId = typeof event.data.provider_polling_request_id === "string"
+        ? event.data.provider_polling_request_id : null;
+      providerPollingAccountId = typeof event.data.provider_polling_account_id === "string"
+        ? event.data.provider_polling_account_id : null;
       lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
         ? event.data.last_provider_check_at
         : lastProviderCheckAt;
@@ -1105,12 +1111,13 @@
           : accountAccessVerified ? [...accessibleAccountIds].sort().join("\n")
             : providerCheckOutcome === "failed" ? "" : null;
       if (sessionIdentity !== null) {
-        const changed = sessionIdentity !== recoverySessionIdentity
-          && (recoverySessionIdentity !== null || sessionIdentity !== "");
+        const previousIdentity = recoverySessionIdentity;
+        const changed = sessionIdentity !== previousIdentity
+          && (previousIdentity !== null || sessionIdentity !== "");
         recoverySessionIdentity = sessionIdentity;
-        // This is only a wake hint. The background verifies the sender tab and
-        // configured accounts before scheduling any provider recovery.
-        if (changed) requestResumeSync("session_changed");
+        // First verification can finish while manual recovery is starting. It
+        // must join that work, not invalidate it as an account replacement.
+        if (changed) requestResumeSync(previousIdentity === null ? "provider_ready" : "session_changed");
       }
       if (providerSurface === "seller-centre" && !automaticSellerCentreLandingStartupChecked) {
         automaticSellerCentreLandingStartupChecked = true;
@@ -1199,6 +1206,8 @@
       realtime_connected: realtimeConnected,
       provider_polling_active: providerPollingActive,
       provider_polling_account_ids: [...providerPollingAccountIds],
+      provider_polling_request_id: providerPollingRequestId,
+      provider_polling_account_id: providerPollingAccountId,
       last_realtime_connected_at: lastRealtimeConnectedAt,
       last_provider_check_at: lastProviderCheckAt,
       page_visible: document.visibilityState === "visible",
