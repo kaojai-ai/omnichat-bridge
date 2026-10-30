@@ -1282,7 +1282,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (providerAdapterForCommand(message)?.supportsSend(message?.type)) {
-    void sendViaProvider(message).then(
+    void replyQueue.run(`${messageProvider(message)}:${messageProviderAccountId(message)}`, () => sendViaProvider(message)).then(
       (result) => respond(result),
       async (error) => {
         await recordUnexpected("send_message", error, {
@@ -1928,10 +1928,29 @@ async function resolveProviderRecoveryTab(adapter, context, allowTabRecovery) {
       && record?.opened_by_extension === true && record.tab_id === trackedTab.id
       && !activeProviderSendAccounts.has(context.key)
       && (!reload || reload.tabId !== trackedTab.id)) {
-      recoveryTemplateReloads.set(recoveryKey, { tabId: trackedTab.id, at: Date.now() });
-      await updateProviderRecoveryTabState(recoveryKey, { template_reload_at: Date.now(), next_retry_at: Date.now() + 60_000,
-        reason: "Preparing Shopee chat request templates." });
-      await chrome.tabs.reload(trackedTab.id);
+      // Reserve the same queue as sends before persisting the reload attempt.
+      // Yield if a send arrives during persistence, before invalidating its
+      // session or closing the socket that must acknowledge that command.
+      await replyQueue.runIfIdle(context.key, async (isUncontended) => {
+        const previousReloadState = {
+          template_reload_at: record?.template_reload_at ?? null,
+          next_retry_at: record?.next_retry_at ?? null,
+          reason: record?.reason ?? null,
+        };
+        const at = Date.now();
+        record = await updateProviderRecoveryTabState(recoveryKey, {
+          template_reload_at: at, next_retry_at: at + 60_000,
+          reason: "Preparing Shopee chat request templates.",
+        });
+        const currentTab = await getTab(trackedTab.id);
+        if (!isUncontended() || !currentTab || currentTab.url !== trackedTab.url) {
+          record = await updateProviderRecoveryTabState(recoveryKey, previousReloadState);
+          return false;
+        }
+        recoveryTemplateReloads.set(recoveryKey, { tabId: trackedTab.id, at });
+        invalidateProviderTab(trackedTab.id, "provider_recovery_reload");
+        await chrome.tabs.reload(trackedTab.id);
+      });
     }
     if (!isHealthy && reload?.tabId === trackedTab.id && Date.now() - reload.at < 60_000) {
       return { tab: null, record, reason: "Shopee chat initialization is cooling down." };
@@ -2586,6 +2605,8 @@ async function connectionStatusSnapshot(context) {
 function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
+    send_ready: status.send_ready,
+    sync_ready: status.sync_ready,
     reason_code: status.reason_code,
     readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
     device_name: status.device_name,
@@ -5082,7 +5103,7 @@ async function signedRequest(config, providerAccountId, payload, signal) {
   });
 }
 
-async function sendLogBatch(context, logs, { automatic = false, signal } = {}) {
+async function sendLogBatch(context, logs, { automatic = false, signal, batchId } = {}) {
   const url = new URL(context.config.logs_url);
   if (url.protocol !== "https:") throw new Error("Logs server must use HTTPS.");
   const managedLogs = ["https://ingress.kaojai.ai", "https://ingress.kaojai.dev"].includes(url.origin)
@@ -5090,7 +5111,7 @@ async function sendLogBatch(context, logs, { automatic = false, signal } = {}) {
   const payload = {
     schema: "omnichat.log_batch",
     version: 1,
-    batch_id: (await sha256Hex(`${context.key}:${logs.map(entry => entry.id).join(",")}`)).slice(0, 32).replace(/(.{8})(.{4}).(.{3}).(.{3})(.{12})/, "$1-$2-5$3-8$4-$5"),
+    batch_id: batchId,
     installation_id: await installationId(),
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
@@ -5185,47 +5206,63 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
   const entries = pruneLogs(stored[STORAGE.logs]);
   let submitted = 0;
   let failed = false;
+  const state = stored[STORAGE.logForwardState] ?? {};
+  // Only bounded id lists are retained, never duplicate log payloads. Removed
+  // accounts and expired/evicted entries cannot hold a pending batch forever.
+  const pending = {};
+  for (const context of contexts) {
+    const batch = selectLogBatch([context], entries, queuedIds, 0, MAX_LOG_UPLOAD_BATCH, state.pending_batches);
+    if (batch?.batchId) pending[context.key] = { batch_id: batch.batchId, entry_ids: batch.logs.map(entry => entry.id) };
+  }
+  state.pending_batches = pending;
+  const persistBatch = async batch => {
+    batch.batchId ??= crypto.randomUUID();
+    pending[batch.context.key] = { batch_id: batch.batchId, entry_ids: batch.logs.map(entry => entry.id) };
+    // Persist before starting a request: restart, timeout and preemption all
+    // retry the identical logical batch, including a later manual submission.
+    await writeStorage({ [STORAGE.logForwardState]: state });
+  };
+  const acknowledgeBatch = async batch => {
+    const delivered = new Set(batch.logs.map(entry => entry.id));
+    await mutateLogs(async () => {
+      const current = await readStorage([STORAGE.logOutbox]);
+      await writeStorage({ [STORAGE.logOutbox]: (current[STORAGE.logOutbox] ?? []).filter(id => !delivered.has(id)) });
+    });
+    for (const id of delivered) queuedIds.delete(id);
+    delete pending[batch.context.key];
+    await writeStorage({ [STORAGE.logForwardState]: state });
+  };
   if (automatic) {
     if (!automaticLogForwardingEnabled(stored) || automaticLogWorkBusy()) return { ok: true, submitted: 0, skipped: true };
-    const state = stored[STORAGE.logForwardState] ?? {};
     if (state.next_at > Date.now()) return { ok: true, submitted: 0, skipped: true };
-    const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0);
+    const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0, MAX_LOG_UPLOAD_BATCH, pending);
     if (!batch) return { ok: true, submitted: 0 };
     try {
-      await sendLogBatch(batch.context, batch.logs, { automatic: true, signal });
-      const delivered = new Set(batch.logs.map(entry => entry.id));
-      await mutateLogs(async () => {
-        const current = await readStorage([STORAGE.logOutbox]);
-        await writeStorage({ [STORAGE.logOutbox]: (current[STORAGE.logOutbox] ?? []).filter(id => !delivered.has(id)) });
-      });
-      await writeStorage({ [STORAGE.logForwardState]: { cursor: batch.cursor, failures: 0, next_at: 0 } });
+      await persistBatch(batch);
+      await sendLogBatch(batch.context, batch.logs, { automatic: true, signal, batchId: batch.batchId });
+      await acknowledgeBatch(batch);
+      Object.assign(state, { cursor: batch.cursor, failures: 0, next_at: 0 });
+      await writeStorage({ [STORAGE.logForwardState]: state });
       return { ok: true, submitted: batch.logs.length };
     } catch {
       if (signal?.aborted) return { ok: true, submitted: 0, skipped: true };
       const failures = Math.min(5, (state.failures ?? 0) + 1);
-      await writeStorage({ [STORAGE.logForwardState]: { cursor: batch.cursor, failures, next_at: Date.now() + forwardingBackoff(failures) } });
+      Object.assign(state, { cursor: batch.cursor, failures, next_at: Date.now() + forwardingBackoff(failures) });
+      await writeStorage({ [STORAGE.logForwardState]: state });
       return { ok: false, submitted: 0 };
     }
   }
   for (const context of contexts) {
-    const pending = entries
-      .filter((entry) => entry.account_key === context.key && queuedIds.has(entry.id))
-      .reverse();
-    for (let offset = 0; offset < pending.length; offset += MAX_LOG_UPLOAD_BATCH) {
-      const selected = pending.slice(offset, offset + MAX_LOG_UPLOAD_BATCH);
+    let batch;
+    while ((batch = selectLogBatch([context], entries, queuedIds, 0, MAX_LOG_UPLOAD_BATCH, pending))) {
       try {
-        await sendLogBatch(context, selected);
-        const deliveredIds = new Set(selected.map((entry) => entry.id));
-        await mutateLogs(async () => {
-          const current = await readStorage([STORAGE.logOutbox]);
-          const outbox = (Array.isArray(current[STORAGE.logOutbox]) ? current[STORAGE.logOutbox] : [])
-            .filter((id) => !deliveredIds.has(id));
-          await writeStorage({ [STORAGE.logOutbox]: outbox });
-        });
-        submitted += selected.length;
+        await persistBatch(batch);
+        await sendLogBatch(context, batch.logs, { batchId: batch.batchId });
+        await acknowledgeBatch(batch);
+        submitted += batch.logs.length;
         await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
           provider_account_id: context.account.provider_account_id,
-          count: selected.length,
+          count: batch.logs.length,
         }, { remote: false });
       } catch (error) {
         failed = true;
@@ -5237,7 +5274,7 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
       }
     }
   }
-  const remaining = entries.filter((entry) => queuedIds.has(entry.id)).length - submitted;
+  const remaining = entries.filter((entry) => queuedIds.has(entry.id)).length;
   return { ok: !failed && remaining === 0, submitted, remaining,
     ...(failed || remaining ? { error: "Some logs could not be submitted. Submit again to try the remaining logs." } : {}) };
 }

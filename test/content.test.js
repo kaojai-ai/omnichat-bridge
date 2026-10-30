@@ -656,6 +656,30 @@ test("preserves missing-conversation codes across the content bridge", async () 
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
 });
 
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: preserves confirmed pre-send and uncertain dispatch results`, async () => {
+    const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/account/bot/chat", { provider });
+    for (const fields of [
+      { execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_BRIDGE_NOT_READY" },
+      { execution_stage: "provider_dispatch", dispatch_started: true, retryable: false, uncertain: true },
+    ]) {
+      const pending = bridge.sendCommand({ ...command, provider });
+      await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: false, error: "Send failed.", ...fields });
+      const result = await pending;
+      for (const [key, value] of Object.entries(fields)) assert.equal(result[key], value, key);
+    }
+  });
+}
+
+test("does not coerce malformed page execution metadata into retry permission", async () => {
+  const bridge = contentBridge();
+  const pending = bridge.sendCommand(command);
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: false,
+    error: "Send failed.", execution_stage: "arbitrary", dispatch_started: "false", retryable: "true" });
+  const result = await pending;
+  for (const key of ["execution_stage", "dispatch_started", "retryable"]) assert.equal(result[key], undefined);
+});
+
 const routingEnvelope = (fields, observed_at = "2026-10-21T03:00:00Z") => ({ routing: { version: 1, fields, observed_at } });
 
 test("forwards observed routing with messages and keeps it isolated by shop", async () => {

@@ -279,6 +279,14 @@ test("readiness diagnostics publish changed states once without recording messag
   assert.equal(logs.length, 2);
   assert.equal(logs[0].details.reason_code, "seller_chat_bridge_unavailable");
   assert.equal(logs[1].details.ready, true);
+  status = { ...status, send_ready: true, sync_ready: false };
+  await send(socket, account);
+  status = { ...status, sync_ready: true };
+  await send(socket, account);
+  await send(socket, account);
+  assert.equal(sent.length, 4, "capability changes publish even when routing readiness stays true");
+  assert.equal(sent[2].sync_ready, false);
+  assert.equal(sent[3].sync_ready, true);
 });
 
 test("ticket timeout releases the guard even if the request never settles", async () => {
