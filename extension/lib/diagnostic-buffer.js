@@ -53,9 +53,9 @@ export function createDiagnosticBuffer({
     if (!row.failure) routineBytes -= row.bytes;
   }
 
-  function enqueue(value, { remote = true } = {}) {
+  function enqueue(value) {
     const entry = createLogEntry(value, now());
-    const row = { entry, remote: remote === true };
+    const row = { entry };
     const size = logStorageBytes(row);
     const failure = entry.level === "warn" || entry.level === "error";
     const droppedKey = failure ? "droppedFailure" : "droppedRoutine";
@@ -92,7 +92,7 @@ export function createDiagnosticBuffer({
     inFlight = Promise.resolve().then(() => {
       startedAt = performance.now();
       timing.lastQueueWaitMs = Math.max(0, startedAt - batch[0].queuedAt);
-      return persist(batch.map(({ entry, remote }) => ({ entry, remote })));
+      return persist(batch.map(({ entry }) => ({ entry })));
     })
       .then(() => {
         for (const row of batch) release(row);

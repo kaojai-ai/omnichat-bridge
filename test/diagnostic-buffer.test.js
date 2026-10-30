@@ -24,7 +24,7 @@ test("admission captures occurrence time and sanitizes before a slow single-flig
   } });
   assert.equal(buffer.enqueue({ ...event(), details: { password: "private", count: 1 } }), true);
   clock = 2_000;
-  buffer.enqueue(event("warn"), { remote: false });
+  buffer.enqueue(event("warn"));
   assert.equal(batches.length, 0, "storage callback is deferred beyond admission");
   await Promise.resolve();
   assert.equal(batches.length, 1);
@@ -34,7 +34,7 @@ test("admission captures occurrence time and sanitizes before a slow single-flig
   assert.equal(batches.length, 1);
   assert.equal(batches[0][0].entry.at, "1970-01-01T00:00:01.000Z");
   assert.equal(batches[0][0].entry.details.password, undefined);
-  assert.equal(batches[0][1].remote, false);
+  assert.deepEqual(Object.keys(batches[0][1]), ["entry"]);
   release();
   await buffer.drain();
   assert.equal(batches.length, 2);

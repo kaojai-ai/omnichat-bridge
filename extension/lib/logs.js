@@ -2,8 +2,6 @@ export const LOG_RETENTION_MS = 2 * 24 * 60 * 60_000;
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const FAILURE_RESERVE_BYTES = MAX_LOG_BYTES / 4;
 const STORAGE_HEADROOM_BYTES = 1024 * 1024;
-const ROUTINE_LOG_INTERVAL_MS = 5 * 60_000;
-const DROPPED_ROUTINE_EVENTS = new Set(["provider.content_ready", "account.detected", "account.detection_started"]);
 
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 const BLOCKED_DETAIL_KEY = /authorization|body|content|cookie|credential|headers?|hmac|message_text|password|payload|secret|token|url/i;
@@ -247,30 +245,6 @@ export function pruneLogs(items, now = Date.now(), maxBytes = MAX_LOG_BYTES) {
   return recent.filter(({ item }) => retained.has(item)).map(({ item }) => item);
 }
 
-// Drop routine readiness/start chatter and sample unchanged account observations
-// before reading/writing the larger log buffer. Failures are never sampled.
-export function createRoutineLogFilter() {
-  const previous = new Map();
-  return (level, area, event, details, now = Date.now()) => {
-    if (!["info", "debug"].includes(level)) return details;
-    const name = `${area}.${event}`;
-    if (DROPPED_ROUTINE_EVENTS.has(name)) return null;
-    if (name !== "provider.account_detected") return details;
-    const key = JSON.stringify([area, event, details?.provider, details?.provider_account_id]);
-    const signature = JSON.stringify(sanitizeLogDetails(details));
-    const prior = previous.get(key);
-    if (prior && prior.signature === signature && now - prior.at < ROUTINE_LOG_INTERVAL_MS) {
-      prior.suppressed += 1;
-      return null;
-    }
-    previous.delete(key);
-    previous.set(key, { signature, at: now, suppressed: 0 });
-    if (previous.size > 64) previous.delete(previous.keys().next().value);
-    return prior?.signature === signature && prior.suppressed
-      ? { ...details, suppressed_count: prior.suppressed } : details;
-  };
-}
-
 export function logEntryForUpload(entry) {
   return {
     id: entry.id,
@@ -280,5 +254,6 @@ export function logEntryForUpload(entry) {
     event: entry.event,
     message: entry.message,
     details: entry.details,
+    ...(entry.scope === "installation" ? { scope: "installation" } : {}),
   };
 }

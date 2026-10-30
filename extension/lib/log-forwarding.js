@@ -3,11 +3,18 @@ export const automaticLogForwardingEnabled = (stored) => stored.forward_log !== 
 export function forwardingBackoff(failures) {
   return Math.min(15, 2 ** Math.max(0, Math.min(4, failures - 1))) * 60_000;
 }
+// Route installation-wide and removed-account logs once, without changing
+// their stored attribution. The route supplies authentication, not ownership.
+export function routeLogEntries(contexts, entries) {
+  const keys = new Set(contexts.map(context => context.key));
+  return entries.map(entry => keys.has(entry.account_key) ? entry
+    : { ...entry, account_key: contexts[0]?.key, scope: "installation" });
+}
 export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 100, pending = {}) {
   for (let step = 0; step < contexts.length; step++) {
     const index = (cursor + step) % contexts.length;
     const context = contexts[index];
-    const available = entries.filter(entry => entry.account_key === context.key && entry.level !== "debug" && queuedIds.has(entry.id));
+    const available = entries.filter(entry => entry.account_key === context.key && queuedIds.has(entry.id));
     const saved = pending[context.key];
     const byId = new Map(available.map(entry => [entry.id, entry]));
     const retained = Array.isArray(saved?.entry_ids) && typeof saved.batch_id === "string"

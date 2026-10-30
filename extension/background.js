@@ -1,5 +1,5 @@
 import { createAccountSyncCoordinator } from "./lib/sync-coordinator.js";
-import { automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch } from "./lib/log-forwarding.js";
+import { automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch, routeLogEntries } from "./lib/log-forwarding.js";
 import { hasRegionalShopeePermission, reconcileRegionalShopeeScripts } from "./lib/regional-permissions.js";
 import { withRequestTimeout } from "./lib/request-timeout.js";
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
@@ -16,7 +16,6 @@ import {
 } from "./lib/sync-state.js";
 import {
   availableLogBudget,
-  createRoutineLogFilter,
   diagnosticErrorDetails,
   sanitizeSendDiagnostics,
   logEntryForUpload,
@@ -215,8 +214,6 @@ function mutateLogs(task) {
   return result;
 }
 
-const filterRoutineLog = createRoutineLogFilter();
-
 let diagnosticsSuspended = false;
 const diagnosticBuffer = createDiagnosticBuffer({
   persist: (rows) => mutateLogs(async () => {
@@ -236,22 +233,17 @@ const diagnosticBuffer = createDiagnosticBuffer({
     const logs = pruneLogs([...entries.reverse(), ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
     const retained = new Set(logs.map((entry) => entry.id));
     const outbox = new Set((Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []).filter((id) => retained.has(id)));
-    for (const { entry, remote } of rows) {
-      const context = accountContextFor(stored, entry.details?.provider_account_id, entry.details?.provider);
-      if (remote && entry.level !== "debug" && retained.has(entry.id)
-        && hasServerInitialized(stored) && stored[STORAGE.logUploadEnabled] === true
-        && context?.config.logs_url) outbox.add(entry.id);
+    for (const { entry } of rows) {
+      if (retained.has(entry.id)) outbox.add(entry.id);
     }
     await writeStorage({ [STORAGE.logs]: logs, [STORAGE.logOutbox]: [...outbox] });
   }),
 });
 
-async function recordLog(level, area, event, message, details = {}, { remote = true } = {}) {
+async function recordLog(level, area, event, message, details = {}) {
   try {
     if (diagnosticsSuspended) return false;
-    details = filterRoutineLog(level, area, event, details);
-    if (details === null) return false;
-    return diagnosticBuffer.enqueue({ level, area, event, message, details }, { remote });
+    return diagnosticBuffer.enqueue({ level, area, event, message, details });
   } catch {
     // Admission and persistence failures cannot interrupt message processing.
     return false;
@@ -4741,11 +4733,14 @@ async function sendLogBatch(context, logs, { automatic = false, signal, batchId 
   if (url.protocol !== "https:") throw new Error("Logs server must use HTTPS.");
   const managedLogs = ["https://ingress.kaojai.ai", "https://ingress.kaojai.dev"].includes(url.origin)
     && url.pathname === "/logs/omnichat";
+  const stored = await readStorage([STORAGE.deviceName]);
+  const nodeId = await installationId();
   const payload = {
     schema: "omnichat.log_batch",
     version: 1,
     batch_id: batchId,
-    installation_id: await installationId(),
+    installation_id: nodeId,
+    device_name: normalizeDeviceName(stored[STORAGE.deviceName]) || nodeId,
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     extension_version: chrome.runtime.getManifest().version,
@@ -4836,10 +4831,19 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
   const contexts = configuredAccountContexts(stored).filter((context) => context.config.logs_url);
   if (!contexts.length) return { ok: false, submitted: 0, error: "No configured log destination." };
   const queuedIds = new Set(Array.isArray(stored[STORAGE.logOutbox]) ? stored[STORAGE.logOutbox] : []);
-  const entries = pruneLogs(stored[STORAGE.logs]);
+  // Use one configured route for installation-wide diagnostics.
+  const entries = routeLogEntries(contexts, pruneLogs(stored[STORAGE.logs]));
   let submitted = 0;
   let failed = false;
   const state = stored[STORAGE.logForwardState] ?? {};
+  if (!state.all_logs_queued) {
+    // Recover retained entries the older forwarder excluded, once per upgrade.
+    for (const entry of pruneLogs(stored[STORAGE.logs])) {
+      if (entry.level === "debug" || !contexts.some(context => context.key === entry.account_key)) queuedIds.add(entry.id);
+    }
+    state.all_logs_queued = true;
+    await writeStorage({ [STORAGE.logOutbox]: [...queuedIds], [STORAGE.logForwardState]: state });
+  }
   // Only bounded id lists are retained, never duplicate log payloads. Removed
   // accounts and expired/evicted entries cannot hold a pending batch forever.
   const pending = {};
@@ -4893,16 +4897,8 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
         await sendLogBatch(context, batch.logs, { batchId: batch.batchId });
         await acknowledgeBatch(batch);
         submitted += batch.logs.length;
-        await recordLog("info", "logs", "uploaded", "Operational logs uploaded.", {
-          provider_account_id: context.account.provider_account_id,
-          count: batch.logs.length,
-        }, { remote: false });
-      } catch (error) {
+      } catch {
         failed = true;
-        await recordLog("warn", "logs", "upload_failed", "Operational log upload failed.", {
-          provider_account_id: context.account.provider_account_id,
-          ...diagnosticErrorDetails(error),
-        }, { remote: false });
         break; // Manual submission never retries a failed batch.
       }
     }
