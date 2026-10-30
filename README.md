@@ -64,6 +64,7 @@ In the extension's **Settings**, import or paste a version 3 configuration:
 ```json
 {
   "version": 3,
+  "logs_url": "https://your-server.example.com/omnichat/logs",
   "accounts": [
     {
       "provider": "shopee",
@@ -89,9 +90,11 @@ Both URLs must use HTTPS. The extension appends `/ping`, `/tickets`, and
 `/control` to `api_url`. The HMAC secret signs server requests and is not a
 provider login credential. Keep real configuration private.
 
-Optional `image_server_url` (required for outgoing attachments) and `logs_url`
-also use HTTPS. See the [shared setup guide](docs/setup.md) for additional
-fields and legacy Shopee version 2 support.
+Optional account `image_server_url` (required for outgoing attachments) and root
+`logs_url` also use HTTPS. The root log destination receives all operational
+levels and installation diagnostics. An account `logs_url` overrides the root
+for that account; existing account-only configurations remain supported. See the
+[shared setup guide](docs/setup.md) for additional fields and legacy Shopee version 2 support.
 
 Settings → **Forward Log** controls automatic diagnostic forwarding to your configured
 `logs_url`. It defaults on after setup and yields to messaging work. Turning it off

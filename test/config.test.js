@@ -234,3 +234,10 @@ test("regional account config survives import while unsupported countries are re
   assert.equal(validateConfigFile({ version: 3, accounts: [account] }).accounts[0].country, "MY");
   assert.throws(() => validateConfigFile({ version: 3, accounts: [{ ...account, country: "US" }] }), /Unsupported Shopee account country/);
 });
+
+test("root logs URL is preserved, requires HTTPS, and requests its origin", () => {
+  const config = validateConfigFile({ version: 3, logs_url: "https://logs.example.com/ingress", accounts: [] });
+  assert.equal(config.logs_url, "https://logs.example.com/ingress");
+  assert.deepEqual(accountOrigins(config), ["https://logs.example.com/ingress"]);
+  assert.throws(() => validateConfigFile({ version: 3, logs_url: "http://logs.example.com", accounts: [] }), /HTTPS/);
+});

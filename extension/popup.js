@@ -70,6 +70,7 @@ async function renderRegionalAccess() {
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const sampleConfig = {
   version: CONFIG_VERSION,
+  logs_url: "https://your-server.example.com/omnichat/logs",
   accounts: [{
     provider: shopeeAdapter.id,
     provider_account_id: "123456789",
@@ -77,7 +78,6 @@ const sampleConfig = {
     events_url: "https://your-server.example.com/omnichat/events",
     api_url: "https://your-server.example.com/omnichat/api",
     image_server_url: "https://your-images.example.com",
-    logs_url: "https://your-server.example.com/omnichat/logs",
     hmac_secret: "replace-with-your-secret",
   }],
 };
@@ -1532,7 +1532,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
       accounts: config.accounts.length,
-      logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
+      logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),
     });
     renderConfigEditor();
     try {
@@ -1571,7 +1571,7 @@ configFile.addEventListener("change", async () => {
     updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
     logPopup("info", "configuration_imported", "Configuration imported.", {
       accounts: config.accounts.length,
-      logs_enabled: config.accounts.some((account) => Boolean(account.logs_url)),
+      logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),
     });
     let message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}.`;
     let permissionError = false;

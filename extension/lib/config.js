@@ -143,6 +143,9 @@ export function validateConfigFile(value) {
   if (!SUPPORTED_CONFIG_VERSIONS.has(version) || !Array.isArray(value.accounts)) {
     throw new Error(`Configuration file must be version 2 or ${CONFIG_VERSION} with an accounts list.`);
   }
+  const logs_url = value.logs_url === undefined || value.logs_url === ""
+    ? undefined
+    : secureUrl(value.logs_url, "https:", "Logs URL must use HTTPS.");
   const accounts = value.accounts
     .filter((account) => {
       if (!account || typeof account !== "object" || Array.isArray(account)) return true;
@@ -155,6 +158,7 @@ export function validateConfigFile(value) {
   const history = historySyncSettings(value);
   return {
     version,
+    ...(logs_url ? { logs_url } : {}),
     ...(history ? { history_days: history.days } : {}),
     ...(history?.conversation_ids.length
       ? { history_conversation_ids: history.conversation_ids }
@@ -178,7 +182,7 @@ export function accountConfigKey(account) {
 }
 
 export function accountOrigins(config) {
-  const urls = [];
+  const urls = config.logs_url ? [config.logs_url] : [];
   for (const account of config.accounts) {
     const adapter = registeredProviderAdapter(account.provider);
     const adapterUrls = typeof adapter?.configOrigins === "function"
