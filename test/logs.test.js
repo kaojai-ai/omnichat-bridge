@@ -9,7 +9,6 @@ import {
   MAX_LOG_BYTES,
   logStorageBytes,
   availableLogBudget,
-  createRoutineLogFilter,
   createLogEntry,
   diagnosticErrorDetails,
   logEntryForUpload,
@@ -36,7 +35,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => null, hasServerInitialized: () => false,
-    createLogEntry, pruneLogs, availableLogBudget, filterRoutineLog: createRoutineLogFilter(),
+    createLogEntry, pruneLogs, availableLogBudget,
   });
   vm.runInContext(source.slice(allowStart, allowEnd) + "\n"
     + source.slice(recordStart, recordEnd) + "\n" + source.slice(listenerStart, listenerEnd), context);
@@ -249,22 +248,6 @@ test("log budget leaves Chrome quota headroom as other extension data grows", ()
   assert.equal(availableLogBudget(10 * MiB, 0, 10 * MiB), 0);
 });
 
-test("removes readiness chatter, samples unchanged detections, and keeps every failure", () => {
-  const filter = createRoutineLogFilter();
-  const details = { provider: "shopee", accounts: 1 };
-  assert.equal(filter("debug", "provider", "content_ready", details, 0), null);
-  assert.equal(filter("info", "account", "detected", details, 0), null);
-  assert.equal(filter("info", "account", "detection_started", details, 0), null);
-  assert.deepEqual(filter("info", "provider", "account_detected", details, 0), details);
-  assert.equal(filter("info", "provider", "account_detected", details, 3000), null);
-  assert.equal(filter("info", "provider", "account_detected", details, 6000), null);
-  assert.deepEqual(filter("info", "provider", "account_detected", details, 300_000), { ...details, suppressed_count: 2 });
-  assert.deepEqual(filter("info", "provider", "account_detected", { ...details, accounts: 2 }, 300_001), { ...details, accounts: 2 });
-  assert.deepEqual(filter("error", "provider", "account_detected", details, 300_002), details);
-  assert.deepEqual(filter("error", "provider", "account_detected", details, 300_003), details);
-});
-
-
 test("invalid routing IDs cannot bypass the diagnostic allowlist through generic details", () => {
   const entry = createLogEntry({ details: { diagnostic_version: 1, request_shop_id: "private-text",
     query_shop_id: { token: "secret" }, route_recipient_id: "123456789" } });
@@ -321,35 +304,34 @@ test("unrecognized native codes cannot carry arbitrary provider strings into sup
   assert.doesNotMatch(JSON.stringify(entry), /privateCustomerValue123/);
 });
 
-test("DEBUG stays available locally without consuming the remote outbox", async () => {
+test("all retained diagnostics are queued, including unscoped DEBUG and repeated routine events", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
-  const storage = { upload: true };
+  const storage = {};
   let buffer;
   const record = vm.runInNewContext(source.slice(source.indexOf("let diagnosticsSuspended ="), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
-    STORAGE: { logs: "logs", logOutbox: "outbox", logUploadEnabled: "upload" },
+    STORAGE: { logs: "logs", logOutbox: "outbox" },
     chrome: { storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
-    filterRoutineLog: (_level, _area, _event, details) => details,
     createDiagnosticBuffer: options => (buffer = createDiagnosticBuffer({ ...options, setTimer: () => 1, clearTimer: () => {} })),
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
-    accountContextFor: () => ({ config: { logs_url: "https://example.invalid" } }),
-    hasServerInitialized: () => true, createLogEntry, pruneLogs, availableLogBudget,
-    scheduleLogUpload: async () => {},
+    accountContextFor: () => null,
+    createLogEntry, pruneLogs, availableLogBudget,
   });
-  await record("debug", "live", "connecting", "Connecting.");
-  await buffer.flush();
-  assert.equal(storage.logs.length, 1);
-  assert.equal(storage.outbox.length, 0);
-  await record("error", "provider", "recovery_failed", "Failed.");
-  await buffer.flush();
-  assert.equal(storage.logs.length, 2);
-  assert.equal(storage.outbox.length, 1);
+  for (const level of ["debug", "info", "warn", "error"]) {
+    await record(level, "provider", "account_detected", "Account detection observed.");
+    await record(level, "provider", "account_detected", "Account detection observed.");
+  }
+  await buffer.drain();
+  assert.equal(storage.logs.length, 8);
+  assert.equal(storage.outbox.length, 8);
+  assert.equal(new Set(storage.outbox).size, 8);
+  assert.ok(storage.logs.every(entry => !entry.account_key));
+  assert.deepEqual(new Set(storage.outbox), new Set(storage.logs.map(entry => entry.id)));
 });
 
 test("diagnostic admission failure is nonthrowing and is not acknowledged", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
-    filterRoutineLog: (_level, _area, _event, details) => details,
     diagnosticsSuspended: false,
     diagnosticBuffer: { enqueue: () => { throw new Error("Admission unavailable"); } },
   });
@@ -370,4 +352,12 @@ test("account identifier relaxation still rejects emails, URLs, free text and cr
   assert.deepEqual(entry.details, {
     request_id: "a".repeat(48), provider_account_id: "@line-one", reason: "[redacted]",
   });
+});
+
+test("upload preserves installation scope while excluding internal routing", () => {
+  const uploaded = logEntryForUpload({ ...createLogEntry({ level: "debug", event: "initializing" }),
+    account_key: "shopee:transport-route", scope: "installation" });
+  assert.equal(uploaded.scope, "installation");
+  assert.equal(uploaded.level, "debug");
+  assert.equal(uploaded.account_key, undefined);
 });

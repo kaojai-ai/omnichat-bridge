@@ -3,24 +3,25 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch } from '../extension/lib/log-forwarding.js';
+import { automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch } from '../extension/lib/log-forwarding.js';
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
-function fixture({ fail = false, automatic = false, busy = false, persisted, onSend } = {}) {
+function fixture({ fail = false, automatic = false, busy = false, persisted, onSend, contexts } = {}) {
   const entries = Array.from({ length: 205 }, (_, i) => ({ id: String(i), account_key: 'shop' }));
   const stored = persisted ?? { forward_log: automatic, logs: entries, logOutbox: entries.map(e => e.id), logUploadEnabled: true };
   const batches = [];
+  const telemetry = [];
   const submit = vm.runInNewContext(source.slice(source.indexOf('let logSubmission = null;'), source.indexOf('\nfunction isMessageScopedDeliveryError')) + '\nsubmitLogs', {
-    crypto: webcrypto, automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch, automaticLogWorkBusy: () => busy,
+    crypto: webcrypto, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch, automaticLogWorkBusy: () => busy,
     diagnosticBuffer: { drain: async () => {} }, logMutationQueue: Promise.resolve(),
     STORAGE: new Proxy({}, { get: (_, key) => key }), readStorage: async () => stored,
     writeStorage: async value => Object.assign(stored, value), mutateLogs: fn => fn(),
     hasLocalConsent: () => true, hasServerInitialized: () => true,
-    configuredAccountContexts: () => [{ key: 'shop', config: { logs_url: 'configured' }, account: { provider_account_id: 'shop' } }],
+    configuredAccountContexts: () => contexts ?? [{ key: 'shop', config: { logs_url: 'configured' }, account: { provider_account_id: 'shop' } }],
     pruneLogs: value => value, MAX_LOG_UPLOAD_BATCH: 100,
     sendLogBatch: async (_, batch, options) => { batches.push(batch.length); await onSend?.(batch, options); if (fail) throw new Error('Unavailable'); },
-    recordLog: async () => {}, diagnosticErrorDetails: () => ({}),
+    recordLog: async (...args) => { telemetry.push(args); }, diagnosticErrorDetails: () => ({}),
   });
-  return { submit, batches, stored };
+  return { submit, batches, stored, telemetry };
 }
 test('manual submit coalesces clicks and drains only its snapshot in bounded batches', async () => {
   const { submit, batches, stored } = fixture();
@@ -45,14 +46,14 @@ test('automatic forwarding defaults on, respects off and backoff is bounded', ()
   assert.equal(automaticLogForwardingEnabled({forward_log:false}), false);
   assert.deepEqual([1,2,3,4,5,99].map(forwardingBackoff),[1,2,4,8,15,15].map(n=>n*60000));
 });
-test('batch rotation excludes debug and keeps accounts isolated', () => {
+test('batch rotation includes debug and keeps accounts isolated', () => {
   const contexts=[{key:'a'},{key:'b'}];
   const entries=Array.from({length:120},(_,i)=>({id:String(i),account_key:'a',level:'info'}));
   entries.push({id:'b',account_key:'b',level:'warn'},{id:'debug',account_key:'b',level:'debug'});
   const ids=new Set(entries.map(e=>e.id));
   const first=selectLogBatch(contexts,entries,ids);
   assert.equal(first.logs.length,100);
-  assert.deepEqual(selectLogBatch(contexts,entries,ids,first.cursor).logs.map(e=>e.id),['b']);
+  assert.deepEqual(selectLogBatch(contexts,entries,ids,first.cursor).logs.map(e=>e.id),['debug','b']);
 });
 
 test('automatic wakes upload one bounded batch and preserve the remainder', async () => {
@@ -133,4 +134,40 @@ test('retry preserves batch id after retention evicts an entry and never adopts 
   const selected = selectLogBatch([{ key: 'shop' }], entries, new Set(entries.map(entry => entry.id)), 0, 100, pending);
   assert.equal(selected.batchId, pending.shop.batch_id);
   assert.deepEqual(selected.logs.map(entry => entry.id), ['retained']);
+});
+
+test('unattributed and removed-account diagnostics use one installation route without duplicate forwarding', async () => {
+  const contexts = [{ key: 'a', config: { logs_url: 'a' } }, { key: 'b', config: { logs_url: 'b' } }];
+  const logs = [{ id: 'debug', level: 'debug' }, { id: 'orphan', account_key: 'removed' },
+    { id: 'a', account_key: 'a' }, { id: 'b', account_key: 'b' }];
+  const original = structuredClone(logs);
+  const routed = routeLogEntries(contexts, logs);
+  assert.deepEqual(logs, original, 'authentication routing must not change stored attribution');
+  assert.equal(routed[0].scope, 'installation');
+  assert.equal(routed[1].scope, 'installation');
+  assert.equal(routed[2].scope, undefined);
+  const sent = [];
+  const persisted = { logs, logOutbox: [], logUploadEnabled: true };
+  const { submit, stored, telemetry } = fixture({ contexts, persisted, onSend: batch => sent.push(...batch) });
+  assert.equal((await submit()).submitted, 2, 'migration queues previously excluded debug and orphan logs');
+  assert.deepEqual(sent.map(entry => entry.id).sort(), ['debug', 'orphan']);
+  assert.ok(sent.every(entry => entry.account_key === 'a' && entry.scope === 'installation'));
+  assert.equal(stored.logForwardState.all_logs_queued, true);
+  assert.equal((await submit()).submitted, 0, 'acknowledged retained logs are not requeued on the next submission');
+  assert.equal(new Set(sent.map(entry => entry.id)).size, sent.length);
+});
+
+test('manual submit forwards all levels across accounts once without creating upload telemetry', async () => {
+  const contexts = [{ key: 'a', config: { logs_url: 'a' } }, { key: 'b', config: { logs_url: 'b' } }];
+  const logs = ['debug', 'info', 'warn', 'error'].map((level, index) => ({ id: level, level, account_key: index % 2 ? 'b' : 'a' }));
+  logs.push({ id: 'unscoped', level: 'info' });
+  const persisted = { logs, logOutbox: logs.map(entry => entry.id), logUploadEnabled: true };
+  const sent = [];
+  const { submit, stored, telemetry } = fixture({ contexts, persisted, onSend: batch => sent.push(...batch) });
+  assert.equal((await submit()).submitted, 5);
+  assert.deepEqual(sent.map(entry => entry.id).sort(), logs.map(entry => entry.id).sort());
+  assert.equal(stored.logOutbox.length, 0);
+  assert.equal(stored.logs.length, 5);
+  assert.equal(telemetry.length, 0, 'uploading logs must not create more logs to upload');
+  assert.equal((await submit()).submitted, 0);
 });
