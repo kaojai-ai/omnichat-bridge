@@ -120,12 +120,12 @@ test("actual cleanup and first Sync initialization serialize without erasing the
     stopLiveConnection: () => { events.push("stop"); liveConnections.clear(); },
     recordLog: async () => {}, liveConnections, clearTimeout: () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
-    restartSync: async () => { events.push("sync"); readiness = "ready"; liveConnections.set("shopee:fixture", { socket: "new" }); },
-    startSync: async () => {},
+    syncAccountsForTab: async () => { events.push("sync"); readiness = "ready"; liveConnections.set("shopee:fixture", { socket: "new" }); },
+    providerAdapterForId: id => ({ id }), findReadyProviderChatTab: async () => ({ id: 7 }),
   });
   const clearing = api.clearProviderRecoveryLiveState();
   await reachedPause;
-  const syncing = api.initializeAndStartSync("manual");
+  const syncing = api.initializeAndStartSync("manual", "shopee");
   await new Promise(setImmediate);
   assert.equal(state.initialized, false, "initialization must wait until old cleanup finishes");
   release();

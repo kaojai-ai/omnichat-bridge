@@ -33,6 +33,7 @@ test("row retry targets only the failed LINE account and leaves other accounts u
   assert.equal(requests.length, 1);
   assert.equal(requests[0].type, "sync_account");
   assert.equal(requests[0].provider_account_id, "@failed");
+  assert.equal(requests[0].refresh_metadata, true);
   assert.equal(configs[0].accounts.length, 1);
   assert.equal(configs[0].accounts[0], account);
   assert.equal(context.storedConfig.accounts.length, 2);

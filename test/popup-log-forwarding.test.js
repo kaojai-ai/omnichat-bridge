@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../extension/popup.js', import.meta.url), '
 const html = readFileSync(new URL('../extension/popup.html', import.meta.url), 'utf8');
 test('Forward Log sits below device name and persists immediately without config save', async () => {
   assert.ok(html.indexOf('id="forward-log"') > html.indexOf('id="device-name"'));
-  assert.ok(html.indexOf('id="forward-log"') < html.indexOf('id="config"'));
+  assert.ok(html.indexOf('id="config"') < html.indexOf('id="device-name"'));
   let change;
   const writes=[];
   const input={checked:false,disabled:false,addEventListener:(_,handler)=>{change=handler;}};

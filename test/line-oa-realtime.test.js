@@ -1052,6 +1052,13 @@ test("LINE OA restores and continuously polls three accounts from one tab", asyn
   await settleBridge();
   const periodic = bridge.posts.filter((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:"));
   assert.deepEqual(periodic.map((post) => post.provider_account_id), ["@first", "@second", "@third"]);
+  for (const poll of periodic) {
+    assert.ok(bridge.posts.some(post => post.type === "provider_status"
+      && post.provider_polling_request_id === poll.request_id
+      && post.provider_polling_account_id === poll.provider_account_id));
+  }
+  assert.equal(lastPollingStatus(bridge).provider_polling_request_id, null);
+  assert.equal(lastPollingStatus(bridge).provider_polling_account_id, null);
   bridge.dispose();
 });
 

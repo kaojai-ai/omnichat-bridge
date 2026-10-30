@@ -5,12 +5,12 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
 function fixture(provider = 'line_oa') {
   const controller = new AbortController();
-  const control = { controller, adapter: { id: provider }, providerAccountId: 'account', tabId: 7, providerRequestId: 'attempt' };
+  const control = { accountKey: `${provider}:account`, controller, adapter: { id: provider }, providerAccountId: 'account', tabId: 7, providerRequestId: 'attempt' };
   const calls = [];
   const timers = new Map();
   let id = 0;
   const scope = vm.createContext({
-    AbortController, providerAutomaticRecoveries: new Map(), activeSyncControl: control,
+    AbortController, accountSyncs: new Map([[control.accountKey, control]]),
     syncCancelledError: () => Object.assign(new Error('Cancelled'), { name: 'AbortError' }),
     providerMessageTimeout: () => Object.assign(new Error('No progress'), { name: 'TimeoutError' }),
     PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000, RECOVERY_IDLE_TIMEOUT_MS: 60000,

@@ -120,6 +120,8 @@
       last_provider_check_at: lastProviderCheckAt,
       provider_polling_active: Boolean(timer || activePoll || queuedSyncs.length),
       provider_polling_account_ids: pollingAccountIds(),
+      provider_polling_request_id: activePoll?.requestId ?? null,
+      provider_polling_account_id: activePoll?.providerAccountId ?? null,
     });
   }
 
@@ -838,12 +840,14 @@
     if (disposed) return;
     const next = queuedSyncs.shift();
     if (next) startPoll(next);
+    else postProviderStatus();
   }
 
   function startPoll({ requestId, providerAccountId, botId, checkpoint, history, refreshMetadata = false }) {
     const generation = { epoch: pollGeneration, cancelled: false };
     const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
+    postProviderStatus();
     if (!String(requestId).startsWith("poll:")) {
       post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase: "loading_conversations" });
     }

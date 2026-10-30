@@ -32,7 +32,7 @@ function fixture(provider) {
   vm.runInContext(section("  async function requestRecovery(", "  function cancelRecovery(")
     + section("  function cancelRecovery(", "  async function requestAccountDetection(")
     + section("  async function handleRecoveryComplete(", "  function setComposerText(")
-    + section("  const onRuntimeMessage =", "  const requestLifecycleResumeSync ="), context);
+    + section("  const onRuntimeMessage =", "  const onPageShow ="), context);
   return { context, page, runtime, logs,
     command(message) {
       let ack;

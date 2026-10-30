@@ -36,10 +36,13 @@
   let accountAccessVerified = false;
   let providerCheckOutcome = null;
   let currentProviderAccountId = null;
+  let recoverySessionIdentity = null;
   let providerRealtimeTransport = null;
   let providerChatOpen = null;
   let providerPollingActive = false;
   let providerPollingAccountIds = [];
+  let providerPollingRequestId = null;
+  let providerPollingAccountId = null;
   let lastProviderCheckAt = null;
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -277,6 +280,7 @@
     }
     const result = await sendRuntimeMessage({
       type: "auto_sync_now",
+      reason: "page_initialization",
       provider: providerAdapter.id,
     });
     if (!result?.ok) throw new Error(result?.error ?? "Automatic sync could not start.");
@@ -649,6 +653,7 @@
     try {
       const result = await sendRuntimeMessage({
         type: "record_history_window",
+        request_id: message.request_id,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         history_days: message.history_days,
@@ -678,6 +683,7 @@
     try {
       const result = await sendRuntimeMessage({
         type: "record_history_backfill",
+        request_id: message.request_id,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
@@ -710,6 +716,7 @@
     try {
       const result = await sendRuntimeMessage({
         type: "advance_scan_cursor",
+        request_id: message.request_id,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
@@ -735,6 +742,7 @@
     try {
       const result = await sendRuntimeMessage({
         type: "save_bootstrap",
+        request_id: message.request_id,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversations: message.conversations,
@@ -785,15 +793,15 @@
     }));
   }
 
-  function requestResumeSync() {
+  function requestResumeSync(reason = "provider_ready") {
     if (!isBridgeActive()) return;
     clearTimeout(resumeSyncTimer);
     resumeSyncTimer = setTimeout(() => {
       if (!isBridgeActive()) return;
-      void sendRuntimeMessage({ type: "resume_sync" }, (error) => {
+      void sendRuntimeMessage({ type: "resume_sync", provider: providerAdapter.id, reason }, (error) => {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Extension context invalidated") || message.includes("Receiving end does not exist")) return;
-      log("warn", "resume_failed", message);
+        log("warn", "resume_failed", message);
       });
     }, 500);
   }
@@ -1048,7 +1056,7 @@
       realtimeConnected = true;
       lastRealtimeConnectedAt = new Date().toISOString();
       log("info", "socket_observed", `${providerLabel} realtime socket detected.`);
-      requestResumeSync();
+      requestResumeSync("provider_reconnected");
     } else if (event.data.type === "provider_status") {
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
@@ -1085,12 +1093,31 @@
       providerPollingAccountIds = Array.isArray(event.data.provider_polling_account_ids)
         ? event.data.provider_polling_account_ids.filter((id) => typeof id === "string")
         : [];
+      providerPollingRequestId = typeof event.data.provider_polling_request_id === "string"
+        ? event.data.provider_polling_request_id : null;
+      providerPollingAccountId = typeof event.data.provider_polling_account_id === "string"
+        ? event.data.provider_polling_account_id : null;
       lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
         ? event.data.last_provider_check_at
         : lastProviderCheckAt;
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
+      }
+      // Missing probe evidence must not look like a logout/reconnect cycle.
+      const sessionIdentity = providerCheckOutcome === "unknown" ? null
+        : providerAdapter.id === "shopee"
+          ? currentProviderAccountId || (providerCheckOutcome === "failed" ? "" : null)
+          : accountAccessVerified ? [...accessibleAccountIds].sort().join("\n")
+            : providerCheckOutcome === "failed" ? "" : null;
+      if (sessionIdentity !== null) {
+        const previousIdentity = recoverySessionIdentity;
+        const changed = sessionIdentity !== previousIdentity
+          && (previousIdentity !== null || sessionIdentity !== "");
+        recoverySessionIdentity = sessionIdentity;
+        // First verification can finish while manual recovery is starting. It
+        // must join that work, not invalidate it as an account replacement.
+        if (changed) requestResumeSync(previousIdentity === null ? "provider_ready" : "session_changed");
       }
       if (providerSurface === "seller-centre" && !automaticSellerCentreLandingStartupChecked) {
         automaticSellerCentreLandingStartupChecked = true;
@@ -1179,6 +1206,8 @@
       realtime_connected: realtimeConnected,
       provider_polling_active: providerPollingActive,
       provider_polling_account_ids: [...providerPollingAccountIds],
+      provider_polling_request_id: providerPollingRequestId,
+      provider_polling_account_id: providerPollingAccountId,
       last_realtime_connected_at: lastRealtimeConnectedAt,
       last_provider_check_at: lastProviderCheckAt,
       page_visible: document.visibilityState === "visible",
@@ -1258,25 +1287,14 @@
     return undefined;
   };
 
-  const requestLifecycleResumeSync = () => {
-    if (!isSellerCentrePage() || providerChatOpen === true) {
-      requestResumeSync();
-    }
-  };
   const onPageShow = () => {
-    if (isBridgeActive()) requestLifecycleResumeSync();
-  };
-  const onWindowFocus = () => {
-    if (isBridgeActive()) requestLifecycleResumeSync();
-  };
-  const onVisibilityChange = () => {
-    if (isBridgeActive() && !document.hidden) requestLifecycleResumeSync();
+    if (isBridgeActive() && (!isSellerCentrePage() || providerChatOpen === true)) {
+      requestResumeSync("page_initialization");
+    }
   };
   window.addEventListener("message", onPageMessage);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   window.addEventListener("pageshow", onPageShow);
-  window.addEventListener("focus", onWindowFocus);
-  document.addEventListener("visibilitychange", onVisibilityChange);
 
   const dispose = (reason = "Content bridge was replaced.") => {
     if (disposed) return false;
@@ -1316,8 +1334,6 @@
     window.removeEventListener?.("unhandledrejection", onUnhandledRejection);
     window.removeEventListener?.("message", onPageMessage);
     window.removeEventListener?.("pageshow", onPageShow);
-    window.removeEventListener?.("focus", onWindowFocus);
-    document.removeEventListener?.("visibilitychange", onVisibilityChange);
     try {
       globalThis.chrome?.runtime?.onMessage?.removeListener?.(onRuntimeMessage);
     } catch {
@@ -1334,6 +1350,6 @@
 
   log("info", "content_loaded", `${providerLabel} content bridge loaded.`);
   if (providerAdapter.matchesUrl(currentUrl)) {
-    requestLifecycleResumeSync();
+    onPageShow();
   }
 })();
