@@ -7,7 +7,6 @@ import {
   validateConfigFile,
 } from "./lib/config.js";
 import { diagnosticErrorDetails, pruneLogs } from "./lib/logs.js";
-import { accountMigration, assertMigratableConfig, migrationOrigins } from "./lib/config-migration.js";
 import {
   STORAGE,
   hasLocalConsent,
@@ -823,9 +822,7 @@ function renderDashboard(message = "", isError = false) {
   const endpointFailure = configuredStates
     .filter((item) => item.live?.endpoint_not_found && item.live.socket !== "connected")
     .map((item) => accountConnectionStatus(item.live).hint)[0];
-  const migrationFailure = storedConfig.accounts.map((account) => accountMigration(account, storedConfig.version).error).find(Boolean);
-  const migrationPending = configuredStates.map((item) => item.syncState?.migration_error).find(Boolean);
-  const latestFailure = migrationFailure || migrationPending || endpointFailure
+  const latestFailure = endpointFailure
     || statusFailure
     || (pendingTotal ? latestLoggedDeliveryFailure?.details.error_message : "")
     || "";
@@ -1528,7 +1525,6 @@ clearLogsButton.addEventListener("click", async (event) => {
 document.querySelector("#save-config").addEventListener("click", async () => {
   try {
     const input = JSON.parse(configInput.value);
-    assertMigratableConfig(input);
     const config = validateConfigFile(input);
     const deviceName = normalizeDeviceName(deviceNameInput.value) || generateDeviceName();
     const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
@@ -1551,7 +1547,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     });
     renderConfigEditor();
     try {
-      await requestTargetPermission([...accountOrigins(config), ...migrationOrigins(config)]);
+      await requestTargetPermission(accountOrigins(config));
       const syncStarted = configurationChanged && await autoStartSync(config);
       setConfigStatus(
         syncStarted
@@ -1575,7 +1571,6 @@ configFile.addEventListener("change", async () => {
   if (!file) return;
   try {
     const input = JSON.parse(await file.text());
-    assertMigratableConfig(input);
     const config = validateConfigFile(input);
     await writeStorage({
       [STORAGE.config]: config,
@@ -1592,7 +1587,7 @@ configFile.addEventListener("change", async () => {
     let message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}.`;
     let permissionError = false;
     try {
-      await requestTargetPermission([...accountOrigins(config), ...migrationOrigins(config)]);
+      await requestTargetPermission(accountOrigins(config));
       message += " Server access approved.";
       if (await autoStartSync(config)) message += " Sync started.";
       else message += " Open a supported provider chat to start sync.";

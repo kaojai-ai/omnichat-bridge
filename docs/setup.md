@@ -58,26 +58,8 @@ Version 2 is legacy Shopee-only configuration using `commands_url` instead of
 `api_url`; LINE requires version 3. Unsupported provider entries are skipped;
 malformed supported entries are rejected. Unrecognized fields are discarded.
 
-### KaoJai managed configuration migration
-
-Recognized version-3 KaoJai configurations using
-`https://admin.kaojai.ai/api/omnichat/{provider}/{tenant}/{account}` migrate to
-`https://omnichat.kaojai.ai/api/{provider}/{tenant}/{account}` and add
-`https://ingress.kaojai.ai/logs/omnichat` for diagnostics. Development `.dev`
-configuration stays in the development environment. Custom/self-hosted server
-URLs are never rewritten.
-
-Migration verifies authenticated ping, read-only leader status, a ticket, and
-the actual WebSocket connection before saving the new configuration. A working
-connection is allowed to finish naturally before switching servers. Queued
-messages, installation identity, and sync checkpoints are preserved. Temporary
-failures retain the working old endpoint and retry with backoff. If server access
-is required, open Settings and save the configuration to approve the new origins.
-
-Unsupported managed configurations stop the affected account and show:
-“This configuration cannot be migrated automatically. Copy a new configuration
-from KaoJai Admin and import it again.” Keep the saved configuration until you
-have obtained its replacement; other valid accounts can continue working.
+Server URLs are used as configured. Import a replacement configuration to change
+servers; the extension does not automatically migrate endpoints.
 
 Initial sync covers the last 1 day. Later polling and reconnect recovery use
 the saved checkpoint, capped at the last 5 days even with a missing or stale
