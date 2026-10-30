@@ -97,7 +97,7 @@ test("uses Chrome's update lifecycle with bounded checks and queued restart", ()
   assert.match(backgroundSource, /const UPDATE_RETRY_DELAY_MS = 5 \* 60_000/);
   assert.match(backgroundSource, /chrome\.runtime\.requestUpdateCheck\(\)/);
   assert.match(backgroundSource, /chrome\.runtime\.onUpdateAvailable\.addListener/);
-  assert.match(backgroundSource, /await activeSync\?\.catch/);
+  assert.match(backgroundSource, /await syncCoordinator\.drain\(\)/);
   assert.match(backgroundSource, /await exclusive\(async \(\) => \{\s+chrome\.runtime\.reload\(\);/);
   assert.match(popupSource, /type: "check_extension_update"/);
   assert.match(popupSource, /type: "apply_extension_update"/);

@@ -30,7 +30,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     readStorage: async () => stored,
     configuredAccountContexts: () => contexts,
     lineSessionContexts: async (items) => items,
-    providerAutomaticRecoveries: new Map(),
+    accountSyncs: new Map(),
     hasServerInitialized: () => true,
     hasLocalConsent: (value) => value === true,
     providerAdapters: { list: () => [adapter] },
@@ -271,7 +271,8 @@ for (const restorePolling of [false, true]) {
       exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
       getAccountScanState: async () => ({ state, stored: {} }),
       readAccountState: (_stored, _key, fallback) => fallback,
-      writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+      writeAccountScanState: async (_context, patch) => Object.assign(state, typeof patch === "function" ? patch(state) : patch),
+      isCurrentSyncControl: () => true,
       updateScopedState: async () => {}, recordLog: async () => {},
       attemptDelivery: async () => ({ sent: 0, pending: 0 }),
       providerLabel: () => "LINE OA", liveConnections: new Map(),
@@ -290,7 +291,7 @@ test("unattended failure clears in-progress scan state instead of treating its o
   const control = { accountKey: context.key, controller: new AbortController(), restorePolling: true };
   const state = {};
   let status;
-  const runtime = vm.createContext({ activeSyncControl: null, providerAutomaticRecoveries: new Map([[context.key, control]]),
+  const runtime = vm.createContext({ accountSyncs: new Map([[context.key, control]]),
     STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
     exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
     getAccountScanState: async () => ({ state, stored: {} }),

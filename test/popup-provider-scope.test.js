@@ -1,3 +1,5 @@
+import vm from "node:vm";
+import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -28,16 +30,43 @@ test("detects the account from the tab that opened the popup", () => {
   assert.match(backgroundSource, /const hasPreferredTab = preferredTabId !== null && preferredTabId !== undefined;/);
 });
 
-test("selects current session accounts before manual sync", () => {
-  const start = backgroundSource.indexOf("async function runUnifiedSync(trigger, control)");
-  const end = backgroundSource.indexOf("\n}\n\nasync function resumeSync", start);
-  assert.ok(start >= 0);
-  assert.ok(end > start);
-  const syncSource = backgroundSource.slice(start, end);
-  assert.match(syncSource, /openSessionSyncContexts\(providerCandidates, control\)/);
-  assert.match(syncSource, /for \(const context of contexts\)/);
-  assert.match(syncSource, /runAccountSync\(trigger, control, context\)/);
-});
+for (const provider of ["shopee", "line_oa"]) {
+  test(`manual ${provider} sync selects only currently accessible configured accounts`, async () => {
+    const contexts = ["shopee", "line_oa"].flatMap(id => ["A", "B", "C"].map(account => ({
+      key: `${id}:${account}`, adapter: { id }, config: {}, account: { provider: id, provider_account_id: account },
+    })));
+    const tab = { id: 42, url: "https://provider.example/chat" };
+    const syncCoordinator = createAccountSyncCoordinator();
+    const calls = [];
+    const scope = vm.createContext({ AbortController, syncCoordinator, accountSyncs: syncCoordinator.jobs,
+      providerAdapterForId: id => ({ id }), providerChatTabById: async () => tab,
+      providerTabContext: () => "verified-session", ensureProviderBridge: async () => {},
+      detectOpenProviderAccount: async () => ({ ok: true }),
+      providerTabStatus: async () => ({ current_provider_account_id: "B", account_access_verified: true,
+        accessible_account_ids: ["A", "B", "unconfigured"] }),
+      readStorage: async () => ({}), STORAGE: {}, hasLocalConsent: () => true,
+      configuredAccountContexts: () => contexts, providerAccountMatchesTab: () => true,
+      accountContextFor: (_stored, id, kind) => contexts.find(context => context.key === `${kind}:${id}`),
+      preemptAutomaticLogUpload() {}, throwIfSyncCancelled() {}, exactProviderAccountTab: async () => tab,
+      queueLiveStateWrite: fn => fn(), writeStorage: async () => {},
+      ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
+      runAccountSync: async (trigger, control, context) => {
+        calls.push({ key: context.key, trigger, tab: control.lockedTabId, shared: control.sharedSession });
+        return { recovered: 1 };
+      },
+    });
+    const extract = (start, end) => backgroundSource.slice(backgroundSource.indexOf(start), backgroundSource.indexOf(end, backgroundSource.indexOf(start)));
+    vm.runInContext(extract("function requestAccountSync(", "async function retryProviderAccount(")
+      + extract("async function syncAccountsForTab(", "async function resumeSync("), scope);
+    const result = await scope.syncAccountsForTab(provider, 42, "manual");
+    assert.equal(result.ok, true);
+    assert.equal(result.partial, false);
+    assert.deepEqual(calls, (provider === "shopee" ? ["B"] : ["A", "B"]).map(id => ({
+      key: `${provider}:${id}`, trigger: "manual", tab: 42, shared: provider === "line_oa",
+    })));
+    assert.equal(syncCoordinator.jobs.size, 0);
+  });
+}
 
 test("shows only configured LINE accounts or the account in the open tab", () => {
   assert.match(popupSource, /from "\.\/lib\/popup-accounts\.js"/);

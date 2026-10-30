@@ -193,7 +193,7 @@ test("repairs live status independently of manual retry", () => {
   assert.ok(start >= 0);
   assert.ok(end > start);
   const syncStartSource = source.slice(start, end);
-  assert.match(syncStartSource, /void ensureLiveConnection\(\)[\s\S]*restartSync\(\) : startSync\(trigger, false, provider\)/);
+  assert.match(syncStartSource, /void ensureLiveConnection\(\)[\s\S]*syncAccountsForTab\(provider, tab.id, trigger\)/);
 });
 
 test("scopes leader changes to the provider shown in the popup", () => {
@@ -296,8 +296,8 @@ test("records unattended provider recovery through account sync bookkeeping", ()
   assert.ok(start >= 0);
   assert.ok(end > start);
   const automaticSource = source.slice(start, end);
-  assert.match(automaticSource, /runAccountSync\("automatic", control, context\)/);
-  assert.match(automaticSource, /preferredTabId: tabId/);
+  assert.match(automaticSource, /requestAccountSync\(context, "automatic",/);
+  assert.match(automaticSource, /tab_id: tabId/);
   assert.match(source, /const trackedTabId = providerRecoveryRecord\(/);
   assert.match(source, /const preferredTabId = control\.preferredTabId \?\? trackedTabId/);
   assert.match(source, /if \(result\?\.error\) throw new Error\(result\.error\);/);
@@ -345,7 +345,7 @@ test("requires unattended recovery before an automatic Seller Centre sync", () =
   assert.match(source, /message\?\.type === "auto_sync_now"/);
   assert.match(source, /STORAGE\.unattendedRecovery/);
   assert.match(source, /stored\[STORAGE\.unattendedRecovery\] !== true/);
-  assert.match(source, /initializeAndStartSync\("automatic"\)/);
+  assert.match(source, /message.type === "auto_sync_now" && stored\[STORAGE.unattendedRecovery\] !== true/);
 });
 
 test("opens Seller Centre mini chat during unattended recovery", () => {

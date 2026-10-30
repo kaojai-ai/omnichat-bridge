@@ -1,3 +1,4 @@
+import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
@@ -45,13 +46,15 @@ test("failed fresh LINE access check cannot reuse stale tab access", async () =>
 
 test("retry B while A syncs never restarts A and retains B failure as an account result", async () => {
   const calls = [];
-  const recoveries = new Map();
+  const syncCoordinator = createAccountSyncCoordinator();
+  const recoveries = syncCoordinator.jobs;
   const scope = vm.createContext({
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     AbortController, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     configuredAccountContexts: () => contexts, openSessionSyncContexts: async c => c.filter(item => item.account.provider_account_id !== "C"),
-    activeSyncControl: { providerAccountId: "A", adapter: { id: "line_oa", sendCommands: ["send_text"] } },
-    providerAutomaticRecoveries: recoveries,
+    accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    accountContextFor: (_stored, id, provider) => contexts.find(c => c.account.provider_account_id === id && c.adapter.id === provider),
+    hasServerInitialized: () => true, throwIfSyncCancelled() {},
     queueLiveStateWrite: async fn => { assert.equal(recoveries.has("line_oa:B"), true); return fn(); }, writeStorage: async () => {},
     runAccountSync: async (_trigger, control, context) => {
       assert.equal(recoveries.get(context.key), control);
@@ -60,11 +63,20 @@ test("retry B while A syncs never restarts A and retains B failure as an account
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
   });
   installProviderPolicy(scope);
-  vm.runInContext(extract("async function retryProviderAccount(", "function restartSync("), scope);
-  assert.equal((await scope.retryProviderAccount({ provider: "line_oa", provider_account_id: "B" })).error, "B failed");
+  vm.runInContext(extract("function requestAccountSync(", "async function cancelActiveSync("), scope);
+  let release;
+  const control = { accountKey: "line_oa:A", adapter: { id: "line_oa" }, controller: new AbortController() };
+  const first = syncCoordinator.run(control.accountKey, "line_oa", control, () => new Promise(resolve => { release = resolve; }));
+  const retry = scope.retryProviderAccount({ provider: "line_oa", provider_account_id: "B" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [], "same-provider retry waits without restarting active recovery");
+  assert.equal(control.controller.signal.aborted, false);
+  release({ recovered: 1 });
+  await first;
+  assert.equal((await retry).error, "B failed");
   assert.deepEqual(calls, ["line_oa:B"]);
   assert.equal(recoveries.size, 0);
-  await assert.rejects(scope.retryProviderAccount({ provider: "line_oa", provider_account_id: "C" }), /not available/);
+  assert.equal((await scope.retryProviderAccount({ provider: "line_oa", provider_account_id: "C" })).skipped, "account_unavailable");
 });
 
 function shopeeRetryHarness(currentId) {
@@ -72,7 +84,8 @@ function shopeeRetryHarness(currentId) {
     account: { provider: "shopee", provider_account_id: id } }));
   const calls = [];
   const verified = [];
-  const recoveries = new Map();
+  const syncCoordinator = createAccountSyncCoordinator();
+  const recoveries = syncCoordinator.jobs;
   const scope = vm.createContext({
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     AbortController, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
@@ -83,8 +96,9 @@ function shopeeRetryHarness(currentId) {
     detectOpenProviderAccount: async () => ({ ok: true }),
     providerTabStatus: async () => ({ current_provider_account_id: currentId }),
     throwIfSyncCancelled: () => {}, updateScopedState: async () => {}, recordLog: async () => {},
-    activeSyncControl: { providerAccountId: "A", adapter: { id: "line_oa", sendCommands: ["send_text"] } },
-    providerAutomaticRecoveries: recoveries,
+    accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    accountContextFor: (_stored, id, provider) => [...contexts, ...shopee].find(c => c.account.provider_account_id === id && c.adapter.id === provider),
+    hasServerInitialized: () => true, throwIfSyncCancelled() {},
     queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
     runAccountSync: async (_trigger, control, context) => {
       assert.equal(recoveries.get(context.key), control);
@@ -95,24 +109,30 @@ function shopeeRetryHarness(currentId) {
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
   });
   installProviderPolicy(scope);
-  vm.runInContext(extract("async function openSessionSyncContexts(", "async function runUnifiedSync("), scope);
+  vm.runInContext(extract("async function openSessionSyncContexts(", "async function syncAccountsForTab("), scope);
   installProviderPolicy(scope);
-  vm.runInContext(extract("async function retryProviderAccount(", "function restartSync("), scope);
+  vm.runInContext(extract("function requestAccountSync(", "async function cancelActiveSync("), scope);
   return { scope, calls, verified, recoveries };
 }
 
 test("Shopee row retry freshly verifies only that shop and does not interrupt an active LINE account", async () => {
   const { scope, calls, verified, recoveries } = shopeeRetryHarness("A");
+  let release;
+  const line = { accountKey: "line_oa:A", adapter: { id: "line_oa" }, controller: new AbortController() };
+  const running = scope.syncCoordinator.run(line.accountKey, "line_oa", line, () => new Promise(resolve => { release = resolve; }));
   assert.equal((await scope.retryProviderAccount({ provider: "shopee", provider_account_id: "A" })).recovered, 1);
   assert.deepEqual(calls, ["shopee:A"]);
   assert.deepEqual(Array.from(verified[0]), ["shopee:A"]);
+  assert.equal(recoveries.get(line.accountKey), line);
+  assert.equal(line.controller.signal.aborted, false);
+  release();
+  await running;
   assert.equal(recoveries.size, 0);
-  assert.equal(scope.activeSyncControl.adapter.id, "line_oa");
 });
 
 test("Shopee row retry rejects a different signed-in shop instead of silently recovering it", async () => {
   const { scope, calls, verified, recoveries } = shopeeRetryHarness("B");
-  await assert.rejects(scope.retryProviderAccount({ provider: "shopee", provider_account_id: "A" }), /not available/);
+  assert.equal((await scope.retryProviderAccount({ provider: "shopee", provider_account_id: "A" })).skipped, "account_unavailable");
   assert.deepEqual(calls, []);
   assert.deepEqual(Array.from(verified[0]), ["shopee:A"]);
   assert.equal(recoveries.size, 0);
@@ -120,9 +140,9 @@ test("Shopee row retry rejects a different signed-in shop instead of silently re
 
 test("per-account retry preserves an existing recovery and rejects unconfigured identities", async () => {
   const { scope, calls, verified, recoveries } = shopeeRetryHarness("A");
-  const existing = { controller: new AbortController() };
+  const existing = { controller: new AbortController(), completion: Promise.resolve({ recovered: 2 }) };
   recoveries.set("shopee:A", existing);
-  assert.equal((await scope.retryProviderAccount({ provider: "shopee", provider_account_id: "A" })).skipped, "already_syncing");
+  assert.equal((await scope.retryProviderAccount({ provider: "shopee", provider_account_id: "A" })).recovered, 2);
   assert.equal(recoveries.get("shopee:A"), existing);
   assert.equal(existing.controller.signal.aborted, false);
   assert.deepEqual(verified, []);

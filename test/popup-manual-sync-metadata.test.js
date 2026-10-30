@@ -11,7 +11,7 @@ const accounts = [
   { provider: "line_oa", provider_account_id: "@two", bot_id: "bot-two" },
   { provider: "shopee", provider_account_id: "shop" },
 ];
-function harness({ provider = "shopee", action = "sync", unknown = false } = {}) {
+function harness({ provider = "shopee", action = "sync", unknown = false, freshAccounts = accounts } = {}) {
   let click;
   let finishPermission;
   let finishPreparation;
@@ -34,7 +34,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false } = {})
     chrome: {
       runtime: { sendMessage: message => {
         requests.push(message);
-        if (message.type === "detect_account") return Promise.resolve({ ok: true, accounts });
+        if (message.type === "detect_account") return Promise.resolve({ ok: true, accounts: freshAccounts });
         if (["sync_line_tab", "sync_account"].includes(message.type)) return new Promise(resolve => refreshes.push(resolve));
         if (message.type === "refresh_metadata") throw new Error("Manual sync must reuse its conversation scan.");
         return Promise.resolve({ ok: true });
@@ -55,13 +55,15 @@ for (const provider of ["shopee", "line_oa"]) {
     const task = h.click();
     assert.equal(h.requests.length, 0);
     await turn();
+    assert.deepEqual(h.requests.map(value => value.type), ["detect_account"], "fresh login verification precedes permissions and sync");
     h.allowPermission();
     await turn();
-    assert.deepEqual(h.requests.slice(0, 2).map(value => value.type), ["prepare_sync_tab", "detect_account"]);
+    assert.equal(h.requests.some(value => ["prepare_sync_tab", "cancel_sync", "reset_recovery_v3"].includes(value.type)), false);
     if (provider === "line_oa") {
       const batch = h.requests.filter(value => value.type === "sync_line_tab");
       assert.equal(batch.length, 1);
       assert.equal(batch[0].tab_id, 7);
+      assert.equal(batch[0].refresh_metadata, true);
       assert.equal(h.requests.some(value => value.type === "refresh_metadata" || value.type === "sync_account"), false);
     } else {
       const syncs = h.requests.filter(value => value.type === "sync_account");
@@ -128,9 +130,33 @@ for (const provider of ['line_oa', 'shopee']) {
     h.allowPermission();
     await turn();
     await h.click();
-    assert.equal(h.requests.filter(x => x.type === 'prepare_sync_tab').length, 1);
+    assert.equal(h.requests.filter(x => x.type === 'prepare_sync_tab').length, 0);
+    assert.equal(h.requests.filter(x => x.type === 'detect_account').length, 1);
     assert.equal(h.requests.filter(x => ['sync_account', 'sync_line_tab'].includes(x.type)).length, 1);
     h.refreshes.forEach(resolve => resolve({ ok: true }));
     await task;
   });
 }
+
+
+test("fresh login verification rejects stale cached access before starting sync", async () => {
+  const h = harness({ provider: "line_oa", freshAccounts: [] });
+  await h.click();
+  assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
+  assert.equal(h.refreshes.length, 0);
+});
+
+test("manual Sync can join background work but stays disabled during its own request", () => {
+  const start = source.indexOf('  syncButton.disabled = Boolean(pendingAction);');
+  assert.ok(start >= 0);
+  const end = source.indexOf('  cancelSyncButton.hidden', start);
+  const button = { dataset: {}, setAttribute() {} };
+  const context = { syncButton: button, pendingAction: "", anySyncing: true,
+    sellerCentreChatClosed: false, activeProviderAdapter: { id: "shopee" },
+    anyPending: false, anyError: false, surfaceHint: "", t: key => key };
+  vm.runInNewContext(source.slice(start, end), context);
+  assert.equal(button.disabled, false);
+  context.pendingAction = "checking";
+  vm.runInNewContext(source.slice(start, end), context);
+  assert.equal(button.disabled, true);
+});

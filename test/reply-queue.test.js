@@ -28,7 +28,7 @@ function harness(sendViaProvider) {
     canonicalProviderAccountId: (context) => context.account.provider_account_id,
     exclusive: (action) => background.promise.then(action), sendViaProvider,
     recordUnexpected: async () => {}, sendConnectionStatus: async () => {},
-    installationId: async () => "installation", activeSync: null,
+    installationId: async () => "installation", syncCoordinator: { drain: async () => {} },
     STORAGE: { extensionUpdate: "update" },
     readStorage: async () => ({ update: { status: "available" } }),
     updateStateForCurrentVersion: (state) => state, storeExtensionUpdate: async () => {},

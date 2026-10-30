@@ -65,6 +65,18 @@ Initial sync covers the last 1 day. Later polling and reconnect recovery use
 the saved checkpoint, capped at the last 5 days even with a missing or stale
 cursor.
 
+Recovery runs independently for each provider account. A Shopee reconnect does
+not start a LINE scan, and slow Shopee recovery does not hold up LINE recovery. Page initialization, provider reconnects, and verified session changes
+can request recovery; switching tabs or focusing Chrome does not start a scan.
+Shopee recovery uses the verified signed-in shop. LINE recovery includes every
+accessible configured account, even when a different account is visible in the
+tab.
+
+**Sync messages** requests a fresh recovery pass while keeping saved checkpoints
+and queued messages. It does not erase sync progress or restart a full history
+import. Requests for an account already syncing are coordinated with its current
+pass instead of starting duplicate scans.
+
 Optional top-level `history_days` is an integer from 1 to 366.
 `history_conversation_ids`, when supplied, must contain unique nonempty strings
 and requires `history_days`. Historical capture remains provider-dependent.

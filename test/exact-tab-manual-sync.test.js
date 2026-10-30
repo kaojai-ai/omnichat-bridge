@@ -1,3 +1,4 @@
+import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -13,10 +14,13 @@ function fixture(provider = "line_oa") {
   let status = { account_access_verified: true, accessible_account_ids: ["A", "B"], current_provider_account_id: "A" };
   let epoch = 1;
   const calls = [];
-  const recoveries = new Map();
+  const syncCoordinator = createAccountSyncCoordinator();
+  const recoveries = syncCoordinator.jobs;
   const runtime = vm.createContext({ URL, AbortController, Map, Set,
     STORAGE: {}, hasLocalConsent: () => true, readStorage: async () => ({}),
-    configuredAccountContexts: () => contexts, providerAutomaticRecoveries: recoveries, lineTabSyncs: new Map(), activeSyncControl: null,
+    configuredAccountContexts: () => contexts, accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    accountContextFor: (_stored, id, provider) => contexts.find(c => c.account.provider_account_id === id && c.adapter.id === provider),
+    hasServerInitialized: () => true, throwIfSyncCancelled() {}, lineTabSyncs: new Map(),
     providerChatTabById: async (_adapter, id) => tab?.id === id ? { ...tab } : null,
     providerTabStatus: async () => status, providerTabContext: candidate => `${candidate.id}:${candidate.url}:${epoch}`,
     ensureProviderBridge: async () => {},
@@ -34,7 +38,7 @@ function fixture(provider = "line_oa") {
     providerChatTabs: () => assert.fail("Must not enumerate alternative tabs"),
   });
   vm.runInContext(section("async function exactProviderAccountTab(", "// Display metadata is applied")
-    + section("async function retryProviderAccount(", "function restartSync(")
+    + section("function requestAccountSync(", "async function cancelActiveSync(")
     + section("async function cancelActiveSync(", "async function clearPersistedSync("), runtime);
   return { runtime, contexts, calls, recoveries,
     close() { tab = null; }, navigate(url) { tab.url = url; epoch++; }, setStatus(value) { status = value; },

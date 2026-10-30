@@ -15,6 +15,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
+  const documentListeners = new Map();
   const runtimeMessages = [];
   const syncCompletions = new Map();
   const storageWrites = [];
@@ -38,8 +39,12 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     window,
     document: {
       hidden: false,
-      addEventListener() {},
-      removeEventListener() {},
+      addEventListener(type, listener) {
+        documentListeners.set(type, [...(documentListeners.get(type) ?? []), listener]);
+      },
+      removeEventListener(type, listener) {
+        documentListeners.set(type, (documentListeners.get(type) ?? []).filter(item => item !== listener));
+      },
     },
     URL,
     chrome: {
@@ -131,6 +136,10 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     sendCommand,
     requestMessage: message => new Promise(resolve => runtimeListeners[0](message, {}, resolve)),
     triggerWindowEvent,
+    async triggerDocumentEvent(type) {
+      for (const listener of documentListeners.get(type) ?? []) listener({});
+      await new Promise(resolve => setImmediate(resolve));
+    },
     reattach() {
       vm.runInContext(source, context);
     },
@@ -441,6 +450,75 @@ test("does not reopen Seller Centre from lifecycle events after Chat is closed",
     0,
   );
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider} initialization and reconnect are scoped; focus and visibility do not scan`, async () => {
+    const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/bot-1/chats", { provider });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
+    assert.deepEqual(resumes(), [{ type: "resume_sync", provider, reason: "page_initialization" }]);
+    await bridge.triggerWindowEvent("focus");
+    await bridge.triggerDocumentEvent("visibilitychange");
+    await new Promise(resolve => setTimeout(resolve, 550));
+    assert.equal(resumes().length, 1);
+    await bridge.providerEvent({ type: "socket_connected", provider_account_id: "untrusted-page-id" });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    assert.deepEqual(resumes().at(-1), { type: "resume_sync", provider, reason: "provider_reconnected" });
+    await bridge.triggerWindowEvent("pageshow");
+    await new Promise(resolve => setTimeout(resolve, 550));
+    assert.deepEqual(resumes().at(-1), { type: "resume_sync", provider, reason: "page_initialization" });
+  });
+}
+
+test("Shopee session changes request verification without trusting a page account as sync scope", async () => {
+  const bridge = contentBridge("/new-webchat/conversations");
+  await bridge.providerEvent({ type: "provider_status", current_provider_account_id: "shop-a" });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
+  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "shopee", reason: "session_changed" }]);
+  await bridge.providerEvent({ type: "provider_status", current_provider_account_id: "shop-a" });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.equal(resumes().length, 1);
+  await bridge.providerEvent({ type: "provider_status", current_provider_account_id: "shop-b" });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.deepEqual(resumes().at(-1), { type: "resume_sync", provider: "shopee", reason: "session_changed" });
+  assert.equal(resumes().length, 2);
+});
+
+test("LINE verified account-set changes request provider recovery without a single-account target", async () => {
+  const bridge = contentBridge("/bot-1/chats", { provider: "line_oa" });
+  await bridge.providerEvent({ type: "provider_status", account_access_verified: true, accessible_account_ids: ["@one", "@two"] });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
+  assert.deepEqual(resumes(), [{ type: "resume_sync", provider: "line_oa", reason: "session_changed" }]);
+  await bridge.providerEvent({ type: "provider_status", account_access_verified: true, accessible_account_ids: ["@two", "@one"] });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.equal(resumes().length, 1);
+  await bridge.providerEvent({ type: "provider_status", account_access_verified: true, accessible_account_ids: [] });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.equal(resumes().length, 2);
+  assert.deepEqual(resumes().at(-1), { type: "resume_sync", provider: "line_oa", reason: "session_changed" });
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider} confirmed access loss wakes recovery but unknown probes do not`, async () => {
+    const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/bot-1/chats", { provider });
+    const known = provider === "shopee" ? { current_provider_account_id: "shop-a" }
+      : { account_access_verified: true, accessible_account_ids: ["@one"] };
+    await bridge.providerEvent({ type: "provider_status", ...known, provider_check_outcome: "passed" });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    const resumes = () => plain(bridge.runtimeMessages.filter(message => message.type === "resume_sync"));
+    const lost = provider === "shopee" ? { current_provider_account_id: null }
+      : { account_access_verified: false, accessible_account_ids: [] };
+    await bridge.providerEvent({ type: "provider_status", ...lost, provider_check_outcome: "unknown" });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    assert.equal(resumes().length, 1);
+    await bridge.providerEvent({ type: "provider_status", ...lost, provider_check_outcome: "failed" });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    assert.equal(resumes().length, 2);
+    assert.deepEqual(resumes().at(-1), { type: "resume_sync", provider, reason: "session_changed" });
+  });
+}
 
 test("waits for the Seller Centre page bridge before unattended recovery opens mini chat", async () => {
   const bridge = contentBridge("/portal/sale/order", {
@@ -985,3 +1063,18 @@ test("cancelled LINE account emits only its own completion while another account
   assert.equal(completions[1].provider_account_id, "@oa-b");
   assert.equal(completions[1].result.ok, true);
 });
+
+for (const [eventType, requestType] of [
+  ["history_window", "record_history_window"], ["history_backfill", "record_history_backfill"],
+  ["recovery_cursor", "advance_scan_cursor"], ["recovery_bootstrap", "save_bootstrap"],
+]) {
+  test(`${eventType} keeps recovery attempt correlation for background fencing`, async () => {
+    const bridge = contentBridge("/new-webchat/conversations");
+    await bridge.providerEvent({ type: eventType, request_id: "attempt-a", provider_account_id: "shop-a",
+      conversation_id: "chat-a", conversations: [], cursor: { message_id: "cursor-a" } });
+    const request = bridge.runtimeMessages.find(message => message.type === requestType);
+    assert.equal(request.request_id, "attempt-a");
+    assert.equal(request.provider, "shopee");
+    assert.equal(request.provider_account_id, "shop-a");
+  });
+}

@@ -1,3 +1,4 @@
+import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -6,32 +7,6 @@ import { readFileSync } from "node:fs";
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
-
-test("manual retry replaces a stuck run; late completion cannot clear the replacement", async () => {
-  const runs = [];
-  const cancellation = deferred();
-  const runtime = vm.createContext({ AbortController, PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5,
-    sendProviderMessage: () => cancellation.promise,
-    runUnifiedSync: (_trigger, control) => { const result = deferred(); control.tabId = 42; runs.push({ control, ...result }); return result.promise; },
-  });
-  vm.runInContext('let activeSync = null, activeSyncControl = null, syncRestart = null;\n' + section('function restartSync(', 'async function cancelActiveSync('), runtime);
-  const old = runtime.startSync("automatic");
-  const retry = runtime.restartSync();
-  const doubleClick = runtime.restartSync();
-  assert.equal(runs[0].control.controller.signal.aborted, true);
-  cancellation.resolve({ ok: true });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(runs.length, 2);
-  assert.equal(runs[1].control.manualRestart, true);
-  runs[0].resolve({ old: true });
-  await old;
-  const automatic = runtime.startSync("automatic");
-  assert.equal(runs.length, 2, "old finalizer must not clear the current attempt");
-  runs[1].resolve({ fresh: true });
-  assert.deepEqual(await retry, { fresh: true });
-  assert.deepEqual(await doubleClick, { fresh: true });
-  assert.deepEqual(await automatic, { fresh: true });
-});
 
 function messageHarness() {
   let now = 0, nextId = 0;
@@ -75,8 +50,7 @@ test("stale attempts and other tabs cannot refresh the current recovery watchdog
   let touches = 0;
   const handle = vm.runInNewContext(`${section('function isCurrentSyncControl(', 'async function initializeAndStartSync(')}
 (message, _sender) => { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress" || message?.type === "sync_phase")')} }`, {
-    activeSyncControl: { controller: new AbortController(), tabId: 42, providerRequestId: "new", touchRecovery: () => touches++ },
-    providerAutomaticRecoveries: new Map(),
+    accountSyncs: new Map([["line_oa:A", { accountKey: "line_oa:A", controller: new AbortController(), tabId: 42, providerRequestId: "new", touchRecovery: () => touches++ }]]),
   });
   handle({ type: "sync_activity", request_id: "old" }, { tab: { id: 42 } });
   handle({ type: "sync_activity", request_id: "new" }, { tab: { id: 99 } });
@@ -105,8 +79,8 @@ test("unattended OA activity reaches only its current control and sender tab", (
   const touches = [];
   const controls = ["oa-a", "oa-b"].map((id) => ({ accountKey: id, controller: new AbortController(),
     tabId: 42, providerRequestId: id, touchRecovery: () => touches.push(id) }));
-  const runtime = vm.createContext({ activeSyncControl: null,
-    providerAutomaticRecoveries: new Map(controls.map(control => [control.accountKey, control])) });
+  const runtime = vm.createContext({
+    accountSyncs: new Map(controls.map(control => [control.accountKey, control])) });
   vm.runInContext(section('function isCurrentSyncControl(', 'async function initializeAndStartSync(')
     + `
 function handle(message, _sender) { const respond = () => {}; ${section('  if (message?.type === "sync_activity")', '  if (message?.type === "sync_progress" || message?.type === "sync_phase")')} }`, runtime);
@@ -117,7 +91,7 @@ function handle(message, _sender) { const respond = () => {}; ${section('  if (m
   runtime.handle({ request_id: "oa-b", type: "sync_activity" }, { tab: { id: 42 } });
   assert.deepEqual(touches, ["oa-a"]);
   assert.equal(runtime.isCurrentSyncControl(controls[0]), true);
-  runtime.providerAutomaticRecoveries.delete("oa-a");
+  runtime.accountSyncs.delete("oa-a");
   assert.equal(runtime.isCurrentSyncControl(controls[0]), false);
 });
 
@@ -140,35 +114,16 @@ test("a healthy content ping cannot hide an old Shopee main bridge after upgrade
 });
 
 
-test("repeated LINE Sync reuses the running operation without cancellation", async () => {
-  const runs = [], result = deferred();
-  const runtime = vm.createContext({
-    AbortController, STORAGE: {}, liveConnections: new Map(), clearTimeout() {},
-    queueLiveStateWrite: async fn => fn(), writeStorage: async () => {}, recordLog: async () => {},
-    ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
-    runUnifiedSync: (_trigger, control) => { runs.push(control); return result.promise; },
-    sendProviderMessage: () => assert.fail("LINE Sync must not cancel recovery"),
-  });
-  vm.runInContext('let activeSync = null, activeSyncControl = null, syncRestart = null;\n'
-    + section('function restartSync(', 'async function cancelActiveSync(')
-    + section('async function initializeAndStartSync(', 'async function startUnattendedSellerCentreSync('), runtime);
-  const first = runtime.initializeAndStartSync("manual", "line_oa");
-  await new Promise(resolve => setImmediate(resolve));
-  const second = runtime.initializeAndStartSync("manual", "line_oa");
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].providerScope, "line_oa");
-  assert.equal(runs[0].controller.signal.aborted, false);
-  result.resolve({ accounts: ["A"] });
-  assert.deepEqual(await first, await second);
-});
-
 test("idle LINE recovery settles error and releases only its own account slot", async () => {
   const h = messageHarness();
-  const recoveries = new Map([["line_oa:B", { healthy: true }]]), updates = [];
+  const syncCoordinator = createAccountSyncCoordinator();
+  const recoveries = syncCoordinator.jobs, updates = [];
+  recoveries.set("line_oa:B", { healthy: true });
   const account = { key: "line_oa:A", account: { provider: "line_oa", provider_account_id: "A" }, adapter: { id: "line_oa" } };
   Object.assign(h.runtime, {
-    AbortController, STORAGE: {}, activeSyncControl: null, lineTabSyncs: new Map(), providerAutomaticRecoveries: recoveries,
+    AbortController, STORAGE: {}, lineTabSyncs: new Map(), accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    accountContextFor: () => account,
+    hasServerInitialized: () => true, throwIfSyncCancelled() {},
     readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
     openSessionSyncContexts: async c => c, queueLiveStateWrite: async fn => fn(), writeStorage: async () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {}, recordLog: async () => {},
@@ -182,7 +137,7 @@ test("idle LINE recovery settles error and releases only its own account slot", 
       { recoveryControl: control, timeoutMs: 60_000 }); },
   });
   vm.runInContext(section('async function runAccountSync(', 'async function openSessionSyncContexts(')
-    + section('async function retryProviderAccount(', 'function restartSync('), h.runtime);
+    + section('function requestAccountSync(', 'async function cancelActiveSync('), h.runtime);
   const result = h.runtime.retryProviderAccount({ provider: "line_oa", provider_account_id: "A" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(recoveries.has("line_oa:A"), true);
@@ -199,11 +154,11 @@ test("idle LINE recovery settles error and releases only its own account slot", 
 
 
 test("explicit LINE Cancel reaches scoped retries without aborting another provider", async () => {
-  const line = { controller: new AbortController(), accountKey: "line_oa:A", providerAccountId: "A", providerRequestId: "run-A", tabId: 42 };
+  const line = { controller: new AbortController(), accountKey: "line_oa:A", adapter: { id: "line_oa" }, providerAccountId: "A", providerRequestId: "run-A", tabId: 42 };
   const shopee = { controller: new AbortController(), adapter: { id: "shopee" } };
   const calls = [];
   const cancel = vm.runInNewContext(`(${section('async function cancelActiveSync(', 'async function clearPersistedSync(')})`, {
-    activeSyncControl: shopee, providerAutomaticRecoveries: new Map([[line.accountKey, line]]),
+    lineTabSyncs: new Map(), accountSyncs: new Map([[line.accountKey, line], ["shopee:B", shopee]]), clearPersistedSync: async () => false,
     sendProviderMessage: async (_tab, message) => { calls.push(message); return { ok: true }; },
     PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000,
   });
@@ -212,4 +167,20 @@ test("explicit LINE Cancel reaches scoped retries without aborting another provi
   assert.equal(shopee.controller.signal.aborted, false);
   assert.equal(calls[0].provider_account_id, "A");
   assert.equal(calls[0].request_id, "run-A");
+});
+
+test('BFCache channel closure stays a failure with a short actionable message', async () => {
+  const error = new Error('The page keeping the extension port is moved into back/forward cache, so the message channel is closed.');
+  const scope = vm.createContext({
+    chrome: { tabs: { sendMessage: async () => { throw error; } } },
+    performance: { now: () => 0 }, PROVIDER_REQUEST_TIMEOUT_MS: 100,
+    setTimeout, clearTimeout, recordLog: async () => {},
+  });
+  vm.runInContext(source.slice(source.indexOf('function providerMessageTimeout('), source.indexOf('function syncCancelledError(')), scope);
+  await assert.rejects(scope.sendProviderMessage(7, { type: 'sync_now_v3' }), failure => {
+    assert.equal(failure.message, 'Page changed. Sync again.');
+    assert.equal(failure.reason_code, 'provider_page_changed');
+    assert.notEqual(failure.name, 'AbortError');
+    return true;
+  });
 });
