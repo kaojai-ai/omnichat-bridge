@@ -1513,7 +1513,7 @@ test("manual discovery retries a failed standalone startup check", async () => {
     "/api/v2/login/": () => new Response("{}", { status: 503 }),
   } });
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(bridge.state.automaticAccountDiscoveryStarted, false);
+  assert.equal(bridge.state.accountDiscoveryPromise, null);
   bridge.setResponse("/api/v2/login/", { data: { shop_id: 100000001 } });
   await bridge.detect();
   assert.equal(bridge.state.currentAccountId, "100000001");

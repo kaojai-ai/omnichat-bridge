@@ -124,7 +124,6 @@
     recoveryAbortController: null,
     recoveryEpoch: 0,
     accountDiscoveryPromise: null,
-    automaticAccountDiscoveryStarted: false,
     latestMessageIdsByConversation: new Map(),
     capturedMessageIdsByConversation: new Map(),
     pendingSellerCentreMessages: new Map(),
@@ -185,7 +184,6 @@
   state.recoveryAbortController ??= null;
   state.recoveryEpoch ??= 0;
   state.accountDiscoveryPromise ??= null;
-  state.automaticAccountDiscoveryStarted ??= false;
   state.latestMessageIdsByConversation ??= new Map();
   state.capturedMessageIdsByConversation ??= new Map();
   state.pendingSellerCentreMessages ??= new Map();
@@ -214,7 +212,6 @@
     state.sellerCentreChatOpenPromise = null;
     state.socket = null;
     state.accountDiscoveryPromise = null;
-    state.automaticAccountDiscoveryStarted = false;
   }
 
   const { accountsFromPayload, conversationItems } = providerAdapter;
@@ -656,6 +653,10 @@
   };
 
   const waitForTemplate = async () => {
+    if (!state.listTemplate || !state.getTemplate) {
+      await discoverAccounts();
+      await ensureSellerCentreChatOpen();
+    }
     const deadline = Date.now() + 15_000;
     while ((!state.listTemplate || !state.getTemplate) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -701,16 +702,16 @@
     return state.accountDiscoveryPromise;
   }
 
+  let discoveryRetryTimer = null;
+  let discoveryAttempts = 0;
   const startAutomaticAccountDiscovery = () => {
-    if (!isShopeeChatPage() || state.automaticAccountDiscoveryStarted) return;
-    state.automaticAccountDiscoveryStarted = true;
-    void discoverAccounts().catch((error) => {
-      postLog("warn", "shop_discovery_failed", "Shopee shop discovery failed during page startup.", {
-        ...errorDetails(error),
-      });
-    }).finally(() => {
-      // A failed startup check must not prevent a later native capture retry.
-      state.automaticAccountDiscoveryStarted = false;
+    if (!isBridgeActive() || !isShopeeChatPage() || state.accountDiscoveryPromise) return;
+    clearTimeout(discoveryRetryTimer);
+    discoveryRetryTimer = null;
+    void discoverAccounts().then(() => { discoveryAttempts = 0; }).catch((error) => {
+      postLog("warn", "shop_discovery_failed", "Shopee account discovery failed.", errorDetails(error));
+      if ([401, 403].includes(error.http_status) || ++discoveryAttempts >= 4 || !isBridgeActive()) return;
+      discoveryRetryTimer = setTimeout(startAutomaticAccountDiscovery, 1000 * 2 ** (discoveryAttempts - 1));
     });
   };
 
@@ -2284,11 +2285,7 @@
 
   // Identity discovery is independent of conversation traffic. The popup uses
   // the same discoverAccounts request, joining an active check or retrying it.
-  if (isSellerCentreSurface()) {
-    void observeAsync("seller_centre_session_account", detectSessionAccount);
-  } else if (!state.currentAccountId) {
-    startAutomaticAccountDiscovery();
-  }
+  if (!state.currentAccountId) startAutomaticAccountDiscovery();
 
   const detachObservedSocket = () => {
     if (!observedSocket || !socketListeners) return;
@@ -2430,6 +2427,7 @@
   const dispose = (reason = "Page bridge was replaced.") => {
     if (disposed) return false;
     disposed = true;
+    clearTimeout(discoveryRetryTimer);
     state.observedMessageKeys.clear();
     resetSellerCentreCapture();
     resetRecovery(reason);
