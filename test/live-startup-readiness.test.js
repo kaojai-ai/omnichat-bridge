@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 const start = source.indexOf("async function ensureLiveConnection() {");
-const end = source.indexOf("\nconst migrationRetries", start);
+const end = source.indexOf("\nasync function ensureAccountLiveConnection", start);
 assert.ok(start >= 0 && end > start);
 
 function harness({ initialized = false, pause = false } = {}) {
