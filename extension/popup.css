@@ -229,14 +229,22 @@ button:disabled {
 
 .settings-preference {
   align-items: center;
-  background: var(--subtle);
-  border: 1px solid var(--line);
-  border-radius: var(--card-radius);
   display: grid;
   gap: 16px;
   grid-template-columns: minmax(0, .7fr) minmax(185px, 1.3fr);
   min-width: 0;
-  padding: 12px;
+  padding: 12px 0;
+}
+
+.settings-preferences .recovery-option {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 0;
+}
+
+#forward-log-description {
+  font-weight: 400;
 }
 
 .settings-preference > label,

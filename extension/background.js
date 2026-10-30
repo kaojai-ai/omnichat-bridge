@@ -3,7 +3,6 @@ import { hasRegionalShopeePermission, reconcileRegionalShopeeScripts } from "./l
 import { withRequestTimeout } from "./lib/request-timeout.js";
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, historySyncSettings } from "./lib/config.js";
-import { accountMigration } from "./lib/config-migration.js";
 import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   advanceConversationCursors,
@@ -348,7 +347,6 @@ function accountContextFor(stored, providerAccountId, provider = "") {
   if (!configuredAccount) return null;
   const key = accountConfigKey(configuredAccount);
   const adapter = providerAdapterForAccount(configuredAccount);
-  if (config && accountMigration(config, stored[STORAGE.config]?.version).status === "invalid") return null;
   return key && config && adapter ? { key, config, account: { ...configuredAccount, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
 }
 
@@ -364,10 +362,6 @@ function configuredAccountContexts(stored) {
     const config = findAccountConfig(stored[STORAGE.config], account);
     const key = accountConfigKey(account);
     const adapter = providerAdapterForAccount(account);
-    const migration = config && accountMigration(config, stored[STORAGE.config]?.version);
-    if (migration?.status === "invalid") {
-      return null;
-    }
     return key && config && adapter ? { key, config, account: { ...account, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
   }).filter(Boolean);
 }
@@ -2727,26 +2721,6 @@ async function ensureLiveConnection() {
   for (const context of contexts) await ensureAccountLiveConnection(context);
 }
 
-const migrationRetries = new Map();
-const migrationConnections = new Map();
-let migrationWrites = Promise.resolve();
-async function persistAccountMigration(context, source) {
-  const write = migrationWrites.then(async () => {
-    const stored = await readStorage([STORAGE.config]);
-    const config = stored[STORAGE.config];
-    const index = config?.accounts?.findIndex((account) => accountConfigKey(account) === context.key);
-    if (index === undefined || index < 0 || JSON.stringify(config.accounts[index]) !== JSON.stringify(source)) return;
-    const accounts = [...config.accounts];
-    accounts[index] = context.config;
-    await writeStorage({ [STORAGE.config]: { ...config, accounts } });
-    migrationRetries.delete(context.key);
-    await updateScopedState(STORAGE.status, context.key, { migration_pending: false, migration_error: null, migration_error_code: null,
-      migration_attempt: 0, migration_retry_at: 0 });
-  });
-  migrationWrites = write.catch(() => {});
-  return write;
-}
-
 async function ensureAccountLiveConnection(context) {
   if (context.account?.provider === "shopee" && context.account.country && context.account.country !== "TH"
     && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
@@ -2754,79 +2728,10 @@ async function ensureAccountLiveConnection(context) {
     if (connection) stopAccountLiveConnection(context.key, connection, "regional_permission_required");
     return;
   }
-  if (migrationConnections.has(context.key)) return migrationConnections.get(context.key);
-  const attempt = ensureMigratedAccountLiveConnection(context).finally(() => migrationConnections.delete(context.key));
-  migrationConnections.set(context.key, attempt);
-  return attempt;
+  return ensureAccountTransportConnection(context);
 }
 
-async function markMigrationPending(context, error) {
-  const stored = await readStorage([STORAGE.status]);
-  const retry = readAccountState(stored[STORAGE.status], context.key, {});
-  const attempt = (migrationRetries.get(context.key)?.attempt ?? retry.migration_attempt ?? 0) + 1;
-  const nextAt = Date.now() + Math.min(3600000, 30000 * 2 ** Math.min(attempt, 7));
-  migrationRetries.set(context.key, { attempt, nextAt });
-  await updateScopedState(STORAGE.status, context.key, { migration_pending: true,
-    migration_error: error.message, migration_error_code: error.code ?? null, migration_attempt: attempt, migration_retry_at: nextAt });
-}
-
-async function ensureMigratedAccountLiveConnection(context) {
-  const migrationStored = await readStorage([STORAGE.config, STORAGE.status]);
-  const storedConfig = migrationStored[STORAGE.config];
-  const persistedRetry = readAccountState(migrationStored[STORAGE.status], context.key, {});
-  let retryAt = migrationRetries.get(context.key)?.nextAt ?? persistedRetry.migration_retry_at ?? 0;
-  const migration = accountMigration(context.config, storedConfig?.version);
-  // Permission approval can arrive while a healthy legacy socket keeps migration
-  // deferred. Reconcile the warning independently of the transport handover.
-  const permissionWarning = persistedRetry.migration_error_code === "server_permission_required"
-    || persistedRetry.migration_error === "Open configuration and save it to approve the new server access.";
-  const migrationOrigins = migration.candidate
-    ? [...new Set([migration.candidate.api_url, migration.candidate.logs_url].map((value) => `${new URL(value).origin}/*`))]
-    : [];
-  if ((permissionWarning && migration.candidate && await chrome.permissions.contains({ origins: migrationOrigins }))
-    || (!migration.candidate && migration.status !== "invalid" && persistedRetry.migration_pending)) {
-    migrationRetries.delete(context.key);
-    retryAt = 0;
-    await updateScopedState(STORAGE.status, context.key, { migration_pending: Boolean(migration.candidate),
-      migration_error: null, migration_error_code: null, migration_attempt: 0, migration_retry_at: 0 });
-  }
-  const handover = liveConnections.get(context.key);
-  if (handover?.migrationSource
-    && JSON.stringify(handover.migrationSource) === JSON.stringify(context.config)) {
-    // Storage notifications still contain the legacy URL until the candidate opens and is saved.
-    // Keep the same connection through this interval rather than replacing its handshake.
-    return;
-  }
-  if (migration.status === "invalid") {
-    const connection = liveConnections.get(context.key);
-    if (connection) stopAccountLiveConnection(context.key, connection);
-    await updateScopedState(STORAGE.status, context.key, { error: migration.error });
-    return;
-  }
-  // Handover only on a natural reconnect: never replace a working socket or its in-flight replies.
-  let migrationSource = null;
-  const currentConnection = liveConnections.get(context.key);
-  if (migration.candidate && !currentConnection?.socket && !currentConnection?.connecting
-    && !currentConnection?.reconnectTimer && Date.now() >= retryAt
-    && ![...liveCommandResults].some(([key, command]) => key.startsWith(`${context.key}:`) && command.expiresAt === Infinity)) {
-    const candidate = { ...context, config: migration.candidate };
-    try {
-      if (!await chrome.permissions.contains({ origins: migrationOrigins })) {
-        const error = new Error("Open configuration and save it to approve the new server access.");
-        error.code = "server_permission_required";
-        throw error;
-      }
-      await signedApiPing(candidate);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      try { await signedLeaderRequest(candidate, "status", controller.signal); }
-      finally { clearTimeout(timeout); }
-      migrationSource = context.config;
-      context = candidate;
-    } catch (error) {
-      await markMigrationPending(context, error);
-    }
-  }
+async function ensureAccountTransportConnection(context) {
   const endpoint = liveEndpoint(context.config);
   if (!endpoint) return;
   let existing = liveConnections.get(context.key) ?? {
@@ -2845,7 +2750,6 @@ async function ensureMigratedAccountLiveConnection(context) {
   }
   existing.config = context.config;
   existing.context = context;
-  existing.migrationSource = migrationSource;
   liveConnections.set(context.key, existing);
   if (existing.socket?.readyState === WebSocket.OPEN) {
     void sendConnectionStatus(existing.socket, context).catch((error) => recordUnexpected("connection_status", error, {
@@ -2897,9 +2801,6 @@ async function ensureMigratedAccountLiveConnection(context) {
         if (liveConnections.get(context.key)?.socket === socket) existing.reconnectAttempt = 0;
       }, 30_000);
       void updateLiveState(context, { socket: "connected", endpoint_not_found: false });
-      if (migrationSource) void persistAccountMigration(context, migrationSource)
-        .catch((error) => recordUnexpected("config_migration", error))
-        .finally(() => { existing.migrationSource = null; });
       void recordLog("info", "live", "connected", "Live command channel connected.", {
         provider_account_id: context.account.provider_account_id,
         connect_duration_ms: openedAt - attemptStartedAt,
@@ -2941,13 +2842,6 @@ async function ensureMigratedAccountLiveConnection(context) {
           open_duration_ms: openedAt === null ? null : Date.now() - openedAt,
           since_last_inbound_ms: existing.lastInboundAt == null ? null : Date.now() - existing.lastInboundAt,
         });
-        if (migrationSource && openedAt === null) {
-          void markMigrationPending(context, new Error("New server connection could not be established. The previous configuration is still active."))
-            .catch((error) => recordUnexpected("config_migration", error));
-          existing.config = migrationSource;
-          existing.context = { ...context, config: migrationSource };
-        }
-        existing.migrationSource = null;
         scheduleLiveReconnect(existing.context);
       }
     });
@@ -2964,12 +2858,6 @@ async function ensureMigratedAccountLiveConnection(context) {
     await recordUnexpected("live_connection", error, {
       provider_account_id: context.account.provider_account_id,
     });
-    if (migrationSource) {
-      await markMigrationPending(context, error);
-      existing.config = migrationSource;
-      existing.context = { ...context, config: migrationSource };
-    }
-    existing.migrationSource = null;
     scheduleLiveReconnect(existing.context);
   } finally {
     clearTimeout(existing.ticketTimer);

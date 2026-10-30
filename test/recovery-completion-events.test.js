@@ -106,7 +106,6 @@ test('navigation fails the correlated recovery promptly without a second start',
 for (const provider of ['line_oa', 'shopee']) {
   test(`${provider} real progress account lookup reads configuration before persisting counters`, async () => {
     const { findAccountConfig, accountConfigKey } = await import('../extension/lib/config.js');
-    const { accountMigration } = await import('../extension/lib/config-migration.js');
     const { STORAGE, readAccountState, writeAccountState } = await import('../extension/lib/storage.js');
     const account = { provider, provider_account_id: provider === 'line_oa' ? '@account' : 'shop' };
     const key = accountConfigKey(account);
@@ -117,7 +116,7 @@ for (const provider of ['line_oa', 'shopee']) {
     };
     const control = { adapter:{id:provider}, providerAccountId:account.provider_account_id, controller:new AbortController() };
     const scope = vm.createContext({
-      URL, STORAGE, findAccountConfig, accountConfigKey, accountMigration, readAccountState,
+      URL, STORAGE, findAccountConfig, accountConfigKey, readAccountState,
       detectedAccounts: stored => stored[STORAGE.detectedAccounts] ?? [], normalizedProviderId: value => value,
       providerAdapterForAccount: account => ({id:account.provider}),
       syncControlForMessage: () => control, isCurrentSyncControl: () => true,

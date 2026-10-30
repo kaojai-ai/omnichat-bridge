@@ -41,11 +41,9 @@ function harness(overrides = {}) {
   }
   const globals = {
     liveConnections, WebSocket: Socket, URL, AbortController,
-    migrationConnections: new Map(), migrationRetries: new Map(),
     liveCommandResults: new Map(),
     STORAGE: { config: "config" }, readStorage: async () => ({}),
     readAccountState: () => ({}),
-    accountMigration: () => ({ status: "custom" }),
     Date: { now: () => now },
     liveEndpoint: () => true,
     updateLiveState: async () => {},
@@ -72,111 +70,6 @@ function harness(overrides = {}) {
 }
 
 const account = { key: "shopee:shop", config: {}, account: { provider_account_id: "shop" } };
-
-test("simultaneous account migration writes preserve both accounts and imported replacements", async () => {
-  const oldA = { provider: "shopee", provider_account_id: "a", api_url: "https://old.invalid/a" };
-  const oldB = { ...oldA, provider_account_id: "b", api_url: "https://old.invalid/b" };
-  const newA = { ...oldA, api_url: "https://new.invalid/a" };
-  const newB = { ...oldB, api_url: "https://new.invalid/b" };
-  let stored = { config: { version: 3, history_days: 5, accounts: [oldA, oldB] } };
-  const implementation = source.slice(source.indexOf("let migrationWrites ="), source.indexOf("async function ensureAccountLiveConnection(context)"));
-  const persist = vm.runInNewContext(`(() => { ${implementation}; return persistAccountMigration; })()`, { preemptAutomaticLogUpload: () => {},
-    STORAGE: { config: "config", status: "status" }, migrationRetries: new Map(),
-    accountConfigKey: (value) => `${value.provider}:${value.provider_account_id}`,
-    readStorage: async () => structuredClone(stored),
-    writeStorage: async (values) => { await new Promise(setImmediate); stored = { ...stored, ...values }; },
-    updateScopedState: async () => {},
-  });
-  await Promise.all([
-    persist({ key: "shopee:a", config: newA }, oldA),
-    persist({ key: "shopee:b", config: newB }, oldB),
-  ]);
-  assert.deepEqual(structuredClone(stored.config.accounts), [newA, newB]);
-  assert.equal(stored.config.history_days, 5);
-  const imported = { ...newA, api_url: "https://custom.invalid/imported" };
-  stored.config.accounts[0] = imported;
-  await persist({ key: "shopee:a", config: newA }, oldA);
-  assert.deepEqual(stored.config.accounts[0], imported);
-});
-
-test("migration verifies the candidate but persists only after its real socket opens", async () => {
-  const calls = [];
-  const candidate = { api_url: "https://example.invalid/api", logs_url: "https://example.invalid/logs" };
-  const h = harness({
-    accountMigration: () => ({ status: "pending", candidate }),
-    chrome: { permissions: { contains: async () => true } },
-    signedApiPing: async () => calls.push("ping"),
-    signedLeaderRequest: async (_context, action) => calls.push(action),
-    persistAccountMigration: async () => calls.push("persist"),
-  });
-  h.resolveTicket();
-  await h.ensureAccountLiveConnection(account);
-  assert.deepEqual(calls, ["ping", "status"]);
-  assert.equal(h.sockets.length, 1);
-  h.sockets[0].open();
-  assert.deepEqual(calls, ["ping", "status", "persist"]);
-});
-
-test("migration permission failure retains legacy transport and applies retry backoff", async () => {
-  const states = [];
-  const h = harness({
-    accountMigration: () => ({ status: "pending", candidate: { api_url: "https://example.invalid/api", logs_url: "https://example.invalid/logs" } }),
-    chrome: { permissions: { contains: async () => false } },
-    updateScopedState: async (_storage, _key, state) => states.push(state),
-    STORAGE: { config: "config", status: "status" },
-  });
-  h.resolveTicket();
-  await h.ensureAccountLiveConnection(account);
-  assert.equal(h.liveConnections.get(account.key).config, account.config);
-  assert.equal(states[0].migration_pending, true);
-  assert.equal(h.sockets.length, 1);
-});
-
-test("legacy storage notifications cannot replace a candidate during handshake or persistence", async () => {
-  const persistence = deferred();
-  let persisted = 0;
-  let pings = 0;
-  const candidate = { api_url: "https://example.invalid/api", logs_url: "https://example.invalid/logs" };
-  const h = harness({
-    accountMigration: () => ({ status: "pending", candidate }),
-    chrome: { permissions: { contains: async () => true } },
-    signedApiPing: async () => { pings++; },
-    signedLeaderRequest: async () => {},
-    persistAccountMigration: async () => { persisted++; await persistence.promise; },
-  });
-  h.resolveTicket();
-  await h.ensureAccountLiveConnection(account);
-  const socket = h.sockets[0];
-  await h.ensureAccountLiveConnection(account);
-  assert.equal(h.sockets.length, 1);
-  assert.equal(socket.readyState, 0);
-  assert.equal(pings, 1);
-  socket.open();
-  await h.ensureAccountLiveConnection(account);
-  assert.equal(socket.readyState, 1);
-  assert.equal(h.sockets.length, 1);
-  assert.equal(persisted, 1);
-  persistence.resolve();
-  await new Promise(setImmediate);
-});
-
-test("candidate ticket failure retains source and persists migration retry state", async () => {
-  const states = [];
-  const h = harness({
-    accountMigration: () => ({ status: "pending", candidate: { api_url: "https://example.invalid/api", logs_url: "https://example.invalid/logs" } }),
-    chrome: { permissions: { contains: async () => true } },
-    signedApiPing: async () => {}, signedLeaderRequest: async () => {},
-    updateScopedState: async (_storage, _key, state) => states.push(state),
-  });
-  const start = h.ensureAccountLiveConnection(account);
-  await new Promise(setImmediate);
-  h.ticket.reject(new Error("New server unavailable."));
-  await start;
-  assert.equal(h.liveConnections.get(account.key).config, account.config);
-  assert.equal(states[0].migration_pending, true);
-  assert.ok(states[0].migration_retry_at > 0);
-  assert.equal(h.sockets.length, 0);
-});
 
 test("simultaneous startup events request one ticket and create one socket", async () => {
   const h = harness();
@@ -401,70 +294,6 @@ test("unexpected errors classify structured provider status and timeout while pr
 });
 
 
-test("approved permissions clear persisted warnings without replacing a healthy legacy socket", async () => {
-  for (const warning of [
-    { migration_error: "Open configuration and save it to approve the new server access." },
-    { migration_error: "Server access needed", migration_error_code: "server_permission_required" },
-  ]) {
-    const states = [];
-    const retries = new Map([[account.key, { attempt: 4, nextAt: 3600000 }]]);
-    const candidate = { api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs" };
-    const h = harness({
-      migrationRetries: retries,
-      readAccountState: () => ({ ...warning, migration_pending: true, migration_retry_at: 3600000 }),
-      accountMigration: () => ({ status: "pending", candidate }),
-      chrome: { permissions: { contains: async ({ origins }) => {
-        assert.deepEqual(Array.from(origins), ["https://new.invalid/*", "https://logs.invalid/*"]);
-        return true;
-      } } },
-      updateScopedState: async (_storage, _key, state) => states.push(state),
-    });
-    const socket = { readyState: 1 };
-    h.liveConnections.set(account.key, { socket, config: account.config });
-    await h.ensureAccountLiveConnection(account);
-    assert.equal(h.liveConnections.get(account.key).socket, socket);
-    assert.equal(h.calls(), 0);
-    assert.equal(retries.size, 0);
-    assert.equal(states.length, 1);
-    assert.equal(states[0].migration_error, null);
-    assert.equal(states[0].migration_retry_at, 0);
-    assert.equal(states[0].migration_pending, true);
-  }
-});
-
-test("denied permissions and unrelated migration failures retain their warning", async () => {
-  for (const migration_error of [
-    "Open configuration and save it to approve the new server access.",
-    "API ping failed",
-  ]) {
-    const states = [];
-    const h = harness({
-      readAccountState: () => ({ migration_error, migration_pending: true }),
-      accountMigration: () => ({ status: "pending", candidate: {
-        api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs",
-      } }),
-      chrome: { permissions: { contains: async () => migration_error === "API ping failed" } },
-      updateScopedState: async (_storage, _key, state) => states.push(state),
-    });
-    h.liveConnections.set(account.key, { socket: { readyState: 1 }, config: account.config });
-    await h.ensureAccountLiveConnection(account);
-    assert.equal(states.length, 0);
-  }
-});
-
-test("importing current configuration removes obsolete migration failure state", async () => {
-  const states = [];
-  const h = harness({
-    readAccountState: () => ({ migration_pending: true, migration_error: "API ping failed" }),
-    updateScopedState: async (_storage, _key, state) => states.push(state),
-  });
-  h.liveConnections.set(account.key, { socket: { readyState: 1 }, config: account.config });
-  await h.ensureAccountLiveConnection(account);
-  assert.equal(states[0].migration_pending, false);
-  assert.equal(states[0].migration_error, null);
-});
-
-
 test("granting and revoking browser permissions reconcile regional access", async () => {
   const listeners = [];
   let calls = 0;
@@ -480,25 +309,6 @@ test("granting and revoking browser permissions reconcile regional access", asyn
   });
   for (const listener of listeners) listener();
   assert.equal(calls, 2);
-});
-
-
-test("approval bypasses permission backoff when a natural reconnect is available", async () => {
-  const calls = [];
-  const candidate = { api_url: "https://new.invalid/api", logs_url: "https://logs.invalid/logs" };
-  const h = harness({
-    readAccountState: () => ({ migration_pending: true, migration_retry_at: 3600000,
-      migration_error: "Open configuration and save it to approve the new server access." }),
-    accountMigration: () => ({ status: "pending", candidate }),
-    chrome: { permissions: { contains: async () => true } },
-    updateScopedState: async () => {},
-    signedApiPing: async () => calls.push("ping"),
-    signedLeaderRequest: async () => calls.push("status"),
-  });
-  h.resolveTicket();
-  await h.ensureAccountLiveConnection(account);
-  assert.deepEqual(calls, ["ping", "status"]);
-  assert.equal(h.liveConnections.get(account.key).config, candidate);
 });
 
 
@@ -521,3 +331,36 @@ test("intentional stop is silent but clean remote closure remains a warning", as
   assert.equal(disconnected.details.open_duration_ms, 1200);
   assert.equal(disconnected.details.reconnect_attempt, 1);
 });
+
+
+for (const config of [
+  { api_url: "https://admin.kaojai.ai/api/omnichat/shopee/11111111-1111-4111-8111-111111111111/shop", logs_url: "https://diagnostics.example.invalid/logs" },
+  { api_url: "https://custom.example.invalid/bridge", logs_url: "https://custom.example.invalid/logs" },
+  { commands_url: "https://legacy.example.invalid/tickets", logs_url: "https://legacy.example.invalid/logs" },
+]) {
+  test(`connection and reconnect preserve configured endpoints: ${config.api_url ?? config.commands_url}`, async () => {
+    const requestedEndpoints = [];
+    const originalConfig = structuredClone(config);
+    const endpointSource = source.slice(source.indexOf("function liveEndpoint("), source.indexOf("function leaderEndpoint("));
+    const endpoint = vm.runInNewContext(`(() => { ${endpointSource}; return liveEndpoint; })()`, { URL });
+    const h = harness({
+      liveEndpoint: endpoint,
+      writeStorage: async () => assert.fail("connecting must not rewrite saved configuration"),
+      signedLiveTicket: async context => {
+        requestedEndpoints.push(endpoint(context.config).toString());
+        return { ticket: "test-ticket", socketUrl: new URL("wss://configured.example.invalid") };
+      },
+    });
+    const context = { ...account, config };
+    await h.ensureAccountLiveConnection(context);
+    h.sockets[0].open();
+    await h.ensureAccountLiveConnection(context);
+    assert.equal(h.sockets.length, 1, "unchanged configuration retains its healthy connection");
+    h.stopLiveConnection();
+    await h.ensureAccountLiveConnection(context);
+    const expected = config.api_url ? `${config.api_url}/tickets` : config.commands_url;
+    assert.deepEqual(requestedEndpoints, [expected, expected]);
+    assert.deepEqual(config, originalConfig);
+    assert.equal(h.liveConnections.get(account.key).config, config);
+  });
+}
