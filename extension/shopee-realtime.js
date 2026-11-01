@@ -99,6 +99,7 @@
   let socketListeners = null;
   let sellerCentreCapturePromise = null;
   let activeSellerCentrePoll = null;
+  let waitingRecovery = null;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -882,6 +883,26 @@
     return result.checkpoint ?? {};
   }
 
+  async function waitForSellerCentreCapture(requestId, signal) {
+    if (!sellerCentreCapturePromise) return;
+    signal.throwIfAborted();
+    const waiter = { requestId, signal };
+    waitingRecovery = waiter;
+    let onAbort;
+    const cancelled = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      // Cancelling recovery releases its wait without interrupting durable polling.
+      await Promise.race([sellerCentreCapturePromise.catch(() => undefined), cancelled]);
+      signal.throwIfAborted();
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      if (waitingRecovery === waiter) waitingRecovery = null;
+    }
+  }
+
   async function fetchSellerCentreConversationMessages(conversation, cursor, latestId, epoch, poll) {
     if (!state.historyTemplate && !state.getTemplate) return null;
     const result = await fetchHistory(conversation, cursor, async (messages, page) => {
@@ -893,6 +914,10 @@
       const acknowledgement = await acknowledged;
       if (!acknowledgement.ok) {
         throw Object.assign(new Error("Could not persist polled messages."), { reason_code: "persistence_failed" });
+      }
+      if (waitingRecovery && !waitingRecovery.signal.aborted
+        && epoch === state.sellerCentreCaptureEpoch) {
+        post({ type: "recovery_activity", request_id: waitingRecovery.requestId });
       }
       return acknowledgement;
     }, cursor ? 0 : Date.now() - INITIAL_SYNC_LOOKBACK_MS, null, {
@@ -1866,7 +1891,7 @@
     let checked = 0;
     try {
       // Finish any active page scan before using the same durable coverage.
-      if (sellerCentreCapturePromise) await sellerCentreCapturePromise.catch(() => undefined);
+      await waitForSellerCentreCapture(requestId, state.recoveryAbortController.signal);
       assertSessionUnchanged();
       const current = await loadRecoveryCheckpoint(`${requestId}:checkpoint`, accountId);
       assertSessionUnchanged();

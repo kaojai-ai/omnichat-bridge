@@ -385,6 +385,11 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     setResponse,
     checkpoint(accountId = "100000001") { return checkpoints.get(accountId) ?? {}; },
     setPollAcknowledgement(ok) { pollAcknowledgement = ok; },
+    cancelSync(requestId) {
+      for (const listener of listeners) listener({ source: window, origin, data: {
+        source: "omnichat-realtime-bridge-v3", type: "cancel_sync_v3", request_id: requestId,
+      } });
+    },
     seedRecoveryState,
     resetRecovery,
     detect,
@@ -1818,5 +1823,60 @@ test("Seller Centre recovery waits for the active poll and reloads its committed
     assert.equal(bridge.requests.filter(path => path === retryHistoryPath).length, 1);
     assert.equal(bridge.checkpoint().conversations["retry-conversation"].message_id, "latest");
     assert.ok(bridge.posts.some(post => post.type === "recovery_checkpoint" && post.request_id === "wait-for-poll:checkpoint"));
+  } finally { bridge.dispose(); }
+});
+
+test("waiting recovery receives activity only when a polling page persists", async () => {
+  const bridge = await pollingRetryBridge();
+  try {
+    const timestamp = Date.parse("2026-08-20T11:00:00Z") / 1000;
+    const messages = Array.from({ length: 101 }, (_, i) => ({
+      ...retryMessage(`progress-${i}`, 0), created_timestamp: timestamp - i,
+    }));
+    bridge.setResponse(retryListPath, [{ ...retryConversation("progress-0"), last_message_time: "2026-08-20T11:00:00Z" }]);
+    let release;
+    let offset = -1;
+    bridge.setResponse(retryHistoryPath, request => {
+      offset = Number(new URL(request.url).searchParams.get("offset"));
+      return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify(messages.slice(offset, offset + 100)))); });
+    });
+    await bridge.runIntervals();
+    const recovery = bridge.sync("100000001", "waiting-progress", { watermark: "2026-08-01T00:00:00Z" });
+    await new Promise(resolve => setImmediate(resolve));
+    const activity = () => bridge.posts.filter(post => post.type === "recovery_activity" && post.request_id === "waiting-progress");
+    assert.equal(activity().length, 0, "a stalled page does not renew recovery activity");
+    release();
+    for (let attempt = 0; attempt < 30 && offset === 0; attempt++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(offset, 100);
+    assert.equal(activity().length, 1, "durable page progress refreshes the waiting request");
+    await bridge.runIntervals();
+    assert.equal(activity().length, 1, "timer ticks cannot disguise a stalled next page");
+    release();
+    assert.equal((await recovery).ok, true);
+    assert.equal(activity().length >= 2, true);
+  } finally { bridge.dispose(); }
+});
+
+test("cancelling a waiting recovery releases it without cancelling the polling scan", async () => {
+  const bridge = await pollingRetryBridge();
+  try {
+    const message = { ...retryMessage("cancel-latest", 0), created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 };
+    bridge.setResponse(retryListPath, [{ ...retryConversation("cancel-latest"), last_message_time: "2026-08-20T11:00:00Z" }]);
+    let release;
+    bridge.setResponse(retryHistoryPath, () => new Promise(resolve => { release = resolve; }));
+    await bridge.runIntervals();
+    const recovery = bridge.sync("100000001", "cancel-wait", { watermark: "2026-08-01T00:00:00Z" });
+    await new Promise(resolve => setImmediate(resolve));
+    bridge.cancelSync("cancel-wait");
+    await new Promise(resolve => setImmediate(resolve));
+    const complete = bridge.posts.find(post => post.type === "recovery_complete" && post.request_id === "cancel-wait");
+    assert.equal(complete?.ok, false, "cancellation completes before the held poll responds");
+    assert.equal(bridge.state.recoveryInFlight, false);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_checkpoint" && post.request_id === "cancel-wait:checkpoint"), false);
+    release(new Response(JSON.stringify([message])));
+    await bridge.runIntervals();
+    assert.equal((await recovery).ok, false);
+    assert.equal(bridge.checkpoint().conversations["retry-conversation"].message_id, "cancel-latest");
+    assert.equal(bridge.posts.some(post => post.type === "recovery_activity" && post.request_id === "cancel-wait"), false);
   } finally { bridge.dispose(); }
 });
