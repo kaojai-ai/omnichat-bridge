@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { STORAGE, readAccountState, writeAccountState } from "../extension/lib/storage.js";
-import { advanceConversationCursors, hasScanBacklog, isAfterMessageCursor, latestMessageCursor, migrateScanState } from "../extension/lib/sync-state.js";
+import { latestMessageCursor, migrateScanState } from "../extension/lib/sync-state.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 function section(start, end) {
@@ -28,7 +28,7 @@ function harness(overrides = {}) {
     writeStorage: async patch => { await turn(); if (failWrite) { failWrite = false; throw new Error("storage unavailable"); } Object.assign(state, structuredClone(patch)); },
     hasLocalConsent: value => value === true,
     hasServerInitialized: stored => stored[STORAGE.serverInitialized] === true,
-    advanceConversationCursors, hasScanBacklog, isAfterMessageCursor, latestMessageCursor, migrateScanState,
+    latestMessageCursor,
     messageProvider: value => value.provider,
     recordLog: async () => {}, installationId: async () => "fixture",
     selectBatchMessages: pending => pending,
@@ -191,37 +191,47 @@ test("realtime after a failed scan cannot advance past unrecovered historical pa
   assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 1);
 });
 
-for (const advanceCursor of [true, false]) {
-  test(`Shopee accepts unseen messages behind its recovery checkpoint (advance=${advanceCursor})`, async () => {
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider} accepts unseen messages behind its recovery checkpoint`, async () => {
     const h = harness();
-    const a = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" } };
+    const a = { key: `${provider}:shop`, account: { provider, provider_account_id: "shop" } };
     const checkpoint = { event_timestamp: "2026-10-25T00:00:00.000Z", message_id: "200" };
     h.state[STORAGE.scanState] = writeAccountState(null, a.key, {
       version: 1, watermark: checkpoint.event_timestamp, in_progress: false,
       conversations: { conversation: checkpoint },
     });
     const messages = [
-      { ...message("100"), provider: "shopee", event_timestamp: "2026-10-24T23:59:00.000Z" },
-      { ...message("150"), provider: "shopee" },
-      { ...message("300"), provider: "shopee", event_timestamp: "2026-10-25T00:01:00.000Z" },
+      { ...message("100"), provider, event_timestamp: "2026-10-24T23:59:00.000Z" },
+      { ...message("150"), provider },
+      { ...message("300"), provider, event_timestamp: "2026-10-25T00:01:00.000Z" },
     ];
-    const result = await h.runtime.queueMessagesForContext(messages, a, false, advanceCursor);
+    const result = await h.runtime.queueMessagesForContext(messages, a, false);
     assert.equal(result.queued, 3);
     assert.deepEqual(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation, checkpoint);
-    const duplicate = await h.runtime.queueMessagesForContext(messages, a, false, advanceCursor);
+    const duplicate = await h.runtime.queueMessagesForContext(messages, a, false);
     assert.equal(duplicate.queued, 0);
     assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 3);
   });
 }
 
-test("LINE keeps filtering by cursor and advancing after complete scans", async () => {
-  const h = harness();
-  const a = context("line");
-  h.state[STORAGE.scanState] = writeAccountState(null, a.key, {
-    version: 1, watermark: "2026-10-25T00:00:00.000Z", in_progress: false,
-    conversations: { conversation: { event_timestamp: "2026-10-25T00:00:00.000Z", message_id: "200" } },
+
+test("legacy scan migration never infers completeness from pending messages", async () => {
+  const a = context("legacy");
+  const state = {
+    [STORAGE.consent]: true,
+    [STORAGE.pending]: writeAccountState(null, a.key, [message("unscanned-live")]),
+  };
+  const runtime = vm.createContext({
+    STORAGE, readAccountState, writeAccountState, migrateScanState,
+    serializeAccountStorage: task => task(),
+    readStorage: async () => state,
+    writeStorage: async patch => Object.assign(state, patch),
+    accountContextFor: () => a,
+    hasLocalConsent: value => value === true,
   });
-  const result = await h.runtime.queueMessagesForContext([message("100"), message("300")], a, false);
-  assert.equal(result.queued, 1);
-  assert.equal(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation.message_id, "300");
+  vm.runInContext(section("async function getAccountScanState(", "async function discardPending("), runtime);
+  const result = await runtime.getAccountScanState(a.account.provider_account_id, a.account.provider);
+  assert.deepEqual(result.state.conversations, {});
+  assert.equal(result.state.watermark, null);
+  assert.equal(readAccountState(state[STORAGE.pending], a.key)[0].id, "unscanned-live");
 });
