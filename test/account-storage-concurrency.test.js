@@ -190,3 +190,38 @@ test("realtime after a failed scan cannot advance past unrecovered historical pa
   assert.deepEqual(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation, checkpoint);
   assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 1);
 });
+
+for (const advanceCursor of [true, false]) {
+  test(`Shopee accepts unseen messages behind its recovery checkpoint (advance=${advanceCursor})`, async () => {
+    const h = harness();
+    const a = { key: "shopee:shop", account: { provider: "shopee", provider_account_id: "shop" } };
+    const checkpoint = { event_timestamp: "2026-10-25T00:00:00.000Z", message_id: "200" };
+    h.state[STORAGE.scanState] = writeAccountState(null, a.key, {
+      version: 1, watermark: checkpoint.event_timestamp, in_progress: false,
+      conversations: { conversation: checkpoint },
+    });
+    const messages = [
+      { ...message("100"), provider: "shopee", event_timestamp: "2026-10-24T23:59:00.000Z" },
+      { ...message("150"), provider: "shopee" },
+      { ...message("300"), provider: "shopee", event_timestamp: "2026-10-25T00:01:00.000Z" },
+    ];
+    const result = await h.runtime.queueMessagesForContext(messages, a, false, advanceCursor);
+    assert.equal(result.queued, 3);
+    assert.deepEqual(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation, checkpoint);
+    const duplicate = await h.runtime.queueMessagesForContext(messages, a, false, advanceCursor);
+    assert.equal(duplicate.queued, 0);
+    assert.equal(readAccountState(h.state[STORAGE.pending], a.key).length, 3);
+  });
+}
+
+test("LINE keeps filtering by cursor and advancing after complete scans", async () => {
+  const h = harness();
+  const a = context("line");
+  h.state[STORAGE.scanState] = writeAccountState(null, a.key, {
+    version: 1, watermark: "2026-10-25T00:00:00.000Z", in_progress: false,
+    conversations: { conversation: { event_timestamp: "2026-10-25T00:00:00.000Z", message_id: "200" } },
+  });
+  const result = await h.runtime.queueMessagesForContext([message("100"), message("300")], a, false);
+  assert.equal(result.queued, 1);
+  assert.equal(readAccountState(h.state[STORAGE.scanState], a.key).conversations.conversation.message_id, "300");
+});

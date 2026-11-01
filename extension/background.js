@@ -4460,14 +4460,16 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
         readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, null),
       );
     }
-    const deferCursorAdvance = advanceCursor && hasScanBacklog(scanState);
+    // Shopee realtime arrivals do not prove that earlier history was captured.
+    const advancesRecoveryCursor = advanceCursor && context.account.provider !== "shopee";
+    const deferCursorAdvance = advanceCursor && (!advancesRecoveryCursor || hasScanBacklog(scanState));
     const known = new Set(pending.map(messageKey));
     const eligible = [];
     const added = [];
     for (const message of scopedMessages) {
       const cursor = scanState.conversations?.[message?.conversation_id];
       if (messageProvider(message) !== context.account.provider
-        || !isAfterMessageCursor(message, cursor)) continue;
+        || (context.account.provider !== "shopee" && !isAfterMessageCursor(message, cursor))) continue;
       eligible.push(message);
       if (known.has(messageKey(message))) continue;
       known.add(messageKey(message));
@@ -4495,7 +4497,7 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
         },
       );
     }
-    if (!deferCursorAdvance && advanceCursor && added.length) {
+    if (!deferCursorAdvance && advancesRecoveryCursor && added.length) {
       writes[STORAGE.scanState] = writeAccountState(
         stored[STORAGE.scanState],
         context.key,
