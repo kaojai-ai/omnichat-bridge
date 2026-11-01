@@ -14,13 +14,6 @@ const origin = "https://seller.shopee.co.th";
 const parserContext = vm.createContext({ location: { origin }, URL });
 vm.runInContext(shopeeParserSource, parserContext);
 
-test("Shopee history window is not capped at the bootstrap conversation limit", () => {
-  assert.match(
-    source,
-    /maxItems: !historyWindow && bootstrap && !pageRequired\.length \? MANUAL_SYNC_MAX_CONVERSATIONS : null/,
-  );
-  assert.match(source, /\} else if \(!historyWindow && bootstrap\) \{/);
-});
 
 test("keeps the recovery account identity available to reconnect cleanup", () => {
   const recoverStart = source.indexOf("async function recover(");
@@ -159,9 +152,12 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       posts.push(message);
       if (message.type === "recovery_batch" && message.request_id.startsWith("poll:")) {
         queueMicrotask(() => {
+          const parsed = parserContext.OmnichatShopee.parseShopeeMessages(message.body, "poll");
           for (const listener of listeners) listener({ source: window, origin, data: {
             source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
             request_id: message.request_id, ok: pollAcknowledgement,
+            parsed: parsed.length, queued: pollAcknowledgement ? parsed.length : 0,
+            latest_cursor: pollAcknowledgement ? latestMessageCursor(parsed) : null,
           } });
         });
       }
@@ -299,7 +295,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
         },
       });
     }
-    for (let attempt = 0; attempt < 300; attempt += 1) {
+    for (let attempt = 0; attempt < 2000; attempt += 1) {
       for (const post of posts) {
         if (![
           "recovery_batch",
@@ -631,7 +627,9 @@ test("Shopee history_days without conversation ids loads every conversation in t
     message("inside-message", insideId, "2026-08-26T00:00:00.000Z"),
     message("inside-too-old", insideId, "2026-08-20T00:00:00.000Z"),
   ]);
-  bridge.setResponse("/webchat/api/v1.2/conversations/inside-older/messages", []);
+  bridge.setResponse("/webchat/api/v1.2/conversations/inside-older/messages", [
+    message("inside-older-message", "inside-older", "2026-08-26T00:00:00.000Z"),
+  ]);
   const store = { messages: [], conversations: {}, watermark: null };
   const complete = await bridge.sync("100000001", "history-window", {
     watermark: "2026-09-20T00:00:00.000Z",
@@ -640,7 +638,7 @@ test("Shopee history_days without conversation ids loads every conversation in t
   }, store);
 
   assert.equal(complete.ok, true);
-  assert.deepEqual(store.messages.map((item) => item.id), ["inside-message"]);
+  assert.deepEqual(store.messages.map((item) => item.id), ["inside-message", "inside-older-message"]);
   assert.equal(
     bridge.requests.includes("/webchat/api/v1.2/conversations/inside-older/messages"),
     true,
@@ -733,7 +731,9 @@ test("Shopee sync checks a different message ID at the same timestamp", async ()
     id: "changed", shop_id: 100000001, last_message_time: timestamp,
     latest_message_id: "message-2",
   }]);
-  bridge.setResponse("/webchat/api/v1.2/conversations/changed/messages", []);
+  bridge.setResponse("/webchat/api/v1.2/conversations/changed/messages", [{
+    ...retryMessage("message-2", 0), conversation_id: "changed", created_timestamp: Date.parse(timestamp) / 1000,
+  }]);
 
   const result = await bridge.sync("100000001", "changed-sync", {
     watermark: "2026-08-01T00:00:00.000Z",
@@ -786,7 +786,9 @@ test("Shopee sync probes a summary with no usable timestamp", async () => {
   await bridge.fetch("/webchat/api/v1.2/conversations", [{
     id: "no-time", shop_id: 100000001, latest_message_id: "message-1",
   }]);
-  bridge.setResponse("/webchat/api/v1.2/conversations/no-time/messages", []);
+  bridge.setResponse("/webchat/api/v1.2/conversations/no-time/messages", [{
+    ...retryMessage("message-1", 0), conversation_id: "no-time", created_timestamp: Date.parse("2026-08-20T10:00:00Z") / 1000,
+  }]);
 
   const result = await bridge.sync("100000001", "no-time-sync", {
     watermark: "2026-08-01T00:00:00.000Z",
@@ -852,7 +854,7 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
   assert.ok(realtime.request_id.startsWith("poll:"));
   assert.deepEqual(
     JSON.parse(JSON.stringify(realtime.body.map((message) => message.id))),
-    ["seller-message-2"],
+    ["seller-message-1", "seller-message-2"],
   );
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations"), false);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/messages"), false);
@@ -869,7 +871,11 @@ test("recovers Seller Centre history through the mini conversation route", async
     latest_message_id: "seller-recovery-message",
     biz_id: 0,
   }]);
-  await bridge.fetch("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages", []);
+  await bridge.fetch("/webchat/api/v1.2/mini/conversations/seller-centre-recovery/messages", [{
+    id: "seller-recovery-message", conversation_id: "seller-centre-recovery",
+    shop_id: 100000001, from_id: 987654321, to_id: 100000001,
+    type: "text", content: { text: "Recovered" }, created_timestamp: Date.parse("2026-08-20T10:00:00Z") / 1000,
+  }]);
 
   const complete = await bridge.sync("100000001");
   assert.equal(complete.ok, true);
@@ -903,6 +909,39 @@ function capturedRetryIds(bridge) {
     .flatMap((post) => Array.from(post.body, (message) => message.id));
 }
 
+test("Seller Centre initial list leaves history ownership with recovery", async () => {
+  const bridge = await pollingRetryBridge();
+  assert.equal(bridge.state.capturedMessageCursorsByConversation.size, 0);
+  assert.equal(bridge.requests.includes(retryHistoryPath), false);
+  assert.deepEqual(capturedRetryIds(bridge), []);
+});
+
+test("Seller Centre captures lower-ID messages at the previous timestamp boundary", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("z-old")]);
+  bridge.setResponse(retryHistoryPath, [retryMessage("z-old", 0)]);
+  await bridge.runIntervals();
+  bridge.setResponse(retryListPath, [retryConversation("a-new")]);
+  bridge.setResponse(retryHistoryPath, [retryMessage("z-old", 0), retryMessage("a-new", 0)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["z-old", "z-old", "a-new"]);
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
+});
+
+test("Seller Centre polling resets a captured scrolled-list cursor", async () => {
+  const bridge = await pollingRetryBridge();
+  await bridge.fetch(retryListPath, [retryConversation("m1")], { next_timestamp_nano: "scrolled-page", direction: "older" });
+  const cursors = [];
+  bridge.setResponse(retryListPath, async (request) => {
+    cursors.push((await request.json()).next_timestamp_nano);
+    return new Response(JSON.stringify([retryConversation("m2")]));
+  });
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  await bridge.runIntervals();
+  assert.deepEqual(cursors, ["0"]);
+  assert.ok(capturedRetryIds(bridge).includes("m2"));
+});
+
 test("Seller Centre retries unchanged summaries after repeated history failures and captures intervening messages once", async () => {
   const bridge = await pollingRetryBridge();
   bridge.setResponse(retryListPath, [retryConversation("m2")]);
@@ -910,15 +949,15 @@ test("Seller Centre retries unchanged summaries after repeated history failures 
   await bridge.runIntervals();
   await bridge.runIntervals();
   assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 2);
-  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.capturedMessageCursorsByConversation.get("retry-conversation"), undefined);
   assert.equal(bridge.state.sellerCentreCaptureFailed, true);
   bridge.setResponse(retryListPath, [retryConversation("m3")]);
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1), retryMessage("m3", 2)]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2", "m3"]);
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2", "m3"]);
 });
 
 test("Seller Centre captures buyer messages before a reply in a first-seen conversation", async () => {
@@ -940,11 +979,11 @@ test("Seller Centre retries unchanged summaries until history contains the expec
   bridge.setResponse(retryListPath, [retryConversation("m2")]);
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0)]);
   await bridge.runIntervals();
-  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.capturedMessageCursorsByConversation.get("retry-conversation"), undefined);
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2"]);
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
 });
 
@@ -954,13 +993,13 @@ test("Seller Centre retries capture after the durable queue rejects a batch", as
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   bridge.setPollAcknowledgement(false);
   await bridge.runIntervals();
-  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.capturedMessageCursorsByConversation.get("retry-conversation"), undefined);
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
   bridge.setPollAcknowledgement(true);
   await bridge.runIntervals();
-  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m2");
+  assert.equal(bridge.state.capturedMessageCursorsByConversation.get("retry-conversation")?.message_id, "m2");
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
-  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2", "m1", "m2"]);
 });
 
 test("Seller Centre paginates history back to the last captured message", async () => {
@@ -975,7 +1014,9 @@ test("Seller Centre paginates history back to the last captured message", async 
   });
   await bridge.runIntervals();
   assert.deepEqual(offsets, [0, 100]);
-  assert.deepEqual(capturedRetryIds(bridge), messages.slice(1).map((message) => message.id));
+  assert.deepEqual(new Set(capturedRetryIds(bridge)), new Set(messages.map((message) => message.id)));
+  const batches = bridge.posts.filter((post) => post.type === "recovery_batch" && post.request_id.startsWith("poll:"));
+  assert.deepEqual(batches.map((post) => post.body.length), [100, 2]);
 });
 
 test("Seller Centre retains pending capture until a history request template is available", async () => {
@@ -991,7 +1032,7 @@ test("Seller Centre retains pending capture until a history request template is 
   bridge.state.getTemplate = template;
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2"]);
 });
 
 test("Seller Centre prevents overlapping history fetches and retains newer summaries", async () => {
@@ -1008,7 +1049,7 @@ test("Seller Centre prevents overlapping history fetches and retains newer summa
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1), retryMessage("m3", 2)]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2", "m2", "m3"]);
 });
 
 for (const reset of ["shop switch", "dispose"]) {
@@ -1027,7 +1068,7 @@ for (const reset of ["shop switch", "dispose"]) {
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(capturedRetryIds(bridge), []);
     assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
-    assert.equal(bridge.state.capturedMessageIdsByConversation.size, 0);
+    assert.equal(bridge.state.capturedMessageCursorsByConversation.size, 0);
     assert.equal(bridge.state.pollingConnected, false);
   });
 }
@@ -1041,9 +1082,9 @@ test("Seller Centre retries m2 on the next poll without a new summary message", 
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   await bridge.runIntervals();
   assert.equal(bridge.requests.filter((path) => path === retryHistoryPath).length, 2);
-  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2"]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2"]);
 });
 
 for (const subaccount of [false, true]) {
@@ -1063,7 +1104,10 @@ for (const subaccount of [false, true]) {
     const first = wrap([conversation("other-shop", 200000002, cursor)]);
     const payload = { next_timestamp_nano: "0", direction: "older", biz_id: 0, on_message_received: false };
     await bridge.fetch(path, first, payload);
-    await bridge.fetch("/webchat/api/v1.2/mini/conversations/active-shop/messages", []);
+    await bridge.fetch("/webchat/api/v1.2/mini/conversations/active-shop/messages", [{
+      ...retryMessage("active-shop-message", 0), conversation_id: "active-shop",
+      created_timestamp: Date.parse("2026-08-20T10:00:00Z") / 1000,
+    }]);
     const replayBodies = [];
     bridge.setResponse(path, async (request) => {
       assert.equal(request.method, "POST");
@@ -1094,7 +1138,7 @@ test("subaccount polling captures new active-shop messages without fetching othe
   ] });
   bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
   await bridge.runIntervals();
-  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.deepEqual(capturedRetryIds(bridge), ["m1", "m2"]);
   assert.equal(bridge.requests.includes(`${retryListPath}/other-conversation/messages`), false);
 });
 
@@ -1138,7 +1182,7 @@ for (const hangBody of [false, true]) {
   });
 }
 
-test("default polling captures old provider events without an arbitrary age cutoff", async () => {
+test("polling without a durable cursor uses the initial one-day history window", async () => {
   const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
   await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
   const conversation = (id, latest) => ({
@@ -1161,8 +1205,8 @@ test("default polling captures old provider events without an arbitrary age cuto
   await bridge.runIntervals();
   const ids = capturedRetryIds(bridge);
   assert.equal(requestedLimit, "100");
-  assert.equal(ids.length, 40);
-  assert.deepEqual(ids, messages.map((message) => message.id));
+  assert.equal(ids.length, 35);
+  assert.deepEqual(ids, messages.slice(5).map((message) => message.id));
   assert.equal(bridge.requests.some((path) => path.includes("/ancient/messages")), true);
 });
 
@@ -1394,7 +1438,39 @@ test("Shopee recovery reports fetched conversation pages and actual message work
 });
 
 
-test("combined Shopee metadata uses the same list pass while bootstrap still recovers only ten chats", async () => {
+test("Shopee bootstrap captures more than twenty-five messages before completing", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  const messages = Array.from({ length: 40 }, (_, index) => ({
+    id: `bootstrap-${index}`, conversation_id: "bootstrap-full", shop_id: 100000001,
+    from_id: 987654321, to_id: 100000001, type: "text", content: { text: "Fixture" },
+    created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 + index,
+  }));
+  await bridge.fetch(path, [{ id: "bootstrap-full", shop_id: 100000001,
+    last_message_time: "2026-08-20T11:00:39Z", latest_message_id: "bootstrap-39" }]);
+  bridge.setResponse(`${path}/bootstrap-full/messages`, messages);
+  const store = { messages: [], conversations: {} };
+  const result = await bridge.sync("100000001", "bootstrap-full", {}, store);
+  assert.equal(result.ok, true);
+  assert.equal(store.messages.length, 40);
+  assert.equal(store.conversations["bootstrap-full"].event_timestamp, "2026-08-20T11:00:39.000Z");
+  bridge.dispose();
+});
+
+test("Shopee recovery does not advance checkpoints before history reaches its summary", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  await bridge.fetch(path, [{ id: "not-ready", shop_id: 100000001,
+    last_message_time: "2026-08-20T11:00:00Z", latest_message_id: "missing-latest" }]);
+  bridge.setResponse(`${path}/not-ready/messages`, []);
+  const result = await bridge.sync("100000001", "not-ready", {});
+  assert.equal(result.ok, false);
+  assert.equal(result.reason_code, "invalid_message_history");
+  assert.equal(bridge.posts.some((post) => post.type === "recovery_cursor"), false);
+  bridge.dispose();
+});
+
+test("combined Shopee metadata uses the same list pass while bootstrap recovers every recent chat", async () => {
   const bridge = createBridge();
   const path = "/webchat/api/v1.2/conversations";
   const items = Array.from({ length: 105 }, (_, i) => ({ id: `combined-${i}`, shop_id: 100000001,
@@ -1410,7 +1486,7 @@ test("combined Shopee metadata uses the same list pass while bootstrap still rec
   assert.equal(result.metadata.account.provider_account_id, "100000001");
   const requests = bridge.requests.slice(before);
   assert.equal(requests.filter(request => request === path).length, 1);
-  assert.equal(requests.filter(request => request.startsWith(path + "/") && request.endsWith("/messages")).length, 10);
+  assert.equal(requests.filter(request => request.startsWith(path + "/") && request.endsWith("/messages")).length, 105);
   bridge.dispose();
 });
 
@@ -1434,6 +1510,28 @@ test("Shopee recovery traverses later list pages after an old summary and probes
   assert.equal(result.metadata.profiles.length, 2);
   assert.ok(bridge.requests.includes(`${path}/unknown-later/messages`));
   assert.equal(bridge.requests.includes(`${path}/old-first/messages`), false);
+  bridge.dispose();
+});
+
+test("Shopee recovery continues past an early requested-history conversation", async () => {
+  const bridge = createBridge();
+  const path = "/webchat/api/v1.2/conversations";
+  const conversation = (id, next) => ({ id, shop_id: 100000001,
+    last_message_time: "2026-08-20T11:00:00Z", next_timestamp_nano: next });
+  await bridge.fetch(path, [conversation("deep-first", "second")], { next_timestamp_nano: "0", direction: "older" });
+  bridge.setResponse(path, async (request) => new Response(JSON.stringify(
+    (await request.json()).next_timestamp_nano === "0"
+      ? [conversation("deep-first", "second")] : [conversation("ordinary-later", "0")],
+  )));
+  bridge.setResponse(`${path}/deep-first/messages`, []);
+  bridge.setResponse(`${path}/ordinary-later/messages`, []);
+  const result = await bridge.sync("100000001", "deep-and-regular", {
+    watermark: "2026-08-19T00:00:00Z", history_days: 3,
+    history_since_ms: Date.parse("2026-08-17T00:00:00Z"),
+    history_conversation_ids: ["deep-first"],
+  });
+  assert.equal(result.ok, true);
+  assert.ok(bridge.requests.includes(`${path}/ordinary-later/messages`));
   bridge.dispose();
 });
 
