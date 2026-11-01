@@ -603,7 +603,7 @@
     const automaticPoll = String(message.request_id).startsWith("poll:");
     try {
       const messages = addConversationProfile(
-        normalizedMessages(message.body, "history_recovery")
+        normalizedMessages(message.body, automaticPoll ? "poll" : "history_recovery")
       ).map((item) => ({
         ...item,
         ...(item.provider_account_id || !message.provider_account_id
@@ -616,7 +616,6 @@
         type: "queue_messages",
         messages,
         flush: automaticPoll,
-        advance_cursor: false,
         recovery_page: !automaticPoll,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
@@ -707,6 +706,21 @@
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
       });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
+  async function handleRecoveryCheckpoint(message) {
+    try {
+      const result = await sendRuntimeMessage({
+        type: "get_sync_state",
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
+      });
+      post({ type: "recovery_ack_v3", request_id: message.request_id,
+        ok: Boolean(result?.ok), checkpoint: result?.checkpoint,
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not load sync checkpoint." }) });
+    } catch (error) {
       post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -808,6 +822,7 @@
 
   async function handleRealtimeEvent(body, captureMethod = "realtime_socket") {
     const messages = [];
+    const capturedKeys = [];
     for (const message of addConversationProfile(normalizedMessages(body, captureMethod))) {
       const apiSend = findPendingApiSend(message);
       if (apiSend) {
@@ -818,7 +833,7 @@
       const accountId = message.provider_account_id ?? message.participant?.provider_account_id
         ?? currentProviderAccountId ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "unverified");
       if (realtimeMessageKeys.has(providerAdapter.id, accountId, message.conversation_id, message.id)) continue;
-      realtimeMessageKeys.add(providerAdapter.id, accountId, message.conversation_id, message.id);
+      capturedKeys.push([providerAdapter.id, accountId, message.conversation_id, message.id]);
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
@@ -836,18 +851,19 @@
     }
     if (!messages.length) return;
     const result = await sendRuntimeMessage({ type: "queue_messages", messages, flush: true });
+    if (result?.ok) {
+      for (const key of capturedKeys) realtimeMessageKeys.add(...key);
+    }
     log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
       ? "Realtime provider event processed."
       : result?.error ?? "Realtime provider event failed.", {
       parsed: messages.length,
       queued: Number(result?.queued) || 0,
-      deferred: Boolean(result?.deferred),
     });
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtimeCapture = JSON.stringify({
         parsed: messages.length,
         queued: result?.queued ?? 0,
-        deferred: Boolean(result?.deferred),
       });
     }
   }
@@ -1156,6 +1172,8 @@
       void observeAsync("history_window", () => handleHistoryWindow(event.data));
     } else if (event.data.type === "history_backfill") {
       void observeAsync("history_backfill", () => handleHistoryBackfill(event.data));
+    } else if (event.data.type === "recovery_checkpoint") {
+      void observeAsync("recovery_checkpoint", () => handleRecoveryCheckpoint(event.data));
     } else if (event.data.type === "recovery_cursor") {
       void observeAsync("recovery_cursor", () => handleRecoveryCursor(event.data));
     } else if (event.data.type === "recovery_bootstrap") {

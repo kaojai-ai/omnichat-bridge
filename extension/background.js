@@ -6,11 +6,8 @@ import { hmacHex, sha256Hex } from "./lib/crypto.js";
 import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, historySyncSettings } from "./lib/config.js";
 import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
-  advanceConversationCursors,
   compareMessageCursor,
   deliveryRetryDelay,
-  hasScanBacklog,
-  isAfterMessageCursor,
   latestMessageCursor,
   migrateScanState,
 } from "./lib/sync-state.js";
@@ -624,7 +621,6 @@ async function getAccountScanState(providerAccountId, provider = "") {
       STORAGE.config,
       STORAGE.consent,
       STORAGE.detectedAccounts,
-      STORAGE.pending,
       STORAGE.scanState,
       STORAGE.status,
       STORAGE.targetCursor,
@@ -636,14 +632,14 @@ async function getAccountScanState(providerAccountId, provider = "") {
     }
     const existing = readAccountState(stored[STORAGE.scanState], context.key, null);
     if (existing?.version === 1) return { context, state: existing, stored };
-    const pending = readAccountState(stored[STORAGE.pending], context.key, []);
     const legacyCursor = readAccountState(stored[STORAGE.targetCursor], context.key, null);
     const legacyLastAutoAt = readAccountState(
       stored[STORAGE.lastResumeSyncAt],
       context.key,
       null,
     );
-    const state = migrateScanState(legacyCursor, pending, legacyLastAutoAt);
+    // Pending captures are not evidence of a completed history interval.
+    const state = migrateScanState(legacyCursor, [], legacyLastAutoAt);
     const scanState = writeAccountState(
       stored[STORAGE.scanState],
       context.key,
@@ -1067,7 +1063,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     void exclusive(() => queueMessages(
       message.messages,
       Boolean(message.flush),
-      message.advance_cursor !== false,
     ).then(async (result) => {
       if (message.recovery_page === true) {
         const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
@@ -1281,10 +1276,10 @@ function syncControlForMessage(message, tabId) {
     && control.tabId === tabId && control.providerRequestId === requestId);
 }
 
-// Routine LINE polls outlive recovery jobs and service-worker lifetimes. Verify
+// Routine polls outlive recovery jobs and service-worker lifetimes. Verify
 // their live page identity instead of granting authority to the poll prefix alone.
 async function pollingCheckpointGuard(message, tabId) {
-  const adapter = providerAdapterForId("line_oa");
+  const adapter = providerAdapterForId(message.provider);
   const tab = await providerChatTabById(adapter, tabId);
   if (!tab) throw syncCancelledError();
   const epoch = providerTabContext(tab, adapter.id);
@@ -1293,8 +1288,10 @@ async function pollingCheckpointGuard(message, tabId) {
   if (!context || !hasLocalConsent(stored[STORAGE.consent])) throw syncCancelledError();
   const status = await providerTabStatus(tab);
   const requestId = String(message.request_id).split(":").slice(0, 2).join(":");
-  if (!status?.account_access_verified
-    || !status.accessible_account_ids?.includes(message.provider_account_id)
+  const accountVerified = adapter.id === "shopee"
+    ? status?.current_provider_account_id === message.provider_account_id
+    : status?.account_access_verified && status.accessible_account_ids?.includes(message.provider_account_id);
+  if (!accountVerified
     || status.provider_polling_request_id !== requestId
     || status.provider_polling_account_id !== message.provider_account_id) throw syncCancelledError();
   return () => {
@@ -1304,7 +1301,7 @@ async function pollingCheckpointGuard(message, tabId) {
 
 async function persistSyncCheckpoint(message, tabId) {
   const control = syncControlForMessage(message, tabId);
-  const assertCurrent = message.provider === "line_oa" && String(message.request_id ?? "").startsWith("poll:")
+  const assertCurrent = ["line_oa", "shopee"].includes(message.provider) && String(message.request_id ?? "").startsWith("poll:")
     ? await pollingCheckpointGuard(message, tabId)
     : () => {
       if (!control || !isCurrentSyncControl(control) || control.controller.signal.aborted
@@ -4427,7 +4424,7 @@ function messageKey(message) {
   return `${messageProvider(message)}:${message.conversation_id}:${message.id}`;
 }
 
-async function queueMessagesForContext(messages, context, shouldFlush, advanceCursor = true) {
+async function queueMessagesForContext(messages, context, shouldFlush) {
   preemptAutomaticLogUpload();
   if (context.account.provider === "shopee" && context.account.country && context.account.country !== "TH"
     && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
@@ -4438,9 +4435,6 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
     const stored = await readStorage([
       STORAGE.consent,
       STORAGE.pending,
-      STORAGE.scanState,
-      STORAGE.targetCursor,
-      STORAGE.lastResumeSyncAt,
       STORAGE.serverInitialized,
       STORAGE.status,
     ]);
@@ -4450,24 +4444,13 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
     for (const message of Array.isArray(messages) ? messages : []) {
       scopedMessages.push(await customerMetadata.enrich(scope, message));
     }
-    let scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
     const pending = readAccountState(stored[STORAGE.pending], context.key, []);
-    const migrated = scanState?.version !== 1;
-    if (scanState?.version !== 1) {
-      scanState = migrateScanState(
-        readAccountState(stored[STORAGE.targetCursor], context.key, null),
-        pending,
-        readAccountState(stored[STORAGE.lastResumeSyncAt], context.key, null),
-      );
-    }
-    const deferCursorAdvance = advanceCursor && hasScanBacklog(scanState);
+    // Capture deduplicates message IDs; only completed history scans own checkpoints.
     const known = new Set(pending.map(messageKey));
     const eligible = [];
     const added = [];
     for (const message of scopedMessages) {
-      const cursor = scanState.conversations?.[message?.conversation_id];
-      if (messageProvider(message) !== context.account.provider
-        || !isAfterMessageCursor(message, cursor)) continue;
+      if (messageProvider(message) !== context.account.provider) continue;
       eligible.push(message);
       if (known.has(messageKey(message))) continue;
       known.add(messageKey(message));
@@ -4495,27 +4478,10 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
         },
       );
     }
-    if (!deferCursorAdvance && advanceCursor && added.length) {
-      writes[STORAGE.scanState] = writeAccountState(
-        stored[STORAGE.scanState],
-        context.key,
-        {
-          ...scanState,
-          conversations: advanceConversationCursors(scanState, added),
-          updated_at: new Date().toISOString(),
-        },
-      );
-    } else if (migrated) {
-      writes[STORAGE.scanState] = writeAccountState(
-        stored[STORAGE.scanState],
-        context.key,
-        scanState,
-      );
-    }
     if (Object.keys(writes).length) await writeStorage(writes);
     const pendingCount = pending.length + added.length;
     const latestCursor = latestMessageCursor(eligible);
-    return { scopedMessages, added, pendingCount, latestCursor, deferCursorAdvance, initialized: hasServerInitialized(stored) };
+    return { scopedMessages, added, pendingCount, latestCursor, initialized: hasServerInitialized(stored) };
   });
   if (!captured) {
     await recordLog("debug", "queue", "ignored", "Captured messages were ignored because setup is incomplete.", {
@@ -4524,7 +4490,7 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
     });
     return { queued: 0, sent: 0, pending: 0 };
   }
-  const { scopedMessages, added, pendingCount, latestCursor, deferCursorAdvance, initialized } = captured;
+  const { scopedMessages, added, pendingCount, latestCursor, initialized } = captured;
   // The caller acknowledges only local durable capture. Forwarding owns its
   // account queue and must never extend the global capture/storage lock.
   if (initialized) {
@@ -4537,16 +4503,16 @@ async function queueMessagesForContext(messages, context, shouldFlush, advanceCu
   void recordLog("info", "queue", "stored", "Captured messages stored for delivery.", {
     provider_account_id: context.account.provider_account_id,
     received: scopedMessages.length, queued: added.length,
-    pending: pendingCount, deferred: deferCursorAdvance,
+    pending: pendingCount,
     duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - startedAt),
   });
   return {
     queued: added.length, sent: 0, pending: pendingCount,
-    deferred: deferCursorAdvance, latest_cursor: latestCursor,
+    latest_cursor: latestCursor,
   };
 }
 
-async function queueMessages(messages, shouldFlush, advanceCursor = true) {
+async function queueMessages(messages, shouldFlush) {
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -4599,14 +4565,12 @@ async function queueMessages(messages, shouldFlush, advanceCursor = true) {
       group,
       contexts.get(contextKey),
       shouldFlush,
-      advanceCursor,
     ));
   }
   return {
     queued: results.reduce((total, result) => total + (Number(result.queued) || 0), 0),
     sent: results.reduce((total, result) => total + (Number(result.sent) || 0), 0),
     pending: results.reduce((total, result) => total + (Number(result.pending) || 0), 0),
-    deferred: results.some((result) => result.deferred),
     ...(results.length === 1 ? { latest_cursor: results[0].latest_cursor } : {}),
   };
 }

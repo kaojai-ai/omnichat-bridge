@@ -87,8 +87,6 @@
   });
   const HISTORY_LIMIT = 100;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
-  const MANUAL_SYNC_MAX_CONVERSATIONS = 10;
-  const MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 300;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
   const SELLER_CENTRE_CHAT_OPEN_TIMEOUT_MS = 15_000;
@@ -99,6 +97,9 @@
   let fetchBeforeBridge = null;
   let observedSocket = null;
   let socketListeners = null;
+  let sellerCentreCapturePromise = null;
+  let activeSellerCentrePoll = null;
+  let waitingRecovery = null;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -125,9 +126,7 @@
     recoveryEpoch: 0,
     accountDiscoveryPromise: null,
     latestMessageIdsByConversation: new Map(),
-    capturedMessageIdsByConversation: new Map(),
     pendingSellerCentreMessages: new Map(),
-    sellerCentreFetches: new Map(),
     sellerCentreCaptureEpoch: 0,
     observedMessageKeys: globalThis.OmnichatMessageIdCache.create(),
     sellerCentreListInitialized: false,
@@ -152,9 +151,7 @@
     state.historyTemplate = null;
     state.sendTemplate = null;
     state.latestMessageIdsByConversation = new Map();
-    state.capturedMessageIdsByConversation = new Map();
     state.pendingSellerCentreMessages = new Map();
-    state.sellerCentreFetches = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
     state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
     state.sellerCentreListInitialized = false;
@@ -185,9 +182,7 @@
   state.recoveryEpoch ??= 0;
   state.accountDiscoveryPromise ??= null;
   state.latestMessageIdsByConversation ??= new Map();
-  state.capturedMessageIdsByConversation ??= new Map();
   state.pendingSellerCentreMessages ??= new Map();
-  state.sellerCentreFetches ??= new Map();
   state.sellerCentreCaptureEpoch ??= 0;
   // Message IDs are disposable acceleration state; never retain an old unbounded Set.
   state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
@@ -276,6 +271,10 @@
         : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
       last_provider_check_at: state.lastProviderCheckAt,
+      provider_polling_active: Boolean(activeSellerCentrePoll),
+      provider_polling_account_ids: activeSellerCentrePoll ? [activeSellerCentrePoll.accountId] : [],
+      provider_polling_request_id: activeSellerCentrePoll?.requestId ?? null,
+      provider_polling_account_id: activeSellerCentrePoll?.accountId ?? null,
     });
   };
 
@@ -733,6 +732,7 @@
       || state.acknowledgements.size,
     );
     state.recoveryEpoch += 1;
+    state.sellerCentreCaptureEpoch += 1;
     state.recoveryAbortController?.abort();
     state.recoveryAbortController = null;
     for (const [acknowledgementId, acknowledge] of state.acknowledgements) {
@@ -851,7 +851,7 @@
     url.searchParams.set("offset", String(offset));
     url.searchParams.set("limit", String(HISTORY_LIMIT));
     url.searchParams.set("direction", "older");
-    url.searchParams.set("on_message_received", "true");
+    if (isSellerCentreSurface()) url.searchParams.set("on_message_received", "true");
     const headers = new Headers(template.init?.headers ?? {});
     headers.delete("content-type");
     return new Request(url, {
@@ -864,9 +864,7 @@
 
   const resetSellerCentreCapture = () => {
     state.sellerCentreCaptureEpoch += 1;
-    state.capturedMessageIdsByConversation.clear();
     state.pendingSellerCentreMessages.clear();
-    state.sellerCentreFetches.clear();
     state.sellerCentreCaptureFailed = false;
     state.sellerCentreCaptureOutcome = null;
   };
@@ -877,37 +875,57 @@
       ? "failed" : "unknown";
   };
 
-  async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
-    const template = state.historyTemplate ?? state.getTemplate;
-    if (!template) return false;
-    const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template));
-    if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
-    if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
-      throw Object.assign(new Error("Shopee message capture returned an invalid response."), { reason_code: "invalid_message_history" });
+  async function loadRecoveryCheckpoint(requestId, accountId) {
+    const acknowledged = waitForAcknowledgement(requestId);
+    post({ type: "recovery_checkpoint", request_id: requestId, provider_account_id: accountId });
+    const result = await acknowledged;
+    if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not load sync checkpoint."), { reason_code: "persistence_failed" });
+    return result.checkpoint ?? {};
+  }
+
+  async function waitForSellerCentreCapture(requestId, signal) {
+    if (!sellerCentreCapturePromise) return;
+    signal.throwIfAborted();
+    const waiter = { requestId, signal };
+    waitingRecovery = waiter;
+    let onAbort;
+    const cancelled = new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      // Cancelling recovery releases its wait without interrupting durable polling.
+      await Promise.race([sellerCentreCapturePromise.catch(() => undefined), cancelled]);
+      signal.throwIfAborted();
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      if (waitingRecovery === waiter) waitingRecovery = null;
     }
-    const messages = Array.isArray(body)
-      ? body
-      : conversationItems(body);
-    const ordered = [...messages].sort((left, right) => {
-      const difference = timeMs(left?.created_timestamp ?? left?.created_at)
-        - timeMs(right?.created_timestamp ?? right?.created_at);
-      if (difference) return difference;
-      return String(messageIdOf(left) ?? "").localeCompare(String(messageIdOf(right) ?? ""));
+  }
+
+  async function fetchSellerCentreConversationMessages(conversation, cursor, latestId, epoch, poll) {
+    if (!state.historyTemplate && !state.getTemplate) return null;
+    const result = await fetchHistory(conversation, cursor, async (messages, page) => {
+      messages.sort((left, right) => timeMs(left.created_timestamp ?? left.created_at)
+        - timeMs(right.created_timestamp ?? right.created_at));
+      const requestId = `${poll.requestId}:${conversation.id}:${page}`;
+      const acknowledged = waitForAcknowledgement(requestId);
+      post({ type: "recovery_batch", request_id: requestId, provider_account_id: poll.accountId, body: messages });
+      const acknowledgement = await acknowledged;
+      if (!acknowledgement.ok) {
+        throw Object.assign(new Error("Could not persist polled messages."), { reason_code: "persistence_failed" });
+      }
+      if (waitingRecovery && !waitingRecovery.signal.aborted
+        && epoch === state.sellerCentreCaptureEpoch) {
+        post({ type: "recovery_activity", request_id: waitingRecovery.requestId });
+      }
+      return acknowledgement;
+    }, cursor ? 0 : Date.now() - INITIAL_SYNC_LOOKBACK_MS, null, {
+      fetchJson: fetchProviderJson,
+      expectedLatestId: latestId,
+      isCurrent: () => isBridgeActive() && epoch === state.sellerCentreCaptureEpoch,
     });
-    const previousIndex = previousLatestId
-      ? ordered.findIndex((message) => messageIdOf(message) === previousLatestId)
-      : -1;
-    const candidates = previousIndex >= 0
-      ? ordered.slice(previousIndex + 1)
-      : previousLatestId
-        ? ordered
-        : (latestId ? ordered.filter((message) => messageIdOf(message) === latestId) : ordered.slice(-1));
-    const emitted = emitRealtimeMessages(candidates);
-    if (emitted) postLog("debug", "seller_centre_messages_observed", "Seller Centre polling delivered new messages.", {
-      conversation_id: String(conversation.id ?? ""),
-      messages: emitted,
-    });
-    return true;
+    return result.complete ? result.latestCursor ?? cursor : null;
   }
 
   async function captureSellerCentreConversationList(response, sessionEpoch = state.routeSessionEpoch) {
@@ -932,65 +950,89 @@
       const hadPrevious = state.latestMessageIdsByConversation.has(conversationId);
       const previousId = state.latestMessageIdsByConversation.get(conversationId) ?? null;
       state.latestMessageIdsByConversation.set(conversationId, latestId);
-      // The first list is a baseline; bootstrap/recovery owns its history.
-      if (!wasInitialized) state.capturedMessageIdsByConversation.set(conversationId, latestId);
       if (wasInitialized && latestId && (!hadPrevious || latestId !== previousId)) {
         state.pendingSellerCentreMessages.set(conversationId, { conversation, latestId });
       }
     }
     state.sellerCentreListInitialized = true;
     if (!wasInitialized) return;
-    const captureDeadline = Date.now() + 15_000;
-    for (const [conversationId, item] of state.pendingSellerCentreMessages) {
-      if (Date.now() >= captureDeadline) break;
-      if (state.sellerCentreFetches.has(conversationId)) continue;
-      const epoch = state.sellerCentreCaptureEpoch;
-      const token = {};
-      state.sellerCentreFetches.set(conversationId, token);
-      try {
-        const captured = await fetchSellerCentreConversationMessages(
-          item.conversation,
-          state.capturedMessageIdsByConversation.get(conversationId) ?? null,
-          item.latestId,
-          epoch,
-        );
-        if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
-        if (!captured) {
-          state.sellerCentreCaptureFailed = true;
-          state.sellerCentreCaptureOutcome = "failed";
-          continue;
-        }
-        state.capturedMessageIdsByConversation.set(conversationId, item.latestId);
-        // A newer summary may have arrived while this fetch was in flight.
-        if (state.pendingSellerCentreMessages.get(conversationId) === item) {
-          state.pendingSellerCentreMessages.delete(conversationId);
-        }
-      } catch (error) {
-        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
-          state.sellerCentreCaptureFailed = true;
-          if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
-        }
-        logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
-      } finally {
-        if (state.sellerCentreFetches.get(conversationId) === token) {
-          state.sellerCentreFetches.delete(conversationId);
+    if (state.recoveryInFlight || sellerCentreCapturePromise || !state.pendingSellerCentreMessages.size) return;
+    sellerCentreCapturePromise = capturePendingSellerCentreMessages();
+    try {
+      await sellerCentreCapturePromise;
+    } finally {
+      sellerCentreCapturePromise = null;
+    }
+  }
+
+  async function capturePendingSellerCentreMessages() {
+    const epoch = state.sellerCentreCaptureEpoch;
+    const poll = { requestId: `poll:${epoch}-${Date.now()}`, accountId: state.currentAccountId };
+    activeSellerCentrePoll = poll;
+    publishSurfaceStatus();
+    try {
+      const checkpoint = await loadRecoveryCheckpoint(`${poll.requestId}:checkpoint`, poll.accountId);
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      const cursors = checkpoint.conversations ?? {};
+      const captureDeadline = Date.now() + 15_000;
+      for (const [conversationId, item] of state.pendingSellerCentreMessages) {
+        if (state.recoveryInFlight || Date.now() >= captureDeadline) break;
+        try {
+          const cursor = cursors[conversationId] ?? null;
+          const summaryMs = conversationTime(item.conversation);
+          const cursorMs = timeMs(cursor?.event_timestamp);
+          const alreadyCaptured = cursorMs && summaryMs && (summaryMs < cursorMs
+            || (summaryMs === cursorMs && item.latestId === String(cursor.message_id)));
+          const captured = alreadyCaptured ? cursor : await fetchSellerCentreConversationMessages(
+            item.conversation, cursor, item.latestId, epoch, poll,
+          );
+          if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+          if (!captured) {
+            state.sellerCentreCaptureFailed = true;
+            state.sellerCentreCaptureOutcome = "failed";
+            continue;
+          }
+          if (!alreadyCaptured) {
+            const requestId = `${poll.requestId}:${conversationId}:cursor`;
+            const acknowledged = waitForAcknowledgement(requestId);
+            post({ type: "recovery_cursor", request_id: requestId, provider_account_id: poll.accountId,
+              conversation_id: conversationId, cursor: captured });
+            const result = await acknowledged;
+            if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not save sync cursor."), { reason_code: "persistence_failed" });
+            if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+            cursors[conversationId] = captured;
+          }
+          // A newer summary may have arrived while this fetch was in flight.
+          if (state.pendingSellerCentreMessages.get(conversationId) === item) {
+            state.pendingSellerCentreMessages.delete(conversationId);
+          }
+        } catch (error) {
+          if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
+            state.sellerCentreCaptureFailed = true;
+            if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
+          }
+          logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
         }
       }
-    }
-    if (!state.pendingSellerCentreMessages.size) {
-      state.sellerCentreCaptureFailed = false;
-      state.sellerCentreCaptureOutcome = null;
+      if (!state.pendingSellerCentreMessages.size) {
+        state.sellerCentreCaptureFailed = false;
+        state.sellerCentreCaptureOutcome = null;
+      }
+    } finally {
+      if (activeSellerCentrePoll === poll) activeSellerCentrePoll = null;
+      publishSurfaceStatus();
     }
   }
 
   async function refreshSellerCentreConversations() {
-    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
+    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight || state.recoveryInFlight) return;
     state.pollingRefreshInFlight = true;
     const epoch = state.sellerCentreCaptureEpoch;
     try {
-      const body = await fetchProviderJson(new Request(state.listTemplate.url, {
-        ...state.listTemplate.init,
-        body: state.listTemplate.body?.slice(0),
+      const template = await initialRecoveryListTemplate();
+      const body = await fetchProviderJson(new Request(template.url, {
+        ...template.init,
+        body: template.body?.slice(0),
       }));
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
@@ -1008,7 +1050,7 @@
     if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.sellerCentrePollingStarted) return;
     state.sellerCentrePollingStarted = true;
     const poll = () => {
-      if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight) return;
+      if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight || state.recoveryInFlight) return;
       void (async () => {
         const epoch = state.sellerCentreCaptureEpoch;
         try {
@@ -1666,7 +1708,6 @@
 
   async function fetchConversationPages({
     requiredIds = null,
-    maxItems = null,
     accountId = null,
     sendLookup = false,
     deadlineAt = Infinity,
@@ -1744,8 +1785,8 @@
         }
       }
       const needsMetadata = metadata?.collecting === true;
-      if (maxItems && conversations.length >= maxItems && !needsMetadata) break;
-      if (required && !needsMetadata && (required.size === 0 || (sendLookup && [...required].every((id) => routeComplete(cachedRoute(id, accountId)))))) {
+      if (sendLookup && required && !needsMetadata
+        && (required.size === 0 || [...required].every((id) => routeComplete(cachedRoute(id, accountId))))) {
         stopReason = "target_found"; break;
       }
       if (orderedOlder && allOlder && !needsMetadata && (!required || required.size === 0)) {
@@ -1769,67 +1810,60 @@
     }
   }
 
-  async function fetchHistory(conversation, cursor, maxMessages, onPage, sinceFloorMs = 0, onProgress = null) {
-    const cursorMs = timeMs(cursor?.event_timestamp);
-    const sinceMs = Math.max(sinceFloorMs, cursorMs);
-    const pageSize = Math.min(HISTORY_LIMIT, maxMessages ?? HISTORY_LIMIT);
-    let accepted = 0;
+  async function fetchHistory(conversation, cursor, onPage, sinceFloorMs = 0, onProgress = null, {
+    fetchJson = recoveryFetchJson, expectedLatestId = null, isCurrent = isBridgeActive,
+  } = {}) {
+    const sinceMs = Math.max(sinceFloorMs, timeMs(cursor?.event_timestamp));
+    const seenIds = new Set();
     let parsed = 0;
     let queued = 0;
     let latestCursor = null;
+    let sawExpectedLatest = !expectedLatestId;
     for (let page = 0; ; page += 1) {
-      const historyTemplate = state.historyTemplate ?? state.getTemplate;
-      if (!historyTemplate) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
-      const sourceUrl = new URL(historyTemplate.url);
-      const url = new URL(surfaceProfile().historyPath(conversation.id), sourceUrl.origin);
-      for (const key of authQueryKeys) {
-        if (sourceUrl.searchParams.has(key)) url.searchParams.set(key, sourceUrl.searchParams.get(key));
-      }
-      url.searchParams.set("shop_id", conversation.shop_id);
-      url.searchParams.set("offset", String(page * pageSize));
-      url.searchParams.set("limit", String(pageSize));
-      url.searchParams.set("direction", "older");
-      url.searchParams.set("biz_id", String(conversation.biz_id ?? 0));
-      if (isSellerCentreSurface()) url.searchParams.set("on_message_received", "true");
-      const headers = new Headers(historyTemplate.init.headers);
-      headers.delete("content-type");
+      const template = state.historyTemplate ?? state.getTemplate;
+      if (!template) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
       onProgress?.("fetching_messages");
-      const pageMessages = await recoveryFetchJson(new Request(url, {
-        ...historyTemplate.init,
-        method: "GET",
-        headers,
-        body: undefined,
-      }));
-      if (!Array.isArray(pageMessages)) {
+      const body = await fetchJson(sellerCentreHistoryRequest(conversation, template, page * HISTORY_LIMIT));
+      if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
+      if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
         throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
       }
+      const pageMessages = Array.isArray(body) ? body : conversationItems(body);
+      if (pageMessages.some((message) => messageIdOf(message) === expectedLatestId)) sawExpectedLatest = true;
+      const unseen = pageMessages.filter((message) => {
+        const id = messageIdOf(message);
+        if (!id || seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
+      if (pageMessages.length && !unseen.length) {
+        throw Object.assign(new Error("Shopee message history pagination repeated a page."), { reason_code: "invalid_message_history" });
+      }
       onProgress?.("fetching_messages");
-      let currentMessages = pageMessages
-        .filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
-        .sort((left, right) => {
-          const timeDifference = timeMs(right.created_timestamp ?? right.created_at)
-            - timeMs(left.created_timestamp ?? left.created_at);
-          if (timeDifference) return timeDifference;
-          const rightId = String(right.id ?? right.message_id ?? "");
-          const leftId = String(left.id ?? left.message_id ?? "");
-          return rightId === leftId ? 0 : rightId > leftId ? 1 : -1;
-        });
-      if (maxMessages) currentMessages = currentMessages.slice(0, maxMessages - accepted);
+      const currentMessages = unseen.filter((message) =>
+        timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
+        .sort((left, right) => timeMs(right.created_timestamp ?? right.created_at)
+          - timeMs(left.created_timestamp ?? left.created_at));
       if (currentMessages.length) {
         const acknowledgement = await onPage(currentMessages, page);
+        if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
         parsed += acknowledgement.parsed ?? 0;
         queued += acknowledgement.queued ?? 0;
-        latestCursor ??= acknowledgement.latest_cursor ?? null;
-        accepted += currentMessages.length;
+        const candidate = acknowledgement.latest_cursor;
+        if (candidate && (!latestCursor || timeMs(candidate.event_timestamp) > timeMs(latestCursor.event_timestamp)
+          || (timeMs(candidate.event_timestamp) === timeMs(latestCursor.event_timestamp)
+            && String(candidate.message_id) > String(latestCursor.message_id)))) {
+          latestCursor = candidate;
+        }
       }
-      if (maxMessages && accepted >= maxMessages) break;
       const oldest = pageMessages.reduce((value, message) => {
         const candidate = timeMs(message.created_timestamp ?? message.created_at);
         return candidate && candidate < value ? candidate : value;
       }, Number.POSITIVE_INFINITY);
-      if (pageMessages.length < pageSize || oldest < sinceMs) break;
+      // Include the whole timestamp boundary; provider IDs do not encode order.
+      if (pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
     }
-    return { parsed, queued, latestCursor };
+    return { parsed, queued, latestCursor, complete: sawExpectedLatest };
   }
 
   async function recover(requestId, checkpoint = {}) {
@@ -1856,6 +1890,12 @@
     let queued = 0;
     let checked = 0;
     try {
+      // Finish any active page scan before using the same durable coverage.
+      await waitForSellerCentreCapture(requestId, state.recoveryAbortController.signal);
+      assertSessionUnchanged();
+      const current = await loadRecoveryCheckpoint(`${requestId}:checkpoint`, accountId);
+      assertSessionUnchanged();
+      checkpoint = { ...checkpoint, ...current };
       postLog("info", "recovery_started", "Shopee recovery started.", {
         provider_account_id: accountId,
         current_provider_account_id: state.currentAccountId ?? null,
@@ -1891,15 +1931,11 @@
       const frozenBootstrap = Array.isArray(checkpoint?.bootstrap?.conversations)
         ? checkpoint.bootstrap.conversations
         : [];
-      const requiredIds = !historyWindow && bootstrap && frozenBootstrap.length
-        ? frozenBootstrap.map((conversation) => String(conversation.id))
-        : null;
-      const pageRequired = [...new Set([...(requiredIds ?? []), ...deepIds])];
+      const pageRequired = deepIds;
       const pages = await fetchConversationPages({
         metadata,
         checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
         requiredIds: pageRequired.length ? pageRequired : null,
-        maxItems: !historyWindow && bootstrap && !pageRequired.length ? MANUAL_SYNC_MAX_CONVERSATIONS : null,
         accountId,
         onProgress: (phase, conversationPages) => {
           assertSessionUnchanged();
@@ -1913,17 +1949,11 @@
       let recoveryConversations;
       if (!historyWindow && bootstrap && frozenBootstrap.length) {
         const liveById = new Map(sorted.map((conversation) => [String(conversation.id), conversation]));
-        recoveryConversations = frozenBootstrap.map(
-          (conversation) => liveById.get(String(conversation.id)) ?? conversation,
-        );
+        recoveryConversations = [...sorted, ...frozenBootstrap.filter(
+          (conversation) => !liveById.has(String(conversation.id)),
+        )];
       } else if (!historyWindow && bootstrap) {
-        recoveryConversations = sorted.slice(0, MANUAL_SYNC_MAX_CONVERSATIONS);
-        for (const id of deepIds) {
-          const conversation = sorted.find((item) => String(item.id) === id);
-          if (conversation && !recoveryConversations.some((item) => String(item.id) === id)) {
-            recoveryConversations.push(conversation);
-          }
-        }
+        recoveryConversations = sorted;
         const bootstrapRequestId = `${requestId}:bootstrap`;
         post({
           type: "recovery_bootstrap",
@@ -2040,12 +2070,12 @@
         const history = await fetchHistory(
           conversation,
           deep || windowJob ? null : cursor,
-          deep || windowJob ? null : (bootstrap ? MANUAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : undefined),
           async (messages, page) => {
             assertSessionUnchanged();
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
+            const acknowledged = waitForAcknowledgement(batchRequestId);
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
-            const acknowledgement = await waitForAcknowledgement(batchRequestId);
+            const acknowledgement = await acknowledged;
             if (!acknowledgement.ok) {
               throw Object.assign(new Error(acknowledgement.error ?? "Could not queue recovered messages."), { reason_code: "persistence_failed" });
             }
@@ -2058,7 +2088,11 @@
               phase, conversation_id: String(conversation.id), conversation_pages: pages.pages,
               completed_conversations: completedConversations, total_conversations: totalConversations });
           },
+          { expectedLatestId: latestMessageIdOf(conversation) },
         );
+        if (!history.complete) {
+          throw Object.assign(new Error("Shopee message history has not reached its latest summary."), { reason_code: "invalid_message_history" });
+        }
         if (deep) {
           const backfillRequestId = `${requestId}:${conversation.id}:history`;
           post({
