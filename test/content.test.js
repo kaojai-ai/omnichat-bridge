@@ -1085,3 +1085,15 @@ for (const [eventType, requestType] of [
     assert.equal(request.provider_account_id, "shop-a");
   });
 }
+
+test("retries a realtime message after durable queuing fails", async () => {
+  let attempts = 0;
+  const bridge = contentBridge("/portal/chat-management", { runtimeHandler: message => {
+    if (message.type === "queue_messages") return { ok: ++attempts > 1 };
+    return { ok: true };
+  } });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await bridge.providerEvent({ type: "realtime_event", body: { messages: [echo] } });
+  }
+  assert.equal(attempts, 2);
+});

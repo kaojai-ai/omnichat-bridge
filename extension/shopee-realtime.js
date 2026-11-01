@@ -880,14 +880,36 @@
   async function fetchSellerCentreConversationMessages(conversation, previousLatestId, latestId, epoch) {
     const template = state.historyTemplate ?? state.getTemplate;
     if (!template) return false;
-    const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template));
-    if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
-    if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
-      throw Object.assign(new Error("Shopee message capture returned an invalid response."), { reason_code: "invalid_message_history" });
+    const messages = [];
+    const seenIds = new Set();
+    const sinceMs = previousLatestId ? 0 : Date.now() - INITIAL_SYNC_LOOKBACK_MS;
+    for (let offset = 0; ; offset += HISTORY_LIMIT) {
+      const body = await fetchProviderJson(sellerCentreHistoryRequest(conversation, template, offset));
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
+      if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+        throw Object.assign(new Error("Shopee message capture returned an invalid response."), { reason_code: "invalid_message_history" });
+      }
+      const page = Array.isArray(body) ? body : conversationItems(body);
+      let added = 0;
+      for (const message of page) {
+        const id = messageIdOf(message);
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        messages.push(message);
+        added += 1;
+      }
+      // A summary can arrive before its history is available. Keep it pending
+      // rather than advancing capture past a message we have not observed.
+      if (offset === 0 && latestId && !seenIds.has(latestId)) return false;
+      const reachedFloor = sinceMs > 0 && page.some((message) => {
+        const eventMs = timeMs(message.created_timestamp ?? message.created_at);
+        return eventMs > 0 && eventMs < sinceMs;
+      });
+      if ((previousLatestId && seenIds.has(previousLatestId)) || reachedFloor || page.length < HISTORY_LIMIT) break;
+      if (!added) {
+        throw Object.assign(new Error("Shopee message history pagination repeated a page."), { reason_code: "invalid_message_history" });
+      }
     }
-    const messages = Array.isArray(body)
-      ? body
-      : conversationItems(body);
     const ordered = [...messages].sort((left, right) => {
       const difference = timeMs(left?.created_timestamp ?? left?.created_at)
         - timeMs(right?.created_timestamp ?? right?.created_at);
@@ -897,16 +919,20 @@
     const previousIndex = previousLatestId
       ? ordered.findIndex((message) => messageIdOf(message) === previousLatestId)
       : -1;
-    const candidates = previousIndex >= 0
-      ? ordered.slice(previousIndex + 1)
-      : previousLatestId
-        ? ordered
-        : (latestId ? ordered.filter((message) => messageIdOf(message) === latestId) : ordered.slice(-1));
-    const emitted = emitRealtimeMessages(candidates);
-    if (emitted) postLog("debug", "seller_centre_messages_observed", "Seller Centre polling delivered new messages.", {
-      conversation_id: String(conversation.id ?? ""),
-      messages: emitted,
-    });
+    const candidates = previousIndex >= 0 ? ordered.slice(previousIndex + 1)
+      : ordered.filter((message) => timeMs(message.created_timestamp ?? message.created_at) >= sinceMs);
+    if (candidates.length) {
+      const requestId = `poll:${epoch}:${conversation.id}:${Date.now()}`;
+      const acknowledged = waitForAcknowledgement(requestId);
+      post({ type: "recovery_batch", request_id: requestId, provider_account_id: state.currentAccountId, body: candidates });
+      const result = await acknowledged;
+      if (!result.ok) return false;
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return false;
+      postLog("debug", "seller_centre_messages_observed", "Seller Centre polling delivered new messages.", {
+        conversation_id: String(conversation.id ?? ""),
+        messages: candidates.length,
+      });
+    }
     return true;
   }
 
