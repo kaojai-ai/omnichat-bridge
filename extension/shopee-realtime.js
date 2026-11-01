@@ -97,6 +97,8 @@
   let fetchBeforeBridge = null;
   let observedSocket = null;
   let socketListeners = null;
+  let sellerCentreCapturePromise = null;
+  let activeSellerCentrePoll = null;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.get("shopee");
   if (!providerAdapter) throw new Error("Shopee provider adapter is unavailable.");
   const currentSurface = providerAdapter.surfaceForUrl?.(window.location.href)
@@ -123,9 +125,7 @@
     recoveryEpoch: 0,
     accountDiscoveryPromise: null,
     latestMessageIdsByConversation: new Map(),
-    capturedMessageCursorsByConversation: new Map(),
     pendingSellerCentreMessages: new Map(),
-    sellerCentreFetches: new Map(),
     sellerCentreCaptureEpoch: 0,
     observedMessageKeys: globalThis.OmnichatMessageIdCache.create(),
     sellerCentreListInitialized: false,
@@ -150,9 +150,7 @@
     state.historyTemplate = null;
     state.sendTemplate = null;
     state.latestMessageIdsByConversation = new Map();
-    state.capturedMessageCursorsByConversation = new Map();
     state.pendingSellerCentreMessages = new Map();
-    state.sellerCentreFetches = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
     state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
     state.sellerCentreListInitialized = false;
@@ -183,9 +181,7 @@
   state.recoveryEpoch ??= 0;
   state.accountDiscoveryPromise ??= null;
   state.latestMessageIdsByConversation ??= new Map();
-  state.capturedMessageCursorsByConversation ??= new Map();
   state.pendingSellerCentreMessages ??= new Map();
-  state.sellerCentreFetches ??= new Map();
   state.sellerCentreCaptureEpoch ??= 0;
   // Message IDs are disposable acceleration state; never retain an old unbounded Set.
   state.observedMessageKeys = globalThis.OmnichatMessageIdCache.create();
@@ -274,6 +270,10 @@
         : Boolean(state.socket?.connected ?? state.socket),
       ...(isSellerCentreSurface() && state.pollingConnected ? { connected_at: state.pollingConnectedAt ?? new Date().toISOString() } : {}),
       last_provider_check_at: state.lastProviderCheckAt,
+      provider_polling_active: Boolean(activeSellerCentrePoll),
+      provider_polling_account_ids: activeSellerCentrePoll ? [activeSellerCentrePoll.accountId] : [],
+      provider_polling_request_id: activeSellerCentrePoll?.requestId ?? null,
+      provider_polling_account_id: activeSellerCentrePoll?.accountId ?? null,
     });
   };
 
@@ -731,6 +731,7 @@
       || state.acknowledgements.size,
     );
     state.recoveryEpoch += 1;
+    state.sellerCentreCaptureEpoch += 1;
     state.recoveryAbortController?.abort();
     state.recoveryAbortController = null;
     for (const [acknowledgementId, acknowledge] of state.acknowledgements) {
@@ -862,9 +863,7 @@
 
   const resetSellerCentreCapture = () => {
     state.sellerCentreCaptureEpoch += 1;
-    state.capturedMessageCursorsByConversation.clear();
     state.pendingSellerCentreMessages.clear();
-    state.sellerCentreFetches.clear();
     state.sellerCentreCaptureFailed = false;
     state.sellerCentreCaptureOutcome = null;
   };
@@ -875,14 +874,22 @@
       ? "failed" : "unknown";
   };
 
-  async function fetchSellerCentreConversationMessages(conversation, cursor, latestId, epoch) {
+  async function loadRecoveryCheckpoint(requestId, accountId) {
+    const acknowledged = waitForAcknowledgement(requestId);
+    post({ type: "recovery_checkpoint", request_id: requestId, provider_account_id: accountId });
+    const result = await acknowledged;
+    if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not load sync checkpoint."), { reason_code: "persistence_failed" });
+    return result.checkpoint ?? {};
+  }
+
+  async function fetchSellerCentreConversationMessages(conversation, cursor, latestId, epoch, poll) {
     if (!state.historyTemplate && !state.getTemplate) return null;
     const result = await fetchHistory(conversation, cursor, async (messages, page) => {
       messages.sort((left, right) => timeMs(left.created_timestamp ?? left.created_at)
         - timeMs(right.created_timestamp ?? right.created_at));
-      const requestId = `poll:${epoch}:${conversation.id}:${Date.now()}:${page}`;
+      const requestId = `${poll.requestId}:${conversation.id}:${page}`;
       const acknowledged = waitForAcknowledgement(requestId);
-      post({ type: "recovery_batch", request_id: requestId, provider_account_id: state.currentAccountId, body: messages });
+      post({ type: "recovery_batch", request_id: requestId, provider_account_id: poll.accountId, body: messages });
       const acknowledgement = await acknowledged;
       if (!acknowledgement.ok) {
         throw Object.assign(new Error("Could not persist polled messages."), { reason_code: "persistence_failed" });
@@ -924,51 +931,76 @@
     }
     state.sellerCentreListInitialized = true;
     if (!wasInitialized) return;
-    const captureDeadline = Date.now() + 15_000;
-    for (const [conversationId, item] of state.pendingSellerCentreMessages) {
-      if (Date.now() >= captureDeadline) break;
-      if (state.sellerCentreFetches.has(conversationId)) continue;
-      const epoch = state.sellerCentreCaptureEpoch;
-      const token = {};
-      state.sellerCentreFetches.set(conversationId, token);
-      try {
-        const captured = await fetchSellerCentreConversationMessages(
-          item.conversation,
-          state.capturedMessageCursorsByConversation.get(conversationId) ?? null,
-          item.latestId,
-          epoch,
-        );
-        if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) continue;
-        if (!captured) {
-          state.sellerCentreCaptureFailed = true;
-          state.sellerCentreCaptureOutcome = "failed";
-          continue;
-        }
-        state.capturedMessageCursorsByConversation.set(conversationId, captured);
-        // A newer summary may have arrived while this fetch was in flight.
-        if (state.pendingSellerCentreMessages.get(conversationId) === item) {
-          state.pendingSellerCentreMessages.delete(conversationId);
-        }
-      } catch (error) {
-        if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
-          state.sellerCentreCaptureFailed = true;
-          if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
-        }
-        logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
-      } finally {
-        if (state.sellerCentreFetches.get(conversationId) === token) {
-          state.sellerCentreFetches.delete(conversationId);
+    if (state.recoveryInFlight || sellerCentreCapturePromise || !state.pendingSellerCentreMessages.size) return;
+    sellerCentreCapturePromise = capturePendingSellerCentreMessages();
+    try {
+      await sellerCentreCapturePromise;
+    } finally {
+      sellerCentreCapturePromise = null;
+    }
+  }
+
+  async function capturePendingSellerCentreMessages() {
+    const epoch = state.sellerCentreCaptureEpoch;
+    const poll = { requestId: `poll:${epoch}-${Date.now()}`, accountId: state.currentAccountId };
+    activeSellerCentrePoll = poll;
+    publishSurfaceStatus();
+    try {
+      const checkpoint = await loadRecoveryCheckpoint(`${poll.requestId}:checkpoint`, poll.accountId);
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      const cursors = checkpoint.conversations ?? {};
+      const captureDeadline = Date.now() + 15_000;
+      for (const [conversationId, item] of state.pendingSellerCentreMessages) {
+        if (state.recoveryInFlight || Date.now() >= captureDeadline) break;
+        try {
+          const cursor = cursors[conversationId] ?? null;
+          const summaryMs = conversationTime(item.conversation);
+          const cursorMs = timeMs(cursor?.event_timestamp);
+          const alreadyCaptured = cursorMs && summaryMs && (summaryMs < cursorMs
+            || (summaryMs === cursorMs && item.latestId === String(cursor.message_id)));
+          const captured = alreadyCaptured ? cursor : await fetchSellerCentreConversationMessages(
+            item.conversation, cursor, item.latestId, epoch, poll,
+          );
+          if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+          if (!captured) {
+            state.sellerCentreCaptureFailed = true;
+            state.sellerCentreCaptureOutcome = "failed";
+            continue;
+          }
+          if (!alreadyCaptured) {
+            const requestId = `${poll.requestId}:${conversationId}:cursor`;
+            const acknowledged = waitForAcknowledgement(requestId);
+            post({ type: "recovery_cursor", request_id: requestId, provider_account_id: poll.accountId,
+              conversation_id: conversationId, cursor: captured });
+            const result = await acknowledged;
+            if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not save sync cursor."), { reason_code: "persistence_failed" });
+            if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+            cursors[conversationId] = captured;
+          }
+          // A newer summary may have arrived while this fetch was in flight.
+          if (state.pendingSellerCentreMessages.get(conversationId) === item) {
+            state.pendingSellerCentreMessages.delete(conversationId);
+          }
+        } catch (error) {
+          if (isBridgeActive() && epoch === state.sellerCentreCaptureEpoch) {
+            state.sellerCentreCaptureFailed = true;
+            if (state.sellerCentreCaptureOutcome !== "failed") state.sellerCentreCaptureOutcome = sellerCentreFailureOutcome(error);
+          }
+          logAsyncError("seller_centre_message_poll", error, { conversation_id: conversationId });
         }
       }
-    }
-    if (!state.pendingSellerCentreMessages.size) {
-      state.sellerCentreCaptureFailed = false;
-      state.sellerCentreCaptureOutcome = null;
+      if (!state.pendingSellerCentreMessages.size) {
+        state.sellerCentreCaptureFailed = false;
+        state.sellerCentreCaptureOutcome = null;
+      }
+    } finally {
+      if (activeSellerCentrePoll === poll) activeSellerCentrePoll = null;
+      publishSurfaceStatus();
     }
   }
 
   async function refreshSellerCentreConversations() {
-    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight) return;
+    if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.pollingRefreshInFlight || state.recoveryInFlight) return;
     state.pollingRefreshInFlight = true;
     const epoch = state.sellerCentreCaptureEpoch;
     try {
@@ -993,7 +1025,7 @@
     if (!isBridgeActive() || !isSellerCentreSurface() || !state.listTemplate || state.sellerCentrePollingStarted) return;
     state.sellerCentrePollingStarted = true;
     const poll = () => {
-      if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight) return;
+      if (!isBridgeActive() || !state.listTemplate || state.pollingRefreshInFlight || state.recoveryInFlight) return;
       void (async () => {
         const epoch = state.sellerCentreCaptureEpoch;
         try {
@@ -1761,6 +1793,7 @@
     let parsed = 0;
     let queued = 0;
     let latestCursor = null;
+    let sawExpectedLatest = !expectedLatestId;
     for (let page = 0; ; page += 1) {
       const template = state.historyTemplate ?? state.getTemplate;
       if (!template) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
@@ -1771,9 +1804,7 @@
         throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
       }
       const pageMessages = Array.isArray(body) ? body : conversationItems(body);
-      if (page === 0 && expectedLatestId && !pageMessages.some((message) => messageIdOf(message) === expectedLatestId)) {
-        return { parsed, queued, latestCursor, complete: false };
-      }
+      if (pageMessages.some((message) => messageIdOf(message) === expectedLatestId)) sawExpectedLatest = true;
       const unseen = pageMessages.filter((message) => {
         const id = messageIdOf(message);
         if (!id || seenIds.has(id)) return false;
@@ -1807,7 +1838,7 @@
       // Include the whole timestamp boundary; provider IDs do not encode order.
       if (pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
     }
-    return { parsed, queued, latestCursor, complete: true };
+    return { parsed, queued, latestCursor, complete: sawExpectedLatest };
   }
 
   async function recover(requestId, checkpoint = {}) {
@@ -1834,6 +1865,12 @@
     let queued = 0;
     let checked = 0;
     try {
+      // Finish any active page scan before using the same durable coverage.
+      if (sellerCentreCapturePromise) await sellerCentreCapturePromise.catch(() => undefined);
+      assertSessionUnchanged();
+      const current = await loadRecoveryCheckpoint(`${requestId}:checkpoint`, accountId);
+      assertSessionUnchanged();
+      checkpoint = { ...checkpoint, ...current };
       postLog("info", "recovery_started", "Shopee recovery started.", {
         provider_account_id: accountId,
         current_provider_account_id: state.currentAccountId ?? null,

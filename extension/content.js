@@ -616,7 +616,6 @@
         type: "queue_messages",
         messages,
         flush: automaticPoll,
-        advance_cursor: false,
         recovery_page: !automaticPoll,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
@@ -707,6 +706,21 @@
         provider_account_id: message.provider_account_id,
         conversation_id: message.conversation_id,
       });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
+  async function handleRecoveryCheckpoint(message) {
+    try {
+      const result = await sendRuntimeMessage({
+        type: "get_sync_state",
+        provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id,
+      });
+      post({ type: "recovery_ack_v3", request_id: message.request_id,
+        ok: Boolean(result?.ok), checkpoint: result?.checkpoint,
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not load sync checkpoint." }) });
+    } catch (error) {
       post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
     }
   }
@@ -845,13 +859,11 @@
       : result?.error ?? "Realtime provider event failed.", {
       parsed: messages.length,
       queued: Number(result?.queued) || 0,
-      deferred: Boolean(result?.deferred),
     });
     if (document.documentElement) {
       document.documentElement.dataset.omnichatRealtimeCapture = JSON.stringify({
         parsed: messages.length,
         queued: result?.queued ?? 0,
-        deferred: Boolean(result?.deferred),
       });
     }
   }
@@ -1160,6 +1172,8 @@
       void observeAsync("history_window", () => handleHistoryWindow(event.data));
     } else if (event.data.type === "history_backfill") {
       void observeAsync("history_backfill", () => handleHistoryBackfill(event.data));
+    } else if (event.data.type === "recovery_checkpoint") {
+      void observeAsync("recovery_checkpoint", () => handleRecoveryCheckpoint(event.data));
     } else if (event.data.type === "recovery_cursor") {
       void observeAsync("recovery_cursor", () => handleRecoveryCursor(event.data));
     } else if (event.data.type === "recovery_bootstrap") {

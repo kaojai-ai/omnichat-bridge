@@ -1276,10 +1276,10 @@ function syncControlForMessage(message, tabId) {
     && control.tabId === tabId && control.providerRequestId === requestId);
 }
 
-// Routine LINE polls outlive recovery jobs and service-worker lifetimes. Verify
+// Routine polls outlive recovery jobs and service-worker lifetimes. Verify
 // their live page identity instead of granting authority to the poll prefix alone.
 async function pollingCheckpointGuard(message, tabId) {
-  const adapter = providerAdapterForId("line_oa");
+  const adapter = providerAdapterForId(message.provider);
   const tab = await providerChatTabById(adapter, tabId);
   if (!tab) throw syncCancelledError();
   const epoch = providerTabContext(tab, adapter.id);
@@ -1288,8 +1288,10 @@ async function pollingCheckpointGuard(message, tabId) {
   if (!context || !hasLocalConsent(stored[STORAGE.consent])) throw syncCancelledError();
   const status = await providerTabStatus(tab);
   const requestId = String(message.request_id).split(":").slice(0, 2).join(":");
-  if (!status?.account_access_verified
-    || !status.accessible_account_ids?.includes(message.provider_account_id)
+  const accountVerified = adapter.id === "shopee"
+    ? status?.current_provider_account_id === message.provider_account_id
+    : status?.account_access_verified && status.accessible_account_ids?.includes(message.provider_account_id);
+  if (!accountVerified
     || status.provider_polling_request_id !== requestId
     || status.provider_polling_account_id !== message.provider_account_id) throw syncCancelledError();
   return () => {
@@ -1299,7 +1301,7 @@ async function pollingCheckpointGuard(message, tabId) {
 
 async function persistSyncCheckpoint(message, tabId) {
   const control = syncControlForMessage(message, tabId);
-  const assertCurrent = message.provider === "line_oa" && String(message.request_id ?? "").startsWith("poll:")
+  const assertCurrent = ["line_oa", "shopee"].includes(message.provider) && String(message.request_id ?? "").startsWith("poll:")
     ? await pollingCheckpointGuard(message, tabId)
     : () => {
       if (!control || !isCurrentSyncControl(control) || control.controller.signal.aborted

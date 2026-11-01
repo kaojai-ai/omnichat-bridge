@@ -305,7 +305,6 @@ test("keeps historical recovery batches deferred until recovery completes", asyn
 
   const queue = bridge.runtimeMessages.find((message) => message.type === "queue_messages");
   assert.equal(queue?.flush, false);
-  assert.equal(queue?.advance_cursor, false);
 });
 
 test("flushes each recurring poll recovery batch immediately", async () => {
@@ -320,7 +319,6 @@ test("flushes each recurring poll recovery batch immediately", async () => {
 
   const queue = bridge.runtimeMessages.find((message) => message.type === "queue_messages");
   assert.equal(queue?.flush, true);
-  assert.equal(queue?.advance_cursor, false);
 });
 
 test("keeps message-level buyer profile data when the conversation list profile is missing", async () => {
@@ -1097,3 +1095,20 @@ test("retries a realtime message after durable queuing fails", async () => {
   }
   assert.equal(attempts, 2);
 });
+
+for (const succeeds of [true, false]) {
+  test(`Shopee polling checkpoint bridge forwards ${succeeds ? "durable state" : "read failure"}`, async () => {
+    const checkpoint = { conversations: { "chat-a": { message_id: "last", event_timestamp: "2026-11-01T00:00:00Z" } } };
+    const bridge = contentBridge("/portal/chat-management", { runtimeHandler: message =>
+      message.type === "get_sync_state" ? { ok: succeeds, checkpoint, error: "storage unavailable" } : { ok: true } });
+    await bridge.providerEvent({ type: "recovery_checkpoint", request_id: "poll:current:checkpoint", provider_account_id: "shop-a" });
+    const request = bridge.runtimeMessages.find(message => message.type === "get_sync_state");
+    assert.equal(request.provider, "shopee");
+    assert.equal(request.provider_account_id, "shop-a");
+    const ack = bridge.runtimeMessages.find(message => message.type === "recovery_ack_v3");
+    assert.equal(ack.request_id, "poll:current:checkpoint");
+    assert.equal(ack.ok, succeeds);
+    if (succeeds) assert.deepEqual(plain(ack.checkpoint), checkpoint);
+    else assert.equal(ack.error, "storage unavailable");
+  });
+}
