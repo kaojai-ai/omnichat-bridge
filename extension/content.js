@@ -603,7 +603,7 @@
     const automaticPoll = String(message.request_id).startsWith("poll:");
     try {
       const messages = addConversationProfile(
-        normalizedMessages(message.body, "history_recovery")
+        normalizedMessages(message.body, automaticPoll ? "poll" : "history_recovery")
       ).map((item) => ({
         ...item,
         ...(item.provider_account_id || !message.provider_account_id
@@ -808,6 +808,7 @@
 
   async function handleRealtimeEvent(body, captureMethod = "realtime_socket") {
     const messages = [];
+    const capturedKeys = [];
     for (const message of addConversationProfile(normalizedMessages(body, captureMethod))) {
       const apiSend = findPendingApiSend(message);
       if (apiSend) {
@@ -818,7 +819,7 @@
       const accountId = message.provider_account_id ?? message.participant?.provider_account_id
         ?? currentProviderAccountId ?? (providerAccountIds.length === 1 ? providerAccountIds[0] : "unverified");
       if (realtimeMessageKeys.has(providerAdapter.id, accountId, message.conversation_id, message.id)) continue;
-      realtimeMessageKeys.add(providerAdapter.id, accountId, message.conversation_id, message.id);
+      capturedKeys.push([providerAdapter.id, accountId, message.conversation_id, message.id]);
 
       const key = outboundKey(message.conversation_id, message.text ?? "");
       const pending = pendingOutbound.get(key);
@@ -836,6 +837,9 @@
     }
     if (!messages.length) return;
     const result = await sendRuntimeMessage({ type: "queue_messages", messages, flush: true });
+    if (result?.ok) {
+      for (const key of capturedKeys) realtimeMessageKeys.add(...key);
+    }
     log(result?.ok ? "info" : "error", "realtime_processed", result?.ok
       ? "Realtime provider event processed."
       : result?.error ?? "Realtime provider event failed.", {

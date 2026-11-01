@@ -106,6 +106,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
   }));
   const requests = [];
   const intervals = [];
+  let pollAcknowledgement = true;
   let miniChatClicks = 0;
   let miniChatIsOpen = miniChatOpen === true;
   const miniChatPanel = {
@@ -156,6 +157,14 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     },
     postMessage(message) {
       posts.push(message);
+      if (message.type === "recovery_batch" && message.request_id.startsWith("poll:")) {
+        queueMicrotask(() => {
+          for (const listener of listeners) listener({ source: window, origin, data: {
+            source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
+            request_id: message.request_id, ok: pollAcknowledgement,
+          } });
+        });
+      }
     },
     __CHAT_GLOBAL__: socket ? { socket } : {},
   };
@@ -346,6 +355,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     },
     fetch,
     setResponse,
+    setPollAcknowledgement(ok) { pollAcknowledgement = ok; },
     seedRecoveryState,
     resetRecovery,
     detect,
@@ -838,10 +848,10 @@ test("discovers a Seller Centre shop and polls its mini history without legacy e
   }]);
   await bridge.runIntervals();
   assert.equal(bridge.intervals.filter(({ delay }) => delay === 3_000).length, 1);
-  const realtime = bridge.posts.findLast((post) => post.type === "realtime_event");
-  assert.equal(realtime.capture_method, "poll");
+  const realtime = bridge.posts.findLast((post) => post.type === "recovery_batch");
+  assert.ok(realtime.request_id.startsWith("poll:"));
   assert.deepEqual(
-    JSON.parse(JSON.stringify(realtime.body.messages.map((message) => message.id))),
+    JSON.parse(JSON.stringify(realtime.body.map((message) => message.id))),
     ["seller-message-2"],
   );
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations"), false);
@@ -889,8 +899,8 @@ async function pollingRetryBridge() {
   return bridge;
 }
 function capturedRetryIds(bridge) {
-  return bridge.posts.filter((post) => post.type === "realtime_event")
-    .flatMap((post) => Array.from(post.body.messages, (message) => message.id));
+  return bridge.posts.filter((post) => post.type === "recovery_batch" && post.request_id.startsWith("poll:"))
+    .flatMap((post) => Array.from(post.body, (message) => message.id));
 }
 
 test("Seller Centre retries unchanged summaries after repeated history failures and captures intervening messages once", async () => {
@@ -909,6 +919,63 @@ test("Seller Centre retries unchanged summaries after repeated history failures 
   assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
   await bridge.runIntervals();
   assert.deepEqual(capturedRetryIds(bridge), ["m2", "m3"]);
+});
+
+test("Seller Centre captures buyer messages before a reply in a first-seen conversation", async () => {
+  const bridge = createBridge({ pathname: "/portal/chat-management", captureIntervals: true });
+  await bridge.fetch("/webchat/api/v1.2/mini/user/setting", {});
+  await bridge.fetch(retryListPath, []);
+  bridge.setResponse(retryListPath, [retryConversation("seller-reply")]);
+  bridge.setResponse(retryHistoryPath, [
+    { ...retryMessage("buyer-image", 0), type: "image", content: { url: "https://example.com/image.jpg" } },
+    retryMessage("buyer-text", 1),
+    { ...retryMessage("seller-reply", 2), from_id: 100000001, to_id: 987654321 },
+  ]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["buyer-image", "buyer-text", "seller-reply"]);
+});
+
+test("Seller Centre retries unchanged summaries until history contains the expected latest message", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0)]);
+  await bridge.runIntervals();
+  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  await bridge.runIntervals();
+  assert.deepEqual(capturedRetryIds(bridge), ["m2"]);
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
+});
+
+test("Seller Centre retries capture after the durable queue rejects a batch", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("m2")]);
+  bridge.setResponse(retryHistoryPath, [retryMessage("m1", 0), retryMessage("m2", 1)]);
+  bridge.setPollAcknowledgement(false);
+  await bridge.runIntervals();
+  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m1");
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 1);
+  bridge.setPollAcknowledgement(true);
+  await bridge.runIntervals();
+  assert.equal(bridge.state.capturedMessageIdsByConversation.get("retry-conversation"), "m2");
+  assert.equal(bridge.state.pendingSellerCentreMessages.size, 0);
+  assert.deepEqual(capturedRetryIds(bridge), ["m2", "m2"]);
+});
+
+test("Seller Centre paginates history back to the last captured message", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setResponse(retryListPath, [retryConversation("m102")]);
+  const messages = Array.from({ length: 102 }, (_, index) => retryMessage(`m${index + 1}`, index));
+  const offsets = [];
+  bridge.setResponse(retryHistoryPath, (request) => {
+    const offset = Number(new URL(request.url).searchParams.get("offset"));
+    offsets.push(offset);
+    return new Response(JSON.stringify([...messages].reverse().slice(offset, offset + 100)));
+  });
+  await bridge.runIntervals();
+  assert.deepEqual(offsets, [0, 100]);
+  assert.deepEqual(capturedRetryIds(bridge), messages.slice(1).map((message) => message.id));
 });
 
 test("Seller Centre retains pending capture until a history request template is available", async () => {
