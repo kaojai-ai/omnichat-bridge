@@ -12,7 +12,7 @@ const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", impor
 const shopeeParserSource = await readFile(new URL("../extension/lib/shopee.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false, shopeeOrigin = "https://seller.shopee.co.th" } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const documentListeners = new Map();
@@ -22,7 +22,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   let context;
   const window = {
     location: {
-      origin: provider === "line_oa" ? "https://chat.line.biz" : "https://seller.shopee.co.th",
+      origin: provider === "line_oa" ? "https://chat.line.biz" : shopeeOrigin,
       pathname,
     },
     addEventListener(type, listener) {
@@ -188,6 +188,28 @@ test("actual Shopee parser keeps session ownership across realtime and historica
     assert.equal(message.sender_account_id, "active-shop");
     assert.equal(message.recipient_account_id, "buyer-shop");
   }
+});
+
+test("Taiwan page bridge queues realtime and recovery messages and correlates a sent reply", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", {
+    localConsent: true, realShopeeParser: true, shopeeOrigin: "https://seller.shopee.tw",
+  });
+  await bridge.providerEvent({ type: "accounts_detected", accounts: [{ provider: "shopee", provider_account_id: "tw-shop" }] });
+  const inbound = { id: "tw-inbound", conversation_id: "tw-chat", from_id: "buyer-user", to_id: "seller-user",
+    from_shop_id: "buyer-shop", to_shop_id: "tw-shop", type: "text", content: { text: "你好" } };
+  await bridge.providerEvent({ type: "realtime_event", body: { messages: [inbound] } });
+  await bridge.providerEvent({ type: "recovery_batch", request_id: "history:tw", provider_account_id: "tw-shop",
+    body: { messages: [{ ...inbound, id: "tw-history" }] } });
+  const queued = bridge.runtimeMessages.filter(message => message.type === "queue_messages").flatMap(message => message.messages);
+  assert.deepEqual(queued.map(message => message.id), ["tw-inbound", "tw-history"]);
+  assert.deepEqual(queued.map(message => message.provider_account_id), ["tw-shop", "tw-shop"]);
+
+  const sending = bridge.sendCommand({ ...command, request_id: "tw-send", conversation_id: "tw-chat",
+    client_message_id: "tw-client", text: "Reply" });
+  assert.equal(bridge.runtimeMessages.find(message => message.type === "send_api_v3" && message.request_id === "tw-send")?.conversation_id, "tw-chat");
+  await bridge.providerEvent({ type: "api_send_result", request_id: "tw-send", ok: true,
+    provider_message_id: "tw-sent", confirmed: true });
+  assert.deepEqual(plain(await sending), { ok: true, provider_message_id: "tw-sent" });
 });
 
 test("actual Shopee parser rejects unrelated and ambiguous shops before recovery owner fallback", async () => {
