@@ -95,6 +95,22 @@ test("routes only supported Shopee chat URLs to the adapter", () => {
   assert.equal(registry.forUrl("https://manager.line.biz/"), null);
 });
 
+test("Taiwan Shopee account selects only its own tab for inbound capture and outbound replies", () => {
+  const registry = createRegistry();
+  const adapter = registry.forUrl("https://seller.shopee.tw/new-webchat/conversations");
+  const account = { provider: "shopee", provider_account_id: "tw-shop", country: "TW" };
+  assert.equal(adapter.id, "shopee");
+  assert.equal(registry.forPage("https://seller.shopee.tw/portal").id, "shopee");
+  assert.equal(adapter.chatUrlForAccount(account), "https://seller.shopee.tw/new-webchat/conversations");
+  assert.equal(adapter.matchesAccountUrl("https://seller.shopee.tw/webchat/conversations", account), true);
+  assert.equal(adapter.matchesAccountUrl("https://seller.shopee.co.th/new-webchat/conversations", account), false);
+  assert.equal(adapter.supports("message_observation"), true);
+  assert.equal(adapter.supports("message_recovery"), true);
+  for (const command of ["send_text", "send_image", "send_product", "send_video"]) {
+    assert.equal(adapter.supportsSend(command), true);
+  }
+});
+
 test("allows a future provider to own config validation and page matching", () => {
   const registry = createRegistry();
   const adapter = registry.register({
