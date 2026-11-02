@@ -1823,7 +1823,8 @@
     let latestCursor = null;
     let sawExpectedLatest = !expectedLatestId;
     let offset = "0";
-    const diagnostics = { conversation_id: String(conversation.id), provider_account_id: providerAccountId,
+    const diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "poll",
+      conversation_id: String(conversation.id), provider_account_id: providerAccountId,
       request_id: requestId, expected_latest_message_id: expectedLatestId,
       cursor_message_id: cursor?.message_id ?? null, since_ms: sinceMs };
     try {
