@@ -293,6 +293,8 @@
   function logAsyncError(scope, error, details = {}) {
     postLog("error", "async_error", "Extension async operation failed.", {
       scope,
+      ...error?.diagnostics,
+      reason_code: error?.reason_code,
       ...errorDetails(error),
       ...details,
     });
@@ -924,7 +926,7 @@
       return acknowledgement;
     }, poll.watermarkMs, null, {
       fetchJson: fetchProviderJson,
-      expectedLatestId: latestId,
+      expectedLatestId: latestId, requestId: poll.requestId, providerAccountId: poll.accountId,
       isCurrent: () => isBridgeActive() && epoch === state.sellerCentreCaptureEpoch,
     });
     return result.complete ? result.latestCursor ?? cursor : null;
@@ -1816,6 +1818,7 @@
 
   async function fetchHistory(conversation, cursor, onPage, sinceFloorMs = 0, onProgress = null, {
     fetchJson = recoveryFetchJson, expectedLatestId = null, isCurrent = isBridgeActive,
+    requestId = null, providerAccountId = state.currentAccountId,
     maxMessages = null, untilMs = Infinity,
   } = {}) {
     const sinceMs = Math.max(sinceFloorMs, timeMs(cursor?.event_timestamp));
@@ -1825,54 +1828,82 @@
     let latestCursor = null;
     let sawExpectedLatest = !expectedLatestId;
     let captured = 0;
-    for (let page = 0; ; page += 1) {
-      const template = state.historyTemplate ?? state.getTemplate;
-      if (!template) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
-      onProgress?.("fetching_messages");
-      const body = await fetchJson(sellerCentreHistoryRequest(conversation, template, page * HISTORY_LIMIT));
-      if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
-      if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
-        throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
-      }
-      const pageMessages = Array.isArray(body) ? body : conversationItems(body);
-      if (pageMessages.some((message) => messageIdOf(message) === expectedLatestId)) sawExpectedLatest = true;
-      const unseen = pageMessages.filter((message) => {
-        const id = messageIdOf(message);
-        if (!id || seenIds.has(id)) return false;
-        seenIds.add(id);
-        return true;
-      });
-      if (pageMessages.length && !unseen.length) {
-        throw Object.assign(new Error("Shopee message history pagination repeated a page."), { reason_code: "invalid_message_history" });
-      }
-      onProgress?.("fetching_messages");
-      const currentMessages = unseen.filter((message) =>
-        timeMs(message.created_timestamp ?? message.created_at) >= sinceMs
-          && timeMs(message.created_timestamp ?? message.created_at) <= untilMs)
-        .sort((left, right) => timeMs(right.created_timestamp ?? right.created_at)
-          - timeMs(left.created_timestamp ?? left.created_at))
-        .slice(0, maxMessages === null ? undefined : Math.max(0, maxMessages - captured));
-      if (currentMessages.length) {
-        const acknowledgement = await onPage(currentMessages, page);
+    let offset = "0";
+    const diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "poll",
+      conversation_id: String(conversation.id), provider_account_id: providerAccountId,
+      request_id: requestId, expected_latest_message_id: expectedLatestId,
+      cursor_message_id: cursor?.message_id ?? null, since_ms: sinceMs };
+    try {
+      for (let page = 0; ; page += 1) {
+        const template = state.historyTemplate ?? state.getTemplate;
+        if (!template) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
+        onProgress?.("fetching_messages");
+        delete diagnostics.page_count;
+        delete diagnostics.first_message_id;
+        delete diagnostics.last_message_id;
+        Object.assign(diagnostics, { stage: "history_fetch", page_index: page, page_offset: offset });
+        const body = await fetchJson(sellerCentreHistoryRequest(conversation, template, offset));
         if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
-        captured += currentMessages.length;
-        parsed += acknowledgement.parsed ?? 0;
-        queued += acknowledgement.queued ?? 0;
-        const candidate = acknowledgement.latest_cursor;
-        if (candidate && (!latestCursor || timeMs(candidate.event_timestamp) > timeMs(latestCursor.event_timestamp)
-          || (timeMs(candidate.event_timestamp) === timeMs(latestCursor.event_timestamp)
-            && String(candidate.message_id) > String(latestCursor.message_id)))) {
-          latestCursor = candidate;
+        if (!Array.isArray(body) && ![body?.conversations, body?.items, body?.data?.conversations, body?.data?.items, body?.data].some(Array.isArray)) {
+          throw Object.assign(new Error("Shopee returned invalid message history."), { reason_code: "invalid_message_history" });
         }
+        const pageMessages = Array.isArray(body) ? body : conversationItems(body);
+        Object.assign(diagnostics, { page_count: pageMessages.length,
+          first_message_id: messageIdOf(pageMessages[0]) ?? null,
+          last_message_id: messageIdOf(pageMessages.at(-1)) ?? null });
+        if (pageMessages.some((message) => messageIdOf(message) === expectedLatestId)) sawExpectedLatest = true;
+        const unseen = pageMessages.filter((message) => {
+          const id = messageIdOf(message);
+          if (!id || seenIds.has(id)) return false;
+          seenIds.add(id);
+          return true;
+        });
+        if (pageMessages.length && !unseen.length) {
+          throw Object.assign(new Error("Shopee message history pagination repeated a page."), { reason_code: "invalid_message_history" });
+        }
+        onProgress?.("fetching_messages");
+        const currentMessages = unseen.filter((message) =>
+          timeMs(message.created_timestamp ?? message.created_at) >= sinceMs
+            && timeMs(message.created_timestamp ?? message.created_at) <= untilMs)
+          .sort((left, right) => timeMs(right.created_timestamp ?? right.created_at)
+            - timeMs(left.created_timestamp ?? left.created_at))
+          .slice(0, maxMessages === null ? undefined : Math.max(0, maxMessages - captured));
+        if (currentMessages.length) {
+          diagnostics.stage = "history_persistence";
+          const acknowledgement = await onPage(currentMessages, page);
+          if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
+          captured += currentMessages.length;
+          parsed += acknowledgement.parsed ?? 0;
+          queued += acknowledgement.queued ?? 0;
+          const candidate = acknowledgement.latest_cursor;
+          if (candidate && (!latestCursor || timeMs(candidate.event_timestamp) > timeMs(latestCursor.event_timestamp)
+            || (timeMs(candidate.event_timestamp) === timeMs(latestCursor.event_timestamp)
+              && String(candidate.message_id) > String(latestCursor.message_id)))) {
+            latestCursor = candidate;
+          }
+        }
+        const oldest = pageMessages.reduce((value, message) => {
+          const candidate = timeMs(message.created_timestamp ?? message.created_at);
+          return candidate && candidate < value ? candidate : value;
+        }, Number.POSITIVE_INFINITY);
+        // Include the whole timestamp boundary; provider IDs do not encode order.
+        if ((maxMessages !== null && captured >= maxMessages) || pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
+        // Shopee uses the final message ID as an exclusive older-page cursor.
+        const nextOffset = messageIdOf(pageMessages.at(-1));
+        if (!nextOffset || String(nextOffset) === offset) {
+          throw Object.assign(new Error("Shopee history cursor did not advance."), { reason_code: "invalid_message_history" });
+        }
+        offset = String(nextOffset);
       }
-      const oldest = pageMessages.reduce((value, message) => {
-        const candidate = timeMs(message.created_timestamp ?? message.created_at);
-        return candidate && candidate < value ? candidate : value;
-      }, Number.POSITIVE_INFINITY);
-      // Include the whole timestamp boundary; provider IDs do not encode order.
-      if ((maxMessages !== null && captured >= maxMessages) || pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
+      diagnostics.stage = "history_completeness";
+      if (!sawExpectedLatest) {
+        throw Object.assign(new Error("Shopee message history has not reached its latest summary."), { reason_code: "invalid_message_history" });
+      }
+      return { parsed, queued, latestCursor, complete: true };
+    } catch (error) {
+      error.diagnostics = { ...error.diagnostics, ...diagnostics };
+      throw error;
     }
-    return { parsed, queued, latestCursor, complete: sawExpectedLatest };
   }
 
   async function recover(requestId, checkpoint = {}) {
@@ -1898,6 +1929,7 @@
     let parsed = 0;
     let queued = 0;
     let checked = 0;
+    let recoveryContext = { stage: "checkpoint_load" };
     try {
       // Finish any active page scan before using the same durable coverage.
       await waitForSellerCentreCapture(requestId, state.recoveryAbortController.signal);
@@ -2052,6 +2084,8 @@
       for (const item of [...probes, ...recoveryJobs]) {
         assertSessionUnchanged();
         const { conversation, cursor, decision } = item;
+        recoveryContext = { conversation_id: String(conversation.id), stage: "history_fetch",
+          expected_latest_message_id: latestMessageIdOf(conversation), cursor_message_id: cursor?.message_id ?? null };
         checked += 1;
         postLog("debug", "conversation_started", "Checking one conversation for missed messages.", {
           position: checked,
@@ -2081,7 +2115,7 @@
               phase, conversation_id: String(conversation.id), conversation_pages: pages.pages,
               completed_conversations: completedConversations, total_conversations: totalConversations });
           },
-          { expectedLatestId: latestMessageIdOf(conversation),
+          { expectedLatestId: latestMessageIdOf(conversation), requestId, providerAccountId: accountId,
             maxMessages: bootstrap && !deep && !windowJob ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
             untilMs: bootstrap && !deep && !windowJob ? bootstrapStartedAt : Infinity },
         );
@@ -2089,6 +2123,7 @@
           throw Object.assign(new Error("Shopee message history has not reached its latest summary."), { reason_code: "invalid_message_history" });
         }
         if (deep) {
+          recoveryContext.stage = "history_backfill";
           const backfillRequestId = `${requestId}:${conversation.id}:history`;
           post({
             type: "history_backfill",
@@ -2121,6 +2156,7 @@
             message_id: "",
           } : null);
         if (completedCursor) {
+          recoveryContext.stage = "checkpoint_save";
           const cursorRequestId = `${requestId}:${conversation.id}:cursor`;
           post({
             type: "recovery_cursor",
@@ -2221,7 +2257,7 @@
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: accountId,
         ok: false, error: String(error), reason_code: reasonCode, conversations_checked: checked,
         duration_ms: Date.now() - startedAt,
-        diagnostics: { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+        diagnostics: { ...recoveryContext, ...error?.diagnostics, diagnostic_version: 1, provider: "shopee", operation: "recovery",
           ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { http_status: status } : {}),
           timed_out: error?.name === "TimeoutError",
           error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name) ? error.name : "Error",

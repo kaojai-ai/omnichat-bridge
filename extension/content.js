@@ -490,7 +490,9 @@
     if (!input || input.diagnostic_version !== 1) return {};
     const keys = ["diagnostic_version", "provider", "operation", "stage", "http_status", "native_error_code",
       "provider_code_present", "response_format", "failure_kind", "timed_out", "error_name", "provider_duration_ms",
-      "native_attempted", "delivery_uncertain", "validation_fields"];
+      "native_attempted", "delivery_uncertain", "validation_fields",
+      "conversation_id", "expected_latest_message_id", "cursor_message_id", "page_offset",
+      "first_message_id", "last_message_id", "page_index", "page_count", "since_ms"];
     return Object.fromEntries(keys.filter(key => Object.hasOwn(input, key)).map(key => [key, input[key]]));
   }
 
@@ -902,7 +904,7 @@
       const recorded = await log(superseded ? "info" : "error", superseded ? "recovery_superseded" : "recovery_failed",
         superseded ? "Provider recovery superseded by reconnect." : "Provider recovery failed.", {
         ...(["superseded", "provider_timeout", "provider_rejected", "queue_ack_timeout", "invalid_conversation_list",
-          "history_not_ready", "session_changed", "persistence_failed", "recovery_failed"].includes(message.reason_code)
+          "invalid_message_history", "history_not_ready", "session_changed", "persistence_failed", "recovery_failed"].includes(message.reason_code)
           ? { reason_code: message.reason_code } : {}),
         conversations_checked: message.conversations_checked,
         duration_ms: message.duration_ms,

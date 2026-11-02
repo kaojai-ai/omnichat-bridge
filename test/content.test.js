@@ -1114,6 +1114,22 @@ for (const succeeds of [true, false]) {
   });
 }
 
+ test("recovery completeness failures retain their reason and page evidence for server logs", async () => {
+  const bridge = contentBridge();
+  await bridge.providerEvent({ type: "recovery_complete", request_id: "history-attempt", ok: false,
+    provider_account_id: "1545238334", reason_code: "invalid_message_history",
+    error: "private response", diagnostics: { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+      stage: "history_completeness", conversation_id: "4702143640317214721",
+      expected_latest_message_id: "2442444048573022577", page_offset: "0", page_count: 0, page_index: 0,
+      body: "private response", token: "secret" } });
+  const entry = bridge.runtimeMessages.find(entry => entry.type === "record_log" && entry.event === "recovery_failed");
+  assert.equal(entry.details.reason_code, "invalid_message_history");
+  assert.equal(entry.details.expected_latest_message_id, "2442444048573022577");
+  assert.equal(entry.details.stage, "history_completeness");
+  assert.equal(entry.details.body, undefined);
+  assert.equal(entry.details.token, undefined);
+});
+
 for (const succeeds of [true, false]) {
   test(`scan completion acknowledges ${succeeds ? "durable checkpoint" : "persistence failure"}`, async () => {
     const bridge = contentBridge("/portal/chat-management", { runtimeHandler: message =>

@@ -10,6 +10,12 @@ const urlSource = await readFile(new URL("../extension/lib/shopee-url.js", impor
 const adaptersSource = await readFile(new URL("../extension/lib/provider-adapters.js", import.meta.url), "utf8");
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const shopeeParserSource = await readFile(new URL("../extension/lib/shopee.js", import.meta.url), "utf8");
+// Native Shopee history offsets are exclusive message IDs, including 64-bit strings.
+function historyPage(messages, offset, limit = 100) {
+  const start = offset === "0" ? 0 : messages.findIndex(message => message.id === offset) + 1;
+  assert.ok(offset === "0" || start > 0, `Unknown history cursor: ${offset}`);
+  return messages.slice(start, start + limit);
+}
 const origin = "https://seller.shopee.co.th";
 const parserContext = vm.createContext({ location: { origin }, URL });
 vm.runInContext(shopeeParserSource, parserContext);
@@ -1055,12 +1061,12 @@ test("Seller Centre paginates history back to the last captured message", async 
   const messages = Array.from({ length: 102 }, (_, index) => retryMessage(`m${index + 1}`, index));
   const offsets = [];
   bridge.setResponse(retryHistoryPath, (request) => {
-    const offset = Number(new URL(request.url).searchParams.get("offset"));
+    const offset = new URL(request.url).searchParams.get("offset");
     offsets.push(offset);
-    return new Response(JSON.stringify([...messages].reverse().slice(offset, offset + 100)));
+    return new Response(JSON.stringify(historyPage([...messages].reverse(), offset)));
   });
   await bridge.runIntervals();
-  assert.deepEqual(offsets, [0, 100]);
+  assert.deepEqual(offsets, ["0", "m3"]);
   assert.deepEqual(new Set(capturedRetryIds(bridge)), new Set(messages.map((message) => message.id)));
   const batches = bridge.posts.filter((post) => post.type === "recovery_batch" && post.request_id.startsWith("poll:"));
   assert.deepEqual(batches.map((post) => post.body.length), [100, 2]);
@@ -1513,6 +1519,11 @@ test("Shopee recovery does not advance checkpoints before history reaches its su
   const result = await bridge.sync("100000001", "not-ready", {});
   assert.equal(result.ok, false);
   assert.equal(result.reason_code, "invalid_message_history");
+  assert.equal(result.diagnostics.stage, "history_completeness");
+  assert.equal(result.diagnostics.conversation_id, "not-ready");
+  assert.equal(result.diagnostics.expected_latest_message_id, "missing-latest");
+  assert.equal(result.diagnostics.page_index, 0);
+  assert.equal(result.diagnostics.page_count, 0);
   assert.equal(bridge.posts.some((post) => post.type === "recovery_cursor"), false);
   bridge.dispose();
 });
@@ -1737,23 +1748,23 @@ test("Shopee recovery finds the summary message after a full page of newer arriv
     const list = "/webchat/api/v1.2/conversations";
     const timestamp = Date.parse("2026-08-20T11:00:00Z") / 1000;
     const messages = Array.from({ length: 101 }, (_, i) => ({
-      ...retryMessage(`arrival-${i}`, 0), conversation_id: "busy",
+      ...retryMessage(String(2442444048573022577n + BigInt(i)), 0), conversation_id: "busy",
       created_timestamp: timestamp + i,
     })).reverse();
     await bridge.fetch(list, [{ id: "busy", shop_id: 100000001,
-      latest_message_id: "arrival-0", last_message_time: new Date(timestamp * 1000).toISOString() }]);
+      latest_message_id: "2442444048573022577", last_message_time: new Date(timestamp * 1000).toISOString() }]);
     const offsets = [];
     bridge.setResponse(`${list}/busy/messages`, request => {
-      const offset = Number(new URL(request.url).searchParams.get("offset"));
+      const offset = new URL(request.url).searchParams.get("offset");
       offsets.push(offset);
-      return new Response(JSON.stringify(messages.slice(offset, offset + 100)));
+      return new Response(JSON.stringify(historyPage(messages, offset)));
     });
     const store = { messages: [], conversations: {} };
     const result = await bridge.sync("100000001", "summary-on-second-page", { watermark: "2026-08-19T12:00:00Z" }, store);
     assert.equal(result.ok, true);
-    assert.deepEqual(offsets, [0, 100]);
+    assert.deepEqual(offsets, ["0", "2442444048573022578"]);
     assert.equal(store.messages.length, 101);
-    assert.equal(store.conversations.busy.message_id, "arrival-100");
+    assert.equal(store.conversations.busy.message_id, "2442444048573022677");
   } finally { bridge.dispose(); }
 });
 
@@ -1769,14 +1780,14 @@ test("Shopee withholds the checkpoint when the summary message is missing across
     }));
     const offsets = [];
     bridge.setResponse(`${list}/busy/messages`, request => {
-      const offset = Number(new URL(request.url).searchParams.get("offset"));
+      const offset = new URL(request.url).searchParams.get("offset");
       offsets.push(offset);
-      return new Response(JSON.stringify(messages.slice(offset, offset + 100)));
+      return new Response(JSON.stringify(historyPage(messages, offset)));
     });
     const store = { messages: [], conversations: {} };
     const result = await bridge.sync("100000001", "summary-still-missing", { watermark: "2026-08-19T12:00:00Z" }, store);
     assert.equal(result.ok, false);
-    assert.deepEqual(offsets, [0, 100]);
+    assert.deepEqual(offsets, ["0", "visible-99"]);
     assert.equal(store.messages.length, 101);
     assert.equal(store.conversations.busy, undefined);
   } finally { bridge.dispose(); }
@@ -1795,9 +1806,9 @@ test("Seller Centre polling reuses recovery coverage and persists its newer chec
     let available = messages.slice(0, 101).reverse();
     const offsets = [];
     bridge.setResponse(retryHistoryPath, request => {
-      const offset = Number(new URL(request.url).searchParams.get("offset"));
+      const offset = new URL(request.url).searchParams.get("offset");
       offsets.push(offset);
-      return new Response(JSON.stringify(available.slice(offset, offset + 100)));
+      return new Response(JSON.stringify(historyPage(available, offset)));
     });
     const completed = await bridge.sync("100000001", "shared-bootstrap", {});
     assert.equal(completed.ok, true);
@@ -1809,7 +1820,7 @@ test("Seller Centre polling reuses recovery coverage and persists its newer chec
     available = [...messages].reverse();
     bridge.setResponse(retryListPath, [summary(101)]);
     await bridge.runIntervals();
-    assert.deepEqual(offsets, [0]);
+    assert.deepEqual(offsets, ["0"]);
     assert.deepEqual(capturedRetryIds(bridge), ["shared-101"]);
     assert.equal(bridge.checkpoint().conversations["retry-conversation"].message_id, "shared-101");
     const requestsBeforeRecovery = bridge.requests.filter(path => path === retryHistoryPath).length;
@@ -1854,8 +1865,8 @@ test("waiting recovery receives activity only when a polling page persists", asy
     let release;
     let offset = -1;
     bridge.setResponse(retryHistoryPath, request => {
-      offset = Number(new URL(request.url).searchParams.get("offset"));
-      return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify(messages.slice(offset, offset + 100)))); });
+      offset = new URL(request.url).searchParams.get("offset");
+      return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify(historyPage(messages, offset)))); });
     });
     await bridge.runIntervals();
     const recovery = bridge.sync("100000001", "waiting-progress", { watermark: "2026-08-01T00:00:00Z" });
@@ -1863,8 +1874,8 @@ test("waiting recovery receives activity only when a polling page persists", asy
     const activity = () => bridge.posts.filter(post => post.type === "recovery_activity" && post.request_id === "waiting-progress");
     assert.equal(activity().length, 0, "a stalled page does not renew recovery activity");
     release();
-    for (let attempt = 0; attempt < 30 && offset === 0; attempt++) await new Promise(resolve => setImmediate(resolve));
-    assert.equal(offset, 100);
+    for (let attempt = 0; attempt < 30 && offset === "0"; attempt++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(offset, "progress-99");
     assert.equal(activity().length, 1, "durable page progress refreshes the waiting request");
     await bridge.runIntervals();
     assert.equal(activity().length, 1, "timer ticks cannot disguise a stalled next page");
@@ -1944,15 +1955,15 @@ test("Shopee three-day recovery paginates every missing message beyond initial c
     await bridge.fetch(list, [{ id: "gap", shop_id: 100000001, latest_message_id: "gap-300",
       last_message_time: new Date(messages[0].created_timestamp * 1000).toISOString() }]);
     bridge.setResponse(`${list}/gap/messages`, request => {
-      const offset = Number(new URL(request.url).searchParams.get("offset"));
+      const offset = new URL(request.url).searchParams.get("offset");
       offsets.push(offset);
-      return new Response(JSON.stringify(messages.slice(offset, offset + 100)));
+      return new Response(JSON.stringify(historyPage(messages, offset)));
     });
     const store = { messages: [], conversations: {} };
     const result = await bridge.sync("100000001", "three-day-gap", { watermark: new Date(since).toISOString() }, store);
     assert.equal(result.ok, true);
     assert.equal(store.messages.length, 301);
-    assert.deepEqual(offsets, [0, 100, 200, 300]);
+    assert.deepEqual(offsets, ["0", "gap-201", "gap-101", "gap-1"]);
     assert.equal(bridge.posts.some(post => post.type === "recovery_bootstrap"), false);
     assert.equal(bridge.checkpoint().watermark, result.watermark);
   } finally { bridge.dispose(); }
@@ -1991,5 +2002,30 @@ test("Shopee completion write failure retains the previous overall checkpoint", 
       { messages: [], conversations: {}, failCompletion: true });
     assert.equal(result.ok, false);
     assert.equal(bridge.checkpoint().watermark, watermark);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee next-page fetch failures do not retain the preceding page evidence", async () => {
+  const bridge = createBridge();
+  const list = "/webchat/api/v1.2/conversations";
+  const messages = Array.from({ length: 100 }, (_, i) => ({
+    ...retryMessage(`diagnostic-${i}`, 0), conversation_id: "diagnostic-chat",
+    created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 + i,
+  })).reverse();
+  try {
+    await bridge.fetch(list, [{ id: "diagnostic-chat", shop_id: 100000001,
+      latest_message_id: messages[0].id, last_message_time: "2026-08-20T11:01:39Z" }]);
+    bridge.setResponse(`${list}/diagnostic-chat/messages`, request => {
+      const offset = new URL(request.url).searchParams.get("offset");
+      return offset === "0" ? new Response(JSON.stringify(messages)) : new Response("{}", { status: 500 });
+    });
+    const result = await bridge.sync("100000001", "page-fetch-failure", { watermark: "2026-08-17T12:00:00Z" });
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics.stage, "history_fetch");
+    assert.equal(result.diagnostics.page_index, 1);
+    assert.equal(result.diagnostics.page_offset, "diagnostic-0");
+    assert.equal(result.diagnostics.page_count, undefined);
+    assert.equal(result.diagnostics.first_message_id, undefined);
+    assert.equal(result.diagnostics.last_message_id, undefined);
   } finally { bridge.dispose(); }
 });

@@ -41,7 +41,7 @@ export function sanitizeSendDiagnostics(input) {
   const enums = {
     provider: ["shopee", "line_oa"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
-    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation"],
+    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
     response_format: ["json", "non_json", "empty", "unreadable"],
     surface: ["new-webchat", "webchat", "seller-centre"],
@@ -82,6 +82,13 @@ export function sanitizeSendDiagnostics(input) {
   for (const key of SEND_DIAGNOSTIC_ID_KEYS) {
     const id = typeof input[key] === "number" || typeof input[key] === "string" ? String(input[key]) : "";
     if (/^\d{1,32}$/.test(id)) result[key] = id;
+  }
+  for (const key of ["conversation_id", "expected_latest_message_id", "cursor_message_id", "page_offset", "first_message_id", "last_message_id"]) {
+    if (typeof input[key] === "string" && /^[a-z0-9._:-]{1,64}$/i.test(input[key])) result[key] = input[key];
+    else if (input[key] === null) result[key] = null;
+  }
+  for (const key of ["page_index", "page_count", "since_ms"]) {
+    if (Number.isSafeInteger(input[key]) && input[key] >= 0) result[key] = input[key];
   }
   if (Number.isInteger(input.text_length) && input.text_length >= 0 && input.text_length <= 20_000) result.text_length = input.text_length;
   return result;
