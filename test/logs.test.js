@@ -361,3 +361,25 @@ test("upload preserves installation scope while excluding internal routing", () 
   assert.equal(uploaded.level, "debug");
   assert.equal(uploaded.account_key, undefined);
 });
+
+test("history failure evidence survives storage, upload and support export without private payloads", () => {
+  const diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+    stage: "history_completeness", conversation_id: "4702143640317214721",
+    expected_latest_message_id: "2442444048573022577", cursor_message_id: "2442444048573022576",
+    page_offset: "2442444048573022575", first_message_id: "2442444048573022574",
+    last_message_id: "2442444048573022573", page_index: 1, page_count: 100, since_ms: 1790000000000,
+    body: "private response", token: "secret" };
+  const safe = sanitizeSendDiagnostics(diagnostics);
+  assert.equal(safe.expected_latest_message_id, diagnostics.expected_latest_message_id);
+  const entry = createLogEntry({ level: "error", area: "provider", event: "recovery_failed",
+    message: "Provider recovery failed.", details: { ...safe, request_id: "attempt-1", provider_account_id: "1545238334", reason_code: "invalid_message_history" } });
+  const uploaded = logEntryForUpload(entry);
+  assert.equal(uploaded.details.page_offset, diagnostics.page_offset);
+  assert.equal(uploaded.details.stage, "history_completeness");
+  const popup = readFileSync(new URL("../extension/popup.js", import.meta.url), "utf8");
+  const exported = vm.runInNewContext(popup.slice(popup.indexOf("function formatLogDetails("), popup.indexOf("function safeFilenamePart(")) + "\nformatSupportLogs()", {
+    logs: [entry], logLevel: { value: "error" }, chrome: { runtime: { getManifest: () => ({ version: "0.8.9" }) } } });
+  assert.match(exported, /expected_latest_message_id=2442444048573022577/);
+  assert.match(exported, /reason_code=invalid_message_history/);
+  assert.doesNotMatch(JSON.stringify(uploaded) + exported, /private response|secret/);
+});
