@@ -85,12 +85,12 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 11;
+const BRIDGE_PROTOCOL_VERSION = 12;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 7;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
 // Bump when an open Shopee page must replace its main-world bridge.
-const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 4;
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -779,17 +779,16 @@ function bootstrapConversation(value) {
   };
 }
 
-async function saveBootstrapSelection(providerAccountId, conversations, provider = "", assertCurrent = () => {}) {
+async function saveBootstrapSelection(providerAccountId, conversations, provider = "", assertCurrent = () => {}, startedAt = null) {
   const { context, state } = await getAccountScanState(providerAccountId, provider);
-  if (state.watermark || state.bootstrap?.conversations?.length) return;
+  if (Date.parse(state.watermark) > 0 || state.bootstrap?.started_at) return;
   const selected = (Array.isArray(conversations) ? conversations : [])
     .map(bootstrapConversation)
     .filter(Boolean)
     .slice(0, 10);
-  if (!selected.length) return;
   await writeAccountScanState(context, () => {
     assertCurrent();
-    return { bootstrap: { conversations: selected }, in_progress: true };
+    return { bootstrap: { conversations: selected, started_at: Number.isFinite(Date.parse(startedAt)) ? startedAt : new Date().toISOString() }, in_progress: true };
   });
 }
 
@@ -831,6 +830,18 @@ async function advanceScanCursor(providerAccountId, conversationId, cursor, prov
     delete next.summary_token;
     if (!next.event_timestamp) return {};
     return { conversations: { ...(current.conversations ?? {}), [id]: next } };
+  });
+}
+
+async function completeScan(providerAccountId, watermark, provider = "", assertCurrent = () => {}) {
+  const boundary = Date.parse(watermark);
+  if (!Number.isFinite(boundary) || boundary <= 0 || boundary > Date.now()) throw new Error("Invalid recovery watermark.");
+  const { context } = await getAccountScanState(providerAccountId, provider);
+  await writeAccountScanState(context, (current) => {
+    assertCurrent();
+    const previous = Date.parse(current.watermark);
+    return { watermark: Number.isFinite(previous) && previous > boundary ? current.watermark : watermark,
+      bootstrap: null, in_progress: false, completed_at: new Date().toISOString() };
   });
 }
 
@@ -1200,7 +1211,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
-  if (["record_history_window", "record_history_backfill", "advance_scan_cursor", "save_bootstrap"].includes(message?.type)) {
+  if (["record_history_window", "record_history_backfill", "advance_scan_cursor", "save_bootstrap", "complete_scan"].includes(message?.type)) {
     void persistSyncCheckpoint(message, _sender?.tab?.id).then(
       () => respond({ ok: true }),
       error => respond({ ok: false, error: error.message || "Recovery was superseded." }),
@@ -1315,7 +1326,8 @@ async function persistSyncCheckpoint(message, tabId) {
     if (message.type === "record_history_window") return recordHistoryWindow(message.provider_account_id, message.history_days, message.provider, assertCurrent);
     if (message.type === "record_history_backfill") return recordHistoryBackfill(message.provider_account_id, message.conversation_id, message.history_days, message.provider, assertCurrent);
     if (message.type === "advance_scan_cursor") return advanceScanCursor(message.provider_account_id, message.conversation_id, message.cursor, message.provider, assertCurrent);
-    return saveBootstrapSelection(message.provider_account_id, message.conversations, message.provider, assertCurrent);
+    if (message.type === "complete_scan") return completeScan(message.provider_account_id, message.watermark, message.provider, assertCurrent);
+    return saveBootstrapSelection(message.provider_account_id, message.conversations, message.provider, assertCurrent, message.started_at);
   });
 }
 
@@ -4208,17 +4220,6 @@ async function runAccountSync(trigger, control, context) {
     });
     const recovered = await syncOpenProvider(control, context);
     throwIfSyncCancelled(signal);
-    await exclusive(async () => {
-      throwIfSyncCancelled(signal);
-      const { state } = await getAccountScanState(providerAccountId, context.account.provider);
-      throwIfSyncCancelled(signal);
-      await writeAccountScanState(context, () => {
-        throwIfSyncCancelled(signal);
-        if (!isCurrentSyncControl(control)) throw syncCancelledError();
-        return { watermark: recovered.watermark ?? state.watermark, bootstrap: null,
-          in_progress: false, completed_at: new Date().toISOString() };
-      });
-    });
     await updateScopedState(STORAGE.status, context.key, {
       state: "discovering",
       phase: "sending_recovered",

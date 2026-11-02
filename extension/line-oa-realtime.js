@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-11";
+  const BRIDGE_VERSION = "line-oa-poll-12";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 7;
+  const COMPATIBILITY_VERSION = 8;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -425,12 +425,20 @@
     }
   }
 
+  async function checkpointRequest(type, requestId, providerAccountId, details = {}) {
+    const acknowledged = waitForAcknowledgement(requestId);
+    post({ type, request_id: requestId, provider_account_id: providerAccountId, ...details });
+    const result = await acknowledged;
+    if (!result?.ok) throw new Error(result?.error ?? "Could not persist recovery progress.");
+    return result;
+  }
+
   function pollIsActive(generation) {
     return !disposed && generation.epoch === pollGeneration && !generation.cancelled;
   }
 
   // Persisted boundaries own recovery; evictable IDs must never stop pagination.
-  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0 }) {
+  async function recoverChat({ requestId, providerAccountId, botId, chat, generation, maxMessages = null, sinceMs = 0, untilMs = Infinity }) {
     const chatId = value(chat?.chatId);
     if (!chatId) return { parsed: 0, queued: 0 };
     let backward = null;
@@ -456,7 +464,7 @@
           // Bootstrap and incremental recovery both have a lower bound. Never
           // enqueue timestamp-less messages when a lower bound is active.
           return sinceMs > 0
-            ? timestamp > 0 && timestamp >= sinceMs
+            ? timestamp > 0 && timestamp >= sinceMs && timestamp <= untilMs
             : true;
         })
         .slice(0, maxMessages === null ? undefined : Math.max(0, maxMessages - accepted));
@@ -588,14 +596,18 @@
     }
   }
 
-  async function poll(requestId, providerAccountId, botId, checkpoint, generation, history, refreshMetadata = false) {
+  async function poll(requestId, providerAccountId, botId, generation, history, refreshMetadata = false) {
     const scanStartedAt = Date.now();
-    const completedCursors = { ...(checkpoint?.conversations ?? {}) };
+    let completedCursors;
     const metadata = refreshMetadata === true && !String(requestId).startsWith("poll:")
       ? { ok: false, profiles: [], partial: false } : null;
     const metadataDeadline = scanStartedAt + 30_000;
     const metadataChats = new Set();
     try {
+      const loaded = await checkpointRequest("recovery_checkpoint", `${requestId}:checkpoint`, providerAccountId);
+      if (!pollIsActive(generation)) return;
+      const checkpoint = loaded.checkpoint ?? {};
+      completedCursors = { ...(checkpoint.conversations ?? {}) };
       const resolvedBotId = await resolveBotId(providerAccountId, botId);
       if (!pollIsActive(generation)) return;
       if (!resolvedBotId) throw new Error("LINE OA account is not available to the signed-in user.");
@@ -611,10 +623,12 @@
       const checkpointMs = timeMs(checkpoint?.watermark);
       const bootstrap = checkpointMs <= 0;
       const historyWindow = historyWindowActive(selection, checkpoint);
+      let bootstrapStartedAt = timeMs(checkpoint?.bootstrap?.started_at) || scanStartedAt;
+      let frozenChats = checkpoint?.bootstrap?.started_at ? checkpoint.bootstrap.conversations ?? [] : null;
       const lowerBoundMs = historyWindow
         ? selection.sinceMs
         : bootstrap
-          ? Date.now() - INITIAL_SYNC_LOOKBACK_MS
+          ? bootstrapStartedAt - INITIAL_SYNC_LOOKBACK_MS
           : checkpointMs;
       const pendingIds = new Set(
         (selection?.ids ?? []).filter((id) => !historyCovered(checkpoint, id, selection.days) && !missingHistoryIds.has(id)),
@@ -645,11 +659,38 @@
           conversation_pages: conversationPages, completed_conversations: completedConversations,
           total_conversations: totalConversations,
         });
-        const body = await json(chatUrl(resolvedBotId, next));
+        let body = await json(chatUrl(resolvedBotId, next));
         if (!pollIsActive(generation)) return;
         if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
         conversationPages += 1;
-        const chats = globalThis.OmnichatLineOA.chatItems(body);
+        if (bootstrap && !historyWindow && pendingIds.size === 0 && frozenChats === null && conversationPages === 1) {
+          const first = body;
+          const items = [...body.list];
+          const selectionCursors = new Set();
+          while (globalThis.OmnichatLineOA.chatItems({ ...body, list: items }).length < INITIAL_SYNC_MAX_CONVERSATIONS && cursor(body.next)) {
+            const selectionCursor = cursor(body.next);
+            if (selectionCursors.has(selectionCursor)) throw invalidProviderResponse("LINE OA conversation pagination repeated a cursor.");
+            selectionCursors.add(selectionCursor);
+            body = await json(chatUrl(resolvedBotId, selectionCursor));
+            if (!pollIsActive(generation)) return;
+            if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
+            items.push(...body.list);
+            conversationPages += 1;
+          }
+          body = { ...first, list: items, next: body.next };
+        }
+        let chats = globalThis.OmnichatLineOA.chatItems(body);
+        if (bootstrap && !historyWindow && pendingIds.size === 0 && nonTargetConversations === 0 && !recoveryListComplete) {
+          if (frozenChats === null) {
+            frozenChats = chats.filter(chat => value(chat?.chatId)).slice(0, INITIAL_SYNC_MAX_CONVERSATIONS)
+              .map(chat => ({ id: value(chat.chatId) }));
+            await checkpointRequest("recovery_bootstrap", `${requestId}:bootstrap`, providerAccountId,
+              { conversations: frozenChats, started_at: new Date(bootstrapStartedAt).toISOString() });
+            if (!pollIsActive(generation)) return;
+          }
+          const byId = new Map(chats.map(chat => [value(chat.chatId), chat]));
+          chats = frozenChats.map(item => byId.get(item.id) ?? { chatId: item.id });
+        }
         let pageBeforeCheckpoint = chats.length > 0;
         if (orderedByUpdate) for (const chat of chats) {
           const updatedAt = timeMs(chat?.updatedAt);
@@ -720,6 +761,7 @@
                 ? null
                 : (bootstrap ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null),
               sinceMs: deep || historyWindow ? selection.sinceMs : Math.max(lowerBoundMs, timeMs(completedCursors[chatId]?.event_timestamp)),
+              untilMs: bootstrap && !deep && !historyWindow ? bootstrapStartedAt : Infinity,
             })
             : { parsed: 0, queued: 0 };
           if (!pollIsActive(generation)) return;
@@ -752,7 +794,7 @@
           }
         }
         if (bootstrap && !historyWindow && pendingIds.size === 0
-          && nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS) recoveryListComplete = true;
+          && (frozenChats !== null || nonTargetConversations >= INITIAL_SYNC_MAX_CONVERSATIONS)) recoveryListComplete = true;
         const needsMetadata = metadata && !metadata.partial && metadataChats.size < 100 && Date.now() < metadataDeadline;
         if (orderedByUpdate && pageBeforeCheckpoint && pendingIds.size === 0 && !needsMetadata) {
           recoveryListComplete = true;
@@ -807,17 +849,9 @@
           checkpoint,
         });
       }
-      const watermark = new Date(scanStartedAt).toISOString();
-      const state = pollingAccounts.get(providerAccountId);
-      if (state) {
-        state.checkpoint = {
-          ...checkpoint,
-          watermark,
-          conversations: completedCursors,
-          ...(checkpoint?.history_backfill ? { history_backfill: checkpoint.history_backfill } : {}),
-          ...(checkpoint?.history_window_days ? { history_window_days: checkpoint.history_window_days } : {}),
-        };
-      }
+      const watermark = new Date(bootstrap && !historyWindow && pendingIds.size === 0 ? bootstrapStartedAt : scanStartedAt).toISOString();
+      await checkpointRequest("recovery_scan_complete", `${requestId}:complete`, providerAccountId, { watermark });
+      if (!pollIsActive(generation)) return;
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
@@ -843,7 +877,7 @@
     else postProviderStatus();
   }
 
-  function startPoll({ requestId, providerAccountId, botId, checkpoint, history, refreshMetadata = false }) {
+  function startPoll({ requestId, providerAccountId, botId, history, refreshMetadata = false }) {
     const generation = { epoch: pollGeneration, cancelled: false };
     const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
@@ -851,18 +885,17 @@
     if (!String(requestId).startsWith("poll:")) {
       post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase: "loading_conversations" });
     }
-    const task = poll(requestId, providerAccountId, botId, checkpoint, generation, history, refreshMetadata);
+    const task = poll(requestId, providerAccountId, botId, generation, history, refreshMetadata);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
   }
 
-  function start(requestId, providerAccountId, botId, checkpoint, history, refreshMetadata = false) {
+  function start(requestId, providerAccountId, botId, history, refreshMetadata = false) {
     const accountId = value(providerAccountId);
     stopTimer();
     const previous = pollingAccounts.get(accountId);
     const account = {
       botId: value(botId) || previous?.botId || "",
-      checkpoint: checkpoint ?? previous?.checkpoint ?? null,
       history: history === undefined ? previous?.history ?? null : history,
     };
     pollingAccounts.set(accountId, account);
@@ -1227,7 +1260,6 @@
         event.data.request_id,
         event.data.provider_account_id,
         event.data.bot_id,
-        event.data.checkpoint,
         historySelection(event.data),
         event.data.refresh_metadata === true,
       );

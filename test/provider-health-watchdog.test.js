@@ -276,7 +276,7 @@ for (const restorePolling of [false, true]) {
       updateScopedState: async () => {}, recordLog: async () => {},
       attemptDelivery: async () => ({ sent: 0, pending: 0 }),
       providerLabel: () => "LINE OA", liveConnections: new Map(),
-      syncOpenProvider: async () => { recoveries++; return { recovered: 0 }; },
+      syncOpenProvider: async () => { recoveries++; state.in_progress = false; return { recovered: 0 }; },
     });
     vm.runInContext(functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
     const result = await runtime.runAccountSync("automatic", control, context);

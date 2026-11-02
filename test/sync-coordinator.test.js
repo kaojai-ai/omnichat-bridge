@@ -279,3 +279,38 @@ for (const provider of ["line_oa", "shopee"]) {
     assert.equal(writes.length, 2, "session invalidation during storage waiting cannot advance checkpoints");
   });
 }
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider} scan completion is monotonic and fenced against stale/cancelled requests`, async () => {
+    const controller = new AbortController();
+    const control = { controller, accountKey: `${provider}:a`, adapter: { id: provider }, providerAccountId: "a", tabId: 7, providerRequestId: "current" };
+    const state = { watermark: "2026-10-31T00:00:00Z", bootstrap: { conversations: [] }, conversations: { a: { message_id: "saved" } } };
+    let beforeWrite = () => {};
+    const sandbox = {
+      accountSyncs: new Map([[control.accountKey, control]]),
+      syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+      exclusive: task => task(),
+      getAccountScanState: async () => ({ context: {} }),
+      writeAccountScanState: async (_context, patch) => { beforeWrite(); Object.assign(state, patch(state)); },
+    };
+    const first = source.indexOf("function isCurrentSyncControl(");
+    const last = source.indexOf("async function initializeAndStartSync(", first);
+    const completeStart = source.indexOf("async function completeScan(");
+    const completeEnd = source.indexOf("function exclusive(", completeStart);
+    const persist = vm.runInNewContext(`(() => { ${source.slice(first, last)}\n${source.slice(completeStart, completeEnd)}; return persistSyncCheckpoint; })()`, sandbox);
+    const message = { type: "complete_scan", provider, provider_account_id: "a", request_id: "current:complete", watermark: "2026-11-01T00:00:00Z" };
+    await persist(message, 7);
+    assert.equal(state.watermark, message.watermark);
+    assert.equal(state.bootstrap, null);
+    assert.equal(state.in_progress, false);
+    assert.equal(state.conversations.a.message_id, "saved");
+    await persist({ ...message, watermark: "2026-10-30T00:00:00Z" }, 7);
+    assert.equal(state.watermark, message.watermark);
+    await assert.rejects(persist({ ...message, request_id: "old:complete" }, 7), { name: "AbortError" });
+    await assert.rejects(persist(message, 8), { name: "AbortError" });
+    await assert.rejects(persist({ ...message, watermark: "invalid" }, 7), /Invalid recovery watermark/);
+    beforeWrite = () => controller.abort();
+    await assert.rejects(persist({ ...message, watermark: "2026-11-02T00:00:00Z" }, 7), { name: "AbortError" });
+    assert.equal(state.watermark, message.watermark);
+  });
+}
