@@ -14,6 +14,7 @@ import {
 import {
   availableLogBudget,
   diagnosticErrorDetails,
+  readinessLogDetails,
   sanitizeSendDiagnostics,
   logEntryForUpload,
   pruneLogs,
@@ -122,6 +123,7 @@ const INBOUND_LOG_MESSAGES = {
   "popup.configuration_exported": "Configuration exported.",
   "popup.async_error": "Extension async operation failed.",
   "popup.uncaught_error": "Unhandled popup error.",
+  "provider.status_probe": "Provider readiness probe outcome changed.",
   "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
   "provider.send_failed": "Provider reply failed. See routing diagnostics.",
@@ -190,6 +192,7 @@ const providerPolicyObservations = new Map();
 let providerObservationSequence = 0;
 const providerStatusProbes = new Map();
 const providerPolicyContexts = new Map();
+const providerWatchdogFailures = new Map();
 const sessionEligibility = createSessionEligibility({
   onRecheck: () => ensureLiveConnection(),
   onEvent: (key, event, details) => {
@@ -393,6 +396,7 @@ function providerStatusEvidence(status) {
 
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
   const adapter = context.adapter;
+  context.readinessDiagnostics = providerPolicyContexts.get(context.key)?.readinessDiagnostics;
   providerPolicyContexts.set(context.key, context);
   const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
   const countryAllowed = !(context.account.provider === "shopee" && context.account.country && context.account.country !== "TH")
@@ -452,6 +456,12 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
       ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
     evidence: ready ? { tab, status, command_capabilities: providerCommandCapabilities(status, context) } : null,
   });
+  context.readinessDiagnostics = {
+    ...readinessLogDetails(status, { provider: adapter.id, tabId: tab?.id,
+      accountId: context.account.provider_account_id, ready: Boolean(policy.eligible && !policy.unknown) }),
+    account_verified: verified,
+    reason_code: policy.reason_code,
+  };
   const active = policy.eligible;
   await updateLiveState(context, {
     send_ready: Boolean(policy.eligible && !policy.unknown),
@@ -1035,7 +1045,15 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       area,
       message.event,
       safeMessage,
-      message.details,
+      {
+        ...(area === "popup" && message.details?.scope === "manual_sync"
+          ? [...providerPolicyContexts.values()].find(context =>
+            context.readinessDiagnostics?.tab_id === message.details?.tab_id)?.readinessDiagnostics
+          : {}),
+        ...message.details,
+        ...(message.event === "status_probe" && _sender.tab?.id
+          ? { tab_id: _sender.tab.id, document_id: _sender.documentId ?? null } : {}),
+      },
     ).then((recorded) => respond({ ok: recorded === true }));
     return true;
   }
@@ -2303,8 +2321,11 @@ async function runProviderHealthWatchdogOnce() {
           continue;
         }
         if (!providerTabHealthy(status, adapter)) {
-          throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+          throw new Error(status?.ok === true
+            ? `${providerLabel(adapter)} responded but is not ready.`
+            : `${providerLabel(adapter)} did not return a successful health response.`);
         }
+        providerWatchdogFailures.delete(tab.id);
         const record = recovery.record?.tab_id === tab.id
           ? await updateProviderRecoveryTabState(recoveryKey, {
             state: PROVIDER_RECOVERY_STATES.ready,
@@ -2330,11 +2351,16 @@ async function runProviderHealthWatchdogOnce() {
           });
         }
       } catch (error) {
-        await recordUnexpected("provider_watchdog", error, {
-          provider: adapter.id,
-          tab_id: tab.id,
-        });
         const status = await providerTabStatus(tab);
+        const details = readinessLogDetails(status, { provider: adapter.id, tabId: tab.id,
+          accountId: context.account.provider_account_id });
+        const failureKey = JSON.stringify([error.message, details]);
+        // Recovery retries continue normally; unchanged failures need only one log.
+        if (providerWatchdogFailures.get(tab.id) !== failureKey) {
+          if (providerWatchdogFailures.size >= 100) providerWatchdogFailures.delete(providerWatchdogFailures.keys().next().value);
+          providerWatchdogFailures.set(tab.id, failureKey);
+          await recordUnexpected("provider_watchdog", error, details);
+        }
         await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
       }
     }
@@ -2649,7 +2675,9 @@ async function sendConnectionStatus(socket, context) {
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
+    ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
     ready: status.ready,
+    send_ready: status.send_ready,
     reason_code: status.reason_code,
     readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
   });
@@ -3239,6 +3267,61 @@ async function exactProviderAccountTab(context, tabId, { shared_session = false 
     throw new Error("The selected provider tab is signed in to a different account.");
   }
   return tab;
+}
+
+// Manual Sync keeps its freshly verified account scope, but may use a ready peer tab.
+async function manualSyncTab(context, sourceTabId, { shared_session = false, verified_context, signal } = {}) {
+  const adapter = context.adapter;
+  const source = await providerChatTabById(adapter, sourceTabId);
+  if (!source) throw new Error("Open this account's chat, then try Sync.");
+  if (!providerAccountMatchesTab(adapter, context.account, source)) throw new Error("The selected provider tab is in a different country.");
+  const sourceContext = providerTabContext(source, adapter.id);
+  if (verified_context && verified_context !== sourceContext) throw syncCancelledError();
+  if (!verified_context) {
+    const detection = await detectOpenProviderAccount(adapter.id, sourceTabId);
+    throwIfSyncCancelled(signal);
+    if (!detection?.ok) throw new Error(detection?.error || "Could not verify the selected provider account.");
+    if (!detection.accounts?.some(account => account.provider_account_id === context.account.provider_account_id)) {
+      throw new Error("The selected provider tab is signed in to a different account.");
+    }
+  }
+  const currentSource = await providerChatTabById(adapter, sourceTabId);
+  if (!currentSource || sourceContext !== providerTabContext(currentSource, adapter.id)) throw syncCancelledError();
+  // Preserve profile-wide account conflicts and session checks before choosing a peer.
+  const policy = await providerReadiness(context);
+  throwIfSyncCancelled(signal);
+  if (policy?.reason_code === "wrong_account") throw new Error("Provider account access changed or tabs report conflicting accounts. Verify the account and try Sync again.");
+  const candidates = [source, ...orderProviderTabs(adapter, (await providerChatTabs(adapter))
+    .filter(tab => tab.id !== sourceTabId))];
+  for (const candidate of candidates) {
+    throwIfSyncCancelled(signal);
+    if (!providerAccountMatchesTab(adapter, context.account, candidate)) continue;
+    let tab, epoch, status;
+    try {
+      tab = await exactProviderAccountTab(context, candidate.id, { shared_session });
+      epoch = providerTabContext(tab, adapter.id);
+      status = await providerTabStatus(tab);
+    } catch {
+      throwIfSyncCancelled(signal);
+      continue; // Inaccessible peers cannot widen the requested account scope.
+    }
+    throwIfSyncCancelled(signal);
+    if (epoch !== providerTabContext(tab, adapter.id)) continue;
+    if (!providerStatusMeetsPolicy(status, context) || status?.capabilities?.message_recovery !== true
+      || (status.surface === "seller-centre" && status.chat_open === false)) continue;
+    const currentPolicy = await providerReadiness(context);
+    throwIfSyncCancelled(signal);
+    if (currentPolicy?.reason_code === "wrong_account") throw new Error("Provider account access changed or tabs report conflicting accounts. Verify the account and try Sync again.");
+    if (!currentPolicy?.eligible || currentPolicy.unknown || epoch !== providerTabContext(tab, adapter.id)) continue;
+    if (candidate.id !== sourceTabId) await recordLog("info", "sync", "tab_fallback", "Manual Sync selected another ready tab for the same account.", {
+      provider: adapter.id, provider_account_id: context.account.provider_account_id,
+      source_tab_id: sourceTabId, tab_id: tab.id,
+      source_surface: adapter.surfaceForUrl?.(source.url) ?? adapter.id,
+      surface: status.surface ?? adapter.id, reason_code: "selected_tab_unready",
+    });
+    return { tab, epoch, generation: currentPolicy.generation };
+  }
+  throw new Error("Open this account's chat, then try Sync.");
 }
 
 // Display metadata is applied only to the same configured account/session that requested it.
@@ -4070,6 +4153,7 @@ function requestAccountSync(context, trigger, options = {}) {
     controller, accountKey: context.key,
     adapter: context.adapter, providerAccountId: context.account.provider_account_id,
     preferredTabId: options.tab_id, tabId: options.tab_id ?? null,
+    manualSourceTabId: trigger === "manual" && options.allow_tab_fallback === true ? options.tab_id : null,
     sharedSession: context.adapter.id === "line_oa" && options.shared_session === true,
     refreshMetadata: trigger === "manual" || options.refresh_metadata === true,
     restorePolling: options.restorePolling === true,
@@ -4086,10 +4170,16 @@ function requestAccountSync(context, trigger, options = {}) {
     if (trigger !== "manual" && !hasServerInitialized(current)) return { skipped: "not_initialized" };
     let selected = context;
     if (Number.isInteger(options.tab_id)) {
-      const tab = await exactProviderAccountTab(context, options.tab_id, { shared_session: control.sharedSession });
+      const selection = trigger === "manual" && options.allow_tab_fallback === true
+        ? await manualSyncTab(context, options.tab_id, { shared_session: control.sharedSession,
+          verified_context: options.verified_context, signal })
+        : { tab: await exactProviderAccountTab(context, options.tab_id, { shared_session: control.sharedSession }) };
       throwIfSyncCancelled(signal);
+      const tab = selection.tab;
       control.lockedTabId = tab.id;
-      control.lockedTabContext = providerTabContext(tab, context.adapter.id);
+      control.tabId = tab.id;
+      control.lockedTabContext = selection.epoch ?? providerTabContext(tab, context.adapter.id);
+      if (selection.generation !== undefined) control.sessionGeneration = selection.generation;
     } else {
       selected = (await openSessionSyncContexts([context], control)).find(item => item.key === context.key);
       if (!selected) return { provider: context.adapter.id, provider_account_id: context.account.provider_account_id, skipped: "account_unavailable" };
@@ -4114,7 +4204,7 @@ async function retryProviderAccount(message, { controller } = {}) {
   const context = configuredAccountContexts(stored).find(item => item.adapter.id === message.provider
     && item.account.provider_account_id === message.provider_account_id);
   if (!context) throw new Error("This provider account is not configured.");
-  return requestAccountSync(context, "manual", { ...message, controller });
+  return requestAccountSync(context, "manual", { ...message, verified_context: undefined, controller });
 }
 
 async function cancelActiveSync(provider = null, requestedTabId = null) {
@@ -4123,7 +4213,7 @@ async function cancelActiveSync(provider = null, requestedTabId = null) {
     && (requestedTabId == null || requestedTabId === tabId)).map(([, batch]) => batch);
   for (const batch of batches) batch.controller.abort();
   const controls = [...accountSyncs.values()].filter(control => (!provider || control.adapter.id === provider)
-    && (requestedTabId == null || control.tabId === requestedTabId || control.lockedTabId === requestedTabId));
+    && (requestedTabId == null || control.tabId === requestedTabId || control.lockedTabId === requestedTabId || control.manualSourceTabId === requestedTabId));
   for (const control of controls) control.controller.abort();
   await Promise.allSettled(controls.filter(control => control.tabId).map(control => sendProviderMessage(control.tabId, {
     type: "cancel_sync_v3", provider: control.adapter.id,
@@ -4342,8 +4432,16 @@ async function runAccountSync(trigger, control, context) {
       await recordLog("info", "sync", "superseded", "Sync superseded by provider reconnect.", {
         provider_account_id: providerAccountId, reason_code: "superseded",
       });
+    } else if (trigger === "manual" && error?.recovery_diagnostic_recorded === true) {
+      await recordLog("info", "sync", "failure_readiness", "Readiness at manual sync failure.", {
+        ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
+        provider: context.account.provider, provider_account_id: providerAccountId,
+      });
     } else if (error?.recovery_diagnostic_recorded !== true) {
-      await recordUnexpected("message_sync", error, { provider_account_id: providerAccountId });
+      await recordUnexpected("message_sync", error, {
+        ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
+        provider: context.account.provider, provider_account_id: providerAccountId, trigger,
+      });
     }
     return {
       provider: context.account.provider,
@@ -4416,6 +4514,7 @@ async function syncAccountsForTab(provider, tabId, trigger = "automatic", { cont
   const tabContext = providerTabContext(tab, provider);
   await ensureProviderBridge(tab.id, adapter);
   const detection = await detectOpenProviderAccount(provider, tabId);
+  if (trigger === "manual" && !detection?.ok) throw new Error(detection?.error || "Could not verify the selected provider account.");
   const status = detection?.ok ? await providerTabStatus(tab) : null;
   const latest = await providerChatTabById(adapter, tabId);
   if (!latest || tabContext !== providerTabContext(latest, provider)) throw syncCancelledError();
@@ -4438,6 +4537,7 @@ async function syncAccountsForTab(provider, tabId, trigger = "automatic", { cont
   }
   const accounts = await Promise.all(contexts.map(context => requestAccountSync(context, trigger, {
     tab_id: tabId, shared_session: provider === "line_oa", controller,
+    allow_tab_fallback: trigger === "manual", verified_context: tabContext,
   }).catch(error => ({ provider: context.adapter.id, provider_account_id: context.account.provider_account_id, error: error.message }))));
   return { ok: true, accounts, partial: accounts.some(result => result.error || result.metadata?.ok === false) };
 }

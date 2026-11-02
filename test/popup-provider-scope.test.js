@@ -48,6 +48,11 @@ for (const provider of ["shopee", "line_oa"]) {
       configuredAccountContexts: () => contexts, providerAccountMatchesTab: () => true,
       accountContextFor: (_stored, id, kind) => contexts.find(context => context.key === `${kind}:${id}`),
       preemptAutomaticLogUpload() {}, throwIfSyncCancelled() {}, exactProviderAccountTab: async () => tab,
+      manualSyncTab: async (_context, tabId, options) => {
+        assert.equal(tabId, 42);
+        assert.equal(options.verified_context, "verified-session");
+        return { tab, epoch: "verified-session" };
+      },
       queueLiveStateWrite: fn => fn(), writeStorage: async () => {},
       ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
       runAccountSync: async (trigger, control, context) => {

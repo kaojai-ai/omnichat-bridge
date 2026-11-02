@@ -35,7 +35,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
       runtimeMessages.push(message);
     },
   };
-  context = vm.createContext({
+  context = vm.createContext({ performance,
     window,
     document: {
       hidden: false,

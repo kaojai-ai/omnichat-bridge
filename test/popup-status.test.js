@@ -158,9 +158,9 @@ test("healthy provider does not hide a failed history sync or undelivered messag
   assert.equal(currentAccountSyncFailure({ ...state, last_sync_at: "2026-10-26T01:02:00Z" }, { provider_recovery_state: "ready" }), "");
 });
 
-test("configured inactive Shopee shop offers a connection check instead of retrying sync", () => {
+test("configured inactive Shopee shop uses the unified sync action", () => {
   const action = accountDiscoveryStatus({ detecting: false, hasConfiguration: true, inactiveShopee: true });
-  assert.equal(action.action, "detect");
+  assert.equal(action.action, "sync");
   assert.equal(action.label, "inactiveShop");
 });
 

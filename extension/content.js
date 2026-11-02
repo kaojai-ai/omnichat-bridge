@@ -18,6 +18,9 @@
   const recoveries = new Map();
   const accountDetections = new Map();
   let providerStatusRequest = null;
+  let statusDiagnosticKey = null;
+  let statusDiagnosticAccount = null;
+  let firstUnreadyAt = null;
   const profilesByConversation = new Map();
   const routingByConversation = new Map();
   const pendingOutbound = new Map();
@@ -29,6 +32,7 @@
   let lastRealtimeConnectedAt = null;
   let providerSurface = null;
   let providerSurfaceReady = false;
+  let providerReadinessDetails = {};
   let providerCapabilities = {};
   let providerCommandCapabilitiesByAccount = {};
   let providerAccountIds = [];
@@ -1107,6 +1111,8 @@
       }
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
+      providerReadinessDetails = Object.fromEntries(["list_ready", "history_ready", "sender_available"]
+        .map(key => [key, typeof event.data[key] === "boolean" ? event.data[key] : null]));
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
         ? { ...event.data.capabilities }
         : providerCapabilities;
@@ -1168,7 +1174,9 @@
         const pending = providerStatusRequest;
         providerStatusRequest = null;
         clearTimeout(pending.timeout);
-        pending.resolve(providerStatusSnapshot());
+        const snapshot = providerStatusSnapshot();
+        recordStatusProbe(snapshot, pending.startedAt);
+        pending.resolve(snapshot);
       }
     } else if (event.data.type === "seller_centre_chat_opened") {
       requestResumeSync();
@@ -1234,6 +1242,7 @@
       ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
       surface_ready: providerSurfaceReady,
+      ...providerReadinessDetails,
       capabilities: { ...providerCapabilities },
       command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
       realtime_transport: providerRealtimeTransport,
@@ -1249,17 +1258,59 @@
     };
   }
 
+  // Timing is diagnostic only: never extends a probe or changes eligibility.
+  function recordStatusProbe(status, startedAt) {
+    const now = performance.now();
+    if (statusDiagnosticAccount !== currentProviderAccountId) {
+      if (statusDiagnosticAccount !== null) firstUnreadyAt = null;
+      statusDiagnosticAccount = currentProviderAccountId;
+      statusDiagnosticKey = null;
+    }
+    const responded = status?.ok === true;
+    const prerequisitesReady = responded && Boolean(currentProviderAccountId)
+      && status.surface_ready === true && status.capabilities?.message_recovery === true
+      && status.capabilities?.send_text === true;
+    const details = {
+      outcome: responded ? "response_received" : "response_timeout",
+      prerequisites_ready: prerequisitesReady,
+      surface: responded ? status.surface : providerSurface,
+      ...(responded ? {
+        account_verified: Boolean(currentProviderAccountId),
+        ...providerReadinessDetails,
+        surface_ready: status.surface_ready === true,
+        history_capable: status.capabilities?.message_recovery === true,
+        text_capable: status.capabilities?.send_text === true,
+        realtime_connected: status.realtime_connected === true,
+      } : {}),
+    };
+    const key = JSON.stringify(details);
+    if (!prerequisitesReady && firstUnreadyAt === null) firstUnreadyAt = startedAt;
+    if (key !== statusDiagnosticKey) {
+      statusDiagnosticKey = key;
+      log(responded ? "info" : "warn", "status_probe", "Provider readiness probe outcome changed.", {
+        ...details, provider_account_id: currentProviderAccountId,
+        duration_ms: Math.max(0, Math.round(now - startedAt)), timeout_ms: 1500,
+        bridge_generation: bridgeGeneration,
+        ...(prerequisitesReady && firstUnreadyAt !== null
+          ? { unready_duration_ms: Math.max(0, Math.round(now - firstUnreadyAt)) } : {}),
+      });
+    }
+    if (prerequisitesReady) firstUnreadyAt = null;
+  }
+
   function requestFreshProviderStatus() {
     if (providerStatusRequest) return providerStatusRequest.promise;
     const requestId = crypto.randomUUID();
+    const startedAt = performance.now();
     let resolve;
     const promise = new Promise((done) => { resolve = done; });
     const timeout = setTimeout(() => {
       if (providerStatusRequest?.requestId !== requestId) return;
       providerStatusRequest = null;
+      recordStatusProbe(null, startedAt);
       resolve({ ok: false, provider_check_outcome: "unknown", error: "Provider status response timed out." });
     }, 1500);
-    providerStatusRequest = { requestId, promise, resolve, timeout };
+    providerStatusRequest = { requestId, promise, resolve, timeout, startedAt };
     post({ type: "check_provider_status_v3", request_id: requestId });
     return promise;
   }

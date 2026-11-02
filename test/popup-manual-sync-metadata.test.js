@@ -23,6 +23,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
   const scope = vm.createContext({
     syncButton: button, storedConfig: { accounts }, detectedAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
     progressArea: {}, status: { classList: { remove() {} } },
+    logPopup() {}, diagnosticErrorDetails: () => ({}),
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
     accountOrigins: config => config.accounts,
     requestTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
@@ -95,11 +96,7 @@ test("cancelled popup action cannot replace the newer UI when background sync fi
   assert.equal(h.results.length, 0);
 });
 
-test("detect and open-chat actions do not refresh metadata", async () => {
-  const detect = harness({ action: "detect" });
-  await detect.click();
-  assert.equal(detect.detections, 1);
-  assert.equal(detect.requests.length, 0);
+test("open-chat action does not refresh metadata", async () => {
   const open = harness({ action: "open_webchat_mini" });
   const task = open.click();
   open.finishPreparation();

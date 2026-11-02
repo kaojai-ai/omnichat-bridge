@@ -265,6 +265,10 @@
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
+      list_ready: Boolean(state.listTemplate),
+      history_ready: Boolean(state.getTemplate),
+      sender_available: isSellerCentreSurface() ? typeof state.nativeFetch === "function"
+        : typeof window.__chat_anti_fraud__?.poster === "function",
       capabilities,
       realtime_transport: isSellerCentreSurface() ? "polling" : "socket",
       ...(isSellerCentreSurface() ? { chat_open: chatOpen } : {}),

@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { createSessionEligibility } from "../../extension/lib/session-eligibility.js";
+import { readinessLogDetails } from "../../extension/lib/logs.js";
 const source = readFileSync(new URL("../../extension/background.js", import.meta.url), "utf8");
 export function installProviderPolicy(scope) {
   const defaults = {
+    readinessLogDetails,
     hasRegionalShopeePermission: async () => true,
     accountSyncs: new Map(), lineTabSyncs: new Map(), throwIfSyncCancelled: signal => { if (signal?.aborted) throw Object.assign(new Error("Sync cancelled."), { name: "AbortError" }); },
     providerBridgeChecks: new Map(), providerObservationSequence: 0, providerPolicyObservations: new Map(), providerSessionEpochs: new Map(), providerTabEpochs: new Map(), providerPolicyTabIds: new Map(), providerStatusProbes: new Map(), providerProbeTabs: new Map(), providerPolicyContexts: new Map(),

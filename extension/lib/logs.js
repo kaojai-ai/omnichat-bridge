@@ -264,3 +264,24 @@ export function logEntryForUpload(entry) {
     ...(entry.scope === "installation" ? { scope: "installation" } : {}),
   };
 }
+
+// Flat, payload-free evidence shared by readiness and failure logs.
+export function readinessLogDetails(status, { provider, tabId, accountId, ready = false } = {}) {
+  const bool = value => typeof value === "boolean" ? value : null;
+  return {
+    provider, tab_id: tabId ?? null, surface: status?.surface ?? null,
+    account_verified: provider === "shopee"
+      ? Boolean(accountId && status?.current_provider_account_id === accountId)
+      : Boolean(status?.account_access_verified && status?.accessible_account_ids?.includes(accountId)),
+    probe_ok: bool(status?.ok), surface_ready: bool(status?.surface_ready),
+    list_ready: bool(status?.list_ready), history_ready: bool(status?.history_ready),
+    sender_available: bool(status?.sender_available),
+    history_capable: bool(status?.capabilities?.message_recovery),
+    text_capable: provider === "line_oa"
+      ? Boolean(status?.command_capabilities_by_account?.[accountId]?.includes("send_text"))
+      : bool(status?.capabilities?.send_text),
+    realtime_connected: bool(status?.realtime_connected),
+    provider_check_outcome: status?.provider_check_outcome ?? null,
+    ready,
+  };
+}

@@ -158,7 +158,7 @@ test("readiness diagnostics publish changed states once without recording messag
   const start = source.indexOf("function statusPublishKey(status)");
   const end = source.indexOf("function scheduleKeepalive(context, socket)");
   const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, { preemptAutomaticLogUpload: () => {},
-    liveConnections: new Map([[account.key, connection]]),
+    providerPolicyContexts: new Map(), liveConnections: new Map([[account.key, connection]]),
     WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
     createStatusReporter: options => createStatusReporter({ ...options, id: () => "report", setTimer: () => 1, clearTimer: () => {} }),
     scheduleLeaderStatusRefresh: () => {}, scheduleKeepalive: () => {},

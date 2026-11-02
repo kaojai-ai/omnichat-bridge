@@ -22,6 +22,12 @@ function harness({ pauseSync = false } = {}) {
     ensureProviderBridge: async () => {}, detectOpenProviderAccount: async () => ({ ok: true }),
     providerTabStatus: async () => ({ account_access_verified: true, accessible_account_ids: ["A", "B", "unconfigured"] }),
     exactProviderAccountTab: async () => tab,
+    manualSyncTab: async (_context, tabId, options) => {
+      assert.equal(tabId, 42);
+      assert.equal(options.verified_context, "fixed-session");
+      assert.equal(options.shared_session, true);
+      return { tab, epoch: "fixed-session" };
+    },
     configuredAccountContexts: () => contexts, accountSyncs: syncCoordinator.jobs,
     accountContextFor: (_stored, id, provider) => contexts.find(context => context.adapter.id === provider && context.account.provider_account_id === id),
     queueLiveStateWrite: fn => fn(), writeStorage: async () => {}, preemptAutomaticLogUpload() {},

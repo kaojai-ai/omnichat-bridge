@@ -124,12 +124,16 @@ export function transportConnectionStatus(live) {
 // Startup discovery is not evidence that configuration is missing.
 export function accountDiscoveryStatus({ detecting, hasConfiguration, inactiveShopee = false }) {
   if (detecting) return { label: "detectingShop", hint: "detectingShop", action: "sync" };
-  if (hasConfiguration && inactiveShopee) return { label: "inactiveShop", hint: "sessionUnverified", action: "detect" };
+  if (hasConfiguration && inactiveShopee) return { label: "inactiveShop", hint: "sessionUnverified", action: "sync" };
   if (hasConfiguration) return { label: "waitingForShop", hint: "shopUnknown", action: "sync" };
   return { label: "needConfig", hint: "configurationMissing", action: "configure" };
 }
 
 export function sessionConnectionStatus(live) {
+  if (live?.eligibility_reason_code === "provider_capability_unavailable") return {
+    label: "Not ready", state: "neutral",
+    hint: "Provider is not ready. Try Sync.",
+  };
   return {
     waiting_for_tab: {
       label: "Open chat", state: "neutral",
