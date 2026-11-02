@@ -50,6 +50,7 @@ function accountHarness() {
   const events = [];
   const finishes = new Map();
   const sandbox = {
+    manualBridgeRepair: null,
     syncCoordinator, accountSyncs: syncCoordinator.jobs, AbortController,
     STORAGE: { config: "config", detectedAccounts: "detected", consent: "consent", serverInitialized: "initialized", logUploadEnabled: "logs" },
     readStorage: async () => ({ consent: true, initialized: true }),

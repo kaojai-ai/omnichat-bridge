@@ -12,7 +12,7 @@ const contexts = ["A", "B", "C"].map(id => ({ key: `line_oa:${id}`, adapter: { i
 test("LINE shared configuration selects verified access, preserves failures and clears revoked eligibility", async () => {
   let status = { account_access_verified: true, accessible_account_ids: ["A", "B"], command_capabilities_by_account: { A: ["send_text"], B: ["send_text"] } };
   const live = { "line_oa:B": { sync_error: "failed" } };
-  const scope = vm.createContext({
+  const scope = vm.createContext({ manualBridgeRepair: null,
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     providerChatTabs: async () => [{ id: 1 }], providerTabStatus: async () => status,
     updateLiveState: async (context, patch) => { live[context.key] = { ...live[context.key], ...patch }; },
@@ -32,7 +32,7 @@ test("LINE shared configuration selects verified access, preserves failures and 
 });
 
 test("failed fresh LINE access check cannot reuse stale tab access", async () => {
-  const scope = vm.createContext({
+  const scope = vm.createContext({ manualBridgeRepair: null,
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     providerChatTabs: async () => [{ id: 1 }], ensureProviderBridge: async () => {},
     sendProviderMessage: async () => ({ ok: false }),
@@ -48,7 +48,7 @@ test("retry B while A syncs never restarts A and retains B failure as an account
   const calls = [];
   const syncCoordinator = createAccountSyncCoordinator();
   const recoveries = syncCoordinator.jobs;
-  const scope = vm.createContext({
+  const scope = vm.createContext({ manualBridgeRepair: null,
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     AbortController, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     configuredAccountContexts: () => contexts, openSessionSyncContexts: async c => c.filter(item => item.account.provider_account_id !== "C"),
@@ -86,7 +86,7 @@ function shopeeRetryHarness(currentId) {
   const verified = [];
   const syncCoordinator = createAccountSyncCoordinator();
   const recoveries = syncCoordinator.jobs;
-  const scope = vm.createContext({
+  const scope = vm.createContext({ manualBridgeRepair: null,
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     AbortController, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     configuredAccountContexts: () => [...contexts, ...shopee],

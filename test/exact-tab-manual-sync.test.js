@@ -16,7 +16,7 @@ function fixture(provider = "line_oa") {
   const calls = [];
   const syncCoordinator = createAccountSyncCoordinator();
   const recoveries = syncCoordinator.jobs;
-  const runtime = vm.createContext({ URL, AbortController, Map, Set,
+  const runtime = vm.createContext({ manualBridgeRepair: null, URL, AbortController, Map, Set,
     STORAGE: {}, hasLocalConsent: () => true, readStorage: async () => ({}),
     configuredAccountContexts: () => contexts, accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
     accountContextFor: (_stored, id, provider) => contexts.find(c => c.account.provider_account_id === id && c.adapter.id === provider),

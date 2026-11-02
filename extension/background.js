@@ -887,6 +887,48 @@ async function checkForExtensionUpdate({ force = false } = {}) {
   }
 }
 
+let manualBridgeRepair = null;
+
+// A manual pass is shared by every popup. Healthy tabs are probed without
+// reserving reply queues; replacement only runs while provider accounts are idle.
+async function repairOpenProviderTabs() {
+  if (manualBridgeRepair) return manualBridgeRepair;
+  manualBridgeRepair = (async () => {
+    const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
+    if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Enable Omnichat before syncing.");
+    const contexts = configuredAccountContexts(stored);
+    const failed_tabs = [];
+    for (const adapter of providerAdapters.list()) {
+      const accounts = contexts.filter(context => context.adapter.id === adapter.id);
+      for (const tab of await providerChatTabs(adapter)) {
+        try {
+          await verifyProviderBridge(tab.id, adapter, false);
+          continue;
+        } catch { /* An unresponsive or incompatible bridge needs repair. */ }
+        const busy = () => [...accountSyncs.values()].some(control => control.adapter?.id === adapter.id);
+        const repair = async () => {
+          if (busy()) return false;
+          invalidateProviderTab(tab.id, "provider_bridge_repair");
+          await ensureProviderBridge(tab.id, adapter);
+          return true;
+        };
+        const reserve = (index) => index < accounts.length
+          ? replyQueue.runIfIdle(accounts[index].key, () => reserve(index + 1))
+          : repair();
+        try {
+          if (!await reserve(0)) failed_tabs.push({ tab_id: tab.id, provider: adapter.id, title: tab.title || null, busy: true });
+        } catch (error) {
+          failed_tabs.push({ tab_id: tab.id, provider: adapter.id, title: tab.title || null, busy: false });
+          await recordUnexpected("provider_bridge_reinject", error, { provider: adapter.id, tab_id: tab.id });
+        }
+      }
+    }
+    await ensureLiveConnection();
+    return { ok: true, failed_tabs };
+  })().finally(() => { manualBridgeRepair = null; });
+  return manualBridgeRepair;
+}
+
 async function applyExtensionUpdate() {
   const stored = await readStorage([STORAGE.extensionUpdate]);
   if (updateStateForCurrentVersion(stored[STORAGE.extensionUpdate])?.status !== "available") {
@@ -906,6 +948,11 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "repair_provider_tabs") {
+    void repairOpenProviderTabs().then(respond,
+      error => respond({ ok: false, error: error.message || "Could not repair provider tabs." }));
+    return true;
+  }
   if (message?.type === "refresh_regional_permissions") {
     void refreshRegionalShopeePermissions().then(() => respond({ ok: true }),
       () => respond({ ok: false, error: "Could not enable regional access." }));
@@ -3376,7 +3423,7 @@ async function ensureProviderBridge(tabId, adapter, { reuseVerified = false } = 
   return check.pending;
 }
 
-async function verifyProviderBridge(tabId, adapter) {
+async function verifyProviderBridge(tabId, adapter, repair = true) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const label = providerLabel(adapter);
   let response = null;
@@ -3409,6 +3456,7 @@ async function verifyProviderBridge(tabId, adapter) {
     pingFailed = true;
   }
 
+  if (!bridgeReady && !repair) throw new Error(`${label} bridge needs repair.`);
   if (!bridgeReady && await reinjectProviderBridge(tabId, adapter)) {
     try {
       response = await sendProviderMessage(tabId, { type: "ping_v3" }, {
@@ -4010,6 +4058,7 @@ function requestAccountSync(context, trigger, options = {}) {
     if (trigger === "manual" || options.refresh_metadata) existing.refreshMetadata = true;
     return existing.completion;
   }
+  if (manualBridgeRepair) return manualBridgeRepair.then(() => requestAccountSync(context, trigger, options));
   // Tab cancellation flows down to its jobs; an account losing access must not
   // abort the batch controller and cancel otherwise accessible peer accounts.
   const controller = new AbortController();

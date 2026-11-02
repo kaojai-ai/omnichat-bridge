@@ -11,7 +11,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 function messageHarness() {
   let now = 0, nextId = 0;
   const timers = new Map(), calls = [], response = deferred();
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ manualBridgeRepair: null,
     performance, recordLog: async () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     PROVIDER_REQUEST_TIMEOUT_MS: 15_000,
@@ -79,7 +79,7 @@ test("unattended OA activity reaches only its current control and sender tab", (
   const touches = [];
   const controls = ["oa-a", "oa-b"].map((id) => ({ accountKey: id, controller: new AbortController(),
     tabId: 42, providerRequestId: id, touchRecovery: () => touches.push(id) }));
-  const runtime = vm.createContext({
+  const runtime = vm.createContext({ manualBridgeRepair: null,
     accountSyncs: new Map(controls.map(control => [control.accountKey, control])) });
   vm.runInContext(section('function isCurrentSyncControl(', 'async function initializeAndStartSync(')
     + `
@@ -171,7 +171,7 @@ test("explicit LINE Cancel reaches scoped retries without aborting another provi
 
 test('BFCache channel closure stays a failure with a short actionable message', async () => {
   const error = new Error('The page keeping the extension port is moved into back/forward cache, so the message channel is closed.');
-  const scope = vm.createContext({
+  const scope = vm.createContext({ manualBridgeRepair: null,
     chrome: { tabs: { sendMessage: async () => { throw error; } } },
     performance: { now: () => 0 }, PROVIDER_REQUEST_TIMEOUT_MS: 100,
     setTimeout, clearTimeout, recordLog: async () => {},
