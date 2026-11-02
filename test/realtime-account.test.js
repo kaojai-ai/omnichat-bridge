@@ -105,7 +105,9 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
   }));
   const requests = [];
   const intervals = [];
-  const checkpoints = new Map();
+  const checkpoints = new Map([["100000001", { watermark: "2026-08-01T00:00:00.000Z" }]]);
+  const syncedAccounts = new Set();
+  let checkpointReadAllowed = true;
   let pollAcknowledgement = true;
   let miniChatClicks = 0;
   let miniChatIsOpen = miniChatOpen === true;
@@ -161,7 +163,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
         queueMicrotask(() => {
           for (const listener of listeners) listener({ source: window, origin, data: {
             source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
-            request_id: message.request_id, ok: true,
+            request_id: message.request_id, ok: checkpointReadAllowed,
             checkpoint: structuredClone(checkpoints.get(message.provider_account_id) ?? {}),
           } });
         });
@@ -311,7 +313,8 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
   }
 
   async function sync(providerAccountId, requestId = "sync-1", checkpoint = { watermark: "2026-08-01T00:00:00.000Z" }, recoveryStore = null) {
-    if (!checkpoints.has(providerAccountId)) checkpoints.set(providerAccountId, structuredClone(checkpoint));
+    if (!syncedAccounts.has(providerAccountId)) checkpoints.set(providerAccountId, structuredClone(checkpoint));
+    syncedAccounts.add(providerAccountId);
     for (const listener of listeners) {
       listener({
         source: window,
@@ -333,13 +336,26 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
           "recovery_cursor",
           "history_backfill",
           "history_window",
+          "recovery_scan_complete",
         ].includes(post.type) || acknowledged.has(post.request_id)) continue;
         acknowledged.add(post.request_id);
         const parsed = post.type === "recovery_batch"
           ? parserContext.OmnichatShopee.parseShopeeMessages(post.body, "history_recovery")
           : [];
-        const failed = post.type === "recovery_batch" && recoveryStore?.failNextBatch === true;
+        const failed = (post.type === "recovery_batch" && recoveryStore?.failNextBatch === true)
+          || (post.type === "recovery_scan_complete" && recoveryStore?.failCompletion === true);
         if (failed) recoveryStore.failNextBatch = false;
+        if (post.type === "recovery_bootstrap" && !failed) {
+          const saved = checkpoints.get(providerAccountId) ?? {};
+          saved.bootstrap = { conversations: post.conversations, started_at: post.started_at };
+          checkpoints.set(providerAccountId, saved);
+        }
+        if (post.type === "recovery_scan_complete" && !failed) {
+          const saved = checkpoints.get(providerAccountId) ?? {};
+          saved.watermark = post.watermark;
+          saved.bootstrap = null;
+          checkpoints.set(providerAccountId, saved);
+        }
         if (post.type === "recovery_cursor" && !failed) {
           const saved = checkpoints.get(providerAccountId) ?? {};
           saved.conversations = { ...saved.conversations, [post.conversation_id]: post.cursor };
@@ -367,10 +383,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       }
       const complete = posts.findLast((post) => post.type === "recovery_complete" && post.request_id === requestId);
       if (complete) {
-        if (complete.ok) {
-          checkpoints.get(providerAccountId).watermark = complete.watermark;
-          if (recoveryStore) recoveryStore.watermark = complete.watermark;
-        }
+        if (complete.ok && recoveryStore) recoveryStore.watermark = checkpoints.get(providerAccountId)?.watermark;
         await new Promise((resolve) => setImmediate(resolve));
         return complete;
       }
@@ -390,6 +403,8 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     fetch,
     setResponse,
     checkpoint(accountId = "100000001") { return checkpoints.get(accountId) ?? {}; },
+    setCheckpointReadAllowed(value) { checkpointReadAllowed = value; },
+    setCheckpoint(value, accountId = "100000001") { checkpoints.set(accountId, structuredClone(value)); },
     setPollAcknowledgement(ok) { pollAcknowledgement = ok; },
     cancelSync(requestId) {
       for (const listener of listeners) listener({ source: window, origin, data: {
@@ -691,7 +706,7 @@ test("Shopee history_days without conversation ids loads every conversation in t
 });
 
 test("Shopee recovery persists a cursor, skips unchanged history, and catches a same-time message", async () => {
-  const timestamp = "2026-08-20T10:00:00.000Z";
+  let timestamp = "2026-08-20T10:00:00.000Z";
   const listPath = "/webchat/api/v1.2/conversations";
   const historyPath = "/webchat/api/v1.2/conversations/unchanged/messages";
   const conversation = (messageId) => ({
@@ -725,6 +740,7 @@ test("Shopee recovery persists a cursor, skips unchanged history, and catches a 
   assert.equal(repeatBridge.requests.includes(historyPath), false);
   assert.equal(store.messages.length, 1);
 
+  timestamp = store.watermark;
   const changedBridge = createBridge();
   await changedBridge.fetch(listPath, [conversation("message-2")]);
   changedBridge.setResponse(historyPath, [message("message-2"), message("message-1")]);
@@ -1475,7 +1491,7 @@ test("Shopee recovery reports fetched conversation pages and actual message work
 });
 
 
-test("Shopee bootstrap captures more than twenty-five messages before completing", async () => {
+test("Shopee bootstrap caps a busy conversation at twenty-five messages", async () => {
   const bridge = createBridge();
   const path = "/webchat/api/v1.2/conversations";
   const messages = Array.from({ length: 40 }, (_, index) => ({
@@ -1489,7 +1505,7 @@ test("Shopee bootstrap captures more than twenty-five messages before completing
   const store = { messages: [], conversations: {} };
   const result = await bridge.sync("100000001", "bootstrap-full", {}, store);
   assert.equal(result.ok, true);
-  assert.equal(store.messages.length, 40);
+  assert.equal(store.messages.length, 25);
   assert.equal(store.conversations["bootstrap-full"].event_timestamp, "2026-08-20T11:00:39.000Z");
   bridge.dispose();
 });
@@ -1512,7 +1528,7 @@ test("Shopee recovery does not advance checkpoints before history reaches its su
   bridge.dispose();
 });
 
-test("combined Shopee metadata uses the same list pass while bootstrap recovers every recent chat", async () => {
+test("combined Shopee metadata uses one list pass without widening bootstrap chat limits", async () => {
   const bridge = createBridge();
   const path = "/webchat/api/v1.2/conversations";
   const items = Array.from({ length: 105 }, (_, i) => ({ id: `combined-${i}`, shop_id: 100000001,
@@ -1528,7 +1544,7 @@ test("combined Shopee metadata uses the same list pass while bootstrap recovers 
   assert.equal(result.metadata.account.provider_account_id, "100000001");
   const requests = bridge.requests.slice(before);
   assert.equal(requests.filter(request => request === path).length, 1);
-  assert.equal(requests.filter(request => request.startsWith(path + "/") && request.endsWith("/messages")).length, 105);
+  assert.equal(requests.filter(request => request.startsWith(path + "/") && request.endsWith("/messages")).length, 10);
   bridge.dispose();
 });
 
@@ -1744,7 +1760,7 @@ test("Shopee recovery finds the summary message after a full page of newer arriv
       return new Response(JSON.stringify(historyPage(messages, offset)));
     });
     const store = { messages: [], conversations: {} };
-    const result = await bridge.sync("100000001", "summary-on-second-page", {}, store);
+    const result = await bridge.sync("100000001", "summary-on-second-page", { watermark: "2026-08-19T12:00:00Z" }, store);
     assert.equal(result.ok, true);
     assert.deepEqual(offsets, ["0", "2442444048573022578"]);
     assert.equal(store.messages.length, 101);
@@ -1769,7 +1785,7 @@ test("Shopee withholds the checkpoint when the summary message is missing across
       return new Response(JSON.stringify(historyPage(messages, offset)));
     });
     const store = { messages: [], conversations: {} };
-    const result = await bridge.sync("100000001", "summary-still-missing", {}, store);
+    const result = await bridge.sync("100000001", "summary-still-missing", { watermark: "2026-08-19T12:00:00Z" }, store);
     assert.equal(result.ok, false);
     assert.deepEqual(offsets, ["0", "visible-99"]);
     assert.equal(store.messages.length, 101);
@@ -1800,11 +1816,12 @@ test("Seller Centre polling reuses recovery coverage and persists its newer chec
     // Simulate the native list observing the completed bootstrap summary.
     await bridge.fetch(retryListPath, [summary(100)]);
     offsets.length = 0;
+    messages[101].created_timestamp = Date.parse(completed.watermark) / 1000 + 1;
     available = [...messages].reverse();
     bridge.setResponse(retryListPath, [summary(101)]);
     await bridge.runIntervals();
     assert.deepEqual(offsets, ["0"]);
-    assert.deepEqual(capturedRetryIds(bridge), ["shared-100", "shared-101"]);
+    assert.deepEqual(capturedRetryIds(bridge), ["shared-101"]);
     assert.equal(bridge.checkpoint().conversations["retry-conversation"].message_id, "shared-101");
     const requestsBeforeRecovery = bridge.requests.filter(path => path === retryHistoryPath).length;
     // Content can load this stale snapshot before the poll finishes, then dispatch sync later.
@@ -1889,5 +1906,126 @@ test("cancelling a waiting recovery releases it without cancelling the polling s
     assert.equal((await recovery).ok, false);
     assert.equal(bridge.checkpoint().conversations["retry-conversation"].message_id, "cancel-latest");
     assert.equal(bridge.posts.some(post => post.type === "recovery_activity" && post.request_id === "cancel-wait"), false);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee first sync freezes its 10-chat, 25-message window across retry", async () => {
+  const bridge = createBridge();
+  const list = "/webchat/api/v1.2/conversations";
+  const boundary = Date.parse("2026-08-20T12:00:00Z");
+  const chats = Array.from({ length: 12 }, (_, i) => ({
+    id: `bounded-${i}`, shop_id: 100000001,
+    last_message_time: new Date(boundary - 1000 - i * 1000).toISOString(),
+  }));
+  const history = chat => Array.from({ length: 30 }, (_, i) => ({
+    ...retryMessage(`${chat.id}-${i}`, 0), conversation_id: chat.id,
+    created_timestamp: (boundary - 1000 - i * 1000) / 1000,
+  }));
+  try {
+    await bridge.fetch(list, chats);
+    for (const chat of chats) bridge.setResponse(`${list}/${chat.id}/messages`, history(chat));
+    const store = { messages: [], conversations: {}, failNextBatch: true };
+    assert.equal((await bridge.sync("100000001", "bounded-failed", {}, store)).ok, false);
+    const frozen = structuredClone(bridge.checkpoint().bootstrap);
+    assert.equal(frozen.conversations.length, 10);
+    bridge.advanceClock(3 * 86400_000);
+    bridge.setResponse(list, [{ id: "new-chat", shop_id: 100000001, last_message_time: "2026-08-23T11:00:00Z" }, ...chats]);
+    assert.equal((await bridge.sync("100000001", "bounded-retry", {}, store)).ok, true);
+    assert.equal(store.messages.length, 250);
+    assert.equal(new Set(store.messages.map(message => message.conversation_id)).size, 10);
+    for (const chat of frozen.conversations) {
+      assert.equal(store.messages.filter(message => message.conversation_id === chat.id).length, 25);
+    }
+    assert.equal(bridge.checkpoint().watermark, frozen.started_at);
+    assert.equal(bridge.requests.some(path => path.includes("new-chat/messages")), false);
+    assert.equal(bridge.requests.some(path => path.includes("bounded-10/messages")), false);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee three-day recovery paginates every missing message beyond initial caps", async () => {
+  const bridge = createBridge();
+  const list = "/webchat/api/v1.2/conversations";
+  const since = Date.parse("2026-08-17T12:00:00Z");
+  const messages = Array.from({ length: 301 }, (_, i) => ({
+    ...retryMessage(`gap-${i}`, 0), conversation_id: "gap",
+    created_timestamp: (since + 1000 + i * 1000) / 1000,
+  })).reverse();
+  const offsets = [];
+  try {
+    await bridge.fetch(list, [{ id: "gap", shop_id: 100000001, latest_message_id: "gap-300",
+      last_message_time: new Date(messages[0].created_timestamp * 1000).toISOString() }]);
+    bridge.setResponse(`${list}/gap/messages`, request => {
+      const offset = new URL(request.url).searchParams.get("offset");
+      offsets.push(offset);
+      return new Response(JSON.stringify(historyPage(messages, offset)));
+    });
+    const store = { messages: [], conversations: {} };
+    const result = await bridge.sync("100000001", "three-day-gap", { watermark: new Date(since).toISOString() }, store);
+    assert.equal(result.ok, true);
+    assert.equal(store.messages.length, 301);
+    assert.deepEqual(offsets, ["0", "gap-201", "gap-101", "gap-1"]);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_bootstrap"), false);
+    assert.equal(bridge.checkpoint().watermark, result.watermark);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee routine polling waits for bounded initialization when no watermark exists", async () => {
+  const bridge = await pollingRetryBridge();
+  try {
+    bridge.setCheckpoint({});
+    bridge.setResponse(retryListPath, [retryConversation("uninitialized")]);
+    bridge.setResponse(retryHistoryPath, [retryMessage("uninitialized", 0)]);
+    await bridge.runIntervals();
+    assert.equal(bridge.posts.some(post => post.type === "recovery_batch"), false);
+    assert.equal(bridge.checkpoint().watermark, undefined);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee checkpoint read failure cannot fall back to bootstrap", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.fetch("/webchat/api/v1.2/conversations", [{ id: "blocked", shop_id: 100000001, last_message_time: "2026-08-20T11:00:00Z" }]);
+    bridge.setCheckpointReadAllowed(false);
+    const result = await bridge.sync("100000001", "checkpoint-read-failed", {});
+    assert.equal(result.ok, false);
+    assert.equal(bridge.posts.some(post => ["recovery_batch", "recovery_bootstrap", "recovery_scan_complete"].includes(post.type)), false);
+    assert.equal(bridge.checkpoint().watermark, undefined);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee completion write failure retains the previous overall checkpoint", async () => {
+  const bridge = createBridge();
+  const watermark = "2026-08-17T12:00:00Z";
+  try {
+    await bridge.fetch("/webchat/api/v1.2/conversations", []);
+    const result = await bridge.sync("100000001", "completion-write-failed", { watermark },
+      { messages: [], conversations: {}, failCompletion: true });
+    assert.equal(result.ok, false);
+    assert.equal(bridge.checkpoint().watermark, watermark);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee next-page fetch failures do not retain the preceding page evidence", async () => {
+  const bridge = createBridge();
+  const list = "/webchat/api/v1.2/conversations";
+  const messages = Array.from({ length: 100 }, (_, i) => ({
+    ...retryMessage(`diagnostic-${i}`, 0), conversation_id: "diagnostic-chat",
+    created_timestamp: Date.parse("2026-08-20T11:00:00Z") / 1000 + i,
+  })).reverse();
+  try {
+    await bridge.fetch(list, [{ id: "diagnostic-chat", shop_id: 100000001,
+      latest_message_id: messages[0].id, last_message_time: "2026-08-20T11:01:39Z" }]);
+    bridge.setResponse(`${list}/diagnostic-chat/messages`, request => {
+      const offset = new URL(request.url).searchParams.get("offset");
+      return offset === "0" ? new Response(JSON.stringify(messages)) : new Response("{}", { status: 500 });
+    });
+    const result = await bridge.sync("100000001", "page-fetch-failure", { watermark: "2026-08-17T12:00:00Z" });
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics.stage, "history_fetch");
+    assert.equal(result.diagnostics.page_index, 1);
+    assert.equal(result.diagnostics.page_offset, "diagnostic-0");
+    assert.equal(result.diagnostics.page_count, undefined);
+    assert.equal(result.diagnostics.first_message_id, undefined);
+    assert.equal(result.diagnostics.last_message_id, undefined);
   } finally { bridge.dispose(); }
 });

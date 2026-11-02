@@ -86,6 +86,8 @@
     }),
   });
   const HISTORY_LIMIT = 100;
+  const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
+  const INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION = 25;
   const INITIAL_SYNC_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
   const MIN_RECOVERY_REQUEST_INTERVAL_MS = 300;
   const SELLER_CENTRE_POLL_INTERVAL_MS = 3_000;
@@ -922,7 +924,7 @@
         post({ type: "recovery_activity", request_id: waitingRecovery.requestId });
       }
       return acknowledgement;
-    }, cursor ? 0 : Date.now() - INITIAL_SYNC_LOOKBACK_MS, null, {
+    }, poll.watermarkMs, null, {
       fetchJson: fetchProviderJson,
       expectedLatestId: latestId, requestId: poll.requestId, providerAccountId: poll.accountId,
       isCurrent: () => isBridgeActive() && epoch === state.sellerCentreCaptureEpoch,
@@ -975,6 +977,8 @@
     try {
       const checkpoint = await loadRecoveryCheckpoint(`${poll.requestId}:checkpoint`, poll.accountId);
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
+      if (!(timeMs(checkpoint.watermark) > 0)) return;
+      poll.watermarkMs = timeMs(checkpoint.watermark);
       const cursors = checkpoint.conversations ?? {};
       const captureDeadline = Date.now() + 15_000;
       for (const [conversationId, item] of state.pendingSellerCentreMessages) {
@@ -1815,6 +1819,7 @@
   async function fetchHistory(conversation, cursor, onPage, sinceFloorMs = 0, onProgress = null, {
     fetchJson = recoveryFetchJson, expectedLatestId = null, isCurrent = isBridgeActive,
     requestId = null, providerAccountId = state.currentAccountId,
+    maxMessages = null, untilMs = Infinity,
   } = {}) {
     const sinceMs = Math.max(sinceFloorMs, timeMs(cursor?.event_timestamp));
     const seenIds = new Set();
@@ -1822,6 +1827,7 @@
     let queued = 0;
     let latestCursor = null;
     let sawExpectedLatest = !expectedLatestId;
+    let captured = 0;
     let offset = "0";
     const diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "poll",
       conversation_id: String(conversation.id), provider_account_id: providerAccountId,
@@ -1832,6 +1838,9 @@
         const template = state.historyTemplate ?? state.getTemplate;
         if (!template) throw Object.assign(new Error("Shopee message history is still initializing. Refresh Seller Chat."), { reason_code: "history_not_ready" });
         onProgress?.("fetching_messages");
+        delete diagnostics.page_count;
+        delete diagnostics.first_message_id;
+        delete diagnostics.last_message_id;
         Object.assign(diagnostics, { stage: "history_fetch", page_index: page, page_offset: offset });
         const body = await fetchJson(sellerCentreHistoryRequest(conversation, template, offset));
         if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
@@ -1854,13 +1863,16 @@
         }
         onProgress?.("fetching_messages");
         const currentMessages = unseen.filter((message) =>
-          timeMs(message.created_timestamp ?? message.created_at) >= sinceMs)
+          timeMs(message.created_timestamp ?? message.created_at) >= sinceMs
+            && timeMs(message.created_timestamp ?? message.created_at) <= untilMs)
           .sort((left, right) => timeMs(right.created_timestamp ?? right.created_at)
-            - timeMs(left.created_timestamp ?? left.created_at));
+            - timeMs(left.created_timestamp ?? left.created_at))
+          .slice(0, maxMessages === null ? undefined : Math.max(0, maxMessages - captured));
         if (currentMessages.length) {
           diagnostics.stage = "history_persistence";
           const acknowledgement = await onPage(currentMessages, page);
           if (!isCurrent()) return { parsed, queued, latestCursor, complete: false };
+          captured += currentMessages.length;
           parsed += acknowledgement.parsed ?? 0;
           queued += acknowledgement.queued ?? 0;
           const candidate = acknowledgement.latest_cursor;
@@ -1875,7 +1887,7 @@
           return candidate && candidate < value ? candidate : value;
         }, Number.POSITIVE_INFINITY);
         // Include the whole timestamp boundary; provider IDs do not encode order.
-        if (pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
+        if ((maxMessages !== null && captured >= maxMessages) || pageMessages.length < HISTORY_LIMIT || oldest < sinceMs) break;
         // Shopee uses the final message ID as an exclusive older-page cursor.
         const nextOffset = messageIdOf(pageMessages.at(-1));
         if (!nextOffset || String(nextOffset) === offset) {
@@ -1940,8 +1952,9 @@
       await waitForTemplate();
       assertSessionUnchanged();
       const watermarkMs = timeMs(checkpoint?.watermark);
-      const bootstrap = !watermarkMs;
-      const defaultSinceMs = bootstrap ? Date.now() - INITIAL_SYNC_LOOKBACK_MS : watermarkMs;
+      const bootstrap = !(watermarkMs > 0);
+      const bootstrapStartedAt = timeMs(checkpoint?.bootstrap?.started_at) || startedAt;
+      const defaultSinceMs = bootstrap ? bootstrapStartedAt - INITIAL_SYNC_LOOKBACK_MS : watermarkMs;
       const historyDays = Number(checkpoint?.history_days);
       const historySinceMs = Number(checkpoint?.history_since_ms);
       const historyIds = Array.isArray(checkpoint?.history_conversation_ids)
@@ -1975,39 +1988,22 @@
       assertSessionUnchanged();
       const sorted = [...pages.conversations]
         .sort((left, right) => conversationTime(right) - conversationTime(left));
-      let recoveryConversations;
-      if (!historyWindow && bootstrap && frozenBootstrap.length) {
-        const liveById = new Map(sorted.map((conversation) => [String(conversation.id), conversation]));
-        recoveryConversations = [...sorted, ...frozenBootstrap.filter(
-          (conversation) => !liveById.has(String(conversation.id)),
-        )];
-      } else if (!historyWindow && bootstrap) {
-        recoveryConversations = sorted;
-        const bootstrapRequestId = `${requestId}:bootstrap`;
-        post({
-          type: "recovery_bootstrap",
-          request_id: bootstrapRequestId,
-          provider_account_id: accountId,
-          conversations: recoveryConversations,
-        });
-        const acknowledgement = await waitForAcknowledgement(bootstrapRequestId);
-        if (!acknowledgement.ok) {
-          throw Object.assign(new Error(acknowledgement.error ?? "Could not save bootstrap state."), { reason_code: "persistence_failed" });
+      let recoveryConversations = sorted;
+      if (bootstrap && !historyWindow && deepIds.length === 0) {
+        if (checkpoint?.bootstrap?.started_at) {
+          const liveById = new Map(sorted.map(conversation => [String(conversation.id), conversation]));
+          recoveryConversations = frozenBootstrap.map(conversation => liveById.get(String(conversation.id)) ?? conversation);
+        } else {
+          recoveryConversations = sorted.slice(0, INITIAL_SYNC_MAX_CONVERSATIONS);
+          const bootstrapRequestId = `${requestId}:bootstrap`;
+          const acknowledged = waitForAcknowledgement(bootstrapRequestId);
+          post({ type: "recovery_bootstrap", request_id: bootstrapRequestId, provider_account_id: accountId,
+            conversations: recoveryConversations, started_at: new Date(bootstrapStartedAt).toISOString() });
+          const result = await acknowledged;
+          if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not save bootstrap state."), { reason_code: "persistence_failed" });
         }
-      } else {
-        recoveryConversations = sorted;
       }
-      const firstPageFloor = pages.firstPage.reduce((value, conversation) => {
-        const candidate = conversationTime(conversation);
-        return candidate && candidate < value ? candidate : value;
-      }, Number.POSITIVE_INFINITY);
-      const bootstrapFloor = recoveryConversations.reduce((value, conversation) => {
-        const candidate = conversationTime(conversation);
-        return candidate && candidate < value ? candidate : value;
-      }, Number.POSITIVE_INFINITY);
-      const nextWatermarkMs = bootstrap
-        ? bootstrapFloor
-        : (Number.isFinite(firstPageFloor) ? Math.max(watermarkMs, firstPageFloor) : watermarkMs);
+      const nextWatermarkMs = bootstrap && !historyWindow && deepIds.length === 0 ? bootstrapStartedAt : startedAt;
       const cursors = checkpoint?.conversations ?? {};
       const classify = (conversation) => {
         const cursor = cursors[String(conversation.id)];
@@ -2119,7 +2115,9 @@
               phase, conversation_id: String(conversation.id), conversation_pages: pages.pages,
               completed_conversations: completedConversations, total_conversations: totalConversations });
           },
-          { expectedLatestId: latestMessageIdOf(conversation), requestId, providerAccountId: accountId },
+          { expectedLatestId: latestMessageIdOf(conversation), requestId, providerAccountId: accountId,
+            maxMessages: bootstrap && !deep && !windowJob ? INITIAL_SYNC_MAX_MESSAGES_PER_CONVERSATION : null,
+            untilMs: bootstrap && !deep && !windowJob ? bootstrapStartedAt : Infinity },
         );
         if (!history.complete) {
           throw Object.assign(new Error("Shopee message history has not reached its latest summary."), { reason_code: "invalid_message_history" });
@@ -2216,6 +2214,13 @@
           conversation_id: id,
         });
       }
+      assertSessionUnchanged();
+      const completionRequestId = `${requestId}:complete`;
+      const completion = waitForAcknowledgement(completionRequestId);
+      post({ type: "recovery_scan_complete", request_id: completionRequestId, provider_account_id: accountId,
+        watermark: new Date(nextWatermarkMs).toISOString() });
+      const completed = await completion;
+      if (!completed.ok) throw Object.assign(new Error(completed.error ?? "Could not save recovery checkpoint."), { reason_code: "persistence_failed" });
       assertSessionUnchanged();
       post({
         type: "recovery_complete",
@@ -2521,7 +2526,7 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
-    compatibility_version: 4,
+    compatibility_version: 5,
     combined_metadata_sync: true,
     fresh_provider_status: true,
     bounded_message_ids: true,

@@ -16,7 +16,7 @@ test("LINE OA recovery paginates chat and message history", () => {
   assert.match(source, /const nextBackward = cursor\(body\?\.backward\)/);
   assert.match(source, /const bootstrap = checkpointMs <= 0/);
   assert.match(source, /const lowerBoundMs = historyWindow/);
-  assert.match(source, /Date\.now\(\) - INITIAL_SYNC_LOOKBACK_MS/);
+  assert.match(source, /bootstrapStartedAt - INITIAL_SYNC_LOOKBACK_MS/);
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {} } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {}, durableCheckpoints = new Map(), checkpointError = null, completionError = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   class FixtureDate extends Date {
@@ -108,11 +108,13 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           }),
         };
       }
-      if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
+      if (url.pathname.startsWith("/api/v3/bots/bot-1/chats/") && url.pathname.endsWith("/messages")) {
         if (beforeMessageRequest) {
           const response = await beforeMessageRequest(url, init);
           if (response) return response;
         }
+      }
+      if (url.pathname === "/api/v3/bots/bot-1/chats/chat-1/messages") {
         if (messagePages) return { ok: true, json: async () => messagePages[url.searchParams.get("backward") ?? "first"] ?? { list: [] } };
         if (sentPayloads.length && confirmError) throw confirmError;
         if (sentPayloads.length && sendResponseBody === undefined) {
@@ -166,7 +168,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     },
     postMessage(message) {
       posts.push(message);
-      if (!["recovery_batch", "recovery_cursor", "history_backfill", "history_window"].includes(message.type)) return;
+      if (!["recovery_batch", "recovery_cursor", "history_backfill", "history_window", "recovery_checkpoint", "recovery_bootstrap", "recovery_scan_complete"].includes(message.type)) return;
       queueMicrotask(() => {
         const response = {
           source: "omnichat-realtime-bridge-v3",
@@ -174,9 +176,37 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           request_id: message.request_id,
           ok: true,
         };
+        const checkpoint = durableCheckpoints.get(message.provider_account_id) ?? {};
+        if (message.type === "recovery_checkpoint") {
+          response.ok = !checkpointError;
+          response.checkpoint = plain(checkpoint);
+          if (checkpointError) response.error = checkpointError;
+        } else if (message.type === "recovery_bootstrap") {
+          if (!checkpoint.bootstrap?.started_at) checkpoint.bootstrap = {
+            conversations: plain(message.conversations), started_at: message.started_at,
+          };
+          durableCheckpoints.set(message.provider_account_id, checkpoint);
+        } else if (message.type === "recovery_cursor") {
+          checkpoint.conversations = { ...checkpoint.conversations, [message.conversation_id]: plain(message.cursor) };
+          durableCheckpoints.set(message.provider_account_id, checkpoint);
+        } else if (message.type === "recovery_scan_complete") {
+          response.ok = !completionError;
+          if (completionError) response.error = completionError;
+          else {
+            checkpoint.watermark = Date.parse(checkpoint.watermark) > Date.parse(message.watermark) ? checkpoint.watermark : message.watermark;
+            checkpoint.bootstrap = null;
+            durableCheckpoints.set(message.provider_account_id, checkpoint);
+          }
+        } else if (message.type === "history_window") {
+          checkpoint.history_window_days = message.history_days;
+          durableCheckpoints.set(message.provider_account_id, checkpoint);
+        } else if (message.type === "history_backfill") {
+          checkpoint.history_backfill = { ...checkpoint.history_backfill, [message.conversation_id]: message.history_days };
+          durableCheckpoints.set(message.provider_account_id, checkpoint);
+        }
         if (message.type === "recovery_batch") {
           const messages = message.body.conversations[0].messages;
-          const latest = messages.at(-1);
+          const latest = [...messages].sort((left, right) => Number(right.timestamp) - Number(left.timestamp))[0];
           response.parsed = messages.length;
           response.queued = 1;
           response.latest_cursor = latest
@@ -220,6 +250,9 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
 
   return {
     posts,
+    durableCheckpoints,
+    setCheckpointError(error) { checkpointError = error; },
+    setCompletionError(error) { completionError = error; },
     advanceClock(ms) { fixtureNow = (fixtureNow ?? Date.now()) + ms; },
     setAccounts(accounts) { availableAccounts = accounts; },
     setAccountError(error) { accountError = error; },
@@ -227,6 +260,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     sentPayloads,
     uploads,
     dispatch(data) {
+      if (data.type === "sync_v3" && data.checkpoint !== undefined) durableCheckpoints.set(data.provider_account_id, plain(data.checkpoint ?? {}));
       for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", ...data } });
     },
     tick() { for (const callback of [...intervals.values()]) callback(); },
@@ -292,7 +326,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       requestId = "sync-1",
       providerAccountId = "@exampleoa",
       botId = "bot-1",
-      checkpoint = null,
+      checkpoint = undefined,
       history_days = null,
       history_since_ms = null,
       history_conversation_ids = null,
@@ -301,6 +335,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     } = {}) {
       // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
       fixtureNow = now;
+      if (checkpoint !== undefined) durableCheckpoints.set(providerAccountId, plain(checkpoint ?? {}));
       for (const listener of listeners) {
         listener({
           source: window,
@@ -1218,6 +1253,7 @@ test("LINE queued deadlines renew only while the active account makes real progr
       if (requests === 2) await secondPage;
     },
   });
+  bridge.durableCheckpoints.set("@first", { watermark: new Date(900).toISOString() });
   startAccount(bridge, "@first", "active");
   startAccount(bridge, "@second", "queued");
   await settleBridge();
@@ -1513,6 +1549,7 @@ test("LINE manual recovery reports real list-page progress while requests are pe
   let first = true;
   const bridge = createBridge({ beforeChatRequest: async () => { if (first) { first = false; await blocked; } } });
   try {
+    bridge.durableCheckpoints.set("@exampleoa", { watermark: new Date(900).toISOString() });
     startAccount(bridge, "@exampleoa", "visible-progress");
     await settleBridge();
     const pending = bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress");
@@ -1894,4 +1931,132 @@ test("LINE OA stalled confirmation is aborted within its confirmation budget", a
   } finally {
     bridge.dispose();
   }
+});
+
+
+test("LINE reloads durable progress before routine polls and after a fresh page bridge", async () => {
+  const durableCheckpoints = new Map();
+  const bridge = createBridge({ chatCount: 1, durableCheckpoints, chatLatestEventTimestamps: { "chat-1": 1100 } });
+  try {
+    assert.equal((await bridge.sync({ now: 5000 })).ok, true);
+    assert.equal(durableCheckpoints.get("@exampleoa").watermark, new Date(5000).toISOString());
+    // Another valid owner can advance storage after this page's previous scan.
+    durableCheckpoints.set("@exampleoa", { watermark: new Date(6000).toISOString() });
+    const before = bridge.requests.length;
+    bridge.tick();
+    await settleBridge();
+    assert.ok(bridge.posts.some(post => post.type === "recovery_checkpoint" && post.request_id.startsWith("poll:")));
+    assert.equal(bridge.requests.slice(before).some(url => url.pathname.includes("/messages")), false);
+  } finally { bridge.dispose(); }
+  const restarted = createBridge({ chatCount: 1, durableCheckpoints, chatLatestEventTimestamps: { "chat-1": 1100 } });
+  try {
+    assert.equal((await restarted.sync({ requestId: "after-restart", now: Date.now() })).ok, true);
+    assert.equal(restarted.requests.some(url => url.pathname.includes("/messages")), false);
+    assert.equal(restarted.posts.some(post => post.type === "recovery_bootstrap"), false);
+  } finally { restarted.dispose(); }
+});
+
+test("LINE recovers more than 250 messages over a three-day gap without initial-sync caps", async () => {
+  const pages = {};
+  for (let page = 0; page < 4; page++) {
+    const count = page === 3 ? 1 : 100;
+    pages[page === 0 ? "first" : `page-${page}`] = {
+      list: Array.from({ length: count }, (_, index) => ({ id: `gap-${page * 100 + index}`, timestamp: 400000 - page * 100 - index })),
+      ...(page < 3 ? { backward: `page-${page + 1}` } : {}),
+    };
+  }
+  const bridge = createBridge({ chatCount: 1, messagePages: pages });
+  try {
+    const complete = await bridge.sync({ checkpoint: { watermark: new Date(1000).toISOString() }, now: 3 * 86400000 });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.recovered, 301);
+    assert.equal(bridge.posts.filter(post => post.type === "recovery_batch").length, 4);
+    assert.equal(bridge.posts.some(post => post.type === "recovery_bootstrap"), false);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE checkpoint loading failure stops before fetching or creating initial history", async () => {
+  const bridge = createBridge({ checkpointError: "storage unavailable" });
+  try {
+    const complete = await bridge.sync();
+    assert.equal(complete.ok, false);
+    assert.equal(bridge.requests.length, 0);
+    assert.equal(bridge.posts.some(post => ["recovery_batch", "recovery_bootstrap", "recovery_scan_complete"].includes(post.type)), false);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE completion failure keeps the account watermark while preserving completed chat progress", async () => {
+  const bridge = createBridge({ chatCount: 1, completionError: "storage unavailable" });
+  try {
+    const complete = await bridge.sync({ checkpoint: { watermark: new Date(900).toISOString() } });
+    assert.equal(complete.ok, false);
+    const saved = bridge.durableCheckpoints.get("@exampleoa");
+    assert.equal(saved.watermark, new Date(900).toISOString());
+    assert.equal(saved.conversations["chat-1"].message_id, "message-2");
+  } finally { bridge.dispose(); }
+});
+
+test("LINE cancelled recovery reloads completed chats and retries unfinished history", async () => {
+  let cancelSecond = true;
+  let bridge;
+  bridge = createBridge({ chatLatestEventTimestamps: { "chat-1": 1100 }, beforeMessageRequest(url) {
+    if (cancelSecond && url.pathname.includes("/chat-2/")) {
+      cancelSecond = false;
+      bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@exampleoa", request_id: "cancelled" });
+    }
+  } });
+  try {
+    bridge.durableCheckpoints.set("@exampleoa", { watermark: new Date(900).toISOString() });
+    startAccount(bridge, "@exampleoa", "cancelled");
+    await settleBridge();
+    const saved = bridge.durableCheckpoints.get("@exampleoa");
+    assert.equal(saved.watermark, new Date(900).toISOString());
+    assert.equal(saved.conversations["chat-1"].message_id, "message-2");
+    assert.equal(saved.conversations["chat-2"], undefined);
+    const complete = await bridge.sync({ requestId: "resumed" });
+    assert.equal(complete.ok, true);
+    const messages = bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith("resumed:"))
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+    assert.equal(messages.some(message => message.id === "message-1"), false, "completed older history is not reread");
+    assert.equal(messages.some(message => message.id === "message-3"), true, "unfinished chat is recovered");
+  } finally { bridge.dispose(); }
+});
+
+test("LINE initial retry retains its selected chats and original time boundary", async () => {
+  let failSecond = true;
+  const chatPages = { first: { list: [{ chatId: "chat-1" }, { chatId: "chat-2" }] } };
+  const bridge = createBridge({ chatPages, beforeMessageRequest(url) {
+    if (failSecond && url.pathname.includes("/chat-2/")) throw new Error("temporary failure");
+  } });
+  try {
+    assert.equal((await bridge.sync({ requestId: "initial-failed", now: 100000 })).ok, false);
+    const frozen = plain(bridge.durableCheckpoints.get("@exampleoa").bootstrap);
+    assert.deepEqual(frozen.conversations.map(chat => chat.id), ["chat-1", "chat-2"]);
+    assert.equal(frozen.started_at, new Date(100000).toISOString());
+    chatPages.first.list = [{ chatId: "chat-3" }, { chatId: "chat-1" }, { chatId: "chat-2" }];
+    failSecond = false;
+    const complete = await bridge.sync({ requestId: "initial-retry", now: 200000 });
+    assert.equal(complete.ok, true);
+    assert.equal(complete.watermark, frozen.started_at);
+    const resumedChats = bridge.posts.filter(post => post.type === "recovery_batch" && post.request_id.startsWith("initial-retry:"))
+      .flatMap(post => post.body.conversations.map(chat => chat.id));
+    assert.equal(resumedChats.includes("chat-3"), false);
+    assert.equal(resumedChats.includes("chat-2"), true);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE initial capture selects the newest 25 within its frozen 24-hour window", async () => {
+  const now = 90000000;
+  const recent = Array.from({ length: 30 }, (_, index) => ({ id: `recent-${index}`, timestamp: now - index - 1 }));
+  const bridge = createBridge({ chatCount: 1, messagePages: { first: {
+    list: [{ id: "arrived-during-scan", timestamp: now + 1 }, ...recent, { id: "outside-window", timestamp: now - 86400001 }],
+  } } });
+  try {
+    const complete = await bridge.sync({ now });
+    assert.equal(complete.ok, true);
+    const messages = bridge.posts.filter(post => post.type === "recovery_batch")
+      .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
+    assert.deepEqual(messages.map(message => message.id), recent.slice(0, 25).map(message => message.id));
+    assert.equal(bridge.durableCheckpoints.get("@exampleoa").watermark, new Date(now).toISOString());
+  } finally { bridge.dispose(); }
 });

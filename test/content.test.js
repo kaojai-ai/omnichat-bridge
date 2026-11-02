@@ -1072,6 +1072,7 @@ test("cancelled LINE account emits only its own completion while another account
 for (const [eventType, requestType] of [
   ["history_window", "record_history_window"], ["history_backfill", "record_history_backfill"],
   ["recovery_cursor", "advance_scan_cursor"], ["recovery_bootstrap", "save_bootstrap"],
+  ["recovery_scan_complete", "complete_scan"],
 ]) {
   test(`${eventType} keeps recovery attempt correlation for background fencing`, async () => {
     const bridge = contentBridge("/new-webchat/conversations");
@@ -1128,3 +1129,18 @@ for (const succeeds of [true, false]) {
   assert.equal(entry.details.body, undefined);
   assert.equal(entry.details.token, undefined);
 });
+
+for (const succeeds of [true, false]) {
+  test(`scan completion acknowledges ${succeeds ? "durable checkpoint" : "persistence failure"}`, async () => {
+    const bridge = contentBridge("/portal/chat-management", { runtimeHandler: message =>
+      message.type === "complete_scan" ? { ok: succeeds, error: "storage unavailable" } : { ok: true } });
+    await bridge.providerEvent({ type: "recovery_scan_complete", request_id: "poll:current:complete",
+      provider_account_id: "shop-a", watermark: "2026-11-01T00:00:00Z" });
+    const request = bridge.runtimeMessages.find(message => message.type === "complete_scan");
+    assert.equal(request.watermark, "2026-11-01T00:00:00Z");
+    const ack = bridge.runtimeMessages.find(message => message.type === "recovery_ack_v3");
+    assert.equal(ack.ok, succeeds);
+    assert.equal(ack.request_id, "poll:current:complete");
+    if (!succeeds) assert.equal(ack.error, "storage unavailable");
+  });
+}
