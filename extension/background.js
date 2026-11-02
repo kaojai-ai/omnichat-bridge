@@ -123,6 +123,7 @@ const INBOUND_LOG_MESSAGES = {
   "popup.configuration_exported": "Configuration exported.",
   "popup.async_error": "Extension async operation failed.",
   "popup.uncaught_error": "Unhandled popup error.",
+  "provider.status_probe": "Provider readiness probe outcome changed.",
   "provider.content_loaded": "Provider content bridge loaded.",
   "provider.async_error": "Extension async operation failed.",
   "provider.send_failed": "Provider reply failed. See routing diagnostics.",
@@ -1050,6 +1051,8 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
             context.readinessDiagnostics?.tab_id === message.details?.tab_id)?.readinessDiagnostics
           : {}),
         ...message.details,
+        ...(message.event === "status_probe" && _sender.tab?.id
+          ? { tab_id: _sender.tab.id, document_id: _sender.documentId ?? null } : {}),
       },
     ).then((recorded) => respond({ ok: recorded === true }));
     return true;
