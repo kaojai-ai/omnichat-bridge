@@ -210,6 +210,14 @@ test("Taiwan page bridge queues realtime and recovery messages and correlates a 
   await bridge.providerEvent({ type: "api_send_result", request_id: "tw-send", ok: true,
     provider_message_id: "tw-sent", confirmed: true });
   assert.deepEqual(plain(await sending), { ok: true, provider_message_id: "tw-sent" });
+  const imageSending = bridge.sendCommand({ ...command, request_id: "tw-image", conversation_id: "tw-chat",
+    client_message_id: "tw-image-client", command_type: "send_image", image_url: "https://cdn.example/tw.png" });
+  const imageRequest = bridge.runtimeMessages.find(message => message.type === "send_api_v3" && message.request_id === "tw-image");
+  assert.equal(imageRequest?.command_type, "send_image");
+  assert.equal(imageRequest?.image_url, "https://cdn.example/tw.png");
+  await bridge.providerEvent({ type: "api_send_result", request_id: "tw-image", ok: true,
+    provider_message_id: "tw-image-sent", confirmed: true });
+  assert.deepEqual(plain(await imageSending), { ok: true, provider_message_id: "tw-image-sent" });
 });
 
 test("actual Shopee parser rejects unrelated and ambiguous shops before recovery owner fallback", async () => {
