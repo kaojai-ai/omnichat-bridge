@@ -37,10 +37,10 @@ test("keeps Shopee Seller Chat matching origin-locked", () => {
   assert.equal(isShopeeChatUrl("https://example.com/webchat/conversations"), false);
 });
 
-test("six supported markets use exact HTTPS origins and reject lookalikes", () => {
+test("seven supported markets use exact HTTPS origins and reject lookalikes", () => {
   const expected = {
     TH: "https://seller.shopee.co.th", MY: "https://seller.shopee.com.my", PH: "https://seller.shopee.ph",
-    SG: "https://seller.shopee.sg", ID: "https://seller.shopee.co.id", VN: "https://banhang.shopee.vn",
+    SG: "https://seller.shopee.sg", ID: "https://seller.shopee.co.id", VN: "https://banhang.shopee.vn", TW: "https://seller.shopee.tw",
   };
   assert.deepEqual(JSON.parse(JSON.stringify(context.OmnichatShopeeUrl.sellerOrigins)), expected);
   for (const [country, origin] of Object.entries(expected)) {
@@ -50,6 +50,8 @@ test("six supported markets use exact HTTPS origins and reject lookalikes", () =
     assert.equal(isShopeePageUrl(`${origin}.evil.example/`), false);
     assert.equal(isShopeePageUrl(origin.replace("https:", "http:")), false);
   }
+  assert.equal(surfaceForUrl("https://seller.shopee.tw/new-webchat/conversations"), "new-webchat");
+  assert.equal(surfaceForUrl("https://seller.shopee.tw/webchat/conversations"), "webchat");
   assert.throws(() => context.OmnichatShopeeUrl.originForAccount({ country: "US" }), /Unsupported/);
 });
 
