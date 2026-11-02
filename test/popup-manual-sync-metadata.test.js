@@ -55,7 +55,7 @@ for (const provider of ["shopee", "line_oa"]) {
     const task = h.click();
     assert.equal(h.requests.length, 0);
     await turn();
-    assert.deepEqual(h.requests.map(value => value.type), ["detect_account"], "fresh login verification precedes permissions and sync");
+    assert.deepEqual(h.requests.map(value => value.type), ["repair_provider_tabs", "detect_account"], "fresh login verification precedes permissions and sync");
     h.allowPermission();
     await turn();
     assert.equal(h.requests.some(value => ["prepare_sync_tab", "cancel_sync", "reset_recovery_v3"].includes(value.type)), false);
@@ -118,7 +118,7 @@ test("separate metadata controls and presentation are removed", () => {
 test("unidentified current account stops before refresh or sync", async () => {
   const h = harness({ unknown: true });
   await h.click();
-  assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
+  assert.deepEqual(h.requests.map(value => value.type), ["repair_provider_tabs", "detect_account"]);
 });
 
 for (const provider of ['line_oa', 'shopee']) {
@@ -142,7 +142,7 @@ for (const provider of ['line_oa', 'shopee']) {
 test("fresh login verification rejects stale cached access before starting sync", async () => {
   const h = harness({ provider: "line_oa", freshAccounts: [] });
   await h.click();
-  assert.deepEqual(h.requests.map(value => value.type), ["detect_account"]);
+  assert.deepEqual(h.requests.map(value => value.type), ["repair_provider_tabs", "detect_account"]);
   assert.equal(h.refreshes.length, 0);
 });
 

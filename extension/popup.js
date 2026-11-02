@@ -1322,6 +1322,9 @@ syncButton.addEventListener("click", async () => {
     // Fresh detection verifies this login without cancelling shared work or
     // discarding checkpoints. The account coordinator joins any active sync.
     if (actionId !== syncActionId) return;
+    const repaired = await chrome.runtime.sendMessage({ type: "repair_provider_tabs" });
+    if (actionId !== syncActionId) return;
+    if (!repaired?.ok) throw new Error(repaired?.error || "Could not repair provider tabs. Refresh the provider tab and try Sync again.");
     const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
     if (actionId !== syncActionId) return;
     const accounts = detected?.ok ? currentTabSyncAccounts(storedConfig, detected.accounts, provider) : [];
@@ -1343,6 +1346,10 @@ syncButton.addEventListener("click", async () => {
     if (actionId === syncActionId) {
       pendingAction = "";
       await showSyncResult(result);
+      if (result?.ok && repaired.failed_tabs?.length) {
+        const tabs = repaired.failed_tabs.map(item => `${item.provider === "line_oa" ? "LINE OA" : "Shopee"}${item.title ? `: ${item.title}` : ""}`).join(", ");
+        renderDashboard(`Sync finished. Some tabs could not be repaired: ${tabs}. Let active work finish, then refresh those tabs and try Sync again.`, true);
+      }
     }
   } catch (error) {
     if (actionId === syncActionId) {

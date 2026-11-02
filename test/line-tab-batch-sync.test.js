@@ -14,7 +14,7 @@ function harness({ pauseSync = false } = {}) {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const tab = { id: 42, url: "https://chat.line.biz/bot-A/chats" };
-  const runtime = vm.createContext({ AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
+  const runtime = vm.createContext({ manualBridgeRepair: null, AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
     providerAdapterForId: () => adapter, providerChatTabById: async () => tab, providerAccountMatchesTab: () => true,
     providerTabContext: () => "fixed-session", STORAGE: { status: "status" },
     throwIfSyncCancelled: signal => { if (signal?.aborted) throw Object.assign(new Error("cancelled"), { name: "AbortError" }); },

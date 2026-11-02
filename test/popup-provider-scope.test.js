@@ -38,7 +38,7 @@ for (const provider of ["shopee", "line_oa"]) {
     const tab = { id: 42, url: "https://provider.example/chat" };
     const syncCoordinator = createAccountSyncCoordinator();
     const calls = [];
-    const scope = vm.createContext({ AbortController, syncCoordinator, accountSyncs: syncCoordinator.jobs,
+    const scope = vm.createContext({ manualBridgeRepair: null, AbortController, syncCoordinator, accountSyncs: syncCoordinator.jobs,
       providerAdapterForId: id => ({ id }), providerChatTabById: async () => tab,
       providerTabContext: () => "verified-session", ensureProviderBridge: async () => {},
       detectOpenProviderAccount: async () => ({ ok: true }),
