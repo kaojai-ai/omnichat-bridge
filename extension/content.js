@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 11;
+  const BRIDGE_PROTOCOL_VERSION = 12;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -725,6 +725,18 @@
     }
   }
 
+  async function handleRecoveryScanComplete(message) {
+    touchRecovery(message.request_id);
+    try {
+      const result = await sendRuntimeMessage({ type: "complete_scan", request_id: message.request_id,
+        provider: providerAdapter.id, provider_account_id: message.provider_account_id, watermark: message.watermark });
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: Boolean(result?.ok),
+        ...(result?.ok ? {} : { error: result?.error ?? "Could not save recovery checkpoint." }) });
+    } catch (error) {
+      post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
+    }
+  }
+
   async function handleRecoveryCursor(message) {
     touchRecovery(message.request_id);
     try {
@@ -760,6 +772,7 @@
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
         conversations: message.conversations,
+        started_at: message.started_at,
       });
       post({
         type: "recovery_ack_v3",
@@ -1174,6 +1187,8 @@
       void observeAsync("history_backfill", () => handleHistoryBackfill(event.data));
     } else if (event.data.type === "recovery_checkpoint") {
       void observeAsync("recovery_checkpoint", () => handleRecoveryCheckpoint(event.data));
+    } else if (event.data.type === "recovery_scan_complete") {
+      void observeAsync("recovery_scan_complete", () => handleRecoveryScanComplete(event.data));
     } else if (event.data.type === "recovery_cursor") {
       void observeAsync("recovery_cursor", () => handleRecoveryCursor(event.data));
     } else if (event.data.type === "recovery_bootstrap") {

@@ -9,7 +9,7 @@ const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json",
 
 test("persists the acknowledged recovery cursor and clears unused summary state", async () => {
   const start = source.indexOf("async function advanceScanCursor(");
-  const end = source.indexOf("\nfunction exclusive(", start);
+  const end = source.indexOf("\nasync function completeScan(", start);
   assert.ok(start >= 0 && end > start);
   let state = {
     version: 1,
