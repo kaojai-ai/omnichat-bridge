@@ -124,7 +124,7 @@ export function transportConnectionStatus(live) {
 // Startup discovery is not evidence that configuration is missing.
 export function accountDiscoveryStatus({ detecting, hasConfiguration, inactiveShopee = false }) {
   if (detecting) return { label: "detectingShop", hint: "detectingShop", action: "sync" };
-  if (hasConfiguration && inactiveShopee) return { label: "inactiveShop", hint: "sessionUnverified", action: "detect" };
+  if (hasConfiguration && inactiveShopee) return { label: "inactiveShop", hint: "sessionUnverified", action: "sync" };
   if (hasConfiguration) return { label: "waitingForShop", hint: "shopUnknown", action: "sync" };
   return { label: "needConfig", hint: "configurationMissing", action: "configure" };
 }
