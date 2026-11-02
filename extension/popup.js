@@ -1331,7 +1331,7 @@ syncButton.addEventListener("click", async () => {
       const target = { provider, provider_account_id: accounts[0].provider_account_id, tab_id: tab.id };
       pendingAction = "checking";
       renderDashboard();
-      result = await chrome.runtime.sendMessage({ type: "sync_account", ...target, refresh_metadata: true });
+      result = await chrome.runtime.sendMessage({ type: "sync_account", ...target, refresh_metadata: true, allow_tab_fallback: true });
     }
     if (actionId === syncActionId) {
       pendingAction = "";
