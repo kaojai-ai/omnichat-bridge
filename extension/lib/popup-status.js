@@ -130,6 +130,10 @@ export function accountDiscoveryStatus({ detecting, hasConfiguration, inactiveSh
 }
 
 export function sessionConnectionStatus(live) {
+  if (live?.eligibility_reason_code === "provider_capability_unavailable") return {
+    label: "Not ready", state: "neutral",
+    hint: "Provider is not ready. Try Sync.",
+  };
   return {
     waiting_for_tab: {
       label: "Open chat", state: "neutral",

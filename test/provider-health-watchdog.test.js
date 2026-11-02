@@ -6,6 +6,7 @@ import vm from "node:vm";
 import { PROVIDER_RECOVERY_STATES } from "../extension/lib/provider-recovery.js";
 import { providerConnectionStatus } from "../extension/lib/popup-status.js";
 
+import { readinessLogDetails } from "../extension/lib/logs.js";
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
 
 function functionSource(name, next) {
@@ -25,6 +26,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
   const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: [], alarm: null, live: null, lives: {} };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
+    readinessLogDetails, providerWatchdogFailures: new Map(),
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: { config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
     readStorage: async () => stored,
@@ -291,7 +293,7 @@ test("unattended failure clears in-progress scan state instead of treating its o
   const control = { accountKey: context.key, controller: new AbortController(), restorePolling: true };
   const state = {};
   let status;
-  const runtime = vm.createContext({ accountSyncs: new Map([[context.key, control]]),
+  const runtime = vm.createContext({ providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
     STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
     exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
     getAccountScanState: async () => ({ state, stored: {} }),

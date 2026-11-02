@@ -14,6 +14,7 @@ import {
 import {
   availableLogBudget,
   diagnosticErrorDetails,
+  readinessLogDetails,
   sanitizeSendDiagnostics,
   logEntryForUpload,
   pruneLogs,
@@ -190,6 +191,7 @@ const providerPolicyObservations = new Map();
 let providerObservationSequence = 0;
 const providerStatusProbes = new Map();
 const providerPolicyContexts = new Map();
+const providerWatchdogFailures = new Map();
 const sessionEligibility = createSessionEligibility({
   onRecheck: () => ensureLiveConnection(),
   onEvent: (key, event, details) => {
@@ -393,6 +395,7 @@ function providerStatusEvidence(status) {
 
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
   const adapter = context.adapter;
+  context.readinessDiagnostics = providerPolicyContexts.get(context.key)?.readinessDiagnostics;
   providerPolicyContexts.set(context.key, context);
   const observedEpoch = epoch ?? providerSessionEpoch(adapter.id);
   const countryAllowed = !(context.account.provider === "shopee" && context.account.country && context.account.country !== "TH")
@@ -452,6 +455,12 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
       ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
     evidence: ready ? { tab, status, command_capabilities: providerCommandCapabilities(status, context) } : null,
   });
+  context.readinessDiagnostics = {
+    ...readinessLogDetails(status, { provider: adapter.id, tabId: tab?.id,
+      accountId: context.account.provider_account_id, ready: Boolean(policy.eligible && !policy.unknown) }),
+    account_verified: verified,
+    reason_code: policy.reason_code,
+  };
   const active = policy.eligible;
   await updateLiveState(context, {
     send_ready: Boolean(policy.eligible && !policy.unknown),
@@ -1035,7 +1044,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       area,
       message.event,
       safeMessage,
-      message.details,
+      {
+        ...(area === "popup" && message.details?.scope === "manual_sync"
+          ? [...providerPolicyContexts.values()].find(context =>
+            context.readinessDiagnostics?.tab_id === message.details?.tab_id)?.readinessDiagnostics
+          : {}),
+        ...message.details,
+      },
     ).then((recorded) => respond({ ok: recorded === true }));
     return true;
   }
@@ -2303,8 +2318,11 @@ async function runProviderHealthWatchdogOnce() {
           continue;
         }
         if (!providerTabHealthy(status, adapter)) {
-          throw new Error(`${providerLabel(adapter)} bridge is not responding to health checks.`);
+          throw new Error(status?.ok === true
+            ? `${providerLabel(adapter)} responded but is not ready.`
+            : `${providerLabel(adapter)} did not return a successful health response.`);
         }
+        providerWatchdogFailures.delete(tab.id);
         const record = recovery.record?.tab_id === tab.id
           ? await updateProviderRecoveryTabState(recoveryKey, {
             state: PROVIDER_RECOVERY_STATES.ready,
@@ -2330,11 +2348,16 @@ async function runProviderHealthWatchdogOnce() {
           });
         }
       } catch (error) {
-        await recordUnexpected("provider_watchdog", error, {
-          provider: adapter.id,
-          tab_id: tab.id,
-        });
         const status = await providerTabStatus(tab);
+        const details = readinessLogDetails(status, { provider: adapter.id, tabId: tab.id,
+          accountId: context.account.provider_account_id });
+        const failureKey = JSON.stringify([error.message, details]);
+        // Recovery retries continue normally; unchanged failures need only one log.
+        if (providerWatchdogFailures.get(tab.id) !== failureKey) {
+          if (providerWatchdogFailures.size >= 100) providerWatchdogFailures.delete(providerWatchdogFailures.keys().next().value);
+          providerWatchdogFailures.set(tab.id, failureKey);
+          await recordUnexpected("provider_watchdog", error, details);
+        }
         await handleProviderRecoveryFailure(adapter, tab, status, recovery, error, matchingContexts);
       }
     }
@@ -2649,7 +2672,9 @@ async function sendConnectionStatus(socket, context) {
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
+    ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
     ready: status.ready,
+    send_ready: status.send_ready,
     reason_code: status.reason_code,
     readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
   });
@@ -4342,8 +4367,16 @@ async function runAccountSync(trigger, control, context) {
       await recordLog("info", "sync", "superseded", "Sync superseded by provider reconnect.", {
         provider_account_id: providerAccountId, reason_code: "superseded",
       });
+    } else if (trigger === "manual" && error?.recovery_diagnostic_recorded === true) {
+      await recordLog("info", "sync", "failure_readiness", "Readiness at manual sync failure.", {
+        ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
+        provider: context.account.provider, provider_account_id: providerAccountId,
+      });
     } else if (error?.recovery_diagnostic_recorded !== true) {
-      await recordUnexpected("message_sync", error, { provider_account_id: providerAccountId });
+      await recordUnexpected("message_sync", error, {
+        ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
+        provider: context.account.provider, provider_account_id: providerAccountId, trigger,
+      });
     }
     return {
       provider: context.account.provider,

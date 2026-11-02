@@ -1343,6 +1343,9 @@ syncButton.addEventListener("click", async () => {
     }
   } catch (error) {
     if (actionId === syncActionId) {
+      logPopup("error", "async_error", "Extension async operation failed.", {
+        scope: "manual_sync", tab_id: popupTabId, ...diagnosticErrorDetails(error),
+      });
       pendingAction = "";
       renderDashboard(error.message, true);
     }

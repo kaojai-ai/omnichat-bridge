@@ -11,7 +11,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 function messageHarness() {
   let now = 0, nextId = 0;
   const timers = new Map(), calls = [], response = deferred();
-  const runtime = vm.createContext({ manualBridgeRepair: null,
+  const runtime = vm.createContext({ providerPolicyContexts: new Map(), manualBridgeRepair: null,
     performance, recordLog: async () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     PROVIDER_REQUEST_TIMEOUT_MS: 15_000,

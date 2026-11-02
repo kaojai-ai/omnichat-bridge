@@ -29,6 +29,7 @@
   let lastRealtimeConnectedAt = null;
   let providerSurface = null;
   let providerSurfaceReady = false;
+  let providerReadinessDetails = {};
   let providerCapabilities = {};
   let providerCommandCapabilitiesByAccount = {};
   let providerAccountIds = [];
@@ -1107,6 +1108,8 @@
       }
       providerSurface = typeof event.data.surface === "string" ? event.data.surface : providerSurface;
       providerSurfaceReady = event.data.surface_ready === true;
+      providerReadinessDetails = Object.fromEntries(["list_ready", "history_ready", "sender_available"]
+        .map(key => [key, typeof event.data[key] === "boolean" ? event.data[key] : null]));
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
         ? { ...event.data.capabilities }
         : providerCapabilities;
@@ -1234,6 +1237,7 @@
       ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
       surface_ready: providerSurfaceReady,
+      ...providerReadinessDetails,
       capabilities: { ...providerCapabilities },
       command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
       realtime_transport: providerRealtimeTransport,

@@ -23,6 +23,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
   const scope = vm.createContext({
     syncButton: button, storedConfig: { accounts }, detectedAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
     progressArea: {}, status: { classList: { remove() {} } },
+    logPopup() {}, diagnosticErrorDetails: () => ({}),
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
     accountOrigins: config => config.accounts,
     requestTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
