@@ -1,3 +1,4 @@
+import { hasScanBacklog, scanResumePaused, shouldResumeScan } from "../extension/lib/sync-state.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -16,7 +17,7 @@ function functionSource(name, next) {
   return source.slice(start, end);
 }
 
-function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false, accounts = ["account"], pollingAccounts = accounts, activeShop = accounts[0], missingBridge = false } = {}) {
+function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true, healthy = true, record = null, consent = true, chatOpen = null, alternativeHealthyTab = false, redirected = false, accounts = ["account"], pollingAccounts = accounts, activeShop = accounts[0], missingBridge = false, accessVerified = false, scanState = null } = {}) {
   const adapter = { id: provider, matchesUrl: () => !redirected,
     surfaceForUrl: url => url.includes("/new-webchat") ? "new-webchat" : "seller-centre" };
   const contexts = accounts.map(id => ({ key: `${provider}:${id}`, adapter, account: { provider_account_id: id } }));
@@ -26,10 +27,11 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
   const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: [], alarm: null, live: null, lives: {} };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
+    readAccountState: (value, key, fallback) => value?.[key] ?? fallback,
     readinessLogDetails, providerWatchdogFailures: new Map(),
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
-    STORAGE: { config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
-    readStorage: async () => stored,
+    STORAGE: { scanState: "scan", config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
+    readStorage: async () => ({ ...stored, scan: Object.fromEntries(contexts.map(context => [context.key, scanState])) }),
     configuredAccountContexts: () => contexts,
     lineSessionContexts: async (items) => items,
     accountSyncs: new Map(),
@@ -41,7 +43,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     providerChatTabs: async () => tabOpen && !redirected ? [tab, ...(alternativeHealthyTab ? [alternative] : [])] : [],
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
-    providerTabStatus: async (candidate) => { calls.checked++; if (missingBridge) return null; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: activeShop, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: activeShop, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    providerTabStatus: async (candidate) => { calls.checked++; if (missingBridge) return null; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: activeShop, surface: "new-webchat", chat_open: true }; return { healthy, account_access_verified: accessVerified, accessible_account_ids: accessVerified ? accounts : [], provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: activeShop, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => { missingBridge = false; },
     persistProviderSurfaceState: async () => {},
@@ -84,7 +86,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
       reload: async () => { calls.reloaded++; },
     } },
   };
-  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(), ...globals });
+  const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan, recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(), ...globals });
   vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), runtime);
   vm.runInContext([
     functionSource("resolveProviderRecoveryTab", "function ensureProviderRecoveryTab("),
@@ -203,7 +205,7 @@ for (const recoveryEnabled of [false, true]) {
 
 test("fresh matching provider health clears stale attention without hiding unhealthy or mismatched tabs", async () => {
   let patch;
-  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
+  const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan, recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
     PROVIDER_RECOVERY_STATES,
     updateLiveState: async (_context, value) => { patch = value; },
     providerTabCanSend: (status) => status.matches === true,
@@ -267,9 +269,9 @@ for (const restorePolling of [false, true]) {
   test(`recent successful sync ${restorePolling ? "still restores missing polling" : "keeps normal automatic cooldown"}`, async () => {
     const context = { key: "line_oa:oa-a", account: { provider: "line_oa", provider_account_id: "oa-a" }, adapter: { id: "line_oa" } };
     const control = { controller: new AbortController(), restorePolling };
-    const state = { in_progress: false, last_auto_at: new Date().toISOString() };
+    const state = { watermark: new Date().toISOString(), in_progress: false, last_auto_at: new Date().toISOString() };
     let recoveries = 0;
-    const runtime = vm.createContext({ STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+    const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan, STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
       exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
       getAccountScanState: async () => ({ state, stored: {} }),
       readAccountState: (_stored, _key, fallback) => fallback,
@@ -293,7 +295,7 @@ test("unattended failure clears in-progress scan state instead of treating its o
   const control = { accountKey: context.key, controller: new AbortController(), restorePolling: true };
   const state = {};
   let status;
-  const runtime = vm.createContext({ providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
+  const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan, providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
     STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
     exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
     getAccountScanState: async () => ({ state, stored: {} }),
@@ -348,4 +350,69 @@ test("Shopee repairs a missing bridge before selecting its active shop", async (
   assert.equal(calls.lives.a.state, null);
   assert.equal(calls.lives.b.state, "ready");
   assert.equal(calls.created, 0);
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: healthy capture does not suppress unfinished catch-up with tab recovery disabled`, async () => {
+    const scanState = { watermark: "2026-11-02T08:00:00Z", started_at: "2026-11-03T02:48:00Z", completed_at: "2026-11-02T08:00:00Z", in_progress: false, resume_paused: false };
+    const h = harness({ provider, scanState });
+    await h.run();
+    assert.deepEqual(h.calls.polling, ["account"]);
+    assert.equal(h.calls.created, 0);
+    const paused = harness({ provider, recoveryEnabled: true, scanState: { ...scanState, resume_paused: true } });
+    await paused.run();
+    assert.deepEqual(paused.calls.polling, []);
+    const signedOut = harness({ provider, healthy: false, scanState });
+    await signedOut.run();
+    assert.deepEqual(signedOut.calls.polling, []);
+  });
+}
+
+for (const provider of ["shopee", "line_oa"]) {
+  for (const reason of ["user_cancelled", "provider_tab_navigated"]) {
+    test(`${provider}: manual retry clears pause; ${reason} preserves the correct resume intent`, async () => {
+      const context = { key: `${provider}:a`, account: { provider, provider_account_id: "a" }, adapter: { id: provider } };
+      const control = { accountKey: context.key, controller: new AbortController() };
+      const watermark = "2026-11-02T08:00:00Z";
+      const state = { watermark, resume_paused: true, completed_at: watermark };
+      const pending = [{ id: "durably-captured" }];
+      let status;
+      const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan,
+        providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
+        STORAGE: { status: "status", scanState: "scan", pending: "pending" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+        exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
+        getAccountScanState: async () => ({ state, stored: {} }),
+        readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
+        writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+        updateScopedState: async (_key, _context, patch) => { status = patch; },
+        recordLog: async () => {}, recordUnexpected: async () => {},
+        readStorage: async () => ({ scan: { [context.key]: state }, pending: { [context.key]: pending } }),
+        providerLabel: () => provider,
+        attemptDelivery: async () => ({ sent: 0, pending: pending.length }),
+        syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+        syncOpenProvider: async () => {
+          assert.equal(state.resume_paused, false);
+          control.controller.abort(reason);
+          throw Object.assign(new Error("interrupted"), { name: "AbortError" });
+        },
+      });
+      const helpers = source.slice(source.indexOf("function isCurrentSyncControl("), source.indexOf("async function initializeAndStartSync("));
+      vm.runInContext(helpers + functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
+      await assert.rejects(runtime.runAccountSync("manual", control, context), { name: "AbortError" });
+      assert.equal(state.resume_paused, reason === "user_cancelled");
+      assert.equal(shouldResumeScan(state), reason !== "user_cancelled");
+      assert.equal(state.watermark, watermark);
+      assert.equal(status.caught_up, false);
+      assert.equal(status.pending, 1);
+      assert.equal(pending[0].id, "durably-captured");
+    });
+  }
+}
+
+test("LINE verified history resumes before polling becomes healthy after upgrade", async () => {
+  const scanState = { started_at: "2026-11-03T02:48:00Z", in_progress: true };
+  const h = harness({ provider: "line_oa", healthy: false, accessVerified: true, pollingAccounts: [], scanState });
+  await h.run();
+  assert.deepEqual(h.calls.polling, ["account"]);
+  assert.equal(h.calls.created, 0);
 });

@@ -7,6 +7,9 @@ import { accountConfigKey, accountKey, findAccountConfig, historySinceMs, histor
 import { buildConnectionHealth } from "./lib/connection-status.js";
 import {
   compareMessageCursor,
+  hasScanBacklog,
+  scanResumePaused,
+  shouldResumeScan,
   deliveryRetryDelay,
   latestMessageCursor,
   migrateScanState,
@@ -2198,7 +2201,7 @@ function startUnattendedProviderSync(tab, context) {
   if (!Number.isInteger(tabId) || !recoveryKey) return;
   if (accountSyncs.has(recoveryKey)) return accountSyncs.get(recoveryKey).completion;
   if ((providerAutomaticRetryAt.get(recoveryKey) ?? 0) > Date.now()) return;
-  const operation = requestAccountSync(context, "automatic", { tab_id: tabId, restorePolling: true });
+  const operation = requestAccountSync(context, "automatic", { tab_id: tabId, shared_session: context.adapter.id === "line_oa", restorePolling: true });
   void operation.then((result) => {
     if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
@@ -2223,6 +2226,7 @@ async function runProviderHealthWatchdogOnce() {
     STORAGE.detectedAccounts,
     STORAGE.serverInitialized,
     STORAGE.unattendedRecovery,
+    STORAGE.scanState,
   ]);
   const contexts = configuredAccountContexts(stored);
   const enabled = contexts.length > 0
@@ -2323,6 +2327,15 @@ async function runProviderHealthWatchdogOnce() {
           continue;
         }
         if (!providerTabHealthy(status, adapter)) {
+          // LINE's history reader restores polling itself. Verified session access
+          // is sufficient to resume it; waiting for polling health would deadlock.
+          if (adapter.id === "line_oa" && status?.account_access_verified === true) {
+            for (const item of matchingContexts) {
+              const scan = readAccountState(stored[STORAGE.scanState], item.key, null);
+              if (status.accessible_account_ids?.includes(item.account.provider_account_id)
+                && shouldResumeScan(scan)) startUnattendedProviderSync(tab, item);
+            }
+          }
           throw new Error(status?.ok === true
             ? `${providerLabel(adapter)} responded but is not ready.`
             : `${providerLabel(adapter)} did not return a successful health response.`);
@@ -2343,7 +2356,11 @@ async function runProviderHealthWatchdogOnce() {
             : (status.provider_polling_active === true
             && Array.isArray(status.provider_polling_account_ids)
             && status.provider_polling_account_ids.includes(item.account.provider_account_id));
-          if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
+          const scan = readAccountState(stored[STORAGE.scanState], item.key, null);
+          const catchUp = shouldResumeScan(scan);
+          if (!scanResumePaused(scan) && (catchUp || (!polling && allowTabRecovery))) {
+            startUnattendedProviderSync(tab, item);
+          }
           await updateProviderRecoveryLiveState([item], adapter, {
             state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
             reason: polling ? null : adapter.id === "shopee"
@@ -3075,7 +3092,7 @@ async function refreshRegionalShopeePermissions() {
         .filter(control => control?.accountKey === context.key).map(control => control.tabId)]);
     for (const tabId of tabIds) {
       if (!Number.isInteger(tabId)) continue;
-      void cancelActiveSync("shopee", tabId).catch(() => {});
+      void cancelActiveSync("shopee", tabId, "regional_permission_required").catch(() => {});
       void chrome.tabs.sendMessage(tabId, { type: "cancel_sync_v3", provider: "shopee",
         provider_account_id: context.account.provider_account_id }).catch(() => {});
     }
@@ -3110,9 +3127,9 @@ async function reconnectProviderTab(tab) {
 
 function invalidateProviderSession(provider, reason) {
   for (const control of accountSyncs.values()) {
-    if (control.adapter.id === provider) control.controller.abort();
+    if (control.adapter.id === provider) control.controller.abort(reason);
   }
-  if (provider === "line_oa") for (const batch of lineTabSyncs.values()) batch.controller.abort();
+  if (provider === "line_oa") for (const batch of lineTabSyncs.values()) batch.controller.abort(reason);
   for (const [tabId, check] of providerBridgeChecks) {
     if (check.provider === provider) providerBridgeChecks.delete(tabId);
   }
@@ -3126,13 +3143,13 @@ function invalidateProviderSession(provider, reason) {
 }
 
 function invalidateProviderTab(tabId, reason) {
-  lineTabSyncs.get(tabId)?.controller.abort();
+  lineTabSyncs.get(tabId)?.controller.abort(reason);
   providerBridgeChecks.delete(tabId);
   providerTabEpochs.set(tabId, (providerTabEpochs.get(tabId) ?? 0) + 1);
   for (const control of [...accountSyncs.values()]) {
     if (control?.tabId === tabId || control?.lockedTabId === tabId) {
       control.recoveryCompletion?.reject(Object.assign(new Error("Page changed. Sync again."), { reason_code: "provider_page_changed" }));
-      control.controller.abort();
+      control.controller.abort(reason);
     }
   }
   // Unused tabs cannot tear down another tab's validated account connection.
@@ -4228,25 +4245,25 @@ async function retryProviderAccount(message, { controller } = {}) {
   return requestAccountSync(context, "manual", { ...message, verified_context: undefined, controller });
 }
 
-async function cancelActiveSync(provider = null, requestedTabId = null) {
+async function cancelActiveSync(provider = null, requestedTabId = null, reason = "user_cancelled") {
   if (requestedTabId != null && (!Number.isInteger(requestedTabId) || requestedTabId <= 0)) throw new Error("A valid provider tab is required.");
   const batches = [...lineTabSyncs.entries()].filter(([tabId]) => (!provider || provider === "line_oa")
     && (requestedTabId == null || requestedTabId === tabId)).map(([, batch]) => batch);
-  for (const batch of batches) batch.controller.abort();
+  for (const batch of batches) batch.controller.abort(reason);
   const controls = [...accountSyncs.values()].filter(control => (!provider || control.adapter.id === provider)
     && (requestedTabId == null || control.tabId === requestedTabId || control.lockedTabId === requestedTabId || control.manualSourceTabId === requestedTabId));
-  for (const control of controls) control.controller.abort();
+  for (const control of controls) control.controller.abort(reason);
   await Promise.allSettled(controls.filter(control => control.tabId).map(control => sendProviderMessage(control.tabId, {
     type: "cancel_sync_v3", provider: control.adapter.id,
     provider_account_id: control.providerAccountId,
     ...(control.providerRequestId ? { request_id: control.providerRequestId } : {}),
   }, { label: "Provider", operation: "cancel recovery", timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS })));
   await Promise.allSettled([...controls.map(control => control.completion), ...batches.map(batch => batch.task)]);
-  const persistedCancelled = requestedTabId == null ? await clearPersistedSync(provider) : false;
+  const persistedCancelled = requestedTabId == null ? await clearPersistedSync(provider, reason) : false;
   return { cancelled: controls.length > 0 || batches.length > 0 || persistedCancelled };
 }
 
-async function clearPersistedSync(provider = null) {
+async function clearPersistedSync(provider = null, reason = "user_cancelled") {
   return exclusive(() => serializeAccountStorage(async () => {
     const stored = await readStorage([
       STORAGE.config,
@@ -4287,6 +4304,7 @@ async function clearPersistedSync(provider = null) {
           {
             ...scanState,
             in_progress: false,
+            resume_paused: reason === "user_cancelled",
             cancelled_at: new Date().toISOString(),
           },
         );
@@ -4308,6 +4326,7 @@ async function runAccountSync(trigger, control, context) {
     throwIfSyncCancelled(signal);
     const { state, stored } = await getAccountScanState(providerAccountId, context.account.provider);
     throwIfSyncCancelled(signal);
+    if (automatic && scanResumePaused(state)) return { skipped: "user_paused" };
     const lastAutoAt = Date.parse(state.last_auto_at ?? "");
     const lastSyncAt = Date.parse(
       readAccountState(stored[STORAGE.status], context.key, {}).last_sync_at ?? "",
@@ -4317,8 +4336,7 @@ async function runAccountSync(trigger, control, context) {
       Number.isFinite(lastSyncAt) ? lastSyncAt : 0,
     );
     if (automatic
-      && !control.restorePolling
-      && !state.in_progress
+      && (!control.restorePolling || hasScanBacklog(state))
       && lastCompletedAt > 0
       && Date.now() - lastCompletedAt < RESUME_SYNC_COOLDOWN_MS) {
       return { skipped: "cooldown" };
@@ -4326,6 +4344,7 @@ async function runAccountSync(trigger, control, context) {
     const startedAt = new Date().toISOString();
     await writeAccountScanState(context, {
       in_progress: true,
+      resume_paused: false,
       started_at: startedAt,
       ...(automatic ? { last_auto_at: startedAt } : {}),
     });
@@ -4342,7 +4361,7 @@ async function runAccountSync(trigger, control, context) {
     return { context };
   });
   if (prepared.skipped) {
-    await recordLog("debug", "sync", "skipped", "Automatic sync skipped during cooldown.", {
+    await recordLog("debug", "sync", "skipped", "Automatic sync skipped.", {
       provider_account_id: providerAccountId,
       reason: prepared.skipped,
     });
@@ -4419,6 +4438,7 @@ async function runAccountSync(trigger, control, context) {
   } catch (error) {
     if (!isCurrentSyncControl(control)) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
+    const userCancelled = cancelled && signal.reason === "user_cancelled";
     const message = cancelled
       ? "Sync cancelled."
       : error instanceof Error ? error.message : String(error);
@@ -4428,6 +4448,7 @@ async function runAccountSync(trigger, control, context) {
     if (state) {
       await writeAccountScanState(context, {
         in_progress: false,
+        resume_paused: userCancelled,
         ...(cancelled
           ? { cancelled_at: new Date().toISOString() }
           : { failed_at: new Date().toISOString() }),
@@ -4444,8 +4465,9 @@ async function runAccountSync(trigger, control, context) {
       pending: pending.length,
     });
     if (cancelled) {
-      await recordLog("info", "sync", "cancelled", "Sync cancelled by user.", {
+      await recordLog("info", "sync", userCancelled ? "cancelled" : "interrupted", userCancelled ? "Sync cancelled by user." : "Sync interrupted; unfinished history will resume.", {
         provider_account_id: providerAccountId,
+        reason_code: typeof signal.reason === "string" ? signal.reason : "internal_interruption",
       });
       throw syncCancelledError();
     }
@@ -4578,17 +4600,9 @@ async function resumeSync(message, sender) {
 }
 
 async function resumeInterruptedSync() {
-  const stored = await readStorage([STORAGE.serverInitialized, STORAGE.consent, STORAGE.config,
-    STORAGE.detectedAccounts, STORAGE.status, STORAGE.scanState]);
-  if (!hasServerInitialized(stored) || !hasLocalConsent(stored[STORAGE.consent])) return { skipped: "not_initialized" };
-  const interrupted = configuredAccountContexts(stored).filter(context => {
-    const scanState = readAccountState(stored[STORAGE.scanState], context.key, null);
-    const status = readAccountState(stored[STORAGE.status], context.key, null);
-    return scanState?.in_progress === true || ["discovering", "syncing"].includes(status?.state);
-  });
-  if (!interrupted.length) return { skipped: "no_interrupted_sync" };
-  return { accounts: await Promise.all(interrupted.map(context => requestAccountSync(context, "automatic")
-    .catch(error => ({ provider: context.adapter.id, provider_account_id: context.account.provider_account_id, error: error.message })))) };
+  // The watchdog owns existing-tab repair, account verification and catch-up.
+  // Reuse it on startup so a worker restart cannot bypass those checks.
+  return runProviderHealthWatchdog();
 }
 
 function messageKey(message) {

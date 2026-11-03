@@ -32,6 +32,19 @@ export function hasScanBacklog(state) {
   return Number.isFinite(started) && (!Number.isFinite(completed) || started > completed);
 }
 
+// Legacy cancellation records cannot distinguish user intent from interruption.
+export function scanResumePaused(state) {
+  if (typeof state?.resume_paused === "boolean") return state.resume_paused;
+  const cancelled = Date.parse(state?.cancelled_at ?? "");
+  const completed = Date.parse(state?.completed_at ?? "");
+  return Number.isFinite(cancelled) && (!Number.isFinite(completed) || cancelled > completed);
+}
+
+export function shouldResumeScan(state) {
+  return Number.isFinite(Date.parse(state?.started_at ?? ""))
+    && hasScanBacklog(state) && !scanResumePaused(state);
+}
+
 export function advanceConversationCursors(current, messages) {
   const conversations = { ...(current?.conversations ?? {}) };
   for (const message of messages ?? []) {

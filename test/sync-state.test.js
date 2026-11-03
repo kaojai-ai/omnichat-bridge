@@ -74,3 +74,15 @@ test("failed or cancelled scan keeps later realtime cursors deferred until succe
   assert.equal(hasScanBacklog({ ...state, cancelled_at: "2026-08-01T00:01:00Z" }), true);
   assert.equal(hasScanBacklog({ ...state, completed_at: "2026-08-01T00:02:00Z" }), false);
 });
+
+test("resume eligibility preserves unfinished work and explicit or legacy user pauses", async () => {
+  const { shouldResumeScan, scanResumePaused } = await import("../extension/lib/sync-state.js");
+  const incomplete = { watermark: "2026-11-02T08:00:00Z", started_at: "2026-11-03T02:48:00Z", completed_at: "2026-11-02T08:00:00Z", in_progress: false };
+  assert.equal(shouldResumeScan(incomplete), true);
+  assert.equal(shouldResumeScan({ ...incomplete, resume_paused: true }), false);
+  const legacy = { ...incomplete, cancelled_at: "2026-11-03T02:49:00Z" };
+  assert.equal(scanResumePaused(legacy), true);
+  assert.equal(shouldResumeScan({ ...legacy, resume_paused: false }), true);
+  assert.equal(shouldResumeScan({ in_progress: true }), false);
+  assert.equal(shouldResumeScan({ ...incomplete, completed_at: "2026-11-03T02:50:00Z" }), false);
+});

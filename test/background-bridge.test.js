@@ -279,12 +279,6 @@ test("retires old bridge listeners before reattaching without a provider reload"
   assert.match(source, /type: "sync_now_v3"/);
 });
 
-test("resumes an interrupted sync after the service worker restarts", () => {
-  assert.match(source, /async function resumeInterruptedSync\(/);
-  assert.match(source, /scanState\?\.in_progress === true/);
-  assert.match(source, /\["discovering", "syncing"\]\.includes\(status\?\.state\)/);
-  assert.match(source, /void resumeInterruptedSync\(\)\.catch/);
-});
 
 test("starts provider recovery with visible conversation progress", () => {
   assert.match(source, /state: "syncing",\n      phase: context.adapter.id === "line_oa" \? "connecting_provider" : "checking_conversations",\n      completed_conversations: 0,\n      total_conversations: 0,/);

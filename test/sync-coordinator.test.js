@@ -125,26 +125,15 @@ test("content resume is scoped to a verified sender tab and never accepts an acc
   assert.equal(calls.length, 1);
 });
 
-test("startup resumes only interrupted configured accounts instead of every account", async () => {
-  const contexts = [
-    { key: "shopee:a", adapter: { id: "shopee" } },
-    { key: "line_oa:b", adapter: { id: "line_oa" } },
-    { key: "line_oa:c", adapter: { id: "line_oa" } },
-  ];
-  const requested = [];
-  const sandbox = {
-    STORAGE: { serverInitialized: "initialized", consent: "consent", config: "config", detectedAccounts: "detected", status: "status", scanState: "scan" },
-    readStorage: async () => ({ initialized: true, consent: true, scan: { "shopee:a": { in_progress: true } }, status: { "line_oa:b": { state: "syncing" }, "line_oa:c": { state: "watching" } } }),
-    hasServerInitialized: stored => stored.initialized, hasLocalConsent: value => value,
-    configuredAccountContexts: () => contexts,
-    readAccountState: (state, key, fallback) => state?.[key] ?? fallback,
-    requestAccountSync: async (context, trigger) => { requested.push([context.key, trigger]); return {}; },
-  };
+test("startup delegates recovery to the verified-tab watchdog", async () => {
+  let calls = 0;
   const start = source.indexOf("async function resumeInterruptedSync(");
   const end = source.indexOf("function messageKey(", start);
-  const resume = vm.runInNewContext(`(${source.slice(start, end).trim()})`, sandbox);
-  await resume();
-  assert.deepEqual(requested, [["shopee:a", "automatic"], ["line_oa:b", "automatic"]]);
+  const resume = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    runProviderHealthWatchdog: async () => { calls++; return "reconciled"; },
+  });
+  assert.equal(await resume(), "reconciled");
+  assert.equal(calls, 1);
 });
 
 test("checkpoint writes reject superseded requests and recheck cancellation after storage awaits", async () => {
