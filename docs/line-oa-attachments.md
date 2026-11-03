@@ -27,6 +27,21 @@ is unsent; failed confirmation after native submission may be uncertain.
 Do not automatically resend uncertain results. History uses the send ID to
 correlate provider messages.
 
+LINE account metadata is reused for up to 30 seconds within the verified browser
+session. Readiness checks refresh it; authentication failures and session resets
+invalidate it. Sends with missing or expired metadata await verification.
+
+No captured send-response shape currently qualifies for immediate acceptance.
+Successful HTTP responses therefore still require history confirmation by send
+ID; an arbitrary response ID is not sufficient. This release does not establish
+the one-request send target. Provider error responses are rejected immediately.
+
+Send diagnostics include bounded stage durations, metadata cache state, history
+request count, and confirmation source. Terminal command logs distinguish socket
+submission from unavailable or failed acknowledgement submission; socket
+submission does not establish backend receipt. Failed and uncertain outcomes are
+retained, while successful terminal diagnostics are sampled.
+
 ## Compatibility and validation
 
 The page bridge uses `compatibility_version: 1`; missing compatibility fields

@@ -1525,7 +1525,10 @@
           ? { choice_shop_matches_route: value(payload.choice_info.real_shop_id) === value(routing.shop_id) } : {}) };
       nativeAttempted = true;
       stage("provider_dispatch");
-      const response = await sendThroughSurface(template, url.toString(), payload);
+      const providerRequestStarted = globalThis.performance?.now() ?? Date.now();
+      let response;
+      try { response = await sendThroughSurface(template, url.toString(), payload); }
+      finally { diagnostics.provider_request_duration_ms = Math.round((globalThis.performance?.now() ?? Date.now()) - providerRequestStarted); }
       nativeResponseReceived = true;
       stage("provider_response");
       if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
@@ -1567,7 +1570,7 @@
       if (!knownAcceptance) {
         throw new Error("Shopee returned an unrecognized send result. Delivery is uncertain; check Seller Chat before retrying.");
       }
-      post({ type: "api_send_result", request_id: requestId, ok: true, execution_stage: "completed", dispatch_started: true, retryable: false, provider_message_id: providerMessageId });
+      post({ type: "api_send_result", request_id: requestId, ok: true, execution_stage: "completed", dispatch_started: true, retryable: false, provider_message_id: providerMessageId, diagnostics: { ...diagnostics, confirmation_duration_ms: 0 } });
     } catch (error) {
       diagnostics.provider_duration_ms = Math.min(300_000, Math.max(0, Date.now() - sendStartedAt));
       const providerReason = state.sendErrorsByClientMessageId.get(clientMessageId);

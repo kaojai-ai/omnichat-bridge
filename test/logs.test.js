@@ -383,3 +383,17 @@ test("history failure evidence survives storage, upload and support export witho
   assert.match(exported, /reason_code=invalid_message_history/);
   assert.doesNotMatch(JSON.stringify(uploaded) + exported, /private response|secret/);
 });
+
+test("send timing diagnostics retain bounded numeric evidence without provider payloads", () => {
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1,
+    metadata_cache: "hit", confirmation_source: "history", history_request_count: 2,
+    queue_duration_ms: 1.4, preparation_duration_ms: 5, provider_request_duration_ms: 20,
+    confirmation_duration_ms: 30, total_duration_ms: 55, text: "private", response: { token: "secret" },
+  }), { diagnostic_version: 1, metadata_cache: "hit", confirmation_source: "history",
+    queue_duration_ms: 1, preparation_duration_ms: 5, provider_request_duration_ms: 20,
+    confirmation_duration_ms: 30, total_duration_ms: 55, history_request_count: 2 });
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1,
+    metadata_cache: "private", confirmation_source: "secret", total_duration_ms: Infinity,
+    provider_request_duration_ms: -1, history_request_count: 101,
+  }), { diagnostic_version: 1 });
+});

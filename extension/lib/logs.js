@@ -40,6 +40,8 @@ export function sanitizeSendDiagnostics(input) {
   const result = { diagnostic_version: 1 };
   const enums = {
     provider: ["shopee", "line_oa"],
+    metadata_cache: ["hit", "miss", "expired"],
+    confirmation_source: ["send_response", "history"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
     stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
@@ -79,6 +81,10 @@ export function sanitizeSendDiagnostics(input) {
     result.provider_duration_ms = input.provider_duration_ms;
   }
   if (Number.isFinite(input.duration_ms) && input.duration_ms >= 0 && input.duration_ms <= 300_000) result.duration_ms = input.duration_ms;
+  for (const key of ["queue_duration_ms", "preparation_duration_ms", "provider_request_duration_ms", "confirmation_duration_ms", "total_duration_ms"]) {
+    if (Number.isFinite(input[key]) && input[key] >= 0 && input[key] <= 300_000) result[key] = Math.round(input[key]);
+  }
+  if (Number.isSafeInteger(input.history_request_count) && input.history_request_count >= 0 && input.history_request_count <= 100) result.history_request_count = input.history_request_count;
   for (const key of SEND_DIAGNOSTIC_ID_KEYS) {
     const id = typeof input[key] === "number" || typeof input[key] === "string" ? String(input[key]) : "";
     if (/^\d{1,32}$/.test(id)) result[key] = id;
