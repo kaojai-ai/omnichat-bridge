@@ -2620,12 +2620,14 @@ async function connectionStatusSnapshot(context) {
   const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
   const ready = samePolicy && current?.eligible === true;
   const sendReady = ready && !current?.unknown;
-  const checkedAt = Date.parse(providerStatus?.last_provider_check_at ?? "");
+  const checkedAt = Date.parse(adapter.id === "line_oa"
+    ? providerStatus?.last_successful_poll_at_by_account?.[canonicalProviderAccountId(context)] ?? ""
+    : providerStatus?.last_provider_check_at ?? "");
   const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
   const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
     && (adapter.id !== "shopee" || providerStatus?.capabilities?.message_recovery === true);
   const receiveReasonCode = !providerStatus ? "provider_status_unknown"
-    : !receiveFresh ? "provider_status_stale"
+    : !receiveFresh ? adapter.id === "line_oa" ? "inbound_poll_unverified" : "provider_status_stale"
       : providerStatus.realtime_connected !== true ? "provider_realtime_disconnected"
       : adapter.id === "shopee" && providerStatus?.capabilities?.message_recovery !== true
         ? "message_recovery_unavailable" : "healthy";
