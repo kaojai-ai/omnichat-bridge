@@ -393,7 +393,11 @@ function invalidateBridgeVerification(tabId) {
 
 // A transport/probe failure is missing evidence, not a provider rejection.
 function providerStatusEvidence(status) {
-  return status?.provider_check_outcome === "unknown" ? null : status;
+  // A failed inbound probe may leave send identity and capability independently
+  // verified. Keep that evidence; an unverified account remains ineligible.
+  if (status?.provider_check_outcome !== "unknown") return status;
+  return status?.current_provider_account_id || (status?.account_access_verified === true && status?.accessible_account_ids?.length)
+    ? status : null;
 }
 
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
