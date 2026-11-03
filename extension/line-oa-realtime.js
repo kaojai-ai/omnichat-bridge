@@ -161,10 +161,11 @@
       metadataSessionEpoch += 1;
       providerCheckOutcome = "failed";
       accessibleAccounts = [];
-    } else if (providerCheckOutcome !== "failed") {
+      accountAccessVerified = false;
+    } else if (providerCheckOutcome !== "failed" && !accountAccessVerified) {
+      // A transient inbound request failure does not revoke a previously verified OA.
       providerCheckOutcome = "unknown";
     }
-    accountAccessVerified = false;
     postProviderStatus();
   }
 
