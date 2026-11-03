@@ -1088,6 +1088,9 @@ test("LINE OA restores and continuously polls three accounts from one tab", asyn
   for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
   await settleBridge();
   assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@second", "@third"]);
+  const successes = lastPollingStatus(bridge).last_successful_poll_at_by_account;
+  for (const account of ["@first", "@second", "@third"]) assert.ok(Date.parse(successes[account]) > 0);
+  assert.equal(successes["@unpolled"], undefined, "one OA cannot inherit another OA poll success");
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete" && post.ok).length, 3);
   assert.equal(bridge.intervalCount, 1);
   bridge.tick();
