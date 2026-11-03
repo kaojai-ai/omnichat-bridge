@@ -2943,15 +2943,10 @@ async function handleLiveCommand(raw, context, socket) {
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   if (typeof command.request_id !== "string" || !command.request_id) return;
-  const receivedAtMs = Date.now();
-  const relativeBudgetMs = Number.isSafeInteger(command.execution_budget_ms)
-    && command.execution_budget_ms >= 0 && command.execution_budget_ms <= 30_000
-    ? command.execution_budget_ms : null;
-  const clockOffsetEstimateMs = Number.isSafeInteger(command.server_sent_at_ms)
-    ? receivedAtMs - command.server_sent_at_ms : null;
-  // Browser and server wall clocks can differ. Rebase the server's relative
-  // execution budget once at socket receipt for all downstream deadline checks.
-  if (relativeBudgetMs !== null) command.deadline_at_ms = receivedAtMs + relativeBudgetMs;
+  // Bound local queue and provider work without interpreting a server epoch
+  // using this browser's wall clock. Worker acknowledgement has its own timer.
+  const localTimeoutMs = 30_000;
+  command.deadline_at_ms = Date.now() + localTimeoutMs;
   let acknowledgementStatus = "socket_unavailable";
   const acknowledge = (result) => {
     if (socket.readyState !== WebSocket.OPEN) { acknowledgementStatus = "socket_unavailable"; return; }
@@ -2978,9 +2973,8 @@ async function handleLiveCommand(raw, context, socket) {
   void recordLog("info", "live_command", "received", "Reply command received.", {
     request_id: command.request_id, provider: adapter.id,
     provider_account_id: context.account.provider_account_id,
-    remaining_budget_ms: Math.max(0, (command.deadline_at_ms ?? Date.now()) - Date.now()),
-    relative_budget_ms: relativeBudgetMs,
-    clock_offset_estimate_ms: clockOffsetEstimateMs,
+    remaining_budget_ms: Math.max(0, command.deadline_at_ms - Date.now()),
+    timeout_origin: "extension_local",
   });
   if (!cached) {
     if (liveCommandResults.size >= 200) {
