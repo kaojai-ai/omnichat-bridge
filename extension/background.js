@@ -2621,7 +2621,7 @@ async function connectionStatusSnapshot(context) {
   const ready = samePolicy && current?.eligible === true;
   const sendReady = ready && !current?.unknown;
   const checkedAt = Date.parse(providerStatus?.last_provider_check_at ?? "");
-  const receiveFresh = !providerStatus?.last_provider_check_at || (Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS);
+  const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
   const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
     && (adapter.id !== "shopee" || providerStatus?.capabilities?.message_recovery === true);
   const receiveReasonCode = !providerStatus ? "provider_status_unknown"
