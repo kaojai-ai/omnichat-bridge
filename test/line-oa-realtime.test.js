@@ -48,6 +48,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {}, durableCheckpoints = new Map(), checkpointError = null, completionError = null } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
+  let fixtureMonotonic = 0;
   class FixtureDate extends Date {
     static now() { return fixtureNow ?? Date.now(); }
   }
@@ -229,7 +230,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
   const context = vm.createContext({
     window,
     fetch: window.fetch,
-    URL, Date: FixtureDate,
+    URL, Date: FixtureDate, performance: { now: () => fixtureMonotonic },
     Headers,
     Request,
     FormData, Blob, ArrayBuffer, AbortSignal,
@@ -254,6 +255,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     setCheckpointError(error) { checkpointError = error; },
     setCompletionError(error) { completionError = error; },
     advanceClock(ms) { fixtureNow = (fixtureNow ?? Date.now()) + ms; },
+    advanceMonotonic(ms) { fixtureMonotonic += ms; },
+    navigate(pathname) { window.location.pathname = pathname; },
     setAccounts(accounts) { availableAccounts = accounts; },
     setAccountError(error) { accountError = error; },
     requests,
@@ -399,7 +402,10 @@ test("LINE OA replays an observed text request without copying cookies", async (
   await bridge.captureManualSend({ type: "text", text: "manual message", sendId: "manual-send" });
   const result = await bridge.sendCommand({ command_type: "send_text", text: "bridge message", client_message_id: "caller-send-id" });
 
-  assert.deepEqual(plain(result), {
+  const { diagnostics, ...reply } = plain(result);
+  assert.equal(diagnostics.confirmation_source, "history");
+  assert.equal(diagnostics.history_request_count, 1);
+  assert.deepEqual(reply, {
     source: "omnichat-realtime-bridge-v3",
     type: "api_send_result",
     request_id: "send-1",
@@ -974,6 +980,7 @@ test("LINE OA 400 diagnostics preserve only safe codes and payload field names",
     diagnostic_version: 1, provider: "line_oa", operation: "send", command_type: "send_text",
     http_status: 400, response_format: "json", native_attempted: true, delivery_uncertain: false,
     failure_kind: "provider_rejection", provider_duration_ms: result.diagnostics.provider_duration_ms,
+    history_request_count: 0, preparation_duration_ms: 0, provider_request_duration_ms: 0, total_duration_ms: 0,
     client_id_is_uuid: true, template_source: "derived", provider_code_present: true,
     native_error_code: "INVALID_ARGUMENT", validation_fields: ["sendId"],
   });
@@ -2058,5 +2065,129 @@ test("LINE initial capture selects the newest 25 within its frozen 24-hour windo
       .flatMap(post => post.body.conversations.flatMap(chat => chat.messages));
     assert.deepEqual(messages.map(message => message.id), recent.slice(0, 25).map(message => message.id));
     assert.equal(bridge.durableCheckpoints.get("@exampleoa").watermark, new Date(now).toISOString());
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE sends reuse verified session metadata after minutes and hours", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.detect();
+    const before = bridge.requests.length;
+    bridge.advanceClock(60_000);
+    bridge.advanceMonotonic(60_000);
+    const cached = await bridge.sendCommand({ command_type: "send_text", text: "cached" });
+    assert.equal(cached.ok, true);
+    assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
+    assert.equal(bridge.requests.slice(before).length, 2, "one send and one history confirmation; fast response acceptance is not evidence-qualified");
+    bridge.advanceMonotonic(3 * 60 * 60 * 1_000);
+    const later = await bridge.sendCommand({ command_type: "send_sticker", package_id: "1", sticker_id: "2" });
+    assert.equal(later.ok, true);
+    assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE failed readiness refresh invalidates session metadata and prevents submission", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.detect();
+    bridge.setAccountError(new TypeError("network unavailable"));
+    await bridge.detect();
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "must not send" });
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, false);
+    assert.equal(bridge.sentPayloads.length, 0);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE navigation invalidates fresh metadata before an account send", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.detect();
+    bridge.navigate("/other-bot/chats");
+    bridge.setAccounts([]);
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "must not send" });
+    assert.equal(result.ok, false);
+    assert.equal(bridge.sentPayloads.length, 0);
+    assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, 2);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE concurrent sends after session reset share a single metadata refresh", async () => {
+  let probes = 0;
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ beforeAccountRequest: async () => { if (++probes > 1) await blocked; } });
+  try {
+    await bridge.detect();
+    bridge.resetRecovery("Session reset");
+    const first = bridge.sendCommand({ command_type: "send_text", text: "first" });
+    const second = bridge.sendCommand({ command_type: "send_text", text: "second" });
+    await settleBridge();
+    assert.equal(probes, 2);
+    release();
+    assert.equal((await first).ok, true);
+    assert.equal((await second).ok, true);
+    assert.equal(probes, 2);
+  } finally { release(); bridge.dispose(); }
+});
+
+for (const sendResponseBody of [{ id: "unproven-id" }, { message: { id: "unproven-id" } }, { data: { messageId: "unproven-id" } }]) {
+  test(`LINE unverified response shape ${JSON.stringify(sendResponseBody)} requires history`, async () => {
+    const bridge = createBridge({ sendResponseBody, confirmError: new Error("history unavailable") });
+    try {
+      const result = await bridge.sendCommand({ command_type: "send_text", text: "uncertain" });
+      assert.equal(result.ok, false);
+      assert.equal(result.uncertain, true);
+      assert.equal(result.provider_message_id, undefined);
+      assert.equal(result.diagnostics.history_request_count, 1);
+      assert.equal(bridge.sentPayloads.length, 1);
+    } finally { bridge.dispose(); }
+  });
+}
+
+for (const sendResponseBody of [{ id: "not-sent", error: { code: "INVALID_ARGUMENT" } }, { id: "not-sent", code: "INVALID_ARGUMENT" }]) {
+  test(`LINE error payload with an ID is rejected without confirmation: ${JSON.stringify(sendResponseBody)}`, async () => {
+    const bridge = createBridge({ sendResponseBody });
+    try {
+      const result = await bridge.sendCommand({ command_type: "send_text", text: "invalid" });
+      assert.equal(result.ok, false);
+      assert.equal(result.uncertain, false);
+      assert.equal(result.diagnostics.failure_kind, "provider_rejection");
+      assert.equal(result.diagnostics.history_request_count, 0);
+      assert.equal(bridge.sentPayloads.length, 1);
+    } finally { bridge.dispose(); }
+  });
+}
+
+test("LINE fresh metadata send does not wait for a readiness refresh", async () => {
+  let probes = 0;
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const bridge = createBridge({ beforeAccountRequest: async () => { if (++probes > 1) await blocked; } });
+  try {
+    await bridge.detect();
+    bridge.dispatch({ type: "detect_account_v3", request_id: "slow-refresh" });
+    await settleBridge();
+    assert.equal(probes, 2);
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "fresh metadata" });
+    assert.equal(result.ok, true);
+    assert.equal(probes, 2);
+  } finally { release(); bridge.dispose(); }
+});
+
+
+test("LINE readiness refresh revokes a cached account mapping before the next send", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.detect();
+    bridge.advanceMonotonic(4 * 60 * 60 * 1_000);
+    bridge.setAccounts([]);
+    await bridge.detect();
+    const before = bridge.requests.length;
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "revoked account" });
+    assert.equal(result.ok, false);
+    assert.equal(bridge.sentPayloads.length, 0);
+    assert.equal(bridge.requests.length, before, "verified empty access does not trigger redundant metadata reads");
   } finally { bridge.dispose(); }
 });

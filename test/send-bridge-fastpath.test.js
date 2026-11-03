@@ -57,3 +57,28 @@ test("failed verification is not remembered; another provider cannot reuse a cer
   await h.check(1, "line_oa");
   assert.equal(h.calls.length, 3);
 });
+
+test("socket acknowledgement failure retains a terminal result without sending again", async () => {
+  const logs = [];
+  let sends = 0;
+  const scope = vm.createContext({
+    preemptAutomaticLogUpload() {}, providerAdapterForCommand: () => ({ id: "line_oa", supportsSend: () => true }),
+    messageProviderAccountId: () => "account", canonicalProviderAccountId: () => "account",
+    WebSocket: { OPEN: 1 }, liveConnections: new Map(), liveCommandResults: new Map(),
+    sessionEligibility: { generation: () => 1 }, performance: { now: () => 10 },
+    replyQueue: { run: (_, action) => Promise.resolve().then(action) },
+    sendViaProvider: async () => { sends++; return { ok: true, provider_message_id: "id", diagnostics: { diagnostic_version: 1, text: "private" } }; },
+    sanitizeSendDiagnostics: () => ({ diagnostic_version: 1 }), installationId: async () => "installation",
+    recordLog: async (...args) => logs.push(args), scheduleKeepalive() {},
+  });
+  vm.runInContext(section("async function handleLiveCommand(", "chrome.storage.onChanged.addListener"), scope);
+  await scope.handleLiveCommand(JSON.stringify({ type: "send_text", request_id: "request", provider: "line_oa" }),
+    { key: "line:account", account: { provider: "line_oa", provider_account_id: "account" } },
+    { readyState: 1, send() { throw new Error("closed"); } });
+  assert.equal(sends, 1);
+  const terminal = logs.find(row => row[2] === "completed");
+  assert.equal(terminal[4].acknowledgement_status, "submission_failed");
+  assert.equal(terminal[4].outcome, "accepted");
+  assert.equal(terminal[4].request_id, "request");
+  assert.equal(terminal[4].text, undefined);
+});

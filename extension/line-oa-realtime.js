@@ -12,6 +12,7 @@
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
   const SEND_CONFIRM_POLL_MS = 1_000;
+  const monotonicNow = () => globalThis.performance?.now() ?? Date.now();
   const previous = window.__omnichatLineOABridgeControl;
   previous?.dispose?.();
   let disposed = false;
@@ -24,6 +25,9 @@
   let providerCheckOutcome = "unknown";
   let accountAccessRequest = null;
   let metadataSessionEpoch = 0;
+  let accountMetadataEpoch = -1;
+  const metadataLocation = () => window.location.href ?? `${window.location.origin}${window.location.pathname}`;
+  let accountMetadataLocation = metadataLocation();
   let pollGeneration = 0;
   const queuedSyncs = [];
   const acknowledgements = new Map();
@@ -126,7 +130,7 @@
   }
 
   async function publishProviderStatus() {
-    await availableAccounts().catch(() => undefined);
+    await availableAccounts({ refresh: true }).catch(() => undefined);
     postProviderStatus();
   }
 
@@ -168,9 +172,22 @@
     return error;
   }
 
-  async function availableAccounts() {
+  function accountMetadataCacheState() {
+    if (accountMetadataLocation !== metadataLocation()) {
+      metadataSessionEpoch += 1;
+      accountMetadataLocation = metadataLocation();
+      accountAccessVerified = false;
+      accountAccessRequest = null;
+    }
+    return accountAccessVerified && accountMetadataEpoch === metadataSessionEpoch ? "hit" : "miss";
+  }
+
+  async function availableAccounts({ refresh = false } = {}) {
+    const cacheState = accountMetadataCacheState();
+    if (!refresh && cacheState === "hit") return accessibleAccounts;
     if (accountAccessRequest) return accountAccessRequest;
     const sessionEpoch = metadataSessionEpoch;
+    const sessionLocation = metadataLocation();
     const request = (async () => {
       try {
         const body = await json(`${apiBase}/v1/bots?noFilter=true&limit=1000`, REQUEST_TIMEOUT_MS, sessionEpoch);
@@ -181,11 +198,12 @@
           display_name: value(bot?.name ?? bot?.displayName),
         })).filter((account) => account.provider_account_id && account.bot_id);
         if (disposed) return [];
-        if (sessionEpoch !== metadataSessionEpoch) throw new Error("LINE OA account check was superseded by a session change.");
+        if (sessionEpoch !== metadataSessionEpoch || sessionLocation !== metadataLocation()) throw supersededAccountCheck();
         if (accessibleAccounts.some((previous) => !accounts.some((account) => account.provider_account_id === previous.provider_account_id && account.bot_id === previous.bot_id))) metadataSessionEpoch += 1;
         accessibleAccounts = accounts;
         accountAccessVerified = true;
         providerCheckOutcome = "passed";
+        accountMetadataEpoch = metadataSessionEpoch;
         const ids = new Set(accounts.map((account) => account.provider_account_id));
         for (const id of pollingAccounts.keys()) {
           if (!ids.has(id)) cancelPolling("This LINE OA is not accessible to the signed-in user.", { providerAccountId: id });
@@ -307,11 +325,12 @@
     return value(event?.source?.chatId ?? event?.conversation_id ?? event?.source?.conversationId);
   }
 
-  async function waitForSentMessage({ botId, conversationId, sendId, deadlineAt = Infinity }) {
+  async function waitForSentMessage({ botId, conversationId, sendId, deadlineAt = Infinity, onRequest = () => {} }) {
     const deadline = Math.min(Date.now() + SEND_CONFIRM_TIMEOUT_MS, deadlineAt);
     while (Date.now() < deadline) {
       // Always request the newest messages for this conversation. Do not walk
       // backward through history because a newly sent message appears at the front.
+      onRequest();
       const body = await json(messagesUrl(botId, conversationId, null, PAGE_LIMIT), deadline - Date.now());
       const messages = Array.isArray(body?.list) ? body.list : [];
       const confirmed = messages.find((message) => (
@@ -995,8 +1014,16 @@
     return `${conversationId}_${Date.now()}_${Math.floor(Math.random() * 100_000_000).toString().padStart(8, "0")}`;
   }
 
-  function responseMessageId(payload) {
-    return value(payload?.id ?? payload?.message?.id ?? payload?.data?.id ?? payload?.data?.messageId);
+  function classifySendResponse(response, body) {
+    const failedCode = (code) => code !== undefined && code !== null && code !== "" && ![0, "0", "success"].includes(code);
+    const protocolCode = providerErrorDetails(body).native_error_code;
+    if (!response.ok || (typeof protocolCode === "string" && /[a-z_]/i.test(protocolCode) && protocolCode !== "0") || failedCode(body?.errorCode) || failedCode(body?.error_code)
+      || (body?.error !== undefined && body.error !== null && body.error !== false && failedCode(body.error))) {
+      return "rejected";
+    }
+    // No captured provider response currently establishes a conclusive acceptance
+    // shape. HTTP success or an arbitrary nested ID cannot skip history lookup.
+    return "inconclusive";
   }
 
   // Provider response text can echo customer content or credentials. Extract only
@@ -1058,6 +1085,10 @@
     const conversationId = value(command?.conversation_id);
     const requestId = value(command?.request_id);
     const startedAt = Date.now();
+    const startedMono = monotonicNow();
+    const timings = { history_request_count: 0 };
+    let providerRequestStarted = null;
+    let confirmationStarted = null;
     const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, startedAt + 25_000);
     let operation = "initialize";
     let sendStarted = false;
@@ -1071,7 +1102,8 @@
       ...(httpStatus ? { http_status: httpStatus } : {}),
       ...(responseFormat ? { response_format: responseFormat } : {}),
       native_attempted: sendStarted, delivery_uncertain: uncertain,
-      failure_kind: failureKind, provider_duration_ms: Math.max(0, Date.now() - startedAt),
+      failure_kind: failureKind, provider_duration_ms: Math.max(0, monotonicNow() - startedMono),
+      ...timings, total_duration_ms: Math.max(0, monotonicNow() - startedMono),
       client_id_is_uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value(command?.client_message_id)),
       template_source: templateSource, ...providerDetails,
     });
@@ -1185,6 +1217,8 @@
       httpStatus = undefined;
       responseFormat = undefined;
       sendStarted = true;
+      providerRequestStarted = monotonicNow();
+      timings.preparation_duration_ms = providerRequestStarted - startedMono;
       const response = await nativeFetch(endpoint, {
         method: "POST",
         headers: profile.headers,
@@ -1194,13 +1228,14 @@
       });
       httpStatus = response.status;
       const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
-      if (!response.ok) {
+      timings.provider_request_duration_ms = monotonicNow() - providerRequestStarted;
+      if (classifySendResponse(response, responseBody) === "rejected") {
         if ([401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
         providerDetails = providerErrorDetails(responseBody);
-        post({ type: "api_send_result", request_id: requestId, ok: false, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
+        post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: false, dispatch_started: true, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
       }
-      const responseMessageIdValue = responseMessageId(responseBody);
+      confirmationStarted = monotonicNow();
       operation = "confirm";
       httpStatus = undefined;
       responseFormat = undefined;
@@ -1209,18 +1244,25 @@
         conversationId,
         sendId: confirmationSendId,
         deadlineAt,
+        onRequest: () => { timings.history_request_count += 1; },
       });
-      const providerMessageId = confirmedMessageId || responseMessageIdValue;
+      timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
+      if (confirmedMessageId) timings.confirmation_source = "history";
+      const providerMessageId = confirmedMessageId;
       post({
         type: "api_send_result",
         request_id: requestId,
-        ok: Boolean(confirmedMessageId || responseMessageIdValue),
+        ok: Boolean(confirmedMessageId),
         ...(confirmedMessageId ? { confirmed: true } : { uncertain: true }),
         send_id: confirmationSendId,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
-        ...(!confirmedMessageId ? { error: "LINE OA send was accepted but could not be confirmed in message history.", diagnostics: diagnostics("confirmation_failure", true) } : {}),
+        diagnostics: diagnostics(confirmedMessageId ? "none" : "confirmation_failure", !confirmedMessageId),
+        ...(!confirmedMessageId ? { error: "LINE OA send could not be confirmed in message history." } : {}),
       });
     } catch (error) {
+      if (confirmationStarted !== null) timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
+      else if (providerRequestStarted !== null) timings.provider_request_duration_ms = monotonicNow() - providerRequestStarted;
+      else timings.preparation_duration_ms = monotonicNow() - startedMono;
       if (error?.providerDiagnostics) {
         httpStatus = error.providerDiagnostics.http_status;
         responseFormat = error.providerDiagnostics.response_format;
@@ -1239,7 +1281,7 @@
   const listener = (event) => {
     if (disposed || event.source !== window || event.origin !== window.location.origin || event.data?.source !== SOURCE) return;
     if (event.data.type === "detect_account_v3") {
-      void availableAccounts().then((accounts) => {
+      void availableAccounts({ refresh: true }).then((accounts) => {
         postProviderStatus();
         post({
           type: "accounts_detected",

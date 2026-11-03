@@ -1562,13 +1562,14 @@ async function sendViaProvider(message, options = {}) {
   activeProviderSendAccounts.add(accountKey);
   try {
     const result = await prepareAndSendViaProvider(message, state);
-    return result;
+    return { ...result, diagnostics: { diagnostic_version: 1, ...result?.diagnostics, preparation_duration_ms: Math.round((state.dispatchStartedAt ?? (globalThis.performance?.now() ?? Date.now())) - started), total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started) } };
   } catch (error) {
-    if (state.dispatchStarted) return { ok: false, uncertain: true, execution_stage: "provider_dispatch", dispatch_started: true, retryable: false, error: String(error) };
+    const timing = { preparation_duration_ms: Math.round((state.dispatchStartedAt ?? (globalThis.performance?.now() ?? Date.now())) - started), total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started) };
+    if (state.dispatchStarted) return { ok: false, uncertain: true, execution_stage: "provider_dispatch", dispatch_started: true, retryable: false, error: String(error), diagnostics: { diagnostic_version: 1, ...timing } };
     return { ok: false, execution_stage: "preparation", dispatch_started: false,
       retryable: error?.name === "TimeoutError", error_code: error?.name === "TimeoutError" ? "OMNICHAT_PREPARATION_TIMEOUT" : "OMNICHAT_PREPARATION_FAILED",
       error: error instanceof Error ? error.message : String(error),
-      diagnostics: { diagnostic_version: 1, stage: "preparation", duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started), native_attempted: false } };
+      diagnostics: { diagnostic_version: 1, ...timing, stage: "preparation", duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started), native_attempted: false } };
   } finally { activeProviderSendAccounts.delete(accountKey); }
 }
 
@@ -1642,6 +1643,7 @@ async function prepareAndSendViaProvider(message, state = {}) {
   if (deadlineAt <= Date.now()) return { ok: false, error: "Reply deadline expired before sending.", execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" };
   let result;
   stageLog("provider_dispatch");
+  state.dispatchStartedAt = globalThis.performance?.now() ?? Date.now();
   state.dispatchStarted = true;
   try {
     result = await withRequestTimeout(() => chrome.tabs.sendMessage(tab.id, {
@@ -2941,14 +2943,18 @@ async function handleLiveCommand(raw, context, socket) {
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   if (typeof command.request_id !== "string" || !command.request_id) return;
+  let acknowledgementStatus = "socket_unavailable";
   const acknowledge = (result) => {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify(result));
-    const connection = liveConnections.get(context.key);
-    if (connection?.socket === socket) {
-      connection.lastActivityAt = Date.now();
-      scheduleKeepalive(context, socket);
-    }
+    if (socket.readyState !== WebSocket.OPEN) { acknowledgementStatus = "socket_unavailable"; return; }
+    try {
+      socket.send(JSON.stringify(result));
+      acknowledgementStatus = "submitted_to_socket";
+      const connection = liveConnections.get(context.key);
+      if (connection?.socket === socket) {
+        connection.lastActivityAt = Date.now();
+        scheduleKeepalive(context, socket);
+      }
+    } catch { acknowledgementStatus = "submission_failed"; }
   };
   const key = `${context.key}:${command.request_id}`;
   const now = Date.now();
@@ -2959,16 +2965,19 @@ async function handleLiveCommand(raw, context, socket) {
   const duplicate = Boolean(cached);
   const selectedGeneration = sessionEligibility.generation(context.key);
   const receivedAt = (globalThis.performance?.now() ?? Date.now());
+  let queueDurationMs = 0;
   void recordLog("info", "live_command", "received", "Reply command received.", { request_id: command.request_id, provider: adapter.id, provider_account_id: context.account.provider_account_id, remaining_budget_ms: Math.max(0, (command.deadline_at_ms ?? Date.now()) - Date.now()) });
   if (!cached) {
     if (liveCommandResults.size >= 200) {
       acknowledge({ type: "send_result", request_id: command.request_id, ok: false, error: "Command channel is busy. Retry after current commands finish." });
+      void recordLog("info", "live_command", "completed", "Reply command rejected before execution.", { request_id: command.request_id, provider: adapter.id, command_type: command.type, provider_account_id: context.account.provider_account_id, installation_id: await installationId(), outcome: "rejected", acknowledgement_status: acknowledgementStatus, total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt) });
       return;
     }
     cached = {
       expiresAt: Infinity,
       result: replyQueue.run(context.key, async () => {
         void recordLog("info", "live_command", "queue_started", "Reply command left queue.", { request_id: command.request_id, provider: adapter.id, provider_account_id: context.account.provider_account_id, queue_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt) });
+        queueDurationMs = Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt);
         const sent = await sendViaProvider(command, { expectedGeneration: selectedGeneration });
         // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
@@ -3001,6 +3010,18 @@ async function handleLiveCommand(raw, context, socket) {
     ...(result?.error_code ? { error_code: result.error_code } : {}),
     ...(result?.uncertain === true ? { uncertain: true } : {}),
   });
+  const sampleSuccess = Array.from(command.request_id).reduce((sum, char) => sum + char.charCodeAt(0), 0) % 20 === 0;
+  if (!result?.ok || acknowledgementStatus !== "submitted_to_socket" || sampleSuccess) {
+    void recordLog("info", "live_command", "completed", "Reply command completed.", {
+      ...sanitizeSendDiagnostics(result?.diagnostics),
+      request_id: command.request_id, provider: adapter.id, command_type: command.type,
+      provider_account_id: context.account.provider_account_id, installation_id: await installationId(),
+      queue_duration_ms: queueDurationMs,
+      total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt),
+      outcome: result?.ok ? "accepted" : result?.uncertain ? "uncertain" : "rejected",
+      acknowledgement_status: acknowledgementStatus,
+    });
+  }
   if (!result?.ok) {
     await recordUnexpected("live_command", result?.error ?? "Reply failed.", {
       ...sanitizeSendDiagnostics(result?.diagnostics),
