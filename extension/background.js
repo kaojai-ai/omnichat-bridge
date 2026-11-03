@@ -380,7 +380,9 @@ function providerCommandCapabilities(status, context) {
 
 function providerStatusMeetsPolicy(status, context) {
   const capabilities = providerCommandCapabilities(status, context);
-  return providerTabCanSend(status, context) && (context.adapter.id === "shopee" || providerTabHealthy(status, context.adapter))
+  // Sending is independent of inbound polling health. Verify account and
+  // command capability here; report capture health separately.
+  return providerTabCanSend(status, context)
     && Array.isArray(capabilities) && capabilities.includes("send_text");
 }
 
@@ -391,7 +393,11 @@ function invalidateBridgeVerification(tabId) {
 
 // A transport/probe failure is missing evidence, not a provider rejection.
 function providerStatusEvidence(status) {
-  return status?.provider_check_outcome === "unknown" ? null : status;
+  // A failed inbound probe may leave send identity and capability independently
+  // verified. Keep that evidence; an unverified account remains ineligible.
+  if (status?.provider_check_outcome !== "unknown") return status;
+  return status?.current_provider_account_id || (status?.account_access_verified === true && status?.accessible_account_ids?.length)
+    ? status : null;
 }
 
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
@@ -2617,6 +2623,18 @@ async function connectionStatusSnapshot(context) {
   const current = sessionEligibility.state(context.key);
   const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
   const ready = samePolicy && current?.eligible === true;
+  const sendReady = ready && !current?.unknown;
+  const checkedAt = Date.parse(adapter.id === "line_oa"
+    ? providerStatus?.last_successful_poll_at_by_account?.[canonicalProviderAccountId(context)] ?? ""
+    : providerStatus?.last_provider_check_at ?? "");
+  const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
+  const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
+    && (adapter.id !== "shopee" || providerStatus?.capabilities?.message_recovery === true);
+  const receiveReasonCode = !providerStatus ? "provider_status_unknown"
+    : !receiveFresh ? adapter.id === "line_oa" ? "inbound_poll_unverified" : "provider_status_stale"
+      : providerStatus.realtime_connected !== true ? "provider_realtime_disconnected"
+      : adapter.id === "shopee" && providerStatus?.capabilities?.message_recovery !== true
+        ? "message_recovery_unavailable" : "healthy";
 
   return {
     type: "connection_status",
@@ -2629,7 +2647,10 @@ async function connectionStatusSnapshot(context) {
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
     ready,
-    send_ready: ready && !current?.unknown,
+    send_ready: sendReady,
+    send_reason_code: sendReady ? "healthy" : !samePolicy ? "checking_session" : current?.reason_code ?? "provider_unready",
+    receive_ready: receiveReady,
+    receive_reason_code: receiveReasonCode,
     sync_ready: Boolean(!current?.unknown && (adapter.id !== "shopee" ? ready : providerStatus?.capabilities?.message_recovery === true)),
     reason_code: !samePolicy ? "checking_session" : current?.reason_code === "ready" ? health.reason_code : current?.reason_code ?? "checking_session",
     ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
@@ -2643,6 +2664,9 @@ function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
     send_ready: status.send_ready,
+    send_reason_code: status.send_reason_code,
+    receive_ready: status.receive_ready,
+    receive_reason_code: status.receive_reason_code,
     sync_ready: status.sync_ready,
     reason_code: status.reason_code,
     readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
@@ -2657,7 +2681,8 @@ function statusPublishKey(status) {
 async function sendConnectionStatus(socket, context) {
   const status = await connectionStatusSnapshot(context);
   const connection = liveConnections.get(context.key);
-  const key = statusPublishKey(status);
+  const stateKey = statusPublishKey(status);
+  const key = `${stateKey}:${Math.floor(Date.now() / 60_000)}`;
   if (socket.readyState !== WebSocket.OPEN || connection?.socket !== socket) return;
   if (!connection.statusReporter) {
     connection.statusReporter = createStatusReporter({
@@ -2674,12 +2699,17 @@ async function sendConnectionStatus(socket, context) {
   }
   if (!connection.statusReporter.publish(status, key)) return;
   scheduleLeaderStatusRefresh(context, socket);
+  if (connection.lastStatusKey === stateKey) return;
+  connection.lastStatusKey = stateKey;
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
     ready: status.ready,
     send_ready: status.send_ready,
+    send_reason_code: status.send_reason_code,
+    receive_ready: status.receive_ready,
+    receive_reason_code: status.receive_reason_code,
     reason_code: status.reason_code,
     readiness_grace_expires_at: status.readiness_grace_expires_at ?? null,
   });

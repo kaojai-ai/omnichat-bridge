@@ -19,6 +19,7 @@
   let timer = null;
   let activePoll = null;
   let lastProviderCheckAt = null;
+  const lastSuccessfulPollAtByAccount = new Map();
   const pollingAccounts = new Map();
   let accessibleAccounts = [];
   let accountAccessVerified = false;
@@ -122,6 +123,7 @@
       connected_at: new Date().toISOString(),
       chat_open: true,
       last_provider_check_at: lastProviderCheckAt,
+      last_successful_poll_at_by_account: Object.fromEntries(lastSuccessfulPollAtByAccount),
       provider_polling_active: Boolean(timer || activePoll || queuedSyncs.length),
       provider_polling_account_ids: pollingAccountIds(),
       provider_polling_request_id: activePoll?.requestId ?? null,
@@ -153,16 +155,17 @@
     return response;
   };
 
-  function markProviderCheckFailure(error) {
+  function markProviderCheckFailure(error, { retainVerifiedAccess = false } = {}) {
     const confirmedFailure = [401, 403].includes(error?.providerDiagnostics?.http_status);
     if (confirmedFailure) {
       metadataSessionEpoch += 1;
       providerCheckOutcome = "failed";
       accessibleAccounts = [];
-    } else if (providerCheckOutcome !== "failed") {
+      accountAccessVerified = false;
+    } else if (providerCheckOutcome !== "failed" && !(retainVerifiedAccess && accountAccessVerified)) {
       providerCheckOutcome = "unknown";
+      accountAccessVerified = false;
     }
-    accountAccessVerified = false;
     postProviderStatus();
   }
 
@@ -871,10 +874,11 @@
       const watermark = new Date(bootstrap && !historyWindow && pendingIds.size === 0 ? bootstrapStartedAt : scanStartedAt).toISOString();
       await checkpointRequest("recovery_scan_complete", `${requestId}:complete`, providerAccountId, { watermark });
       if (!pollIsActive(generation)) return;
+      lastSuccessfulPollAtByAccount.set(normalizeBasicId(providerAccountId), new Date().toISOString());
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
-      if (error?.providerCheckUnavailable) markProviderCheckFailure(error);
+      if (error?.providerCheckUnavailable) markProviderCheckFailure(error, { retainVerifiedAccess: true });
       if (pollIsActive(generation)) {
         postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
@@ -1006,6 +1010,7 @@
     accountAccessVerified = false;
     providerCheckOutcome = "unknown";
     lastProviderCheckAt = null;
+    lastSuccessfulPollAtByAccount.clear();
     cancelPolling(reason, { notifyRequests: false });
     return hadRecovery;
   }

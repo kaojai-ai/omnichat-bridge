@@ -48,6 +48,7 @@
   let providerPollingRequestId = null;
   let providerPollingAccountId = null;
   let lastProviderCheckAt = null;
+  let lastSuccessfulPollAtByAccount = {};
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
   let automaticSellerCentreLandingRerun = false;
@@ -1137,6 +1138,12 @@
       lastProviderCheckAt = typeof event.data.last_provider_check_at === "string"
         ? event.data.last_provider_check_at
         : lastProviderCheckAt;
+      lastSuccessfulPollAtByAccount = event.data.last_successful_poll_at_by_account
+        && typeof event.data.last_successful_poll_at_by_account === "object"
+        && !Array.isArray(event.data.last_successful_poll_at_by_account)
+        ? Object.fromEntries(Object.entries(event.data.last_successful_poll_at_by_account)
+          .filter(([id, at]) => typeof id === "string" && typeof at === "string"))
+        : {};
       realtimeConnected = event.data.realtime_connected === true;
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
@@ -1254,6 +1261,7 @@
       provider_polling_account_id: providerPollingAccountId,
       last_realtime_connected_at: lastRealtimeConnectedAt,
       last_provider_check_at: lastProviderCheckAt,
+      last_successful_poll_at_by_account: { ...lastSuccessfulPollAtByAccount },
       page_visible: document.visibilityState === "visible",
     };
   }
