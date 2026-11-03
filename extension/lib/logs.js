@@ -42,7 +42,7 @@ export function sanitizeSendDiagnostics(input) {
     provider: ["shopee", "line_oa"],
     confirmation_source: ["send_response", "history"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
-    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window"],
+    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window", "provider_identity", "conversation_list_fetch", "poll_batch_persist", "poll_cursor_save", "recovery_batch_persist", "history_backfill_save", "cursor_save", "history_window_save", "scan_checkpoint_save"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
     response_format: ["json", "non_json", "empty", "unreadable"],
     surface: ["new-webchat", "webchat", "seller-centre"],
@@ -50,7 +50,7 @@ export function sanitizeSendDiagnostics(input) {
     command_type: ["send_text", "send_image", "send_video", "send_product", "send_file", "send_sticker"],
     template_source: ["captured", "derived"], route_source: ["command", "cache", "lookup"],
     cache_reason: ["complete", "incomplete", "shop_mismatch", "ambiguous_shop", "absent"],
-    failure_kind: ["provider_rejection", "unrecognized_response", "transport_failure", "pre_dispatch_failure", "validation_failure", "confirmation_failure"],
+    failure_kind: ["provider_rejection", "unrecognized_response", "transport_failure", "pre_dispatch_failure", "validation_failure", "confirmation_failure", "ack_timeout", "ack_rejected"],
   };
   for (const key of ["payload_conversation_id_state", "payload_shop_id_state", "payload_to_id_state", "payload_to_shop_id_state", "payload_biz_id_state", "quoted_message_id_state"]) {
     enums[key] = ["absent", "number", "string", "other"];

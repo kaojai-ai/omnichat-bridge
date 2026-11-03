@@ -397,3 +397,21 @@ test("send timing diagnostics retain bounded numeric evidence without provider p
     provider_request_duration_ms: -1, history_request_count: 101,
   }), { diagnostic_version: 1 });
 });
+
+test("Shopee recovery acknowledgement diagnostics retain only bounded stage and failure kind", () => {
+  const entry = createLogEntry({ area: "provider", event: "recovery_persistence_failed",
+    details: { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+      stage: "checkpoint_load", failure_kind: "ack_timeout", error_name: "TimeoutError",
+      request_id: "11111111-1111-4111-8111-111111111111", provider_account_id: "100000001",
+      cookie: "secret", response_body: "private customer message" } });
+  assert.equal(entry.details.stage, "checkpoint_load");
+  assert.equal(entry.details.failure_kind, "ack_timeout");
+  assert.equal(entry.details.request_id, "11111111-1111-4111-8111-111111111111");
+  assert.equal(entry.details.provider_account_id, "100000001");
+  assert.equal(entry.details.cookie, undefined);
+  assert.equal(entry.details.response_body, undefined);
+  assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1, provider: "shopee",
+    operation: "recovery", stage: "scan_checkpoint_save", failure_kind: "ack_rejected",
+    response_body: "private" }), { diagnostic_version: 1, provider: "shopee",
+    operation: "recovery", stage: "scan_checkpoint_save", failure_kind: "ack_rejected" });
+});

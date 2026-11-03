@@ -733,6 +733,26 @@
     });
   });
 
+  // Keep persistence diagnostics bounded: acknowledgement text can contain provider data.
+  const recoveryAcknowledgement = async (acknowledged, stage, requestId, accountId, fallback) => {
+    try {
+      const result = await acknowledged;
+      if (result.ok) return result;
+      throw Object.assign(new Error(result.error ?? fallback), { reason_code: "persistence_failed" });
+    } catch (error) {
+      const failureKind = error?.reason_code === "queue_ack_timeout" ? "ack_timeout" : "ack_rejected";
+      const errorName = ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name)
+        ? error.name : "Error";
+      const diagnostics = { diagnostic_version: 1, provider: "shopee", operation: "recovery",
+        stage, failure_kind: failureKind, error_name: errorName };
+      error.diagnostics = { ...error.diagnostics, ...diagnostics };
+      postLog("error", "recovery_persistence_failed", "Shopee recovery persistence acknowledgement failed.", {
+        ...diagnostics, request_id: requestId, provider_account_id: accountId,
+      });
+      throw error;
+    }
+  };
+
   const resetRecovery = (reason = "Provider bridge reconnected; retrying recovery.") => {
     const hadRecovery = Boolean(
       state.recoveryInFlight
@@ -886,8 +906,7 @@
   async function loadRecoveryCheckpoint(requestId, accountId) {
     const acknowledged = waitForAcknowledgement(requestId);
     post({ type: "recovery_checkpoint", request_id: requestId, provider_account_id: accountId });
-    const result = await acknowledged;
-    if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not load sync checkpoint."), { reason_code: "persistence_failed" });
+    const result = await recoveryAcknowledgement(acknowledged, "checkpoint_load", requestId, accountId, "Could not load sync checkpoint.");
     return result.checkpoint ?? {};
   }
 
@@ -919,10 +938,7 @@
       const requestId = `${poll.requestId}:${conversation.id}:${page}`;
       const acknowledged = waitForAcknowledgement(requestId);
       post({ type: "recovery_batch", request_id: requestId, provider_account_id: poll.accountId, body: messages });
-      const acknowledgement = await acknowledged;
-      if (!acknowledgement.ok) {
-        throw Object.assign(new Error("Could not persist polled messages."), { reason_code: "persistence_failed" });
-      }
+      const acknowledgement = await recoveryAcknowledgement(acknowledged, "poll_batch_persist", poll.requestId, poll.accountId, "Could not persist polled messages.");
       if (waitingRecovery && !waitingRecovery.signal.aborted
         && epoch === state.sellerCentreCaptureEpoch) {
         post({ type: "recovery_activity", request_id: waitingRecovery.requestId });
@@ -1007,8 +1023,7 @@
             const acknowledged = waitForAcknowledgement(requestId);
             post({ type: "recovery_cursor", request_id: requestId, provider_account_id: poll.accountId,
               conversation_id: conversationId, cursor: captured });
-            const result = await acknowledged;
-            if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not save sync cursor."), { reason_code: "persistence_failed" });
+            const result = await recoveryAcknowledgement(acknowledged, "poll_cursor_save", poll.requestId, poll.accountId, "Could not save sync cursor.");
             if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
             cursors[conversationId] = captured;
           }
@@ -1073,7 +1088,20 @@
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = false;
           state.sellerCentrePollOutcome = sellerCentreFailureOutcome(error);
-          postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
+          postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", {
+             ...errorDetails(error),
+             diagnostic_version: 1, provider: "shopee", operation: "poll",
+             stage: error?.diagnostics?.stage ?? "conversation_list_fetch",
+             ...(Number.isInteger(error?.http_status) && error.http_status >= 100 && error.http_status <= 599
+               ? { http_status: error.http_status } : {}),
+             ...(error?.reason_code === "provider_rejected" ? { failure_kind: "provider_rejection" } : {}),
+             ...(error?.reason_code === "provider_timeout" ? { failure_kind: "transport_failure" } : {}),
+             timed_out: error?.name === "TimeoutError",
+             error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name)
+               ? error.name : "Error",
+             provider_account_id: state.currentAccountId ?? null,
+             ...(activeSellerCentrePoll?.requestId ? { request_id: activeSellerCentrePoll.requestId } : {}),
+           });
         } finally {
           publishSurfaceStatus();
         }
@@ -1949,6 +1977,7 @@
         current_provider_account_id: state.currentAccountId ?? null,
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
+      recoveryContext.stage = "provider_identity";
       await ensureSellerCentreChatOpen();
       const verifiedAccount = await verifySessionAccount(accountId);
       if (metadata) {
@@ -1981,6 +2010,7 @@
         ? checkpoint.bootstrap.conversations
         : [];
       const pageRequired = deepIds;
+      recoveryContext.stage = "conversation_list_fetch";
       const pages = await fetchConversationPages({
         metadata,
         checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
@@ -2006,8 +2036,7 @@
           const acknowledged = waitForAcknowledgement(bootstrapRequestId);
           post({ type: "recovery_bootstrap", request_id: bootstrapRequestId, provider_account_id: accountId,
             conversations: recoveryConversations, started_at: new Date(bootstrapStartedAt).toISOString() });
-          const result = await acknowledged;
-          if (!result.ok) throw Object.assign(new Error(result.error ?? "Could not save bootstrap state."), { reason_code: "persistence_failed" });
+          const result = await recoveryAcknowledgement(acknowledged, "bootstrap_save", requestId, accountId, "Could not save bootstrap state.");
         }
       }
       const nextWatermarkMs = bootstrap && !historyWindow && deepIds.length === 0 ? bootstrapStartedAt : startedAt;
@@ -2109,10 +2138,7 @@
             const batchRequestId = `${requestId}:${conversation.id}:${page}`;
             const acknowledged = waitForAcknowledgement(batchRequestId);
             post({ type: "recovery_batch", request_id: batchRequestId, provider_account_id: accountId, body: messages });
-            const acknowledgement = await acknowledged;
-            if (!acknowledgement.ok) {
-              throw Object.assign(new Error(acknowledgement.error ?? "Could not queue recovered messages."), { reason_code: "persistence_failed" });
-            }
+            const acknowledgement = await recoveryAcknowledgement(acknowledged, "recovery_batch_persist", requestId, accountId, "Could not queue recovered messages.");
             return acknowledgement;
           },
           deep || windowJob ? historySinceMs : defaultSinceMs,
@@ -2139,10 +2165,7 @@
             conversation_id: String(conversation.id),
             history_days: historyDays,
           });
-          const backfillAcknowledgement = await waitForAcknowledgement(backfillRequestId);
-          if (!backfillAcknowledgement.ok) {
-            throw Object.assign(new Error(backfillAcknowledgement.error ?? "Could not save history backfill."), { reason_code: "persistence_failed" });
-          }
+          const backfillAcknowledgement = await recoveryAcknowledgement(waitForAcknowledgement(backfillRequestId), "history_backfill_save", requestId, accountId, "Could not save history backfill.");
           checkpoint.history_backfill = {
             ...(checkpoint.history_backfill ?? {}),
             [String(conversation.id)]: historyDays,
@@ -2172,10 +2195,7 @@
             conversation_id: String(conversation.id),
             cursor: completedCursor,
           });
-          const acknowledgement = await waitForAcknowledgement(cursorRequestId);
-          if (!acknowledgement.ok) {
-            throw Object.assign(new Error(acknowledgement.error ?? "Could not save sync cursor."), { reason_code: "persistence_failed" });
-          }
+          const acknowledgement = await recoveryAcknowledgement(waitForAcknowledgement(cursorRequestId), "cursor_save", requestId, accountId, "Could not save sync cursor.");
         }
         completedConversations += 1;
         post({ type: "recovery_phase", request_id: requestId, provider_account_id: accountId,
@@ -2204,10 +2224,7 @@
           provider_account_id: accountId,
           history_days: historyDays,
         });
-        const windowAcknowledgement = await waitForAcknowledgement(windowRequestId);
-        if (!windowAcknowledgement.ok) {
-          throw Object.assign(new Error(windowAcknowledgement.error ?? "Could not save history window."), { reason_code: "persistence_failed" });
-        }
+        const windowAcknowledgement = await recoveryAcknowledgement(waitForAcknowledgement(windowRequestId), "history_window_save", requestId, accountId, "Could not save history window.");
         checkpoint.history_window_days = historyDays;
         postLog("info", "history_window_completed", "Configured history window was loaded.", {
           provider_account_id: accountId,
@@ -2226,8 +2243,7 @@
       const completion = waitForAcknowledgement(completionRequestId);
       post({ type: "recovery_scan_complete", request_id: completionRequestId, provider_account_id: accountId,
         watermark: new Date(nextWatermarkMs).toISOString() });
-      const completed = await completion;
-      if (!completed.ok) throw Object.assign(new Error(completed.error ?? "Could not save recovery checkpoint."), { reason_code: "persistence_failed" });
+      const completed = await recoveryAcknowledgement(completion, "scan_checkpoint_save", requestId, accountId, "Could not save recovery checkpoint.");
       assertSessionUnchanged();
       post({
         type: "recovery_complete",
@@ -2267,6 +2283,8 @@
         diagnostics: { ...recoveryContext, ...error?.diagnostics, diagnostic_version: 1, provider: "shopee", operation: "recovery",
           ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { http_status: status } : {}),
           timed_out: error?.name === "TimeoutError",
+          ...(reasonCode === "provider_rejected" ? { failure_kind: "provider_rejection" } : {}),
+          ...(reasonCode === "provider_timeout" ? { failure_kind: "transport_failure" } : {}),
           error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name) ? error.name : "Error",
         } });
     } finally {

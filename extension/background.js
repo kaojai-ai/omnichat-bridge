@@ -139,6 +139,7 @@ const INBOUND_LOG_MESSAGES = {
   "provider.resume_failed": "Automatic sync resume failed.",
   "provider.realtime_processed": "Realtime provider event processed.",
   "provider.recovery_failed": "Provider recovery failed.",
+  "provider.recovery_persistence_failed": "Shopee recovery persistence acknowledgement failed.",
   "provider.recovery_timeout": "Provider recovery stopped responding.",
   "provider.recovery_superseded": "Provider recovery superseded by reconnect.",
   "provider.recovery_completed": "Provider recovery completed.",
