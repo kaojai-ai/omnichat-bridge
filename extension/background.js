@@ -2657,6 +2657,8 @@ async function connectionStatusSnapshot(context) {
 function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
+    // Refresh the server presence even when readiness is unchanged.
+    status_minute: Math.floor(Date.now() / 60_000),
     send_ready: status.send_ready,
     send_reason_code: status.send_reason_code,
     receive_ready: status.receive_ready,
