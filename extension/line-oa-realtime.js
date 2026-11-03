@@ -19,6 +19,7 @@
   let timer = null;
   let activePoll = null;
   let lastProviderCheckAt = null;
+  const lastSuccessfulPollAtByAccount = new Map();
   const pollingAccounts = new Map();
   let accessibleAccounts = [];
   let accountAccessVerified = false;
@@ -122,6 +123,7 @@
       connected_at: new Date().toISOString(),
       chat_open: true,
       last_provider_check_at: lastProviderCheckAt,
+      last_successful_poll_at_by_account: Object.fromEntries(lastSuccessfulPollAtByAccount),
       provider_polling_active: Boolean(timer || activePoll || queuedSyncs.length),
       provider_polling_account_ids: pollingAccountIds(),
       provider_polling_request_id: activePoll?.requestId ?? null,
@@ -871,6 +873,7 @@
       const watermark = new Date(bootstrap && !historyWindow && pendingIds.size === 0 ? bootstrapStartedAt : scanStartedAt).toISOString();
       await checkpointRequest("recovery_scan_complete", `${requestId}:complete`, providerAccountId, { watermark });
       if (!pollIsActive(generation)) return;
+      lastSuccessfulPollAtByAccount.set(normalizeBasicId(providerAccountId), new Date().toISOString());
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
@@ -1006,6 +1009,7 @@
     accountAccessVerified = false;
     providerCheckOutcome = "unknown";
     lastProviderCheckAt = null;
+    lastSuccessfulPollAtByAccount.clear();
     cancelPolling(reason, { notifyRequests: false });
     return hadRecovery;
   }
