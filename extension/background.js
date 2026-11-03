@@ -2657,8 +2657,6 @@ async function connectionStatusSnapshot(context) {
 function statusPublishKey(status) {
   return JSON.stringify({
     ready: status.ready,
-    // Refresh the server presence even when readiness is unchanged.
-    status_minute: Math.floor(Date.now() / 60_000),
     send_ready: status.send_ready,
     send_reason_code: status.send_reason_code,
     receive_ready: status.receive_ready,
@@ -2677,7 +2675,8 @@ function statusPublishKey(status) {
 async function sendConnectionStatus(socket, context) {
   const status = await connectionStatusSnapshot(context);
   const connection = liveConnections.get(context.key);
-  const key = statusPublishKey(status);
+  const stateKey = statusPublishKey(status);
+  const key = `${stateKey}:${Math.floor(Date.now() / 60_000)}`;
   if (socket.readyState !== WebSocket.OPEN || connection?.socket !== socket) return;
   if (!connection.statusReporter) {
     connection.statusReporter = createStatusReporter({
@@ -2694,6 +2693,8 @@ async function sendConnectionStatus(socket, context) {
   }
   if (!connection.statusReporter.publish(status, key)) return;
   scheduleLeaderStatusRefresh(context, socket);
+  if (connection.lastStatusKey === stateKey) return;
+  connection.lastStatusKey = stateKey;
   void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
