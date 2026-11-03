@@ -980,7 +980,7 @@ test("LINE OA 400 diagnostics preserve only safe codes and payload field names",
     diagnostic_version: 1, provider: "line_oa", operation: "send", command_type: "send_text",
     http_status: 400, response_format: "json", native_attempted: true, delivery_uncertain: false,
     failure_kind: "provider_rejection", provider_duration_ms: result.diagnostics.provider_duration_ms,
-    metadata_cache: "miss", history_request_count: 0, preparation_duration_ms: 0, provider_request_duration_ms: 0, total_duration_ms: 0,
+    history_request_count: 0, preparation_duration_ms: 0, provider_request_duration_ms: 0, total_duration_ms: 0,
     client_id_is_uuid: true, template_source: "derived", provider_code_present: true,
     native_error_code: "INVALID_ARGUMENT", validation_fields: ["sendId"],
   });
@@ -2078,13 +2078,11 @@ test("LINE sends reuse verified session metadata after minutes and hours", async
     bridge.advanceMonotonic(60_000);
     const cached = await bridge.sendCommand({ command_type: "send_text", text: "cached" });
     assert.equal(cached.ok, true);
-    assert.equal(cached.diagnostics.metadata_cache, "hit");
     assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
     assert.equal(bridge.requests.slice(before).length, 2, "one send and one history confirmation; fast response acceptance is not evidence-qualified");
     bridge.advanceMonotonic(3 * 60 * 60 * 1_000);
     const later = await bridge.sendCommand({ command_type: "send_sticker", package_id: "1", sticker_id: "2" });
     assert.equal(later.ok, true);
-    assert.equal(later.diagnostics.metadata_cache, "hit");
     assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
   } finally { bridge.dispose(); }
 });
@@ -2110,7 +2108,6 @@ test("LINE navigation invalidates fresh metadata before an account send", async 
     bridge.setAccounts([]);
     const result = await bridge.sendCommand({ command_type: "send_text", text: "must not send" });
     assert.equal(result.ok, false);
-    assert.equal(result.diagnostics.metadata_cache, "miss");
     assert.equal(bridge.sentPayloads.length, 0);
     assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, 2);
   } finally { bridge.dispose(); }
@@ -2175,7 +2172,6 @@ test("LINE fresh metadata send does not wait for a readiness refresh", async () 
     assert.equal(probes, 2);
     const result = await bridge.sendCommand({ command_type: "send_text", text: "fresh metadata" });
     assert.equal(result.ok, true);
-    assert.equal(result.diagnostics.metadata_cache, "hit");
     assert.equal(probes, 2);
   } finally { release(); bridge.dispose(); }
 });

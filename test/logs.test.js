@@ -386,10 +386,10 @@ test("history failure evidence survives storage, upload and support export witho
 
 test("send timing diagnostics retain bounded numeric evidence without provider payloads", () => {
   assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1,
-    metadata_cache: "hit", confirmation_source: "history", history_request_count: 2,
+    confirmation_source: "history", history_request_count: 2,
     queue_duration_ms: 1.4, preparation_duration_ms: 5, provider_request_duration_ms: 20,
     confirmation_duration_ms: 30, total_duration_ms: 55, text: "private", response: { token: "secret" },
-  }), { diagnostic_version: 1, metadata_cache: "hit", confirmation_source: "history",
+  }), { diagnostic_version: 1, confirmation_source: "history",
     queue_duration_ms: 1, preparation_duration_ms: 5, provider_request_duration_ms: 20,
     confirmation_duration_ms: 30, total_duration_ms: 55, history_request_count: 2 });
   assert.deepEqual(sanitizeSendDiagnostics({ diagnostic_version: 1,

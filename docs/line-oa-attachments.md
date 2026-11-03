@@ -39,7 +39,7 @@ Successful HTTP responses therefore still require history confirmation by send
 ID; an arbitrary response ID is not sufficient. This release does not establish
 the one-request send target. Provider error responses are rejected immediately.
 
-Send diagnostics include bounded stage durations, metadata cache state, history
+Send diagnostics include bounded stage durations, history
 request count, and confirmation source. Terminal command logs distinguish socket
 submission from unavailable or failed acknowledgement submission; socket
 submission does not establish backend receipt. Failed and uncertain outcomes are

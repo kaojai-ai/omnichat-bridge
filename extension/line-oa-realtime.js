@@ -1086,7 +1086,7 @@
     const requestId = value(command?.request_id);
     const startedAt = Date.now();
     const startedMono = monotonicNow();
-    const timings = { metadata_cache: accountMetadataCacheState(), history_request_count: 0 };
+    const timings = { history_request_count: 0 };
     let providerRequestStarted = null;
     let confirmationStarted = null;
     const deadlineAt = Math.min(Number(command.deadline_at_ms) || Infinity, startedAt + 25_000);
