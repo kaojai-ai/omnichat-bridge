@@ -30,7 +30,7 @@ test("live presence advertises sends only for a responding tab belonging to this
     providerTabCanSend: canSend, providerTabIsReady: (input) => input?.ok === true,
     persistProviderSurfaceState: async () => {}, detectedAccounts: () => [context.account],
     readAccountState: (_state, _key, fallback) => fallback, normalizeDeviceName: () => "", buildConnectionHealth: () => ({ checks: ["provider_tab", "content_bridge", "provider_account", "provider_realtime"].map((key) => ({ key, status: "pass" })) }),
-    canonicalProviderAccountId: () => "shop", installationId: async () => "installation", navigator: {},
+    canonicalProviderAccountId: () => "shop", installationId: async () => "installation", navigator: {}, PROVIDER_HEALTH_STALE_MS: 60_000,
   });
   assert.deepEqual(Array.from((await snapshot(context)).command_capabilities), ["send_text"]);
   status = { ...ready, provider_account_ids: ["shop", "another-shop"], current_provider_account_id: "another-shop" };
