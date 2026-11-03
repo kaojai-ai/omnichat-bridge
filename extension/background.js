@@ -4326,7 +4326,7 @@ async function clearPersistedSync(provider = null, reason = "user_cancelled") {
           {
             ...scanState,
             in_progress: false,
-            resume_paused: reason === "user_cancelled",
+            resume_paused: reason === "user_cancelled" || scanResumePaused(scanState),
             cancelled_at: new Date().toISOString(),
           },
         );
