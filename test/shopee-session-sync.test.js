@@ -144,3 +144,32 @@ for (const outcome of ["superseded", "failure", "recorded_failure"]) {
     assert.equal(logs.some(log => log.event === "superseded" && log.level === "info"), superseded);
   });
 }
+
+test("interrupted Shopee sync correlates its terminal outcome without exposing pending messages", async () => {
+  const controller = new AbortController();
+  controller.abort("provider_tab_navigated");
+  const control = { controller, providerRequestId: "shopee-attempt" }, logs = [];
+  const run = runWithPolicy(source.slice(source.indexOf("async function runAccountSync("), source.indexOf("\nasync function openSessionSyncContexts")) + "\nrunAccountSync", {
+    isCurrentSyncControl: candidate => candidate === control,
+    crypto, STORAGE: { pending: "pending" }, RESUME_SYNC_COOLDOWN_MS: 0,
+    exclusive: async () => ({ context: context("shopee", "A") }), throwIfSyncCancelled: () => {},
+    recordLog: async (level, area, event, message, details) => logs.push({ level, area, event, message, details }),
+    recordUnexpected: () => assert.fail("An interruption must not add another failure log"),
+    updateScopedState: async () => {}, attemptDelivery: async () => ({ sent: 0, pending: 1 }),
+    providerLabel: adapter => adapter.id,
+    syncOpenProvider: async () => { throw Object.assign(new Error("interrupted"), { name: "AbortError" }); },
+    readStorage: async () => ({ pending: { A: [{ text: "synthetic-private-message" }] } }),
+    readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
+    syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+  });
+  await assert.rejects(run("manual", control, context("shopee", "A")), { name: "AbortError" });
+  const terminal = logs.filter(log => log.event === "cancelled");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].details.request_id, "shopee-attempt");
+  assert.equal(terminal[0].details.provider_account_id, "A");
+  assert.equal(terminal[0].details.status, "incomplete");
+  assert.equal(terminal[0].details.execution_stage, "after_provider_request");
+  assert.equal(terminal[0].details.pending, 1);
+  assert.equal(JSON.stringify(logs).includes("synthetic-private-message"), false);
+  assert.equal(terminal[0].message.includes("by user"), false);
+});

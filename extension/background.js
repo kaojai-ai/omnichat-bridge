@@ -4444,8 +4444,15 @@ async function runAccountSync(trigger, control, context) {
       pending: pending.length,
     });
     if (cancelled) {
-      await recordLog("info", "sync", "cancelled", "Sync cancelled by user.", {
+      await recordLog("info", "sync", "cancelled", context.adapter.id === "shopee"
+        ? "Shopee sync stopped before completion." : "Sync cancelled by user.", {
         provider_account_id: providerAccountId,
+        ...(context.adapter.id === "shopee" ? {
+          request_id: control.providerRequestId,
+          execution_stage: control.providerRequestId ? "after_provider_request" : "before_provider_request",
+          status: "incomplete",
+          pending: pending.length,
+        } : {}),
       });
       throw syncCancelledError();
     }

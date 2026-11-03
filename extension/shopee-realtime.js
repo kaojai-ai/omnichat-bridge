@@ -2078,6 +2078,20 @@
         return counts;
       }, {});
       postLog("info", "recovery_plan", "Shopee recovery plan prepared.", {
+        request_id: requestId,
+        provider_account_id: accountId,
+        // Scalar aliases survive the server log allowlist. Detailed reasons and
+        // scan boundaries remain available in the local diagnostic export.
+        execution_stage: "history_selection",
+        status: bootstrap ? "bootstrap" : "incremental",
+        total: classified.length,
+        count: totalConversations,
+        reason_code: Object.keys(reasons).length === 1
+          ? Object.keys(reasons)[0].slice("reason_".length)
+          : classified.length ? "mixed_selection" : "no_candidates",
+        checkpoint_ms: watermarkMs,
+        since_ms: defaultSinceMs,
+        started_ms: startedAt,
         candidates: classified.length,
         history_jobs: recoveryJobs.length,
         probes: probes.length,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { sanitizeLogDetails } from "../extension/lib/logs.js";
 import { latestMessageCursor } from "../extension/lib/sync-state.js";
 
 const cacheSource = await readFile(new URL("../extension/lib/message-id-cache.js", import.meta.url), "utf8");
@@ -814,6 +815,22 @@ test("Shopee sync keeps the legacy nested last-message ID as a skip signal", asy
   assert.equal(result.ok, true);
   assert.equal(bridge.requests.includes("/webchat/api/v1.2/conversations/nested/messages"), false);
   assert.equal(bridge.posts.findLast((post) => post.type === "sync_plan")?.conversations[0].reason, "same_cursor_message");
+  const plans = bridge.posts.filter(post => post.type === "diagnostic_log" && post.event === "recovery_plan");
+  assert.equal(plans.length, 1, "one aggregate event per recovery attempt");
+  const details = sanitizeLogDetails(plans[0].details);
+  assert.equal(details.request_id, "nested-sync");
+  assert.equal(details.provider_account_id, "100000001");
+  assert.equal(details.status, "incremental");
+  assert.equal(details.execution_stage, "history_selection");
+  assert.equal(details.reason_code, "same_cursor_message");
+  assert.equal(details.total, 1);
+  assert.equal(details.count, 0);
+  assert.equal(details.skipped, 1);
+  assert.equal(details.checkpoint_ms, Date.parse("2026-08-01T00:00:00Z"));
+  assert.equal(details.since_ms, details.checkpoint_ms);
+  assert.equal(JSON.stringify(details).includes("message-1"), false);
+  assert.equal(Object.hasOwn(details, "conversations"), false);
+
 });
 
 test("Shopee sync probes a summary with no reliable message ID", async () => {
@@ -1507,6 +1524,16 @@ test("Shopee bootstrap caps a busy conversation at twenty-five messages", async 
   assert.equal(result.ok, true);
   assert.equal(store.messages.length, 25);
   assert.equal(store.conversations["bootstrap-full"].event_timestamp, "2026-08-20T11:00:39.000Z");
+  const details = sanitizeLogDetails(bridge.posts.findLast(post => post.type === "diagnostic_log" && post.event === "recovery_plan").details);
+  assert.equal(details.request_id, "bootstrap-full");
+  assert.equal(details.status, "bootstrap");
+  assert.equal(details.reason_code, "bootstrap");
+  assert.equal(details.total, 1);
+  assert.equal(details.count, 1);
+  assert.equal(details.skipped, 0);
+  assert.equal(details.checkpoint_ms, 0);
+  assert.equal(details.since_ms < details.started_ms, true);
+
   bridge.dispose();
 });
 
