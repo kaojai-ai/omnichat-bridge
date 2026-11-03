@@ -12,7 +12,6 @@
   const ACK_TIMEOUT_MS = 20_000;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
   const SEND_CONFIRM_POLL_MS = 1_000;
-  const ACCOUNT_METADATA_TTL_MS = 30_000;
   const monotonicNow = () => globalThis.performance?.now() ?? Date.now();
   const previous = window.__omnichatLineOABridgeControl;
   previous?.dispose?.();
@@ -26,7 +25,6 @@
   let providerCheckOutcome = "unknown";
   let accountAccessRequest = null;
   let metadataSessionEpoch = 0;
-  let accountMetadataCheckedAt = null;
   let accountMetadataEpoch = -1;
   const metadataLocation = () => window.location.href ?? `${window.location.origin}${window.location.pathname}`;
   let accountMetadataLocation = metadataLocation();
@@ -165,7 +163,6 @@
       providerCheckOutcome = "unknown";
     }
     accountAccessVerified = false;
-    accountMetadataCheckedAt = null;
     postProviderStatus();
   }
 
@@ -179,13 +176,10 @@
     if (accountMetadataLocation !== metadataLocation()) {
       metadataSessionEpoch += 1;
       accountMetadataLocation = metadataLocation();
-      accountMetadataCheckedAt = null;
       accountAccessVerified = false;
       accountAccessRequest = null;
     }
-    if (!accountAccessVerified || accountMetadataCheckedAt === null || accountMetadataEpoch !== metadataSessionEpoch) return "miss";
-    const age = monotonicNow() - accountMetadataCheckedAt;
-    return age >= 0 && age < ACCOUNT_METADATA_TTL_MS ? "hit" : "expired";
+    return accountAccessVerified && accountMetadataEpoch === metadataSessionEpoch ? "hit" : "miss";
   }
 
   async function availableAccounts({ refresh = false } = {}) {
@@ -209,7 +203,6 @@
         accessibleAccounts = accounts;
         accountAccessVerified = true;
         providerCheckOutcome = "passed";
-        accountMetadataCheckedAt = monotonicNow();
         accountMetadataEpoch = metadataSessionEpoch;
         const ids = new Set(accounts.map((account) => account.provider_account_id));
         for (const id of pollingAccounts.keys()) {
@@ -1009,7 +1002,6 @@
     const hadRecovery = Boolean(activePoll || queuedSyncs.length || pollingAccounts.size || timer || acknowledgements.size);
     metadataSessionEpoch += 1;
     accountAccessRequest = null;
-    accountMetadataCheckedAt = null;
     accessibleAccounts = [];
     accountAccessVerified = false;
     providerCheckOutcome = "unknown";

@@ -40,7 +40,7 @@ export function sanitizeSendDiagnostics(input) {
   const result = { diagnostic_version: 1 };
   const enums = {
     provider: ["shopee", "line_oa"],
-    metadata_cache: ["hit", "miss", "expired"],
+    metadata_cache: ["hit", "miss"],
     confirmation_source: ["send_response", "history"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
     stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window"],

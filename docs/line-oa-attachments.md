@@ -27,9 +27,12 @@ is unsent; failed confirmation after native submission may be uncertain.
 Do not automatically resend uncertain results. History uses the send ID to
 correlate provider messages.
 
-LINE account metadata is reused for up to 30 seconds within the verified browser
-session. Readiness checks refresh it; authentication failures and session resets
-invalidate it. Sends with missing or expired metadata await verification.
+LINE account metadata is reused for the verified browser session, without a time
+expiry. Readiness checks still refresh account access independently of sends.
+Authentication failures, navigation, account-access changes, and session resets
+invalidate cached verification; sends with missing or invalidated metadata await
+a successful account check. Elapsed time alone does not add an account-list
+request to the send path.
 
 No captured send-response shape currently qualifies for immediate acceptance.
 Successful HTTP responses therefore still require history confirmation by send

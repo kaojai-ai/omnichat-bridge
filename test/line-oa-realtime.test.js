@@ -2069,31 +2069,32 @@ test("LINE initial capture selects the newest 25 within its frozen 24-hour windo
 });
 
 
-test("LINE sends reuse fresh account metadata and expire it using monotonic time", async () => {
+test("LINE sends reuse verified session metadata after minutes and hours", async () => {
   const bridge = createBridge();
   try {
     await bridge.detect();
     const before = bridge.requests.length;
     bridge.advanceClock(60_000);
+    bridge.advanceMonotonic(60_000);
     const cached = await bridge.sendCommand({ command_type: "send_text", text: "cached" });
     assert.equal(cached.ok, true);
     assert.equal(cached.diagnostics.metadata_cache, "hit");
     assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
     assert.equal(bridge.requests.slice(before).length, 2, "one send and one history confirmation; fast response acceptance is not evidence-qualified");
-    bridge.advanceMonotonic(30_000);
-    const expired = await bridge.sendCommand({ command_type: "send_sticker", package_id: "1", sticker_id: "2" });
-    assert.equal(expired.ok, true);
-    assert.equal(expired.diagnostics.metadata_cache, "expired");
-    assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 1);
+    bridge.advanceMonotonic(3 * 60 * 60 * 1_000);
+    const later = await bridge.sendCommand({ command_type: "send_sticker", package_id: "1", sticker_id: "2" });
+    assert.equal(later.ok, true);
+    assert.equal(later.diagnostics.metadata_cache, "hit");
+    assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
   } finally { bridge.dispose(); }
 });
 
-test("LINE expired-cache refresh failure prevents submission", async () => {
+test("LINE failed readiness refresh invalidates session metadata and prevents submission", async () => {
   const bridge = createBridge();
   try {
     await bridge.detect();
-    bridge.advanceMonotonic(30_000);
     bridge.setAccountError(new TypeError("network unavailable"));
+    await bridge.detect();
     const result = await bridge.sendCommand({ command_type: "send_text", text: "must not send" });
     assert.equal(result.ok, false);
     assert.equal(result.uncertain, false);
@@ -2115,14 +2116,14 @@ test("LINE navigation invalidates fresh metadata before an account send", async 
   } finally { bridge.dispose(); }
 });
 
-test("LINE concurrent expired sends share a single metadata refresh", async () => {
+test("LINE concurrent sends after session reset share a single metadata refresh", async () => {
   let probes = 0;
   let release;
   const blocked = new Promise(resolve => { release = resolve; });
   const bridge = createBridge({ beforeAccountRequest: async () => { if (++probes > 1) await blocked; } });
   try {
     await bridge.detect();
-    bridge.advanceMonotonic(30_000);
+    bridge.resetRecovery("Session reset");
     const first = bridge.sendCommand({ command_type: "send_text", text: "first" });
     const second = bridge.sendCommand({ command_type: "send_text", text: "second" });
     await settleBridge();
@@ -2177,4 +2178,20 @@ test("LINE fresh metadata send does not wait for a readiness refresh", async () 
     assert.equal(result.diagnostics.metadata_cache, "hit");
     assert.equal(probes, 2);
   } finally { release(); bridge.dispose(); }
+});
+
+
+test("LINE readiness refresh revokes a cached account mapping before the next send", async () => {
+  const bridge = createBridge();
+  try {
+    await bridge.detect();
+    bridge.advanceMonotonic(4 * 60 * 60 * 1_000);
+    bridge.setAccounts([]);
+    await bridge.detect();
+    const before = bridge.requests.length;
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "revoked account" });
+    assert.equal(result.ok, false);
+    assert.equal(bridge.sentPayloads.length, 0);
+    assert.equal(bridge.requests.length, before, "verified empty access does not trigger redundant metadata reads");
+  } finally { bridge.dispose(); }
 });
