@@ -134,3 +134,24 @@ test("previously injected regional content cannot queue or forward after revocat
   assert.equal(await scope.queueMessagesForContext([], { account: { provider: "shopee", country: "TH" } }), "accepted");
   assert.equal((await scope.flushBatch({ account: { provider: "line_oa" } })).sent, 1);
 });
+
+
+test("Taiwan receives both page bridges only after permission and loses them on revocation", async () => {
+  const tw = "https://seller.shopee.tw";
+  const twConfig = { accounts: [{ provider: "shopee", country: "TW" }] };
+  assert.deepEqual(regionalShopeeOrigins(twConfig), [tw]);
+  const h = harness();
+  assert.equal(await hasRegionalShopeePermission(h.api, twConfig.accounts[0]), false);
+  await reconcileRegionalShopeeScripts(h.api, twConfig);
+  assert.equal(h.scripts().length, 1);
+  h.permissions.add(`${tw}/*`);
+  assert.equal(await hasRegionalShopeePermission(h.api, twConfig.accounts[0]), true);
+  await reconcileRegionalShopeeScripts(h.api, twConfig);
+  assert.deepEqual(h.scripts().filter(script => script.id.startsWith("omnichat-shopee-region-")).map(script => [script.id, script.world, script.matches]), [
+    ["omnichat-shopee-region-tw-main", "MAIN", [`${tw}/*`]],
+    ["omnichat-shopee-region-tw-isolated", "ISOLATED", [`${tw}/*`]],
+  ]);
+  h.permissions.delete(`${tw}/*`);
+  await reconcileRegionalShopeeScripts(h.api, twConfig);
+  assert.deepEqual(h.scripts().map(script => script.id), ["another-feature"]);
+});

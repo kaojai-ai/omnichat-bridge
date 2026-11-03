@@ -5,6 +5,7 @@ const SHOPEE_SELLER_ORIGINS = Object.freeze({
   SG: "https://seller.shopee.sg",
   ID: "https://seller.shopee.co.id",
   VN: "https://banhang.shopee.vn",
+  TW: "https://seller.shopee.tw",
 });
 
 function countryForUrl(value) {
