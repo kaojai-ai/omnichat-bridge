@@ -1,3 +1,4 @@
+import { readAccountState, writeAccountState } from "../extension/lib/storage.js";
 import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 function messageHarness() {
   let now = 0, nextId = 0;
   const timers = new Map(), calls = [], response = deferred();
-  const runtime = vm.createContext({ providerPolicyContexts: new Map(), manualBridgeRepair: null,
+  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, providerPolicyContexts: new Map(), manualBridgeRepair: null,
     performance, recordLog: async () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     PROVIDER_REQUEST_TIMEOUT_MS: 15_000,
@@ -158,6 +159,7 @@ test("explicit LINE Cancel reaches scoped retries without aborting another provi
   const shopee = { controller: new AbortController(), adapter: { id: "shopee" } };
   const calls = [];
   const cancel = vm.runInNewContext(`(${section('async function cancelActiveSync(', 'async function clearPersistedSync(')})`, {
+    pauseSyncAccounts: async () => {}, exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, STORAGE: { scanState: "scan" }, readStorage: async () => ({}), writeStorage: async () => {},
     lineTabSyncs: new Map(), accountSyncs: new Map([[line.accountKey, line], ["shopee:B", shopee]]), clearPersistedSync: async () => false,
     sendProviderMessage: async (_tab, message) => { calls.push(message); return { ok: true }; },
     PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000,

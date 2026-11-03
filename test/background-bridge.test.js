@@ -245,8 +245,8 @@ test("does not redeclare page bridge dependencies during reattachment", () => {
   assert.match(source, /adapter\.id === "line_oa"/);
   assert.match(source, /const mainFiles = adapter\.id === "line_oa"/);
   assert.match(source, /const isolatedFiles = adapter\.id === "line_oa"/);
-  assert.match(source, /\.\.\.\(mainStatus\.hasUrl \? \[\] : \["lib\/shopee-url\.js"\]\)/);
-  assert.match(source, /\.\.\.\(isolatedStatus\.hasShopee \? \[\] : \["lib\/shopee\.js"\]\)/);
+  assert.match(source, /\.\.\.\(!restart && mainStatus\.hasUrl \? \[\] : \["lib\/shopee-url\.js"\]\)/);
+  assert.match(source, /\.\.\.\(!restart && isolatedStatus\.hasShopee \? \[\] : \["lib\/shopee\.js"\]\)/);
 });
 
 test("bounds the provider sync handoff when a page reload interrupts its response", () => {

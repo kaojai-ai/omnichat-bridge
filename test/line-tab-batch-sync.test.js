@@ -1,3 +1,4 @@
+import { readAccountState, writeAccountState } from "../extension/lib/storage.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -5,21 +6,22 @@ import vm from "node:vm";
 import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
 const part = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
-function harness({ pauseSync = false } = {}) {
+function harness({ pauseSync = false, pauseDetection = false } = {}) {
   const adapter = { id: "line_oa" };
   const contexts = ["A", "B", "C"].map(id => ({ key: `line_oa:${id}`, adapter,
     account: { provider: "line_oa", provider_account_id: id }, config: {} }));
   contexts.push({ key: "shopee:A", adapter: { id: "shopee" }, account: { provider: "shopee", provider_account_id: "A" }, config: {} });
+  const stored = { scan: {} };
   const calls = [], batches = new Map(), syncCoordinator = createAccountSyncCoordinator();
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const tab = { id: 42, url: "https://chat.line.biz/bot-A/chats" };
-  const runtime = vm.createContext({ manualBridgeRepair: null, AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
+  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, manualBridgeRepair: null, AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
     providerAdapterForId: () => adapter, providerChatTabById: async () => tab, providerAccountMatchesTab: () => true,
-    providerTabContext: () => "fixed-session", STORAGE: { status: "status" },
+    providerTabContext: () => "fixed-session", STORAGE: { status: "status", scanState: "scan" },
     throwIfSyncCancelled: signal => { if (signal?.aborted) throw Object.assign(new Error("cancelled"), { name: "AbortError" }); },
-    readStorage: async () => ({}), hasLocalConsent: () => true, hasServerInitialized: () => true,
-    ensureProviderBridge: async () => {}, detectOpenProviderAccount: async () => ({ ok: true }),
+    readStorage: async () => stored, hasLocalConsent: () => true, hasServerInitialized: () => true,
+    ensureProviderBridge: async () => {}, detectOpenProviderAccount: async () => { if (pauseDetection) await gate; return { ok: true }; },
     providerTabStatus: async () => ({ account_access_verified: true, accessible_account_ids: ["A", "B", "unconfigured"] }),
     exactProviderAccountTab: async () => tab,
     manualSyncTab: async (_context, tabId, options) => {
@@ -30,7 +32,7 @@ function harness({ pauseSync = false } = {}) {
     },
     configuredAccountContexts: () => contexts, accountSyncs: syncCoordinator.jobs,
     accountContextFor: (_stored, id, provider) => contexts.find(context => context.adapter.id === provider && context.account.provider_account_id === id),
-    queueLiveStateWrite: fn => fn(), writeStorage: async () => {}, preemptAutomaticLogUpload() {},
+    queueLiveStateWrite: fn => fn(), writeStorage: async patch => Object.assign(stored, patch), preemptAutomaticLogUpload() {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
     sendProviderMessage: async () => ({ ok: true }), PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000,
     runAccountSync: async (_trigger, control, context) => {
@@ -45,7 +47,7 @@ function harness({ pauseSync = false } = {}) {
   vm.runInContext(part("function syncLineTab(", "async function exactProviderAccountTab(")
     + part("function requestAccountSync(", "async function clearPersistedSync(")
     + part("async function syncAccountsForTab(", "async function resumeSync("), runtime);
-  return { runtime, calls, batches, release };
+  return { runtime, calls, batches, release, stored };
 }
 
 test("shared LINE tab batch coalesces and sequentially syncs every accessible configured account", async () => {
@@ -64,6 +66,7 @@ test("cancelling shared LINE batch prevents queued account scans and releases it
   const task = h.runtime.syncLineTab(42);
   await new Promise(resolve => setImmediate(resolve));
   const cancellation = h.runtime.cancelActiveSync("line_oa", 42);
+  await new Promise(resolve => setImmediate(resolve));
   h.release();
   const result = await task;
   assert.equal(result.partial, true);
@@ -92,3 +95,21 @@ test("a LINE batch joins busy accounts and waits for their actual result", async
   assert.equal(result.accounts[0].error, "provider failed");
   assert.deepEqual(h.calls, [["line_oa", "B", 42, true]]);
 });
+
+for (const pauseDetection of [false, true]) {
+  test(`LINE tab Cancel persists verified account pauses during ${pauseDetection ? "detection" : "queued recovery"}`, async () => {
+    const h = harness({ pauseDetection, pauseSync: !pauseDetection });
+    const task = h.runtime.syncLineTab(42);
+    const result = task.catch(error => ({ error: error.name }));
+    await new Promise(resolve => setImmediate(resolve));
+    const cancelling = h.runtime.cancelActiveSync("line_oa", 42);
+    await new Promise(resolve => setImmediate(resolve));
+    h.release();
+    await Promise.all([result, cancelling]);
+    assert.equal(h.stored.scan.accounts["line_oa:A"].resume_paused, true);
+    assert.equal(h.stored.scan.accounts["line_oa:B"].resume_paused, true);
+    assert.equal(h.stored.scan.accounts["line_oa:C"], undefined);
+    assert.equal(h.stored.scan.accounts["shopee:A"], undefined);
+    assert.equal(h.runtime.accountSyncs.size, 0);
+  });
+}

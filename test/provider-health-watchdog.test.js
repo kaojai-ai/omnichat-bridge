@@ -26,7 +26,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
   const alternative = { ...tab, id: 43, url: primaryUrl };
   const calls = { created: 0, reloaded: 0, checked: 0, cleared: 0, polling: [], alarm: null, live: null, lives: {} };
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
-  const globals = {
+  const globals = { manualBridgeRepair: null,
     readAccountState: (value, key, fallback) => value?.[key] ?? fallback,
     readinessLogDetails, providerWatchdogFailures: new Map(),
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
@@ -369,7 +369,7 @@ for (const provider of ["shopee", "line_oa"]) {
 }
 
 for (const provider of ["shopee", "line_oa"]) {
-  for (const reason of ["user_cancelled", "provider_tab_navigated"]) {
+  for (const reason of ["user_cancelled", "provider_tab_navigated", "user_after_navigation"]) {
     test(`${provider}: manual retry clears pause; ${reason} preserves the correct resume intent`, async () => {
       const context = { key: `${provider}:a`, account: { provider, provider_account_id: "a" }, adapter: { id: provider } };
       const control = { accountKey: context.key, controller: new AbortController() };
@@ -392,15 +392,16 @@ for (const provider of ["shopee", "line_oa"]) {
         syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
         syncOpenProvider: async () => {
           assert.equal(state.resume_paused, false);
-          control.controller.abort(reason);
+          control.controller.abort(reason === "user_after_navigation" ? "provider_tab_navigated" : reason);
+          if (reason === "user_after_navigation") control.userCancelled = true;
           throw Object.assign(new Error("interrupted"), { name: "AbortError" });
         },
       });
       const helpers = source.slice(source.indexOf("function isCurrentSyncControl("), source.indexOf("async function initializeAndStartSync("));
       vm.runInContext(helpers + functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
       await assert.rejects(runtime.runAccountSync("manual", control, context), { name: "AbortError" });
-      assert.equal(state.resume_paused, reason === "user_cancelled");
-      assert.equal(shouldResumeScan(state), reason !== "user_cancelled");
+      assert.equal(state.resume_paused, reason !== "provider_tab_navigated");
+      assert.equal(shouldResumeScan(state), reason === "provider_tab_navigated");
       assert.equal(state.watermark, watermark);
       assert.equal(status.caught_up, false);
       assert.equal(status.pending, 1);

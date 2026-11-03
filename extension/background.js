@@ -904,29 +904,52 @@ let manualBridgeRepair = null;
 
 // A manual pass is shared by every popup. Healthy tabs are probed without
 // reserving reply queues; replacement only runs while provider accounts are idle.
-async function repairOpenProviderTabs() {
-  if (manualBridgeRepair) return manualBridgeRepair;
+async function repairOpenProviderTabs({ restart = false } = {}) {
+  if (manualBridgeRepair) {
+    if (!restart) return manualBridgeRepair;
+    await manualBridgeRepair;
+    return repairOpenProviderTabs({ restart: true });
+  }
   manualBridgeRepair = (async () => {
     const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts]);
     if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Enable Omnichat before syncing.");
     const contexts = configuredAccountContexts(stored);
+    if (restart) {
+      await exclusive(() => serializeAccountStorage(async () => {
+        const state = await readStorage([STORAGE.scanState]);
+        let scans = state[STORAGE.scanState];
+        for (const context of contexts) {
+          const scan = readAccountState(scans, context.key, null);
+          if (!Number.isFinite(Date.parse(scan?.started_at ?? "")) || scanResumePaused(scan) || hasScanBacklog(scan)) continue;
+          scans = writeAccountState(scans, context.key, { ...scan, in_progress: true, started_at: new Date().toISOString() });
+        }
+        await writeStorage({ [STORAGE.scanState]: scans ?? {} });
+      }));
+      await cancelActiveSync(null, null, "extension_updated");
+    }
     const failed_tabs = [];
     for (const adapter of providerAdapters.list()) {
       const accounts = contexts.filter(context => context.adapter.id === adapter.id);
       for (const tab of await providerChatTabs(adapter)) {
-        try {
-          await verifyProviderBridge(tab.id, adapter, false);
-          continue;
-        } catch { /* An unresponsive or incompatible bridge needs repair. */ }
+        if (!restart) {
+          try {
+            await verifyProviderBridge(tab.id, adapter, false);
+            continue;
+          } catch { /* An unresponsive or incompatible bridge needs repair. */ }
+        }
         const busy = () => [...accountSyncs.values()].some(control => control.adapter?.id === adapter.id);
         const repair = async () => {
           if (busy()) return false;
           invalidateProviderTab(tab.id, "provider_bridge_repair");
+          if (restart && !await reinjectProviderBridge(tab.id, adapter, { restart: true })) {
+            throw new Error("Provider bridge could not restart after upgrade.");
+          }
           await ensureProviderBridge(tab.id, adapter);
           return true;
         };
         const reserve = (index) => index < accounts.length
-          ? replyQueue.runIfIdle(accounts[index].key, () => reserve(index + 1))
+          ? (restart ? replyQueue.run(accounts[index].key, () => reserve(index + 1))
+            : replyQueue.runIfIdle(accounts[index].key, () => reserve(index + 1)))
           : repair();
         try {
           if (!await reserve(0)) failed_tabs.push({ tab_id: tab.id, provider: adapter.id, title: tab.title || null, busy: true });
@@ -2220,6 +2243,7 @@ function startUnattendedProviderSync(tab, context) {
 }
 
 async function runProviderHealthWatchdogOnce() {
+  if (manualBridgeRepair) await manualBridgeRepair;
   const stored = await readStorage([
     STORAGE.config,
     STORAGE.consent,
@@ -3204,8 +3228,8 @@ chrome.runtime.onUpdateAvailable.addListener((details) => {
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason !== "update" || !isVersionBefore(details.previousVersion, DETECTED_ACCOUNTS_RESET_VERSION)) return;
-  void reinitializeAfterUpgrade().catch((error) => {
+  if (details.reason !== "update") return;
+  void reinitializeAfterUpgrade(details.previousVersion).catch((error) => {
     void recordUnexpected("storage_upgrade", error);
   });
 });
@@ -3226,34 +3250,12 @@ function isVersionBefore(value, target) {
   return false;
 }
 
-async function reinitializeAfterUpgrade() {
-  if (!await resetDetectedAccountsFromConfig()) return;
-  let bridgesReady = true;
-  for (const adapter of providerAdapters.list()) {
-    if (!adapter.supports("account_detection")) continue;
-    const tabs = await chrome.tabs.query(
-      adapter.tabQueryPattern ? { url: adapter.tabQueryPattern } : {},
-    );
-    const chatTabs = tabs.filter((tab) => tab.id && adapter.matchesUrl(tab.url));
-    for (const tab of chatTabs) {
-      try {
-        await ensureProviderBridge(tab.id, adapter);
-        const result = await chrome.tabs.sendMessage(tab.id, {
-          type: "detect_account_v3",
-          provider: adapter.id,
-        });
-        if (!result?.ok) {
-          await recordLog("warn", "account", "detection_failed", `${providerLabel(adapter)} account was not detected after extension upgrade.`, {
-            provider: adapter.id,
-          });
-        }
-      } catch (error) {
-        bridgesReady = false;
-        await recordUnexpected("storage_upgrade", error, { provider: adapter.id });
-      }
-    }
-  }
-  if (bridgesReady) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
+async function reinitializeAfterUpgrade(previousVersion) {
+  const migrate = isVersionBefore(previousVersion, DETECTED_ACCOUNTS_RESET_VERSION);
+  if (migrate) await resetDetectedAccountsFromConfig();
+  const result = await repairOpenProviderTabs({ restart: true });
+  if (migrate && result.failed_tabs.length === 0) await chrome.storage.local.remove(LEGACY_STORAGE.detectedAccount);
+  await resumeInterruptedSync();
 }
 
 async function providerChatTabById(adapter, tabId) {
@@ -3743,7 +3745,7 @@ async function retireProviderMainBridge(tabId) {
         || state?.recoveryRequestId
         || state?.acknowledgements?.size,
       );
-      const control = window.__omnichatRealtimeBridgeControl;
+      const control = window.__omnichatLineOABridgeControl ?? window.__omnichatRealtimeBridgeControl;
       if (typeof control?.dispose === "function") {
         return {
           hadRecovery,
@@ -3807,25 +3809,29 @@ async function retireProviderContentBridge(tabId) {
   return result?.[0]?.result ?? {};
 }
 
-async function reinjectProviderBridge(tabId, adapter) {
+async function reinjectProviderBridge(tabId, adapter, { restart = false } = {}) {
   if (!chrome.scripting?.executeScript || !adapter) return false;
   const inFlight = providerBridgeReinjections.get(tabId);
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    if (!restart) return inFlight;
+    await inFlight;
+    return reinjectProviderBridge(tabId, adapter, { restart: true });
+  }
   const reinjection = (async () => {
     try {
       const mainStatus = await providerMainBridgeStatus(tabId, adapter);
-      if (mainStatus.ready !== true) {
+      if (restart || mainStatus.ready !== true) {
         await retireProviderMainBridge(tabId);
         const mainFiles = adapter.id === "line_oa"
           ? [
-            ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-            ...(mainStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
+            ...(!restart && mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+            ...(!restart && mainStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
             "line-oa-realtime.js",
           ]
           : [
-            ...(mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
-            ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-            ...(mainStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
+            ...(!restart && mainStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
+            ...(!restart && mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+            ...(!restart && mainStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
             "lib/shopee-video.js",
             "lib/message-id-cache.js",
             "shopee-realtime.js",
@@ -3853,16 +3859,16 @@ async function reinjectProviderBridge(tabId, adapter) {
       const isolatedStatus = isolatedBridge?.[0]?.result ?? {};
       const isolatedFiles = adapter.id === "line_oa"
         ? [
-          ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-          ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
+          ...(!restart && isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+          ...(!restart && isolatedStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
           "lib/message-id-cache.js",
           "content.js",
         ]
         : [
-          ...(isolatedStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
-          ...(isolatedStatus.hasShopee ? [] : ["lib/shopee.js"]),
-          ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-          ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
+          ...(!restart && isolatedStatus.hasUrl ? [] : ["lib/shopee-url.js"]),
+          ...(!restart && isolatedStatus.hasShopee ? [] : ["lib/shopee.js"]),
+          ...(!restart && isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
+          ...(!restart && isolatedStatus.hasProviderAdapter ? [] : ["lib/shopee-adapter.js"]),
           "lib/message-id-cache.js",
           "content.js",
         ];
@@ -4245,13 +4251,29 @@ async function retryProviderAccount(message, { controller } = {}) {
   return requestAccountSync(context, "manual", { ...message, verified_context: undefined, controller });
 }
 
+async function pauseSyncAccounts(accountKeys) {
+  if (!accountKeys.length) return;
+  await exclusive(() => serializeAccountStorage(async () => {
+    const stored = await readStorage([STORAGE.scanState]);
+    let scans = stored[STORAGE.scanState];
+    for (const key of accountKeys) {
+      scans = writeAccountState(scans, key, { ...readAccountState(scans, key, {}), resume_paused: true });
+    }
+    await writeStorage({ [STORAGE.scanState]: scans });
+  }));
+}
+
 async function cancelActiveSync(provider = null, requestedTabId = null, reason = "user_cancelled") {
   if (requestedTabId != null && (!Number.isInteger(requestedTabId) || requestedTabId <= 0)) throw new Error("A valid provider tab is required.");
   const batches = [...lineTabSyncs.entries()].filter(([tabId]) => (!provider || provider === "line_oa")
     && (requestedTabId == null || requestedTabId === tabId)).map(([, batch]) => batch);
-  for (const batch of batches) batch.controller.abort(reason);
   const controls = [...accountSyncs.values()].filter(control => (!provider || control.adapter.id === provider)
     && (requestedTabId == null || control.tabId === requestedTabId || control.lockedTabId === requestedTabId || control.manualSourceTabId === requestedTabId));
+  if (reason === "user_cancelled") {
+    for (const control of controls) control.userCancelled = true;
+    await pauseSyncAccounts(controls.map(control => control.accountKey));
+  }
+  for (const batch of batches) batch.controller.abort(reason);
   for (const control of controls) control.controller.abort(reason);
   await Promise.allSettled(controls.filter(control => control.tabId).map(control => sendProviderMessage(control.tabId, {
     type: "cancel_sync_v3", provider: control.adapter.id,
@@ -4438,7 +4460,7 @@ async function runAccountSync(trigger, control, context) {
   } catch (error) {
     if (!isCurrentSyncControl(control)) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
-    const userCancelled = cancelled && signal.reason === "user_cancelled";
+    const userCancelled = control.userCancelled === true || (cancelled && signal.reason === "user_cancelled");
     const message = cancelled
       ? "Sync cancelled."
       : error instanceof Error ? error.message : String(error);
@@ -4568,6 +4590,12 @@ async function syncAccountsForTab(provider, tabId, trigger = "automatic", { cont
     && (provider === "line_oa" ? status?.account_access_verified === true
       && status.accessible_account_ids?.includes(context.account.provider_account_id)
       : status?.current_provider_account_id === context.account.provider_account_id));
+  if (controller?.signal.aborted && controller.signal.reason === "user_cancelled"
+    && (provider !== "line_oa" || status?.account_access_verified === true)) {
+    // A shared LINE batch may be cancelled while detection is still preparing,
+    // before it has created per-account controls. Persist only verified members.
+    await pauseSyncAccounts(contexts.map(context => context.key));
+  }
   throwIfSyncCancelled(controller?.signal);
   const identityVerified = provider === "line_oa" ? status?.account_access_verified === true : Boolean(status?.current_provider_account_id);
   if (identityVerified) for (const control of accountSyncs.values()) {

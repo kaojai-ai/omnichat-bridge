@@ -164,6 +164,34 @@ test("checkpoint writes reject superseded requests and recheck cancellation afte
   assert.equal(writes, 0, "late recovery cannot advance the account checkpoint");
 });
 
+test("replacement recovery rejects old page checkpoint replies already awaiting storage", async () => {
+  const controller = new AbortController();
+  const control = { controller, accountKey: "shopee:a", adapter: { id: "shopee" }, providerAccountId: "a", tabId: 7, providerRequestId: "current" };
+  const storageRead = deferred();
+  let writes = 0;
+  const sandbox = {
+    accountSyncs: new Map([[control.accountKey, control]]),
+    syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+    exclusive: task => task(),
+    getAccountScanState: () => storageRead.promise,
+    writeAccountScanState: async (_context, patch) => { patch({ conversations: {} }); writes++; },
+    compareMessageCursor: () => 1,
+  };
+  const guardStart = source.indexOf("function isCurrentSyncControl(");
+  const guardEnd = source.indexOf("async function initializeAndStartSync(", guardStart);
+  const cursorStart = source.indexOf("async function advanceScanCursor(");
+  const cursorEnd = source.indexOf("function exclusive(", cursorStart);
+  const persist = vm.runInNewContext(`(() => { ${source.slice(guardStart, guardEnd)}\n${source.slice(cursorStart, cursorEnd)}; return persistSyncCheckpoint; })()`, sandbox);
+  const message = { type: "advance_scan_cursor", provider: "shopee", provider_account_id: "a", request_id: "current:page", conversation_id: "conversation", cursor: { event_timestamp: "2026-10-30T00:00:00Z", message_id: "1" } };
+  await assert.rejects(persist({ ...message, request_id: "previous:page" }, 7), { name: "AbortError" });
+  await assert.rejects(persist(message, 8), { name: "AbortError" });
+  const pending = persist(message, 7);
+  sandbox.accountSyncs.set(control.accountKey, { ...control, providerRequestId: "replacement" });
+  storageRead.resolve({ context: {} });
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(writes, 0, "late recovery cannot advance the account checkpoint");
+});
+
 test("a new request waits for cancelled account cleanup before starting a replacement", async () => {
   const h = accountHarness();
   const context = h.context("shopee", "shop");
