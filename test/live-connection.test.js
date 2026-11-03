@@ -150,6 +150,7 @@ test("close diagnostics retain code and duration and status refresh respects ret
 });
 
 test("readiness diagnostics publish changed states once without recording message content", async () => {
+  let now = 0;
   let status = { ready: false, reason_code: "seller_chat_bridge_unavailable" };
   const logs = [];
   const sent = [];
@@ -159,7 +160,7 @@ test("readiness diagnostics publish changed states once without recording messag
   const end = source.indexOf("function scheduleKeepalive(context, socket)");
   const send = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return sendConnectionStatus; })()`, { preemptAutomaticLogUpload: () => {},
     providerPolicyContexts: new Map(), liveConnections: new Map([[account.key, connection]]),
-    WebSocket: { OPEN: 1 }, connectionStatusSnapshot: async () => status,
+    WebSocket: { OPEN: 1 }, Date: { now: () => now }, connectionStatusSnapshot: async () => status,
     createStatusReporter: options => createStatusReporter({ ...options, id: () => "report", setTimer: () => 1, clearTimer: () => {} }),
     scheduleLeaderStatusRefresh: () => {}, scheduleKeepalive: () => {},
     recordLog: async (level, _area, event, _message, details) => logs.push({ level, event, details }),
@@ -180,6 +181,10 @@ test("readiness diagnostics publish changed states once without recording messag
   assert.equal(sent.length, 4, "capability changes publish even when routing readiness stays true");
   assert.equal(sent[2].sync_ready, false);
   assert.equal(sent[3].sync_ready, true);
+  now = 61_000;
+  await send(socket, account);
+  assert.equal(sent.length, 5, "unchanged status refreshes server presence each minute");
+  assert.equal(logs.length, 4, "unchanged status does not add a transition log");
 });
 
 test("ticket timeout releases the guard even if the request never settles", async () => {
