@@ -209,7 +209,7 @@ test("recent incoming socket activity suppresses unnecessary keepalive traffic",
   assert.equal(h.sockets[0].sent.length, 1);
 });
 
-test("relative command budget rebases across browser clock skew", async () => {
+test("extension local timeout ignores worker clock and bounds commands without a deadline", async () => {
   const logs = [];
   let sentCommand;
   const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
@@ -230,9 +230,14 @@ test("relative command budget rebases across browser clock skew", async () => {
     recordUnexpected: async () => {}, sendConnectionStatus: async () => {}, installationId: async () => "installation",
   });
   await run(JSON.stringify(command), { ...account, account: { provider: "shopee", provider_account_id: "shop" } }, socket);
-  assert.equal(sentCommand.deadline_at_ms, 1_005_000);
-  assert.equal(logs.find(row => row.event === "received").details.clock_offset_estimate_ms, -990_000);
+  assert.equal(sentCommand.deadline_at_ms, 1_030_000);
+  assert.equal(logs.find(row => row.event === "received").details.timeout_origin, "extension_local");
   assert.equal(socket.sent[0].request_id, "skewed");
+  await run(JSON.stringify({ ...command, request_id: "no-deadline", deadline_at_ms: undefined,
+    server_sent_at_ms: undefined, execution_budget_ms: undefined }),
+    { ...account, account: { provider: "shopee", provider_account_id: "shop" } }, socket);
+  assert.equal(sentCommand.deadline_at_ms, 1_030_000);
+  assert.equal(socket.sent[1].request_id, "no-deadline");
 });
 
 test("duplicate commands share one provider operation and replay its acknowledgement", async () => {
