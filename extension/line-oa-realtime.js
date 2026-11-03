@@ -155,16 +155,16 @@
     return response;
   };
 
-  function markProviderCheckFailure(error) {
+  function markProviderCheckFailure(error, { retainVerifiedAccess = false } = {}) {
     const confirmedFailure = [401, 403].includes(error?.providerDiagnostics?.http_status);
     if (confirmedFailure) {
       metadataSessionEpoch += 1;
       providerCheckOutcome = "failed";
       accessibleAccounts = [];
       accountAccessVerified = false;
-    } else if (providerCheckOutcome !== "failed" && !accountAccessVerified) {
-      // A transient inbound request failure does not revoke a previously verified OA.
+    } else if (providerCheckOutcome !== "failed" && !(retainVerifiedAccess && accountAccessVerified)) {
       providerCheckOutcome = "unknown";
+      accountAccessVerified = false;
     }
     postProviderStatus();
   }
@@ -878,7 +878,7 @@
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
-      if (error?.providerCheckUnavailable) markProviderCheckFailure(error);
+      if (error?.providerCheckUnavailable) markProviderCheckFailure(error, { retainVerifiedAccess: true });
       if (pollIsActive(generation)) {
         postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
