@@ -1088,7 +1088,20 @@
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = false;
           state.sellerCentrePollOutcome = sellerCentreFailureOutcome(error);
-          postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", errorDetails(error));
+          postLog("error", "seller_centre_message_poll", "Seller Centre conversation polling failed.", {
+             ...errorDetails(error),
+             diagnostic_version: 1, provider: "shopee", operation: "poll",
+             stage: error?.diagnostics?.stage ?? "conversation_list_fetch",
+             ...(Number.isInteger(error?.http_status) && error.http_status >= 100 && error.http_status <= 599
+               ? { http_status: error.http_status } : {}),
+             ...(error?.reason_code === "provider_rejected" ? { failure_kind: "provider_rejection" } : {}),
+             ...(error?.reason_code === "provider_timeout" ? { failure_kind: "transport_failure" } : {}),
+             timed_out: error?.name === "TimeoutError",
+             error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name)
+               ? error.name : "Error",
+             provider_account_id: state.currentAccountId ?? null,
+             ...(activeSellerCentrePoll?.requestId ? { request_id: activeSellerCentrePoll.requestId } : {}),
+           });
         } finally {
           publishSurfaceStatus();
         }
@@ -1964,6 +1977,7 @@
         current_provider_account_id: state.currentAccountId ?? null,
         checkpoint_present: Boolean(checkpoint?.watermark),
       });
+      recoveryContext.stage = "provider_identity";
       await ensureSellerCentreChatOpen();
       const verifiedAccount = await verifySessionAccount(accountId);
       if (metadata) {
@@ -1996,6 +2010,7 @@
         ? checkpoint.bootstrap.conversations
         : [];
       const pageRequired = deepIds;
+      recoveryContext.stage = "conversation_list_fetch";
       const pages = await fetchConversationPages({
         metadata,
         checkpointMs: historyWindow ? historySinceMs : Math.max(defaultSinceMs, watermarkMs),
@@ -2268,6 +2283,8 @@
         diagnostics: { ...recoveryContext, ...error?.diagnostics, diagnostic_version: 1, provider: "shopee", operation: "recovery",
           ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { http_status: status } : {}),
           timed_out: error?.name === "TimeoutError",
+          ...(reasonCode === "provider_rejected" ? { failure_kind: "provider_rejection" } : {}),
+          ...(reasonCode === "provider_timeout" ? { failure_kind: "transport_failure" } : {}),
           error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name) ? error.name : "Error",
         } });
     } finally {
