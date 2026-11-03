@@ -38,7 +38,7 @@ for (const provider of ["shopee", "line_oa"]) {
     const tab = { id: 42, url: "https://provider.example/chat" };
     const syncCoordinator = createAccountSyncCoordinator();
     const calls = [];
-    const scope = vm.createContext({ manualBridgeRepair: null, AbortController, syncCoordinator, accountSyncs: syncCoordinator.jobs,
+    const scope = vm.createContext({ manualBridgeRepair: null, accountSyncWaiters: new Set(), AbortController, syncCoordinator, accountSyncs: syncCoordinator.jobs,
       providerAdapterForId: id => ({ id }), providerChatTabById: async () => tab,
       providerTabContext: () => "verified-session", ensureProviderBridge: async () => {},
       detectOpenProviderAccount: async () => ({ ok: true }),
@@ -61,7 +61,7 @@ for (const provider of ["shopee", "line_oa"]) {
       },
     });
     const extract = (start, end) => backgroundSource.slice(backgroundSource.indexOf(start), backgroundSource.indexOf(end, backgroundSource.indexOf(start)));
-    vm.runInContext(extract("function requestAccountSync(", "async function retryProviderAccount(")
+    vm.runInContext(extract("function waitForSyncDependency(", "async function retryProviderAccount(")
       + extract("async function syncAccountsForTab(", "async function resumeSync("), scope);
     const result = await scope.syncAccountsForTab(provider, 42, "manual");
     assert.equal(result.ok, true);

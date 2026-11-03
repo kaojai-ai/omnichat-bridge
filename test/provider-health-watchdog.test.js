@@ -300,7 +300,7 @@ test("unattended failure clears in-progress scan state instead of treating its o
     exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
     getAccountScanState: async () => ({ state, stored: {} }),
     readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
-    writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+    writeAccountScanState: async (_context, patch) => Object.assign(state, typeof patch === "function" ? patch(state) : patch),
     updateScopedState: async (_key, _context, patch) => { status = patch; },
     recordLog: async () => {}, recordUnexpected: async () => {},
     readStorage: async () => ({ scan: { [context.key]: state } }), providerLabel: () => "LINE OA",
@@ -383,7 +383,7 @@ for (const provider of ["shopee", "line_oa"]) {
         exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
         getAccountScanState: async () => ({ state, stored: {} }),
         readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
-        writeAccountScanState: async (_context, patch) => Object.assign(state, patch),
+        writeAccountScanState: async (_context, patch) => Object.assign(state, typeof patch === "function" ? patch(state) : patch),
         updateScopedState: async (_key, _context, patch) => { status = patch; },
         recordLog: async () => {}, recordUnexpected: async () => {},
         readStorage: async () => ({ scan: { [context.key]: state }, pending: { [context.key]: pending } }),
@@ -417,3 +417,44 @@ test("LINE verified history resumes before polling becomes healthy after upgrade
   assert.deepEqual(h.calls.polling, ["account"]);
   assert.equal(h.calls.created, 0);
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  for (const pauseSource of ["user intent", "serialized state"]) {
+    test(`${provider}: failure cleanup observes late ${pauseSource} inside its serialized update`, async () => {
+      const context = { key: `${provider}:a`, account: { provider, provider_account_id: "a" }, adapter: { id: provider } };
+      const control = { accountKey: context.key, controller: new AbortController() };
+      const watermark = "2026-11-02T08:00:00Z";
+      const state = { watermark, started_at: watermark, completed_at: watermark };
+      let reached, release;
+      const atUpdate = new Promise(resolve => { reached = resolve; });
+      const serialized = new Promise(resolve => { release = resolve; });
+      const runtime = vm.createContext({ hasScanBacklog, scanResumePaused, shouldResumeScan,
+        providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
+        STORAGE: { status: "status", scanState: "scan", pending: "pending" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+        exclusive: fn => fn(), throwIfSyncCancelled: () => {},
+        getAccountScanState: async () => ({ state, stored: {} }),
+        readAccountState: (stored, key, fallback) => stored?.[key] ?? fallback,
+        writeAccountScanState: async (_context, patch) => {
+          if (typeof patch === "function") { reached(); await serialized; }
+          Object.assign(state, typeof patch === "function" ? patch(state) : patch);
+        },
+        updateScopedState: async () => {}, recordLog: async () => {}, recordUnexpected: async () => {},
+        readStorage: async () => ({ scan: { [context.key]: { ...state } }, pending: { [context.key]: [{ id: "queued" }] } }),
+        providerLabel: () => provider, attemptDelivery: async () => ({ sent: 0, pending: 1 }),
+        syncOpenProvider: async () => { throw new Error("Provider failed"); },
+      });
+      const helpers = source.slice(source.indexOf("function isCurrentSyncControl("), source.indexOf("async function initializeAndStartSync("));
+      vm.runInContext(helpers + functionSource("runAccountSync", "async function openSessionSyncContexts("), runtime);
+      const failing = runtime.runAccountSync("manual", control, context);
+      await atUpdate;
+      if (pauseSource === "user intent") control.userCancelled = true;
+      else state.resume_paused = true;
+      release();
+      const result = await failing;
+      assert.match(result.error, /Provider failed/);
+      assert.equal(state.resume_paused, true);
+      assert.equal(state.watermark, watermark);
+      assert.equal(state.in_progress, false);
+    });
+  }
+}

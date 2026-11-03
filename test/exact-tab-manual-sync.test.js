@@ -17,7 +17,7 @@ function fixture(provider = "line_oa") {
   const calls = [];
   const syncCoordinator = createAccountSyncCoordinator();
   const recoveries = syncCoordinator.jobs;
-  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, manualBridgeRepair: null, URL, AbortController, Map, Set,
+  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, manualBridgeRepair: null, accountSyncWaiters: new Set(), URL, AbortController, Map, Set,
     STORAGE: {}, hasLocalConsent: () => true, readStorage: async () => ({}),
     configuredAccountContexts: () => contexts, accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
     accountContextFor: (_stored, id, provider) => contexts.find(c => c.account.provider_account_id === id && c.adapter.id === provider),
@@ -39,7 +39,7 @@ function fixture(provider = "line_oa") {
     providerChatTabs: () => assert.fail("Must not enumerate alternative tabs"),
   });
   vm.runInContext(section("async function exactProviderAccountTab(", "// Display metadata is applied")
-    + section("function requestAccountSync(", "async function cancelActiveSync(")
+    + section("function waitForSyncDependency(", "async function cancelActiveSync(")
     + section("async function cancelActiveSync(", "async function clearPersistedSync("), runtime);
   return { runtime, contexts, calls, recoveries,
     close() { tab = null; }, navigate(url) { tab.url = url; epoch++; }, setStatus(value) { status = value; },

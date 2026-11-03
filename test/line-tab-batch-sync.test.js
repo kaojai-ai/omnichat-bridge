@@ -16,7 +16,9 @@ function harness({ pauseSync = false, pauseDetection = false } = {}) {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const tab = { id: 42, url: "https://chat.line.biz/bot-A/chats" };
-  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, manualBridgeRepair: null, AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
+  const runtime = vm.createContext({ exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState, manualBridgeRepair: null, accountSyncWaiters: new Set(), AbortController, Set, Map, crypto, lineTabSyncs: batches, syncCoordinator,
+    syncCancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+    clearPersistedSync: async () => false,
     providerAdapterForId: () => adapter, providerChatTabById: async () => tab, providerAccountMatchesTab: () => true,
     providerTabContext: () => "fixed-session", STORAGE: { status: "status", scanState: "scan" },
     throwIfSyncCancelled: signal => { if (signal?.aborted) throw Object.assign(new Error("cancelled"), { name: "AbortError" }); },
@@ -45,7 +47,7 @@ function harness({ pauseSync = false, pauseDetection = false } = {}) {
     },
   });
   vm.runInContext(part("function syncLineTab(", "async function exactProviderAccountTab(")
-    + part("function requestAccountSync(", "async function clearPersistedSync(")
+    + part("function waitForSyncDependency(", "async function clearPersistedSync(")
     + part("async function syncAccountsForTab(", "async function resumeSync("), runtime);
   return { runtime, calls, batches, release, stored };
 }
@@ -113,3 +115,36 @@ for (const pauseDetection of [false, true]) {
     assert.equal(h.runtime.accountSyncs.size, 0);
   });
 }
+
+test("a new LINE request during upgrade repair survives the old-work cancellation snapshot", async () => {
+  const h = harness();
+  let finishRepair;
+  h.runtime.manualBridgeRepair = new Promise(resolve => { finishRepair = resolve; });
+  const task = h.runtime.syncLineTab(42);
+  assert.equal(h.batches.get(42).waitingForRepair, true);
+  const cancellation = await h.runtime.cancelActiveSync("line_oa", null, "extension_updated");
+  assert.equal(cancellation.cancelled, false);
+  assert.equal(h.calls.length, 0);
+  h.runtime.manualBridgeRepair = null;
+  finishRepair();
+  const result = await task;
+  assert.equal(result.ok, true);
+  assert.equal(h.calls.length, 2);
+});
+
+test("Cancel reaches a LINE request waiting upgrade repair without waiting for that repair", async () => {
+  const h = harness();
+  let finishRepair;
+  h.runtime.manualBridgeRepair = new Promise(resolve => { finishRepair = resolve; });
+  const task = h.runtime.syncLineTab(42);
+  const rejected = assert.rejects(task, { name: "AbortError" });
+  await h.runtime.cancelActiveSync("line_oa", 42);
+  await rejected;
+  assert.equal(h.batches.size, 0);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.stored.scan.accounts, undefined, "no unverified account should be paused");
+  h.runtime.manualBridgeRepair = null;
+  finishRepair();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.calls.length, 0);
+});

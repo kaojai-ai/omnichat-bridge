@@ -50,7 +50,7 @@ function accountHarness() {
   const events = [];
   const finishes = new Map();
   const sandbox = {
-    manualBridgeRepair: null,
+    manualBridgeRepair: null, accountSyncWaiters: new Set(),
     syncCoordinator, accountSyncs: syncCoordinator.jobs, AbortController,
     STORAGE: { config: "config", detectedAccounts: "detected", consent: "consent", serverInitialized: "initialized", logUploadEnabled: "logs" },
     readStorage: async () => ({ consent: true, initialized: true }),
@@ -68,10 +68,11 @@ function accountHarness() {
     queueLiveStateWrite: action => action(), writeStorage: async () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
   };
-  const start = source.indexOf("function requestAccountSync(");
+  const start = source.indexOf("function waitForSyncDependency(");
   const end = source.indexOf("async function retryProviderAccount(", start);
-  const request = vm.runInNewContext(`(${source.slice(start, end).trim()})`, sandbox);
-  return { events, finishes, coordinator: syncCoordinator, request,
+  const request = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return requestAccountSync; })()`, sandbox);
+  return { events, finishes, coordinator: syncCoordinator, request, sandbox,
+    setRepair: dependency => { sandbox.manualBridgeRepair = dependency; },
     context(provider, id) {
       const context = { key: `${provider}:${id}`, adapter: { id: provider }, account: { provider, provider_account_id: id }, config: {} };
       contexts.set(context.key, context);
@@ -332,3 +333,119 @@ for (const provider of ["line_oa", "shopee"]) {
     assert.equal(state.watermark, message.watermark);
   });
 }
+
+for (const provider of ["shopee", "line_oa"]) {
+  for (const dependencyType of ["repair", "predecessor"]) {
+    test(`${provider}: cancelling a ${dependencyType} wait settles without waiting or starting another scan`, async () => {
+      const h = accountHarness(), context = h.context(provider, "a"), barrier = deferred();
+      let previous;
+      if (dependencyType === "repair") h.setRepair(barrier.promise);
+      else {
+        h.finishes.set(context.key, barrier);
+        previous = h.request(context, "automatic", { tab_id: 7 });
+        await tick();
+        h.coordinator.jobs.get(context.key).controller.abort("navigation");
+      }
+      const parent = new AbortController();
+      let added = 0, removed = 0;
+      const add = parent.signal.addEventListener.bind(parent.signal), remove = parent.signal.removeEventListener.bind(parent.signal);
+      parent.signal.addEventListener = (...args) => { added++; return add(...args); };
+      parent.signal.removeEventListener = (...args) => { removed++; return remove(...args); };
+      const waiting = h.request(context, "manual", { tab_id: 7, controller: parent });
+      const rejected = assert.rejects(waiting, { name: "AbortError" });
+      assert.equal(h.sandbox.accountSyncWaiters.size, 1);
+      parent.abort("user_cancelled");
+      await rejected;
+      assert.equal(h.sandbox.accountSyncWaiters.size, 0);
+      assert.equal(added, removed, "parent listeners are released while the dependency remains blocked");
+      h.setRepair(null);
+      barrier.resolve({ recovered: 0 });
+      await previous;
+      await tick();
+      assert.equal(h.events.filter(event => event.startsWith("scan:")).length, dependencyType === "repair" ? 0 : 1);
+    });
+  }
+}
+
+test("an already cancelled caller cannot join or promote another active account sync", async () => {
+  const h = accountHarness(), context = h.context("shopee", "a"), gate = deferred();
+  h.finishes.set(context.key, gate);
+  const active = h.request(context, "automatic", { tab_id: 7 });
+  await tick();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(h.request(context, "manual", { controller }), { name: "AbortError" });
+  assert.equal(h.coordinator.jobs.get(context.key).refreshMetadata, false);
+  gate.resolve({});
+  await active;
+});
+
+test("repair rejection propagates and releases its waiting intent", async () => {
+  const h = accountHarness(), context = h.context("line_oa", "a"), gate = deferred();
+  h.setRepair(gate.promise);
+  const waiting = h.request(context, "manual");
+  const rejected = assert.rejects(waiting, /repair failed/);
+  gate.reject(new Error("repair failed"));
+  await rejected;
+  assert.equal(h.sandbox.accountSyncWaiters.size, 0);
+  assert.equal(h.events.length, 0);
+});
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: dispatcher-style Cancel finds a no-controller repair waiter and releases it`, async () => {
+    const { readAccountState, writeAccountState } = await import("../extension/lib/storage.js");
+    const h = accountHarness(), context = h.context(provider, "a"), barrier = deferred();
+    const stored = { scan: { version: 2, accounts: {} } };
+    Object.assign(h.sandbox, {
+      STORAGE: { ...h.sandbox.STORAGE, scanState: "scan" }, lineTabSyncs: new Map(),
+      exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState,
+      readStorage: async () => stored, writeStorage: async patch => Object.assign(stored, patch),
+      clearPersistedSync: async () => false,
+      sendProviderMessage: () => assert.fail("A waiting request must not cancel shared provider execution"),
+    });
+    const start = source.indexOf("async function pauseSyncAccounts(");
+    const end = source.indexOf("async function clearPersistedSync(", start);
+    const cancel = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return cancelActiveSync; })()`, h.sandbox);
+    h.setRepair(barrier.promise);
+    const waiting = h.request(context, "manual", { tab_id: 7 });
+    const rejected = assert.rejects(waiting, { name: "AbortError" });
+    assert.equal((await cancel(provider, 7)).cancelled, true);
+    await rejected;
+    assert.equal(h.sandbox.accountSyncWaiters.size, 0);
+    assert.equal(readAccountState(stored.scan, context.key, {}).resume_paused, true);
+    h.setRepair(null);
+    barrier.resolve();
+    await tick();
+    assert.equal(h.events.length, 0);
+  });
+}
+
+test("Cancel intent prevents a repair waiter restarting while its durable pause is still writing", async () => {
+  const { readAccountState, writeAccountState } = await import("../extension/lib/storage.js");
+  const h = accountHarness(), context = h.context("shopee", "a"), repair = deferred(), pauseWrite = deferred(), writing = deferred();
+  const stored = { scan: { version: 2, accounts: {} } };
+  Object.assign(h.sandbox, {
+    STORAGE: { ...h.sandbox.STORAGE, scanState: "scan" }, lineTabSyncs: new Map(),
+    exclusive: fn => fn(), serializeAccountStorage: fn => fn(), readAccountState, writeAccountState,
+    readStorage: async () => stored,
+    writeStorage: async patch => { writing.resolve(); await pauseWrite.promise; Object.assign(stored, patch); },
+    clearPersistedSync: async () => false,
+    sendProviderMessage: () => assert.fail("A cancelled waiter must not dispatch to the provider"),
+  });
+  const start = source.indexOf("async function pauseSyncAccounts("), end = source.indexOf("async function clearPersistedSync(", start);
+  const cancel = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return cancelActiveSync; })()`, h.sandbox);
+  h.setRepair(repair.promise);
+  const waiting = h.request(context, "manual", { tab_id: 7 });
+  const rejected = assert.rejects(waiting, { name: "AbortError" });
+  const cancelling = cancel("shopee", 7);
+  await writing.promise;
+  h.setRepair(null);
+  repair.resolve();
+  await rejected;
+  assert.equal(h.coordinator.jobs.size, 0);
+  assert.equal(h.events.length, 0);
+  pauseWrite.resolve();
+  await cancelling;
+  assert.equal(readAccountState(stored.scan, context.key, {}).resume_paused, true);
+  assert.equal(h.sandbox.accountSyncWaiters.size, 0);
+});

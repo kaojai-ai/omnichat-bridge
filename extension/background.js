@@ -179,6 +179,8 @@ const lineTabSyncs = new Map();
 let logMutationQueue = Promise.resolve();
 const syncCoordinator = createAccountSyncCoordinator();
 const accountSyncs = syncCoordinator.jobs;
+// Waiting requests are cancellable intents, not additional scan jobs.
+const accountSyncWaiters = new Set();
 const liveConnections = new Map();
 const liveCommandResults = new Map();
 const apiPingAttempts = new Map();
@@ -3270,8 +3272,11 @@ async function providerChatTabById(adapter, tabId) {
 }
 
 function syncLineTab(tabId) {
-  if (lineTabSyncs.has(tabId)) return lineTabSyncs.get(tabId).task;
-  const batch = { controller: new AbortController(), task: null };
+  const existing = lineTabSyncs.get(tabId);
+  if (existing && !existing.controller.signal.aborted) return existing.task;
+  const batch = { controller: new AbortController(), task: null,
+    predecessor: existing?.task.catch(() => undefined),
+    repair: manualBridgeRepair, waitingForRepair: Boolean(manualBridgeRepair) };
   lineTabSyncs.set(tabId, batch);
   batch.task = runLineTabSync(tabId, batch).finally(() => {
     if (lineTabSyncs.get(tabId) === batch) lineTabSyncs.delete(tabId);
@@ -3280,6 +3285,10 @@ function syncLineTab(tabId) {
 }
 
 async function runLineTabSync(tabId, batch) {
+  if (batch.predecessor) await waitForSyncDependency(batch.predecessor, batch.controller.signal);
+  if (batch.repair) await waitForSyncDependency(batch.repair, batch.controller.signal);
+  batch.waitingForRepair = false;
+  throwIfSyncCancelled(batch.controller.signal);
   return syncAccountsForTab("line_oa", tabId, "manual", { controller: batch.controller });
 }
 
@@ -4176,20 +4185,49 @@ async function syncOpenProvider(control, context) {
   return result;
 }
 
+function waitForSyncDependency(dependency, signal) {
+  let onAbort;
+  const waiting = new Promise((resolve, reject) => {
+    onAbort = () => reject(syncCancelledError());
+    // Observe the dependency even if cancellation wins; its eventual failure
+    // must not become unhandled or cancel shared repair/predecessor work.
+    Promise.resolve(dependency).then(resolve, reject);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+  return waiting.finally(() => signal?.removeEventListener("abort", onAbort));
+}
+
 function requestAccountSync(context, trigger, options = {}) {
+  const parentSignal = options.controller?.signal;
+  if (parentSignal?.aborted) return Promise.reject(syncCancelledError());
   const existing = accountSyncs.get(context.key);
+  const dependency = manualBridgeRepair || (existing && (existing.controller.signal.aborted || existing.userCancelled)
+    ? existing.completion.catch(() => undefined) : null);
+  if (dependency) {
+    const controller = new AbortController();
+    const abortFromParent = () => controller.abort(parentSignal.reason);
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const waiter = { controller, accountKey: context.key, adapter: context.adapter,
+      providerAccountId: context.account.provider_account_id, tabId: options.tab_id ?? null,
+      waitingForDependency: true, waitingForRepair: Boolean(manualBridgeRepair) };
+    accountSyncWaiters.add(waiter);
+    waiter.completion = waitForSyncDependency(dependency, controller.signal).finally(() => {
+      accountSyncWaiters.delete(waiter);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    }).then(() => {
+      if (waiter.userCancelled || controller.signal.aborted || parentSignal?.aborted) throw syncCancelledError();
+      return requestAccountSync(context, trigger, options);
+    });
+    return waiter.completion;
+  }
   if (existing) {
-    if (existing.controller.signal.aborted) {
-      return existing.completion.catch(() => undefined).then(() => requestAccountSync(context, trigger, options));
-    }
     if (trigger === "manual" || options.refresh_metadata) existing.refreshMetadata = true;
     return existing.completion;
   }
-  if (manualBridgeRepair) return manualBridgeRepair.then(() => requestAccountSync(context, trigger, options));
   // Tab cancellation flows down to its jobs; an account losing access must not
   // abort the batch controller and cancel otherwise accessible peer accounts.
   const controller = new AbortController();
-  const parentSignal = options.controller?.signal;
   const abortFromParent = () => controller.abort(parentSignal.reason);
   if (parentSignal?.aborted) abortFromParent();
   else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
@@ -4265,9 +4303,11 @@ async function pauseSyncAccounts(accountKeys) {
 
 async function cancelActiveSync(provider = null, requestedTabId = null, reason = "user_cancelled") {
   if (requestedTabId != null && (!Number.isInteger(requestedTabId) || requestedTabId <= 0)) throw new Error("A valid provider tab is required.");
-  const batches = [...lineTabSyncs.entries()].filter(([tabId]) => (!provider || provider === "line_oa")
+  const batches = [...lineTabSyncs.entries()].filter(([tabId, batch]) => (reason !== "extension_updated" || !batch.waitingForRepair)
+    && (!provider || provider === "line_oa")
     && (requestedTabId == null || requestedTabId === tabId)).map(([, batch]) => batch);
-  const controls = [...accountSyncs.values()].filter(control => (!provider || control.adapter.id === provider)
+  const controls = [...accountSyncs.values(), ...accountSyncWaiters].filter(control => (reason !== "extension_updated" || !control.waitingForRepair)
+    && (!provider || control.adapter.id === provider)
     && (requestedTabId == null || control.tabId === requestedTabId || control.lockedTabId === requestedTabId || control.manualSourceTabId === requestedTabId));
   if (reason === "user_cancelled") {
     for (const control of controls) control.userCancelled = true;
@@ -4275,7 +4315,7 @@ async function cancelActiveSync(provider = null, requestedTabId = null, reason =
   }
   for (const batch of batches) batch.controller.abort(reason);
   for (const control of controls) control.controller.abort(reason);
-  await Promise.allSettled(controls.filter(control => control.tabId).map(control => sendProviderMessage(control.tabId, {
+  await Promise.allSettled(controls.filter(control => control.tabId && !control.waitingForDependency).map(control => sendProviderMessage(control.tabId, {
     type: "cancel_sync_v3", provider: control.adapter.id,
     provider_account_id: control.providerAccountId,
     ...(control.providerRequestId ? { request_id: control.providerRequestId } : {}),
@@ -4460,7 +4500,6 @@ async function runAccountSync(trigger, control, context) {
   } catch (error) {
     if (!isCurrentSyncControl(control)) throw syncCancelledError();
     const cancelled = signal.aborted || error?.name === "AbortError";
-    const userCancelled = control.userCancelled === true || (cancelled && signal.reason === "user_cancelled");
     const message = cancelled
       ? "Sync cancelled."
       : error instanceof Error ? error.message : String(error);
@@ -4468,13 +4507,13 @@ async function runAccountSync(trigger, control, context) {
     const pending = readAccountState(stored[STORAGE.pending], context.key, []);
     const state = readAccountState(stored[STORAGE.scanState], context.key, null);
     if (state) {
-      await writeAccountScanState(context, {
+      await writeAccountScanState(context, current => ({
         in_progress: false,
-        resume_paused: userCancelled,
+        resume_paused: control.userCancelled === true || signal.reason === "user_cancelled" || scanResumePaused(current),
         ...(cancelled
           ? { cancelled_at: new Date().toISOString() }
           : { failed_at: new Date().toISOString() }),
-      });
+      }));
     }
     await updateScopedState(STORAGE.status, context.key, {
       state: cancelled ? "watching" : "error",
@@ -4487,6 +4526,7 @@ async function runAccountSync(trigger, control, context) {
       pending: pending.length,
     });
     if (cancelled) {
+      const userCancelled = control.userCancelled === true || signal.reason === "user_cancelled";
       await recordLog("info", "sync", userCancelled ? "cancelled" : "interrupted", userCancelled ? "Sync cancelled by user." : "Sync interrupted; unfinished history will resume.", {
         provider_account_id: providerAccountId,
         reason_code: typeof signal.reason === "string" ? signal.reason : "internal_interruption",
