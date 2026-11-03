@@ -1083,6 +1083,25 @@ function lastPollingStatus(bridge) {
   return plain(bridge.posts.filter((post) => post.type === "provider_status").at(-1));
 }
 
+
+test("transient LINE inbound poll failure retains verified send account but not fresh inbound evidence", async () => {
+  let fail = false;
+  const bridge = createBridge({ chatCount: 0, beforeChatRequest: () => { if (fail) throw new TypeError("network unavailable"); } });
+  try {
+    await bridge.sync();
+    const successfulAt = lastPollingStatus(bridge).last_successful_poll_at_by_account["@exampleoa"];
+    assert.ok(successfulAt);
+    fail = true;
+    bridge.tick();
+    await settleBridge();
+    const status = lastPollingStatus(bridge);
+    assert.equal(status.account_access_verified, true);
+    assert.equal(status.provider_check_outcome, "passed");
+    assert.equal(status.last_successful_poll_at_by_account["@exampleoa"], successfulAt);
+    assert.ok(bridge.posts.some(post => post.type === "recovery_complete" && post.ok === false));
+  } finally { bridge.dispose(); }
+});
+
 test("LINE OA restores and continuously polls three accounts from one tab", async () => {
   const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0 });
   for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
