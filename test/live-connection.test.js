@@ -214,6 +214,37 @@ test("recent incoming socket activity suppresses unnecessary keepalive traffic",
   assert.equal(h.sockets[0].sent.length, 1);
 });
 
+test("extension local timeout ignores worker clock and bounds commands without a deadline", async () => {
+  const logs = [];
+  let sentCommand;
+  const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+  const command = { provider: "shopee", provider_account_id: "shop", request_id: "skewed",
+    type: "send_text", deadline_at_ms: 2_000_000, server_sent_at_ms: 1_990_000,
+    execution_budget_ms: 5_000 };
+  const start = source.indexOf("async function handleLiveCommand(");
+  const end = source.indexOf("\nchrome.storage.onChanged", start);
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    preemptAutomaticLogUpload: () => {}, recordLog: async (_level, _area, event, _message, details) => logs.push({ event, details }),
+    liveCommandResults: new Map(), liveConnections: new Map(), scheduleKeepalive: () => {},
+    WebSocket: { OPEN: 1 }, Date: { now: () => 1_000_000 },
+    sessionEligibility: verifiedSession(account.key),
+    providerAdapterForCommand: () => ({ id: "shopee", supportsSend: () => true }),
+    messageProviderAccountId: value => value.provider_account_id, canonicalProviderAccountId: () => "shop",
+    replyQueue: { run: (_account, action) => action() },
+    sendViaProvider: async value => { sentCommand = value; return { ok: true, provider_message_id: "receipt" }; },
+    recordUnexpected: async () => {}, sendConnectionStatus: async () => {}, installationId: async () => "installation",
+  });
+  await run(JSON.stringify(command), { ...account, account: { provider: "shopee", provider_account_id: "shop" } }, socket);
+  assert.equal(sentCommand.deadline_at_ms, 1_030_000);
+  assert.equal(logs.find(row => row.event === "received").details.timeout_origin, "extension_local");
+  assert.equal(socket.sent[0].request_id, "skewed");
+  await run(JSON.stringify({ ...command, request_id: "no-deadline", deadline_at_ms: undefined,
+    server_sent_at_ms: undefined, execution_budget_ms: undefined }),
+    { ...account, account: { provider: "shopee", provider_account_id: "shop" } }, socket);
+  assert.equal(sentCommand.deadline_at_ms, 1_030_000);
+  assert.equal(socket.sent[1].request_id, "no-deadline");
+});
+
 test("duplicate commands share one provider operation and replay its acknowledgement", async () => {
   const pending = deferred();
   let sends = 0;
