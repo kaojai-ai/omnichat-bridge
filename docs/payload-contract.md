@@ -278,10 +278,16 @@ its stored retry time; explicit retry can bypass that backoff. Reload backoff do
 not suspend provider health checks. Capture failures and stale checks suppress
 readiness even when the bridge socket remains connected.
 
-Commands may optionally include `deadline_at_ms` (Unix milliseconds). Older
-extensions may ignore it; updated extensions stop before native sending if the
-deadline has expired. An absent deadline preserves legacy behavior. A deadline
-or lost response after native dispatch does not prove rejection: existing
+Socket commands may optionally include `execution_budget_ms`, a finite duration
+in milliseconds. The extension converts it to a browser-local `deadline_at_ms`
+once on receipt, before queueing; queueing, preparation, sending and confirmation
+share that deadline. Text/image/product commands are capped at 8 seconds and
+video/file commands at 25 seconds. Commands without a budget use those same
+caps; invalid or non-positive budgets expire before sending. Server timestamps
+are not compared with the browser clock. Older extensions may ignore the budget.
+Targets should reserve acknowledgement time outside the execution budget;
+KaoJai's worker reserves 1 second and reduces execution for shorter caller budgets.
+A deadline or lost response after native dispatch does not prove rejection: existing
 `send_result.uncertain` remains the delivery-uncertainty signal. The extension
 preserves it across the page/content/background boundaries.
 

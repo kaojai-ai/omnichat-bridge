@@ -2987,9 +2987,11 @@ async function handleLiveCommand(raw, context, socket) {
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   if (typeof command.request_id !== "string" || !command.request_id) return;
-  // Bound local queue and provider work without interpreting a server epoch
-  // using this browser's wall clock. Worker acknowledgement has its own timer.
-  const localTimeoutMs = 30_000;
+  // Convert the worker's relative budget once, before queueing. Never compare
+  // clocks across devices or give queued commands a fresh execution window.
+  const maxTimeoutMs = command.type === "send_video" || command.type === "send_file" ? 25_000 : 8_000;
+  const localTimeoutMs = command.execution_budget_ms === undefined ? maxTimeoutMs
+    : Number.isFinite(command.execution_budget_ms) ? Math.max(0, Math.min(maxTimeoutMs, command.execution_budget_ms)) : 0;
   command.deadline_at_ms = Date.now() + localTimeoutMs;
   let acknowledgementStatus = "socket_unavailable";
   const acknowledge = (result) => {
@@ -3018,7 +3020,7 @@ async function handleLiveCommand(raw, context, socket) {
     request_id: command.request_id, provider: adapter.id,
     provider_account_id: context.account.provider_account_id,
     remaining_budget_ms: Math.max(0, command.deadline_at_ms - Date.now()),
-    timeout_origin: "extension_local",
+    timeout_origin: command.execution_budget_ms === undefined ? "extension_local" : "worker_budget",
   });
   if (!cached) {
     if (liveCommandResults.size >= 200) {
