@@ -10,7 +10,7 @@ export function routeLogEntries(contexts, entries) {
   return entries.map(entry => keys.has(entry.account_key) ? entry
     : { ...entry, account_key: contexts[0]?.key, scope: "installation" });
 }
-export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 100, pending = {}) {
+export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 100, pending = {}, automatic = false) {
   for (let step = 0; step < contexts.length; step++) {
     const index = (cursor + step) % contexts.length;
     const context = contexts[index];
@@ -22,9 +22,16 @@ export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 1
       ? saved.entry_ids.slice(0, max).map(id => byId.get(id)).filter(Boolean) : [];
     // Entries evicted by normal retention remain lost; never add new entries to
     // an uncertain batch or change its id when only part of it is retained.
-    const logs = retained.length ? retained : available.reverse().slice(0, max);
+    const candidates = available.reverse().filter(entry => !automatic || entry.level !== "debug");
+    if (automatic) candidates.sort((a, b) => Number(important(b)) - Number(important(a)));
+    const logs = retained.length ? retained : candidates.slice(0, max);
     if (logs.length) return { context, logs, cursor: (index + 1) % contexts.length,
       ...(retained.length ? { batchId: saved.batch_id } : {}) };
   }
   return null;
+}
+
+function important(entry) {
+  return entry.level === "warn" || entry.level === "error"
+    || (entry.area === "live" && ["readiness_changed", "readiness_snapshot", "connected", "disconnected", "leader_changed"].includes(entry.event));
 }

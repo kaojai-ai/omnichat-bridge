@@ -185,6 +185,14 @@ test("readiness diagnostics publish changed states once without recording messag
   await send(socket, account);
   assert.equal(sent.length, 5, "unchanged status refreshes server presence each minute");
   assert.equal(logs.length, 4, "unchanged status does not add a transition log");
+  now = 5 * 60_000;
+  await send(socket, account);
+  assert.equal(logs.length, 5);
+  assert.equal(logs.at(-1).event, "readiness_snapshot");
+  now += 60_000;
+  await send(socket, account);
+  assert.equal(logs.length, 5, "snapshot does not repeat every minute");
+
 });
 
 test("ticket timeout releases the guard even if the request never settles", async () => {

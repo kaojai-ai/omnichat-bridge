@@ -290,3 +290,24 @@ export function readinessLogDetails(status, { provider, tabId, accountId, ready 
     ready,
   };
 }
+
+// ponytail: bounded worker-local suppression; restart deliberately records the first observation again.
+export function createDetectionLogFilter(now = Date.now) {
+  const observations = new Map();
+  return (level, area, event, details) => {
+    if (level !== "info" || area !== "provider" || event !== "account_detected"
+      || !details.provider || !details.provider_account_id) return details;
+    const key = JSON.stringify([details.provider, details.provider_account_id]);
+    const fingerprint = JSON.stringify(sanitizeLogDetails(details));
+    const previous = observations.get(key);
+    const at = now();
+    if (previous?.fingerprint === fingerprint && at - previous.at < 5 * 60_000) {
+      previous.suppressed += 1;
+      return null;
+    }
+    observations.delete(key);
+    if (observations.size >= 512) observations.delete(observations.keys().next().value);
+    observations.set(key, { at, fingerprint, suppressed: 0 });
+    return previous?.suppressed ? { ...details, suppressed_count: previous.suppressed } : details;
+  };
+}

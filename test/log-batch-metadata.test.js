@@ -13,7 +13,7 @@ for (const [configuredName, expectedName] of [['  Majestic Chrome  ', 'Majestic 
   test(`log batch identifies the installation using ${configuredName ? 'the configured device name' : 'its id when unnamed'}`, async () => {
     let request;
     const send = vm.runInNewContext(source.slice(start, end) + '\nsendLogBatch', {
-      URL, crypto: webcrypto, STORAGE: { deviceName: 'name' },
+      performance, URL, crypto: webcrypto, STORAGE: { deviceName: 'name' },
       readStorage: async () => ({ name: configuredName }), installationId: async () => installation,
       normalizeDeviceName: name => name?.trim() ?? '',
       chrome: { runtime: { getManifest: () => ({ version: '0.8.5' }) } },
@@ -38,3 +38,22 @@ for (const [configuredName, expectedName] of [['  Majestic Chrome  ', 'Majestic 
     assert.equal(payload.hmac_secret, undefined);
   });
 }
+
+test('automatic request budget includes metadata preparation', async () => {
+  let now = 0;
+  let timeout;
+  const send = vm.runInNewContext(source.slice(start, end) + '\nsendLogBatch', {
+    performance: { now: () => now }, URL, crypto: webcrypto, STORAGE: { deviceName: 'name' },
+    readStorage: async () => { now += 1500; return { name: 'device' }; },
+    installationId: async () => installation, normalizeDeviceName: value => value,
+    chrome: { runtime: { getManifest: () => ({ version: '0.9.2' }) } },
+    canonicalProviderAccountId: context => context.account.provider_account_id,
+    logEntryForUpload, sha256Hex: async () => 'hash', hmacHex: async () => 'signature',
+    withRequestTimeout: async (fn, milliseconds) => { timeout = milliseconds; return fn(); },
+    fetch: async () => ({ ok: true }),
+  });
+  await send({ config: { logs_url: 'https://ingress.kaojai.ai/logs/omnichat', hmac_secret: 'test' },
+    account: { provider: 'shopee', provider_account_id: 'shop' } }, [],
+  { automatic: true, batchId: '22222222-2222-4222-8222-222222222222', timeoutMs: 4000 });
+  assert.equal(timeout, 2500);
+});
