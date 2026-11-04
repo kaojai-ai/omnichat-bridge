@@ -3040,8 +3040,10 @@ async function handleLiveCommand(raw, context, socket) {
             ok: true, provider_message_id: sent.provider_message_id });
         }
         return sent;
-      }).catch((error) => ({
+      }, { waitMs: localTimeoutMs }).catch((error) => ({
         ok: false, error: error instanceof Error ? error.message : String(error),
+        ...(error?.name === "QueueTimeoutError" ? { execution_stage: "queue", dispatch_started: false,
+          retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" } : {}),
         ...(sanitizeSendDiagnostics(error?.diagnostics) ? { diagnostics: sanitizeSendDiagnostics(error.diagnostics) } : {}),
       })),
     };

@@ -285,8 +285,12 @@ share that deadline. Text/image/product commands are capped at 8 seconds and
 video/file commands at 25 seconds. Commands without a budget use those same
 caps; invalid or non-positive budgets expire before sending. Server timestamps
 are not compared with the browser clock. Older extensions may ignore the budget.
+Commands that expire while queued immediately report a pre-dispatch failure and
+are skipped when their queue slot opens, including duplicate requests.
 Targets should reserve acknowledgement time outside the execution budget;
 KaoJai's worker reserves 1 second and reduces execution for shorter caller budgets.
+The budget starts on browser receipt; delayed socket delivery can still outlast
+the worker's wait. This is not a server-validated execution lease.
 A deadline or lost response after native dispatch does not prove rejection: existing
 `send_result.uncertain` remains the delivery-uncertainty signal. The extension
 preserves it across the page/content/background boundaries.
