@@ -444,3 +444,36 @@ test("resolves legacy LINE channel identity from the scoped API for both account
     assert.equal(resolve({ ...context, account: { provider: "shopee", provider_account_id: "shop-1" } }), "shop-1");
   }
 });
+
+for (const provider of ['line_oa', 'shopee']) {
+  test(`${provider}: shared checkpoint response caps stale recovery at one week without rewriting stored coverage`, async () => {
+    const now = Date.parse('2026-11-04T07:00:00Z');
+    const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1_000).toISOString();
+    const start = source.indexOf('  if (message?.type === "get_sync_state")');
+    const end = source.indexOf('  if (message?.type === "discard_pending")', start);
+    let state;
+    let history = null;
+    const read = vm.runInNewContext(`(message => new Promise(resolve => {
+      const respond = resolve;
+      ${source.slice(start, end)}
+    }))`, {
+      Date: class extends Date { static now() { return now; } },
+      exclusive: action => action(), getAccountScanState: async () => ({ state }),
+      STORAGE: {}, readStorage: async () => ({}), historySyncSettings: () => history,
+      historySinceMs: days => now - days * 24 * 60 * 60 * 1_000,
+    });
+    for (const watermark of ['2026-10-02T08:22:04.759Z', '2026-11-03T07:00:00.000Z', weekAgo, null, 'invalid']) {
+      state = { version: 1, watermark, in_progress: true, conversations: { chat: { event_timestamp: '2026-11-03T08:00:00Z', message_id: 'id' } } };
+      const saved = JSON.stringify(state);
+      const result = await read({ type: 'get_sync_state', provider, provider_account_id: 'account' });
+      assert.equal(result.ok, true);
+      assert.equal(result.checkpoint.watermark, watermark === '2026-10-02T08:22:04.759Z' ? weekAgo : watermark);
+      assert.equal(result.checkpoint.conversations, state.conversations);
+      assert.equal(JSON.stringify(state), saved, 'read must not mark skipped history as durably complete');
+    }
+    history = { days: 30, conversation_ids: ['chat'] };
+    const explicit = await read({ type: 'get_sync_state', provider, provider_account_id: 'account' });
+    assert.equal(explicit.history_days, 30);
+    assert.equal(explicit.history_since_ms, now - 30 * 24 * 60 * 60 * 1_000);
+  });
+}

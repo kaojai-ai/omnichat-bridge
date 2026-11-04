@@ -1131,6 +1131,11 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "get_sync_state") {
     void exclusive(async () => {
       const { state } = await getAccountScanState(message.provider_account_id, message.provider);
+      const watermark = Date.parse(state.watermark ?? "");
+      // Limit normal catch-up without advancing durable coverage before success.
+      const checkpoint = watermark > 0 ? { ...state,
+        watermark: new Date(Math.max(watermark, Date.now() - 7 * 24 * 60 * 60 * 1_000)).toISOString(),
+      } : state;
       const stored = await readStorage([STORAGE.config]);
       let history = null;
       try {
@@ -1139,7 +1144,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
         history = null;
       }
       return {
-        checkpoint: state,
+        checkpoint,
         ...(history ? {
           history_days: history.days,
           history_since_ms: historySinceMs(history.days),
