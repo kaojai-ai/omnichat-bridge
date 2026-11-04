@@ -507,3 +507,43 @@ test("outbound selection does not await a stalled extra tab", async () => {
   const selected = await h.scope.sendReadiness(h.context);
   assert.equal(selected.evidence.tab.id, h.tab.id);
 });
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: malformed tab responses stay uncertain through socket acknowledgement and duplicate replay`, async () => {
+    for (const response of [undefined, null, "invalid", {}, [], { ok: "true" }, { ok: 0 }]) {
+      const h = fixture(provider);
+      await h.assess();
+      let sends = 0;
+      wireSender(h, async () => { sends++; return response; });
+      const socket = { readyState: 1, sent: [], send(body) { this.sent.push(JSON.parse(body)); } };
+      const command = JSON.stringify({ provider, provider_account_id: "shop", type: "send_text",
+        conversation_id: "conversation", request_id: "malformed", text: "fixture" });
+      await h.scope.handleLiveCommand(command, h.context, socket);
+      await h.scope.handleLiveCommand(command, h.context, socket);
+      assert.equal(sends, 1, "an ambiguous provider attempt must never be sent again");
+      assert.equal(socket.sent.length, 2);
+      for (const result of socket.sent) {
+        assert.equal(result.ok, false);
+        assert.equal(result.uncertain, true);
+        assert.equal(result.dispatch_started, true);
+        assert.equal(result.execution_stage, "provider_dispatch");
+        assert.equal(result.retryable, false);
+        assert.equal(result.error_code, "OMNICHAT_PROVIDER_RESULT_MISSING");
+      }
+    }
+  });
+  test(`${provider}: valid provider success, rejection and uncertainty preserve their outcome`, async () => {
+    for (const response of [{ ok: true, provider_message_id: "receipt" },
+      { ok: false, error: "Provider rejected reply." }, { ok: false, uncertain: true, error: "Unconfirmed." }]) {
+      const h = fixture(provider);
+      await h.assess();
+      wireSender(h, async () => response);
+      const result = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+        conversation_id: "conversation", request_id: "valid", text: "fixture" });
+      assert.equal(result.ok, response.ok);
+      assert.equal(result.uncertain, response.uncertain);
+      assert.equal(result.provider_message_id, response.provider_message_id);
+      assert.equal(result.dispatch_started, true);
+    }
+  });
+}

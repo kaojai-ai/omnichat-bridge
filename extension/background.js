@@ -1593,12 +1593,6 @@ async function sendViaProvider(message, options = {}) {
   activeProviderSendAccounts.add(accountKey);
   try {
     const result = await prepareAndSendViaProvider(message, state);
-    if (state.dispatchStarted && (!result || typeof result !== "object")) return {
-      ok: false, uncertain: true, dispatch_started: true,
-      execution_stage: "provider_dispatch", retryable: false,
-      error_code: "OMNICHAT_PROVIDER_RESULT_MISSING",
-      error: "Provider reply result was missing. Check provider history before retrying.",
-    };
     return { ...result, diagnostics: { diagnostic_version: 1, ...result?.diagnostics, preparation_duration_ms: Math.round((state.dispatchStartedAt ?? (globalThis.performance?.now() ?? Date.now())) - started), total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started) } };
   } catch (error) {
     const timing = { preparation_duration_ms: Math.round((state.dispatchStartedAt ?? (globalThis.performance?.now() ?? Date.now())) - started), total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started) };
@@ -1705,7 +1699,7 @@ async function prepareAndSendViaProvider(message, state = {}) {
   // Once the command reaches the provider tab, an absent or malformed response
   // cannot prove the provider did not accept it. Never turn this into a
   // pre-dispatch rejection that could be sent again on another installation.
-  if (!result || typeof result !== "object") return {
+  if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.ok !== "boolean") return {
     ok: false, uncertain: true, dispatch_started: true,
     execution_stage: "provider_dispatch", retryable: false,
     error_code: "OMNICHAT_PROVIDER_RESULT_MISSING",
