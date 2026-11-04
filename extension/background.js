@@ -1696,7 +1696,15 @@ async function prepareAndSendViaProvider(message, state = {}) {
       diagnostics: { diagnostic_version: 1, provider: adapter.id, operation: "send",
         command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure", timed_out: true } };
   }
-  if (!result || typeof result !== "object") return result;
+  // Once the command reaches the provider tab, an absent or malformed response
+  // cannot prove the provider did not accept it. Never turn this into a
+  // pre-dispatch rejection that could be sent again on another installation.
+  if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.ok !== "boolean") return {
+    ok: false, uncertain: true, dispatch_started: true,
+    execution_stage: "provider_dispatch", retryable: false,
+    error_code: "OMNICHAT_PROVIDER_RESULT_MISSING",
+    error: "Provider reply result was missing. Check provider history before retrying.",
+  };
   const { diagnostics, ...reply } = result;
   const safeDiagnostics = sanitizeSendDiagnostics(diagnostics);
   return { dispatch_started: true, execution_stage: reply.ok ? "completed" : "provider_dispatch", retryable: false, ...reply, ...(safeDiagnostics ? { diagnostics: safeDiagnostics } : {}) };
