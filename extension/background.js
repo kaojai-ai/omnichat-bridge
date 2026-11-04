@@ -16,6 +16,7 @@ import {
   diagnosticErrorDetails,
   readinessLogDetails,
   sanitizeSendDiagnostics,
+  sanitizeLogDetails,
   logEntryForUpload,
   pruneLogs,
   createDetectionLogFilter,
@@ -229,7 +230,13 @@ const diagnosticBuffer = createDiagnosticBuffer({
     ]);
     const entries = rows.map(({ entry }) => {
       const context = accountContextFor(stored, entry.details?.provider_account_id, entry.details?.provider);
-      return { ...entry, ...(context ? { account_key: context.key } : {}) };
+      return { ...entry, ...(context ? {
+        account_key: context.key,
+        details: { ...entry.details, ...sanitizeLogDetails({
+          browser_provider_account_id: context.account.provider_account_id,
+          canonical_provider_account_id: canonicalProviderAccountId(context),
+        }) },
+      } : {}) };
     });
     const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
     const logs = pruneLogs([...entries.reverse(), ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
@@ -1124,6 +1131,11 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "get_sync_state") {
     void exclusive(async () => {
       const { state } = await getAccountScanState(message.provider_account_id, message.provider);
+      const watermark = Date.parse(state.watermark ?? "");
+      // Limit normal catch-up without advancing durable coverage before success.
+      const checkpoint = watermark > 0 ? { ...state,
+        watermark: new Date(Math.max(watermark, Date.now() - 7 * 24 * 60 * 60 * 1_000)).toISOString(),
+      } : state;
       const stored = await readStorage([STORAGE.config]);
       let history = null;
       try {
@@ -1132,7 +1144,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
         history = null;
       }
       return {
-        checkpoint: state,
+        checkpoint,
         ...(history ? {
           history_days: history.days,
           history_since_ms: historySinceMs(history.days),
@@ -2651,8 +2663,10 @@ async function connectionStatusSnapshot(context) {
   const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
   const ready = samePolicy && current?.eligible === true;
   const sendReady = ready && !current?.unknown;
+  // LINE page evidence uses the browser account ID; canonical IDs belong to
+  // the target server and may differ (for example, a numeric channel ID).
   const checkedAt = Date.parse(adapter.id === "line_oa"
-    ? providerStatus?.last_successful_poll_at_by_account?.[canonicalProviderAccountId(context)] ?? ""
+    ? providerStatus?.last_successful_poll_at_by_account?.[context.account.provider_account_id] ?? ""
     : providerStatus?.last_provider_check_at ?? "");
   const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
   const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
@@ -3001,9 +3015,11 @@ async function handleLiveCommand(raw, context, socket) {
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
   if (typeof command.request_id !== "string" || !command.request_id) return;
-  // Bound local queue and provider work without interpreting a server epoch
-  // using this browser's wall clock. Worker acknowledgement has its own timer.
-  const localTimeoutMs = 30_000;
+  // Convert the worker's relative budget once, before queueing. Never compare
+  // clocks across devices or give queued commands a fresh execution window.
+  const maxTimeoutMs = command.type === "send_video" || command.type === "send_file" ? 25_000 : 8_000;
+  const localTimeoutMs = command.execution_budget_ms === undefined ? maxTimeoutMs
+    : Number.isFinite(command.execution_budget_ms) ? Math.max(0, Math.min(maxTimeoutMs, command.execution_budget_ms)) : 0;
   command.deadline_at_ms = Date.now() + localTimeoutMs;
   let acknowledgementStatus = "socket_unavailable";
   const acknowledge = (result) => {
@@ -3032,7 +3048,7 @@ async function handleLiveCommand(raw, context, socket) {
     request_id: command.request_id, provider: adapter.id,
     provider_account_id: context.account.provider_account_id,
     remaining_budget_ms: Math.max(0, command.deadline_at_ms - Date.now()),
-    timeout_origin: "extension_local",
+    timeout_origin: command.execution_budget_ms === undefined ? "extension_local" : "worker_budget",
   });
   if (!cached) {
     if (liveCommandResults.size >= 200) {
@@ -3052,8 +3068,10 @@ async function handleLiveCommand(raw, context, socket) {
             ok: true, provider_message_id: sent.provider_message_id });
         }
         return sent;
-      }).catch((error) => ({
+      }, { waitMs: localTimeoutMs }).catch((error) => ({
         ok: false, error: error instanceof Error ? error.message : String(error),
+        ...(error?.name === "QueueTimeoutError" ? { execution_stage: "queue", dispatch_started: false,
+          retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" } : {}),
         ...(sanitizeSendDiagnostics(error?.diagnostics) ? { diagnostics: sanitizeSendDiagnostics(error.diagnostics) } : {}),
       })),
     };

@@ -411,7 +411,7 @@ test("worker deadline releases a stalled reply queue and caches uncertain delive
   });
   const socket = { readyState: 1, sent: [], send(body) { this.sent.push(JSON.parse(body)); } };
   const command = (request, deadline) => JSON.stringify({ provider: "line_oa", provider_account_id: "shop",
-    type: "send_text", conversation_id: "conversation", request_id: request, deadline_at_ms: deadline, text: "fixture" });
+    type: "send_text", conversation_id: "conversation", request_id: request, execution_budget_ms: deadline - 100_000, text: "fixture" });
   const stalled = command("stalled", 100_020);
   await Promise.all([
     h.scope.handleLiveCommand(stalled, h.context, socket),
@@ -426,6 +426,21 @@ test("worker deadline releases a stalled reply queue and caches uncertain delive
   assert.equal(socket.sent.find(result => result.request_id === "next").ok, true);
   await h.scope.handleLiveCommand(stalled, h.context, socket);
   assert.equal(attempts.filter(id => id === "stalled").length, 1);
+});
+
+test("a command that exhausts its relative budget in queue never reaches the provider", async () => {
+  const h = fixture();
+  await h.assess();
+  let attempts = 0;
+  wireSender(h, async () => { attempts++; return { ok: true, provider_message_id: "receipt" }; });
+  h.scope.replyQueue = { run: (_key, action) => { h.now = 100_021; return action(); } };
+  const socket = { readyState: 1, sent: [], send(body) { this.sent.push(JSON.parse(body)); } };
+  await h.scope.handleLiveCommand(JSON.stringify({ provider: "shopee", provider_account_id: "shop",
+    type: "send_text", conversation_id: "conversation", request_id: "queued", execution_budget_ms: 20 }), h.context, socket);
+  assert.equal(attempts, 0);
+  assert.equal(socket.sent[0].dispatch_started, false);
+  assert.equal(socket.sent[0].error_code, "OMNICHAT_DEADLINE_EXPIRED");
+  assert.notEqual(socket.sent[0].uncertain, true);
 });
 
 test("expired bridge preflight cannot dispatch a late reply", async () => {

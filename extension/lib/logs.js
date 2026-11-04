@@ -17,6 +17,8 @@ const IDENTIFIER_DETAIL_KEYS = new Set([
   "current_provider_account_id",
   "server_error_code",
   "provider_account_id",
+  "browser_provider_account_id",
+  "canonical_provider_account_id",
   "message_key",
   "message_id",
   "conversation_id",
@@ -147,7 +149,7 @@ function errorCategory(text, status) {
 }
 
 const ACCOUNT_IDENTIFIER_KEYS = new Set([
-  "provider_account_id", "current_provider_account_id", "sender_account_id", "recipient_account_id",
+  "provider_account_id", "browser_provider_account_id", "canonical_provider_account_id", "current_provider_account_id", "sender_account_id", "recipient_account_id",
 ]);
 
 function sanitizeIdentifier(value, key) {

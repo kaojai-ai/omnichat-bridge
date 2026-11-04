@@ -15,6 +15,7 @@ import {
   logEntryForUpload,
   pruneLogs,
   sanitizeSendDiagnostics,
+  sanitizeLogDetails,
 } from "../extension/lib/logs.js";
 
 test("background accepts route diagnostics and stores sanitized correlation details", async () => {
@@ -416,4 +417,42 @@ test("Shopee recovery acknowledgement diagnostics retain only bounded stage and 
     operation: "recovery", stage: "scan_checkpoint_save", failure_kind: "ack_rejected",
     response_body: "private" }), { diagnostic_version: 1, provider: "shopee",
     operation: "recovery", stage: "scan_checkpoint_save", failure_kind: "ack_rejected" });
+});
+
+for (const account of [
+  { provider: "line_oa", id: "@first", canonical: "2000000001" },
+  { provider: "line_oa", id: "@second", canonical: "@second" },
+  { provider: "shopee", id: "shop-1", canonical: "shop-1" },
+]) {
+  test(`persisted ${account.provider} logs retain both IDs without changing routing`, async () => {
+    const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
+    const storage = {};
+    let buffer;
+    const context = { key: `${account.provider}:${account.id}`, account: { provider: account.provider, provider_account_id: account.id } };
+    const record = vm.runInNewContext(source.slice(source.indexOf("let diagnosticsSuspended ="), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
+      STORAGE: { logs: "logs", logOutbox: "outbox" },
+      chrome: { storage: { local: { getBytesInUse: async () => 0, QUOTA_BYTES: 10 * 1024 * 1024 } } },
+      createDiagnosticBuffer: options => (buffer = createDiagnosticBuffer({ ...options, setTimer: () => 1, clearTimer: () => {} })),
+      mutateLogs: fn => fn(), readStorage: async () => storage, writeStorage: async value => Object.assign(storage, value),
+      accountContextFor: (_stored, id, provider) => id === account.id && provider === account.provider ? context : null,
+      canonicalProviderAccountId: () => account.canonical,
+      createDetectionLogFilter, pruneLogs, availableLogBudget, sanitizeLogDetails,
+    });
+    await record("error", "provider", "send_failed", "Reply failed.", { provider: account.provider, provider_account_id: account.id });
+    await record("info", "extension", "loaded", "Extension started.");
+    await buffer.drain();
+    const entry = storage.logs.find(row => row.event === "send_failed");
+    assert.equal(entry.account_key, context.key);
+    assert.equal(entry.details.provider_account_id, account.id);
+    assert.equal(entry.details.browser_provider_account_id, account.id);
+    assert.equal(entry.details.canonical_provider_account_id, account.canonical);
+    assert.deepEqual(logEntryForUpload(entry).details, entry.details);
+    assert.equal(storage.logs.find(row => row.event === "loaded").details.canonical_provider_account_id, undefined);
+  });
+}
+
+test("account correlation fields preserve LINE IDs while redacting emails", () => {
+  assert.deepEqual(sanitizeLogDetails({ browser_provider_account_id: "@first", canonical_provider_account_id: "2000000001" }),
+    { browser_provider_account_id: "@first", canonical_provider_account_id: "2000000001" });
+  assert.equal(sanitizeLogDetails({ canonical_provider_account_id: "person@example.com" }).canonical_provider_account_id, "[redacted]");
 });
