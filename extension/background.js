@@ -16,6 +16,7 @@ import {
   diagnosticErrorDetails,
   readinessLogDetails,
   sanitizeSendDiagnostics,
+  sanitizeLogDetails,
   logEntryForUpload,
   pruneLogs,
   createDetectionLogFilter,
@@ -229,7 +230,13 @@ const diagnosticBuffer = createDiagnosticBuffer({
     ]);
     const entries = rows.map(({ entry }) => {
       const context = accountContextFor(stored, entry.details?.provider_account_id, entry.details?.provider);
-      return { ...entry, ...(context ? { account_key: context.key } : {}) };
+      return { ...entry, ...(context ? {
+        account_key: context.key,
+        details: { ...entry.details, ...sanitizeLogDetails({
+          browser_provider_account_id: context.account.provider_account_id,
+          canonical_provider_account_id: canonicalProviderAccountId(context),
+        }) },
+      } : {}) };
     });
     const budget = availableLogBudget(totalBytes, currentLogBytes, local.QUOTA_BYTES);
     const logs = pruneLogs([...entries.reverse(), ...(Array.isArray(stored[STORAGE.logs]) ? stored[STORAGE.logs] : [])], Date.now(), budget);
