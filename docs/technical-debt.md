@@ -44,7 +44,8 @@ in [LINE attachments](line-oa-attachments.md).
 An open socket is transport liveness, not proof the provider can send.
 Readiness reports are change-driven. Idle keepalives run every 20 seconds;
 connection attempts have bounded timeouts and exponential reconnect backoff.
-Commands may carry `deadline_at_ms`. An uncertain result must not trigger a
+Socket commands may carry relative `execution_budget_ms`; the browser derives
+one local deadline before queueing. An uncertain result must not trigger a
 blind resend. The two-minute in-memory request-result cache is not durable or
 an exactly-once guarantee.
 

@@ -47,9 +47,9 @@ function harness(sendViaProvider) {
   } };
   return {
     replyQueue, sessionEligibility, background, events, socket, update,
-    send(request, account = "shop", provider = "shopee") {
+    send(request, account = "shop", provider = "shopee", execution_budget_ms) {
       sessionEligibility.observe(`${provider}:${account}`, { preemptAutomaticLogUpload: () => {}, hasTab: true, verified: true });
-      return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request }),
+      return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request, execution_budget_ms }),
         { key: `${provider}:${account}`, account: { provider, provider_account_id: account } }, socket);
     },
   };
@@ -154,4 +154,28 @@ test("unchanged selected tabs do not repeatedly read or write storage", async ()
   assert.equal(writes, 2);
   await Promise.all([remember("shopee:one", 4), remember("shopee:one", 2)]);
   assert.equal(stored["shopee:one"], 2, "a pending replacement cannot hide a later selection of the previous tab");
+});
+
+test("queued expiry reports not sent before the preceding send finishes and never executes later", async () => {
+  const first = deferred();
+  const started = [];
+  const h = harness(command => {
+    started.push(command.request_id);
+    return first.promise;
+  });
+  const active = h.send("active");
+  await tick();
+  await h.send("expired", "shop", "shopee", 10);
+  const failure = h.socket.sent.find(result => result.request_id === "expired");
+  assert.equal(failure.ok, false);
+  assert.equal(failure.execution_stage, "queue");
+  assert.equal(failure.dispatch_started, false);
+  assert.equal(failure.error_code, "OMNICHAT_DEADLINE_EXPIRED");
+  assert.notEqual(failure.uncertain, true);
+  assert.deepEqual(started, ["active"]);
+  await h.send("expired", "shop", "shopee", 10);
+  first.resolve({ ok: true, provider_message_id: "receipt" });
+  await active;
+  await tick();
+  assert.deepEqual(started, ["active"], "expired commands and duplicates stay cancelled");
 });
