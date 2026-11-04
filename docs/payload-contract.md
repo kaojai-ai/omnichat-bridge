@@ -209,6 +209,12 @@ enabled when sync is initialized (manually or through configured automatic sync)
 not block message sync. Changing the saved configuration clears any pending
 remote-log outbox so logs are never carried to a newly configured target.
 
+From 0.9.5, newly persisted entries matched to a configured account include
+`details.browser_provider_account_id` and `details.canonical_provider_account_id`.
+The existing `details.provider_account_id` is preserved. Both correlation IDs
+appear in local support exports and uploaded entries; unmatched entries receive
+no inferred account identity. Older retained entries are not rewritten.
+
 ```json
 {
   "schema": "omnichat.log_batch",
