@@ -155,3 +155,26 @@ test("unchanged selected tabs do not repeatedly read or write storage", async ()
   await Promise.all([remember("shopee:one", 4), remember("shopee:one", 2)]);
   assert.equal(stored["shopee:one"], 2, "a pending replacement cannot hide a later selection of the previous tab");
 });
+
+
+test("missing provider result after tab dispatch stays uncertain", async () => {
+  const start = source.indexOf("async function sendViaProvider(");
+  const end = source.indexOf("\nasync function prepareAndSendViaProvider(", start);
+  for (const providerResult of [null, undefined, "invalid"]) {
+    const send = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+      activeProviderSendAccounts: new Set(),
+      messageProviderAccountId: () => "account",
+      prepareAndSendViaProvider: async (_message, state) => {
+        state.dispatchStarted = true;
+        return providerResult;
+      },
+      Date,
+    });
+    const result = await send({ provider: "line_oa", provider_account_id: "account" });
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, true);
+    assert.equal(result.dispatch_started, true);
+    assert.equal(result.retryable, false);
+    assert.equal(result.error_code, "OMNICHAT_PROVIDER_RESULT_MISSING");
+  }
+});
