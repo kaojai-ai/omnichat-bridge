@@ -5,13 +5,13 @@ import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch } from '../extension/lib/log-forwarding.js';
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
-function fixture({ fail = false, automatic = false, busy = false, persisted, onSend, contexts } = {}) {
+function fixture({ fail = false, automatic = false, busy = false, persisted, onSend, contexts, clock = () => 0 } = {}) {
   const entries = Array.from({ length: 205 }, (_, i) => ({ id: String(i), account_key: 'shop' }));
   const stored = persisted ?? { forward_log: automatic, logs: entries, logOutbox: entries.map(e => e.id), logUploadEnabled: true };
   const batches = [];
   const telemetry = [];
   const submit = vm.runInNewContext(source.slice(source.indexOf('let logSubmission = null;'), source.indexOf('\nfunction isMessageScopedDeliveryError')) + '\nsubmitLogs', {
-    crypto: webcrypto, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch, automaticLogWorkBusy: () => busy,
+    performance: { now: clock }, crypto: webcrypto, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch, automaticLogWorkBusy: () => busy,
     diagnosticBuffer: { drain: async () => {} }, logMutationQueue: Promise.resolve(),
     STORAGE: new Proxy({}, { get: (_, key) => key }), readStorage: async () => stored,
     writeStorage: async value => Object.assign(stored, value), mutateLogs: fn => fn(),
@@ -56,18 +56,18 @@ test('batch rotation includes debug and keeps accounts isolated', () => {
   assert.deepEqual(selectLogBatch(contexts,entries,ids,first.cursor).logs.map(e=>e.id),['debug','b']);
 });
 
-test('automatic wakes upload one bounded batch and preserve the remainder', async () => {
+test('automatic wakes drain up to three bounded batches', async () => {
   const {submit,batches,stored}=fixture({automatic:true});
   const result=await submit({automatic:true});
-  assert.equal(result.submitted,100);
-  assert.deepEqual(batches,[100]);
-  assert.equal(stored.logOutbox.length,105);
+  assert.equal(result.submitted,205);
+  assert.deepEqual(batches,[100,100,5]);
+  assert.equal(stored.logOutbox.length,0);
   assert.equal(stored.logForwardState.failures,0);
 });
-test('automatic forwarding yields while customer work is busy', async () => {
+test('automatic forwarding continues while customer work is busy', async () => {
   const {submit,batches}=fixture({automatic:true,busy:true});
-  assert.equal((await submit({automatic:true})).skipped,true);
-  assert.equal(batches.length,0);
+  assert.equal((await submit({automatic:true})).submitted,205);
+  assert.deepEqual(batches,[100,100,5]);
 });
 test('failed auto upload retains entries and observes persisted retry deadline', async () => {
   const {submit,batches,stored}=fixture({automatic:true,fail:true});
@@ -82,7 +82,7 @@ test('preempted uploads retain entries without failure backoff', async () => {
   assert.equal((await submit({automatic:true,signal:{aborted:true}})).skipped,true);
   assert.equal(stored.logOutbox.length,205);
   assert.equal(stored.logForwardState.failures,undefined);
-  assert.equal(stored.logForwardState.pending_batches.shop.entry_ids.length,100);
+  assert.deepEqual(Object.keys(stored.logForwardState.pending_batches), []);
 });
 test('manual click during automatic upload joins then drains the remaining logs', async () => {
   const {submit,batches,stored}=fixture({automatic:true});
@@ -186,4 +186,74 @@ test('root destination receives all levels and installation logs while account o
   });
   assert.equal((await submit()).submitted, 3);
   assert.deepEqual(sent, [['root', ['global']], ['override', ['a']], ['root', ['b']]]);
+});
+
+
+test('automatic wake bounds a 5000-entry backlog to three batches and rotates accounts', async () => {
+  const logs = Array.from({length:5000}, (_, i) => ({id:String(i), account_key:i % 2 ? 'b' : 'a', level:'info'}));
+  logs.unshift({id:'critical', account_key:'a', level:'error'});
+  const persisted = {forward_log:true, logs, logOutbox:logs.map(e=>e.id), logUploadEnabled:true};
+  const sent = [];
+  const {submit,batches,stored} = fixture({persisted, contexts:[{key:'a',config:{logs_url:'a'}},{key:'b',config:{logs_url:'b'}}],
+    onSend:(batch, _options, context)=>sent.push({ids:batch.map(e=>e.id), account:context.key})});
+  assert.equal((await submit({automatic:true})).submitted,300);
+  assert.deepEqual(batches,[100,100,100]);
+  assert.deepEqual(sent.map(s=>s.account),['a','b','a']);
+  assert.equal(sent[0].ids[0],'critical');
+  assert.equal(stored.logOutbox.length,4701);
+});
+
+test('automatic wake shares its remaining five-second budget and stops after exhaustion', async () => {
+  let now = 0;
+  const budgets = [];
+  const {submit,batches,stored} = fixture({automatic:true, clock:()=>now,
+    onSend:(_batch, options)=>{budgets.push(options.timeoutMs); now += 3000;}});
+  assert.equal((await submit({automatic:true})).submitted,200);
+  assert.deepEqual(batches,[100,100]);
+  assert.deepEqual(budgets,[5000,2000]);
+  assert.equal(stored.logOutbox.length,5);
+});
+
+test('automatic filtering keeps debug local and manual submission can send it later', async () => {
+  const logs = [{id:'debug',level:'debug',account_key:'shop'},{id:'info',level:'info',account_key:'shop'}];
+  const persisted = {forward_log:true, logs,logOutbox:logs.map(e=>e.id),logUploadEnabled:true};
+  const sent=[];
+  const {submit,stored}=fixture({persisted,onSend:batch=>sent.push(batch.map(e=>e.id))});
+  assert.equal((await submit({automatic:true})).submitted,1);
+  assert.deepEqual(sent,[['info']]);
+  assert.equal(stored.logs.length,2);
+  assert.equal((await submit()).submitted,1);
+  assert.deepEqual(sent,[['info'],['debug']]);
+});
+
+test('automatic retry preserves debug entries and order of an uncertain batch', () => {
+  const logs=[{id:'new',level:'error',account_key:'shop'}, {id:'debug',level:'debug',account_key:'shop'}, {id:'old',level:'info',account_key:'shop'}];
+  const pending={shop:{batch_id:'11111111-1111-4111-8111-111111111111',entry_ids:['debug','old']}};
+  const selected=selectLogBatch([{key:'shop'}],logs,new Set(logs.map(e=>e.id)),0,100,pending,true);
+  assert.equal(selected.batchId,pending.shop.batch_id);
+  assert.deepEqual(selected.logs.map(e=>e.id),['debug','old']);
+});
+
+test('automatic priority preserves chronological order inside each group', () => {
+  const logs=[{id:'new-info',level:'info'}, {id:'new-ready',area:'live',event:'readiness_snapshot'},
+    {id:'old-error',level:'error'}, {id:'old-info',level:'info'}].map(e=>({...e,account_key:'shop'}));
+  const selected=selectLogBatch([{key:'shop'}],logs,new Set(logs.map(e=>e.id)),0,100,{},true);
+  assert.deepEqual(selected.logs.map(e=>e.id),['new-ready','old-error','old-info','new-info']);
+});
+
+
+test('fresh account state precedes a 5000-error backlog without rewriting an uncertain retry', () => {
+  const states = ['readiness_changed', 'readiness_snapshot', 'connected', 'disconnected', 'leader_changed']
+    .map(event => ({ id:event, area:'live', event, level:'info', account_key:'shop' }));
+  // Storage lists newest entries first.
+  const logs = [...states, ...Array.from({length:5000}, (_, i) => ({id:`error-${i}`, level:'error', account_key:'shop'}))];
+  const contexts = [{key:'shop'}];
+  const ids = new Set(logs.map(entry=>entry.id));
+  const first = selectLogBatch(contexts,logs,ids,0,100,{},true);
+  assert.deepEqual(first.logs.slice(0,5).map(entry=>entry.id),states.map(entry=>entry.id).reverse());
+  assert.equal(first.logs.length,100);
+  const pending = {shop:{batch_id:'11111111-1111-4111-8111-111111111111',entry_ids:['error-0','error-1']}};
+  const retry = selectLogBatch(contexts,logs,ids,0,100,pending,true);
+  assert.equal(retry.batchId,pending.shop.batch_id);
+  assert.deepEqual(retry.logs.map(entry=>entry.id),pending.shop.entry_ids);
 });

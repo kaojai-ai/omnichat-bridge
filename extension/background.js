@@ -18,6 +18,7 @@ import {
   sanitizeSendDiagnostics,
   logEntryForUpload,
   pruneLogs,
+  createDetectionLogFilter,
 } from "./lib/logs.js";
 import { createMetadataCache } from "./lib/metadata-cache.js";
 import { participantForBatch } from "./lib/message-batch.js";
@@ -241,9 +242,12 @@ const diagnosticBuffer = createDiagnosticBuffer({
   }),
 });
 
+const filterDetectionLog = createDetectionLogFilter();
 async function recordLog(level, area, event, message, details = {}) {
   try {
     if (diagnosticsSuspended) return false;
+    details = filterDetectionLog(level, area, event, details);
+    if (details === null) return true;
     return diagnosticBuffer.enqueue({ level, area, event, message, details });
   } catch {
     // Admission and persistence failures cannot interrupt message processing.
@@ -608,6 +612,14 @@ async function writeLiveState(context, patch) {
       updated_at: new Date().toISOString(),
     }),
   });
+  if (Object.hasOwn(patch, "leader_installation_id")
+    && (current.leader_installation_id ?? null) !== (patch.leader_installation_id ?? null)) {
+    void recordLog("info", "live", "leader_changed", "Provider account leader changed.", {
+      provider: context.account.provider, provider_account_id: context.account.provider_account_id,
+      previous_leader_installation_id: current.leader_installation_id ?? null,
+      leader_installation_id: patch.leader_installation_id ?? null,
+    });
+  }
 }
 
 async function persistProviderSurfaceState(context, adapter, providerStatus, tab) {
@@ -2700,9 +2712,11 @@ async function sendConnectionStatus(socket, context) {
   }
   if (!connection.statusReporter.publish(status, key)) return;
   scheduleLeaderStatusRefresh(context, socket);
-  if (connection.lastStatusKey === stateKey) return;
+  const changed = connection.lastStatusKey !== stateKey;
+  if (!changed && Date.now() - (connection.lastReadinessLogAt ?? 0) < 5 * 60_000) return;
   connection.lastStatusKey = stateKey;
-  void recordLog("info", "live", "readiness_changed", "Live command channel readiness reported.", {
+  connection.lastReadinessLogAt = Date.now();
+  void recordLog("info", "live", changed ? "readiness_changed" : "readiness_snapshot", "Live command channel readiness reported.", {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
@@ -2958,7 +2972,6 @@ function scheduleLeaderStatusRefresh(context, socket, attemptsRemaining = 2) {
 }
 
 async function handleLiveCommand(raw, context, socket) {
-  preemptAutomaticLogUpload();
   let command;
   try { command = JSON.parse(raw); } catch { return; }
   if (command?.type === "connection_status_ack") {
@@ -3079,7 +3092,10 @@ async function handleLiveCommand(raw, context, socket) {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[STORAGE.commandTab] || changes[STORAGE.config]) rememberedCommandTabs.clear();
-  if (changes[STORAGE.forwardLog] || changes[STORAGE.serverInitialized] || changes[STORAGE.consent]) void reconcileLogForwarding().catch(() => {});
+  if (changes[STORAGE.forwardLog] || changes[STORAGE.logUploadEnabled] || changes[STORAGE.serverInitialized] || changes[STORAGE.consent]) {
+    preemptAutomaticLogUpload();
+    void reconcileLogForwarding().catch(() => {});
+  }
   if (changes[STORAGE.config]) {
     void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
   }
@@ -4219,7 +4235,6 @@ function requestAccountSync(context, trigger, options = {}) {
     refreshMetadata: trigger === "manual" || options.refresh_metadata === true,
     restorePolling: options.restorePolling === true,
   };
-  preemptAutomaticLogUpload();
   return syncCoordinator.run(context.key, context.adapter.id, control, async () => {
     const { signal } = control.controller;
     throwIfSyncCancelled(signal);
@@ -4636,7 +4651,6 @@ function messageKey(message) {
 }
 
 async function queueMessagesForContext(messages, context, shouldFlush) {
-  preemptAutomaticLogUpload();
   if (context.account.provider === "shopee" && context.account.country && context.account.country !== "TH"
     && !await hasRegionalShopeePermission(globalThis.chrome, context.account)) {
     throw new Error("Shopee country access is required before syncing.");
@@ -4903,7 +4917,8 @@ async function signedRequest(config, providerAccountId, payload, signal) {
   });
 }
 
-async function sendLogBatch(context, logs, { automatic = false, signal, batchId } = {}) {
+async function sendLogBatch(context, logs, { automatic = false, signal, batchId, timeoutMs = automatic ? 5_000 : 15_000 } = {}) {
+  const deadline = performance.now() + timeoutMs;
   const url = new URL(context.config.logs_url);
   if (url.protocol !== "https:") throw new Error("Logs server must use HTTPS.");
   const managedLogs = ["https://ingress.kaojai.ai", "https://ingress.kaojai.dev"].includes(url.origin)
@@ -4933,6 +4948,8 @@ async function sendLogBatch(context, logs, { automatic = false, signal, batchId 
     context.config.hmac_secret,
     `POST\n${url.pathname}\n${timestamp}\n${nonce}\n${await sha256Hex(body)}`,
   );
+  const remainingMs = deadline - performance.now();
+  if (remainingMs <= 0) throw Object.assign(new Error("Log upload budget exhausted."), { name: "TimeoutError" });
   return withRequestTimeout(async (requestSignal) => {
     const response = await fetch(url, {
       method: "POST",
@@ -4948,24 +4965,22 @@ async function sendLogBatch(context, logs, { automatic = false, signal, batchId 
     });
     if (!response.ok) throw new Error(`Logs server returned ${response.status}.`);
     return payload.batch_id;
-  }, automatic ? 5_000 : 15_000, signal);
+  }, remainingMs, signal);
 }
 
 let automaticLogController = null;
 function preemptAutomaticLogUpload() { automaticLogController?.abort(); }
-function automaticLogWorkBusy() {
-  return Boolean(accountSyncs.size || accountDeliveries.size
-    || [...liveCommandResults.values()].some(result => result.expiresAt === Infinity));
-}
 async function reconcileLogForwarding() {
-  const stored = await readStorage([STORAGE.forwardLog, STORAGE.serverInitialized, STORAGE.consent]);
-  if (!automaticLogForwardingEnabled(stored)) preemptAutomaticLogUpload();
-  if (automaticLogForwardingEnabled(stored) && hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])) {
+  const stored = await readStorage([STORAGE.forwardLog, STORAGE.logUploadEnabled, STORAGE.serverInitialized, STORAGE.consent]);
+  const enabled = automaticLogForwardingEnabled(stored) && stored[STORAGE.logUploadEnabled] === true
+    && hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent]);
+  if (!enabled) preemptAutomaticLogUpload();
+  if (enabled) {
     if (!await chrome.alarms.get(LOG_UPLOAD_ALARM)) await chrome.alarms.create(LOG_UPLOAD_ALARM, { periodInMinutes: 1 });
   } else await chrome.alarms.clear(LOG_UPLOAD_ALARM);
 }
 async function forwardLogsAutomatically() {
-  if (logSubmission || automaticLogWorkBusy()) return;
+  if (logSubmission) return;
   const controller = new AbortController();
   automaticLogController = controller;
   try { await submitLogs({ automatic: true, signal: controller.signal }); }
@@ -5054,24 +5069,31 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
     await writeStorage({ [STORAGE.logForwardState]: state });
   };
   if (automatic) {
-    if (!automaticLogForwardingEnabled(stored) || automaticLogWorkBusy()) return { ok: true, submitted: 0, skipped: true };
+    if (!automaticLogForwardingEnabled(stored)) return { ok: true, submitted: 0, skipped: true };
     if (state.next_at > Date.now()) return { ok: true, submitted: 0, skipped: true };
-    const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0, MAX_LOG_UPLOAD_BATCH, pending);
-    if (!batch) return { ok: true, submitted: 0 };
-    try {
-      await persistBatch(batch);
-      await sendLogBatch(batch.context, batch.logs, { automatic: true, signal, batchId: batch.batchId });
-      await acknowledgeBatch(batch);
-      Object.assign(state, { cursor: batch.cursor, failures: 0, next_at: 0 });
-      await writeStorage({ [STORAGE.logForwardState]: state });
-      return { ok: true, submitted: batch.logs.length };
-    } catch {
-      if (signal?.aborted) return { ok: true, submitted: 0, skipped: true };
-      const failures = Math.min(5, (state.failures ?? 0) + 1);
-      Object.assign(state, { cursor: batch.cursor, failures, next_at: Date.now() + forwardingBackoff(failures) });
-      await writeStorage({ [STORAGE.logForwardState]: state });
-      return { ok: false, submitted: 0 };
+    const deadline = performance.now() + 5_000;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal?.aborted) return { ok: true, submitted, skipped: true };
+      const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0, MAX_LOG_UPLOAD_BATCH, pending, true);
+      if (!batch || performance.now() >= deadline) break;
+      try {
+        await persistBatch(batch);
+        const timeoutMs = deadline - performance.now();
+        if (timeoutMs <= 0) break;
+        await sendLogBatch(batch.context, batch.logs, { automatic: true, signal, batchId: batch.batchId, timeoutMs });
+        await acknowledgeBatch(batch);
+        submitted += batch.logs.length;
+        Object.assign(state, { cursor: batch.cursor, failures: 0, next_at: 0 });
+        await writeStorage({ [STORAGE.logForwardState]: state });
+      } catch {
+        if (signal?.aborted) return { ok: true, submitted, skipped: true };
+        const failures = Math.min(5, (state.failures ?? 0) + 1);
+        Object.assign(state, { cursor: batch.cursor, failures, next_at: Date.now() + forwardingBackoff(failures) });
+        await writeStorage({ [STORAGE.logForwardState]: state });
+        return { ok: false, submitted };
+      }
     }
+    return { ok: true, submitted };
   }
   for (const context of contexts) {
     let batch;
@@ -5408,7 +5430,6 @@ async function scheduleDeliveryRetry(context) {
 const accountDeliveries = new Map();
 const accountDeliveryWakeups = new Set();
 function attemptDelivery(context, options) {
-  preemptAutomaticLogUpload();
   const key = context?.key;
   const previous = accountDeliveries.get(key);
   if (previous) {

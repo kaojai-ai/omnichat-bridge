@@ -10,6 +10,7 @@ import {
   logStorageBytes,
   availableLogBudget,
   createLogEntry,
+  createDetectionLogFilter,
   diagnosticErrorDetails,
   logEntryForUpload,
   pruneLogs,
@@ -35,7 +36,7 @@ test("background accepts route diagnostics and stores sanitized correlation deta
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => null, hasServerInitialized: () => false,
-    createLogEntry, pruneLogs, availableLogBudget,
+    createLogEntry, createDetectionLogFilter, pruneLogs, availableLogBudget,
   });
   vm.runInContext(source.slice(allowStart, allowEnd) + "\n"
     + source.slice(recordStart, recordEnd) + "\n" + source.slice(listenerStart, listenerEnd), context);
@@ -304,7 +305,7 @@ test("unrecognized native codes cannot carry arbitrary provider strings into sup
   assert.doesNotMatch(JSON.stringify(entry), /privateCustomerValue123/);
 });
 
-test("all retained diagnostics are queued, including unscoped DEBUG and repeated routine events", async () => {
+test("retained diagnostics are queued while duplicate successful account detection is suppressed", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const storage = {};
   let buffer;
@@ -315,16 +316,17 @@ test("all retained diagnostics are queued, including unscoped DEBUG and repeated
     mutateLogs: fn => fn(), readStorage: async () => storage,
     writeStorage: async value => Object.assign(storage, value),
     accountContextFor: () => null,
-    createLogEntry, pruneLogs, availableLogBudget,
+    createLogEntry, createDetectionLogFilter, pruneLogs, availableLogBudget,
   });
   for (const level of ["debug", "info", "warn", "error"]) {
-    await record(level, "provider", "account_detected", "Account detection observed.");
-    await record(level, "provider", "account_detected", "Account detection observed.");
+    await record(level, "provider", "account_detected", "Account detection observed.", { provider: "shopee", provider_account_id: "shop" });
+    await record(level, "provider", "account_detected", "Account detection observed.", { provider: "shopee", provider_account_id: "shop" });
   }
   await buffer.drain();
-  assert.equal(storage.logs.length, 8);
-  assert.equal(storage.outbox.length, 8);
-  assert.equal(new Set(storage.outbox).size, 8);
+  assert.equal(storage.logs.length, 7);
+  assert.equal(storage.outbox.length, 7);
+  assert.equal(new Set(storage.outbox).size, 7);
+  assert.equal(storage.logs.filter(entry => entry.level === "info").length, 1);
   assert.ok(storage.logs.every(entry => !entry.account_key));
   assert.deepEqual(new Set(storage.outbox), new Set(storage.logs.map(entry => entry.id)));
 });
@@ -332,7 +334,7 @@ test("all retained diagnostics are queued, including unscoped DEBUG and repeated
 test("diagnostic admission failure is nonthrowing and is not acknowledged", async () => {
   const source = readFileSync(new URL("../extension/background.js", import.meta.url), "utf8");
   const record = vm.runInNewContext(source.slice(source.indexOf("async function recordLog("), source.indexOf("\nasync function recordUnexpected")) + "\nrecordLog", {
-    diagnosticsSuspended: false,
+    diagnosticsSuspended: false, filterDetectionLog: createDetectionLogFilter(),
     diagnosticBuffer: { enqueue: () => { throw new Error("Admission unavailable"); } },
   });
   assert.equal(await record("error", "provider", "recovery_failed", "Failed."), false);
