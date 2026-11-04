@@ -93,3 +93,38 @@ test("a delayed persisted readiness ACK refreshes real leader status, with stale
   await handle(JSON.stringify(ack), context, currentSocket);
   assert.equal(scheduled.length, 1, "duplicate ACK must not start another refresh");
 });
+
+for (const config of [
+  { canonical_provider_account_id: 'channel-1' },
+  { api_url: 'https://target.example/api/omnichat/line_oa/tenant/channel-1' },
+  {},
+]) {
+  test(`LINE receive evidence stays browser-scoped while reporting configured identity: ${JSON.stringify(config)}`, async () => {
+    const canonicalStart = source.indexOf('function canonicalProviderAccountId(');
+    const canonicalEnd = source.indexOf('\nfunction hasServerInitialized', canonicalStart);
+    const canonicalProviderAccountId = vm.runInNewContext(`(${source.slice(canonicalStart, canonicalEnd)})`, { URL });
+    const lineContext = { key: 'line_oa:@first', account: { provider: 'line_oa', provider_account_id: '@first' },
+      adapter: { id: 'line_oa' }, config };
+    let polls = { '@first': new Date().toISOString() };
+    const snapshot = fn('connectionStatusSnapshot', '\nfunction statusPublishKey', {
+      STORAGE: {}, readStorage: async () => ({}), readAccountState: (_state, _key, fallback) => fallback,
+      normalizeDeviceName: () => '', buildConnectionHealth: () => ({ reason_code: 'healthy' }),
+      persistProviderSurfaceState: async () => {}, installationId: async () => 'installation',
+      chrome: { runtime: { getManifest: () => ({ version: 'test' }), getPlatformInfo: async () => ({ os: 'mac' }) } },
+      PROVIDER_HEALTH_STALE_MS: 60_000, canonicalProviderAccountId,
+      providerTabStatus: async () => ({ ok: true, account_access_verified: true,
+        accessible_account_ids: ['@first', '@second'], realtime_connected: true,
+        command_capabilities_by_account: { '@first': ['send_text'] }, last_successful_poll_at_by_account: polls }),
+    });
+    const fresh = await snapshot(lineContext);
+    assert.equal(fresh.provider_account_id, config.canonical_provider_account_id || (config.api_url ? 'channel-1' : '@first'));
+    assert.equal(fresh.send_ready, true);
+    assert.equal(fresh.receive_ready, true);
+    assert.equal(fresh.receive_reason_code, 'healthy');
+
+    polls = { '@second': new Date().toISOString(), 'channel-1': new Date().toISOString() };
+    assert.equal((await snapshot(lineContext)).receive_ready, false, 'another browser account or server ID cannot supply poll evidence');
+    polls = { '@first': new Date(Date.now() - 61_000).toISOString() };
+    assert.equal((await snapshot(lineContext)).receive_reason_code, 'inbound_poll_unverified');
+  });
+}

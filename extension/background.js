@@ -2637,8 +2637,10 @@ async function connectionStatusSnapshot(context) {
   const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
   const ready = samePolicy && current?.eligible === true;
   const sendReady = ready && !current?.unknown;
+  // LINE page evidence uses the browser account ID; canonical IDs belong to
+  // the target server and may differ (for example, a numeric channel ID).
   const checkedAt = Date.parse(adapter.id === "line_oa"
-    ? providerStatus?.last_successful_poll_at_by_account?.[canonicalProviderAccountId(context)] ?? ""
+    ? providerStatus?.last_successful_poll_at_by_account?.[context.account.provider_account_id] ?? ""
     : providerStatus?.last_provider_check_at ?? "");
   const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
   const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
