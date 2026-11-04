@@ -238,5 +238,22 @@ test('automatic priority preserves chronological order inside each group', () =>
   const logs=[{id:'new-info',level:'info'}, {id:'new-ready',area:'live',event:'readiness_snapshot'},
     {id:'old-error',level:'error'}, {id:'old-info',level:'info'}].map(e=>({...e,account_key:'shop'}));
   const selected=selectLogBatch([{key:'shop'}],logs,new Set(logs.map(e=>e.id)),0,100,{},true);
-  assert.deepEqual(selected.logs.map(e=>e.id),['old-error','new-ready','old-info','new-info']);
+  assert.deepEqual(selected.logs.map(e=>e.id),['new-ready','old-error','old-info','new-info']);
+});
+
+
+test('fresh account state precedes a 5000-error backlog without rewriting an uncertain retry', () => {
+  const states = ['readiness_changed', 'readiness_snapshot', 'connected', 'disconnected', 'leader_changed']
+    .map(event => ({ id:event, area:'live', event, level:'info', account_key:'shop' }));
+  // Storage lists newest entries first.
+  const logs = [...states, ...Array.from({length:5000}, (_, i) => ({id:`error-${i}`, level:'error', account_key:'shop'}))];
+  const contexts = [{key:'shop'}];
+  const ids = new Set(logs.map(entry=>entry.id));
+  const first = selectLogBatch(contexts,logs,ids,0,100,{},true);
+  assert.deepEqual(first.logs.slice(0,5).map(entry=>entry.id),states.map(entry=>entry.id).reverse());
+  assert.equal(first.logs.length,100);
+  const pending = {shop:{batch_id:'11111111-1111-4111-8111-111111111111',entry_ids:['error-0','error-1']}};
+  const retry = selectLogBatch(contexts,logs,ids,0,100,pending,true);
+  assert.equal(retry.batchId,pending.shop.batch_id);
+  assert.deepEqual(retry.logs.map(entry=>entry.id),pending.shop.entry_ids);
 });

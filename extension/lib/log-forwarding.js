@@ -23,7 +23,7 @@ export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 1
     // Entries evicted by normal retention remain lost; never add new entries to
     // an uncertain batch or change its id when only part of it is retained.
     const candidates = available.reverse().filter(entry => !automatic || entry.level !== "debug");
-    if (automatic) candidates.sort((a, b) => Number(important(b)) - Number(important(a)));
+    if (automatic) candidates.sort((a, b) => priority(b) - priority(a));
     const logs = retained.length ? retained : candidates.slice(0, max);
     if (logs.length) return { context, logs, cursor: (index + 1) % contexts.length,
       ...(retained.length ? { batchId: saved.batch_id } : {}) };
@@ -31,7 +31,7 @@ export function selectLogBatch(contexts, entries, queuedIds, cursor = 0, max = 1
   return null;
 }
 
-function important(entry) {
-  return entry.level === "warn" || entry.level === "error"
-    || (entry.area === "live" && ["readiness_changed", "readiness_snapshot", "connected", "disconnected", "leader_changed"].includes(entry.event));
+function priority(entry) {
+  if (entry.area === "live" && ["readiness_changed", "readiness_snapshot", "connected", "disconnected", "leader_changed"].includes(entry.event)) return 2;
+  return entry.level === "warn" || entry.level === "error" ? 1 : 0;
 }
