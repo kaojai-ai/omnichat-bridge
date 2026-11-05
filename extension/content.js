@@ -928,6 +928,8 @@
       recovered: message.recovered ?? 0,
       queued: message.queued ?? 0,
       watermark: message.watermark ?? null,
+      conversation_pages: Number.isInteger(message.conversation_pages) ? message.conversation_pages : 1,
+      discovery_ordered: message.discovery_ordered === true,
       ...(message.metadata ? { metadata: message.metadata } : {}),
     };
     if (document.documentElement) {

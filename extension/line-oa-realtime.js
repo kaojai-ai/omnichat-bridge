@@ -675,6 +675,7 @@
       let previousUpdatedAt = Infinity;
       let totalConversations = null;
       const seenCursors = new Set();
+      const discoveredChatIds = new Set();
       const trackedRequest = !String(requestId).startsWith("poll:");
       postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
       while (pollIsActive(generation)) {
@@ -697,6 +698,10 @@
             body = await json(chatUrl(resolvedBotId, selectionCursor));
             if (!pollIsActive(generation)) return;
             if (!Array.isArray(body?.list)) throw invalidProviderResponse("LINE OA conversation list response is invalid.");
+            const knownIds = new Set(items.map(item => value(item?.chatId)).filter(Boolean));
+            if (cursor(body.next) && !body.list.some(item => value(item?.chatId) && !knownIds.has(value(item.chatId)))) {
+              throw invalidProviderResponse("LINE OA conversation pagination made no data progress.");
+            }
             items.push(...body.list);
             conversationPages += 1;
           }
@@ -745,6 +750,14 @@
         }
         if (trackedRequest && pageTotal !== null) {
           postRecoveryProgress(requestId, providerAccountId, completedConversations, totalConversations);
+        }
+        let newChatIds = 0;
+        for (const chat of chats) {
+          const id = value(chat?.chatId);
+          if (id && !discoveredChatIds.has(id)) { discoveredChatIds.add(id); newChatIds += 1; }
+        }
+        if (cursor(body?.next) && newChatIds === 0) {
+          throw invalidProviderResponse("LINE OA conversation pagination made no data progress.");
         }
         const chatsToRecover = [];
         for (const chat of chats) {

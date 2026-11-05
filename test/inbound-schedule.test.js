@@ -57,3 +57,16 @@ test('accounts require manual initialization but interrupted first scans remain 
   assert.equal(h.calls.length, 1);
   h.finish({});
 });
+
+for (const [ordered, pages, minimum] of [[true, 1, 3000], [true, 10, 30000], [false, 1, 60000]]) {
+  test(`next scan waits from completion and amortizes pages (ordered=${ordered}, pages=${pages})`, async () => {
+    const h = fixture();
+    await h.runtime.runInboundTick();
+    const completedAt = Date.now();
+    h.finish({ discovery_ordered: ordered, conversation_pages: pages });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(h.runtime.inboundNextAt.get('shopee:shop') >= completedAt + minimum);
+    await h.runtime.runInboundTick();
+    assert.equal(h.calls.length, 1);
+  });
+}

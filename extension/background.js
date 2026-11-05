@@ -2294,6 +2294,13 @@ async function runInboundTick() {
       void requestAccountSync(context, "periodic", { restorePolling: true }).then(async result => {
         if (result?.skipped) return;
         if (result?.error) throw new Error(result.error);
+        const interval = context.adapter.id === "line_oa" ? 15_000 : 3_000;
+        const pages = Math.max(1, Number(result.conversation_pages) || 1);
+        // Schedule from completion, amortizing multi-page work. Unknown ordering
+        // gets a quiet interval instead of repeating a whole-store crawl at 3s.
+        const delay = context.adapter.id === "shopee" && !result.discovery_ordered
+          ? Math.max(60_000, pages * interval) : pages * interval;
+        inboundNextAt.set(context.key, Date.now() + delay);
         providerAutomaticRetryAttempts.delete(context.key);
         providerAutomaticRetryAt.delete(context.key);
         await updateScopedState(STORAGE.status, context.key, { next_retry_at: null });
@@ -4550,6 +4557,8 @@ async function runAccountSync(trigger, control, context) {
       queued: recovered.queued ?? 0,
       sent: delivered.sent,
       pending: delivered.pending,
+      conversation_pages: recovered.conversation_pages ?? 1,
+      discovery_ordered: recovered.discovery_ordered === true,
       ...(recovered.metadata ? { metadata: recovered.metadata } : {}),
     };
     await updateScopedState(STORAGE.status, context.key, {

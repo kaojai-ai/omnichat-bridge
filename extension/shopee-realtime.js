@@ -1554,19 +1554,23 @@
       ? state.lookupListTemplate ?? await lookupTemplateFrom(state.listTemplate)
       : await initialRecoveryListTemplate();
     let url = new Request(template.url, { ...template.init, body: template.body?.slice(0) });
-    // Live older-direction POST lists are descending by last activity. Only use
-    // that shortcut while every observed row confirms the contract (including
-    // other shops); unknown/pinned/unordered rows disable it for this scan.
-    let orderedOlder = false;
+    // Supported GET lists use newest activity first by default. Explicit sort
+    // overrides and unknown POST formats must fall back to exhaustive discovery.
+    const listUrl = new URL(url.url);
+    const explicitSort = ["sort", "sort_by", "sort_type", "order", "order_by", "direction"]
+      .some(key => listUrl.searchParams.has(key));
+    const defaultGetOrder = url.method === "GET" && isListPath(listUrl.pathname) && !explicitSort;
+    let orderedOlder = !sendLookup && checkpointMs > 0 && defaultGetOrder;
     if (!sendLookup && checkpointMs > 0 && url.method === "POST") {
       try {
         const payload = await url.clone().json();
         orderedOlder = payload?.direction === "older" && Object.hasOwn(payload, "next_timestamp_nano");
-      } catch { /* Opaque/unknown list schemes require a complete scan. */ }
+      } catch { /* Unknown list schemes require a complete scan. */ }
     }
     let previousActivity = Infinity;
     let firstPage = [];
     const seenPages = new Set();
+    const seenRawIds = new Set();
     let exhausted = false;
     let pages = 0;
     let stopReason = "scoped_end";
@@ -1582,13 +1586,27 @@
       onProgress?.("loading_conversations", pages);
       const page = await fetchConversationPage(url, accountId, true, sendLookup, deadlineAt, !sendLookup);
       pages += 1;
-      let allOlder = page.raw_items.length > 0;
+      let newRawIds = 0;
+      for (const item of page.raw_items) {
+        const id = value(item?.id);
+        if (id && !seenRawIds.has(id)) { seenRawIds.add(id); newRawIds += 1; }
+      }
+      if (!sendLookup && page.next && newRawIds === 0) {
+        throw Object.assign(new Error("Shopee conversation pagination made no data progress."), { reason_code: "invalid_conversation_list" });
+      }
+      let allOlder = true;
+      let unpinnedRows = 0;
       if (orderedOlder) for (const item of page.raw_items) {
+        // Pinned rows do not belong to the activity-ordered portion of a list.
+        if (item?.pinned === true) continue;
+        unpinnedRows += 1;
         const activity = conversationTime(item);
-        if (!(activity > 0) || item?.pinned !== false || activity > previousActivity) orderedOlder = false;
+        if (!(activity > 0) || (!defaultGetOrder && item?.pinned !== false)
+          || activity > previousActivity) orderedOlder = false;
         if (!(activity < checkpointMs)) allOlder = false;
         previousActivity = activity;
       }
+      allOlder = allOlder && unpinnedRows > 0;
       onProgress?.("checking_conversations", pages);
       exhausted = !page.next;
       if (!firstPage.length) firstPage = page.items;
@@ -1627,7 +1645,7 @@
       if (!page.next || (!added && !page.raw_count)) break;
       url = page.next;
     }
-    return { conversations, firstPage, exhausted, pages, stopReason };
+    return { conversations, firstPage, exhausted, pages, stopReason, ordered: orderedOlder };
   }
 
   async function detectCurrentAccount(requestId) {
@@ -2046,6 +2064,8 @@
         recovered: parsed,
         queued,
         conversations_checked: checked,
+        conversation_pages: pages.pages,
+        discovery_ordered: pages.ordered,
         duration_ms: Date.now() - startedAt,
         ...(metadata ? { metadata: { ok: Boolean(metadata.account), account: metadata.account,
           profiles: metadata.profiles, partial: metadata.partial } } : {}),

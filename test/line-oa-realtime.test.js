@@ -2220,3 +2220,22 @@ test("LINE readiness refresh revokes a cached account mapping before the next se
     assert.equal(bridge.requests.length, before, "verified empty access does not trigger redundant metadata reads");
   } finally { bridge.dispose(); }
 });
+
+for (const bootstrap of [false, true]) {
+  test(`LINE changing cursors without new chats cannot keep ${bootstrap ? 'bootstrap' : 'incremental scan'} alive`, async () => {
+    const chat = { chatId: 'repeat', updatedAt: 6000, latestEvent: { timestamp: 6000 } };
+    const bridge = createBridge({ chatPages: {
+      first: { list: [chat], next: 'second' },
+      second: { list: [chat], next: 'third' },
+      third: { list: [chat], next: 'fourth' },
+    } });
+    try {
+      const checkpoint = bootstrap ? {} : { watermark: new Date(1000).toISOString() };
+      const result = await bridge.sync({ checkpoint });
+      assert.equal(result.ok, false);
+      assert.equal(result.watermark, undefined);
+      assert.equal(bridge.posts.some(post => post.type === 'recovery_scan_complete'), false);
+      assert.ok(bridge.requests.filter(url => url.pathname.endsWith('/chats')).length <= 2);
+    } finally { bridge.dispose(); }
+  });
+}

@@ -741,8 +741,12 @@ test("Shopee recovery persists a cursor, skips unchanged history, and catches a 
   assert.equal(repeatBridge.requests.includes(historyPath), false);
   assert.equal(store.messages.length, 1);
 
+  // Provider timestamps are second-granular; keep the boundary exact and
+  // ensure a replacement fixture's clock cannot move behind the prior scan.
+  store.watermark = new Date(Math.floor(Date.parse(store.watermark) / 1000) * 1000).toISOString();
   timestamp = store.watermark;
   const changedBridge = createBridge();
+  changedBridge.advanceClock(1000);
   await changedBridge.fetch(listPath, [conversation("message-2")]);
   changedBridge.setResponse(historyPath, [message("message-2"), message("message-1")]);
   const changed = await changedBridge.sync("100000001", "changed", store, store);
@@ -1604,5 +1608,53 @@ test("Shopee incremental scan excludes arrivals newer than its frozen start", as
     assert.deepEqual(store.messages.map(message => message.id), ["past"]);
     assert.equal(store.conversations.frozen.message_id, "past");
     assert.ok(Date.parse(result.watermark) < Date.parse("2026-08-20T13:00:00Z"));
+  } finally { bridge.dispose(); }
+});
+
+for (const mode of ['old-first-page', 'overflow', 'equal', 'pinned', 'disordered', 'explicit-sort']) {
+  test(`Shopee GET watermark discovery: ${mode}`, async () => {
+    const bridge = createBridge();
+    try {
+      const path = '/webchat/api/v1.2/conversations';
+      const row = (id, date) => ({ id, shop_id: 100000001, last_message_time: date });
+      const old = row('old', '2026-07-01T00:00:00Z');
+      let first = [old];
+      if (mode === 'overflow') first = [row('new', '2026-08-20T11:00:00Z')];
+      if (mode === 'equal') first = [row('equal', '2026-08-01T00:00:00Z')];
+      if (mode === 'pinned') first = [{ ...row('pin', '2026-08-20T11:00:00Z'), pinned: true }, old];
+      if (mode === 'disordered') first = [old, row('new', '2026-08-20T11:00:00Z')];
+      await bridge.fetch(path, first);
+      bridge.state.listTemplate = { ...bridge.state.listTemplate,
+        url: `https://seller.shopee.co.th${path}?offset=0&limit=25${mode === 'explicit-sort' ? '&sort=unknown' : ''}`,
+        init: { ...bridge.state.listTemplate.init, method: 'GET' }, body: null };
+      const offsets = [];
+      bridge.setResponse(path, request => {
+        const offset = new URL(request.url).searchParams.get('offset'); offsets.push(offset);
+        return new Response(JSON.stringify(!new URL(request.url).searchParams.has('cursor')
+          ? { conversations: first, next_cursor: 'next' }
+          : { conversations: [row('older', '2026-06-01T00:00:00Z')] }));
+      });
+      for (const id of ['new', 'equal', 'pin']) bridge.setResponse(`${path}/${id}/messages`, []);
+      const result = await bridge.sync('100000001', `get-${mode}`, { watermark: '2026-08-01T00:00:00Z' });
+      assert.equal(result.ok, true, result.error);
+      assert.equal(offsets.length, ['old-first-page', 'pinned'].includes(mode) ? 1 : 2);
+    } finally { bridge.dispose(); }
+  });
+}
+
+test('Shopee changing pagination tokens with repeated data fail without committing scan coverage', async () => {
+  const bridge = createBridge();
+  try {
+    const path = '/webchat/api/v1.2/conversations';
+    const item = { id: 'repeated', shop_id: 100000001, last_message_time: '2026-08-20T11:00:00Z' };
+    await bridge.fetch(path, [item]);
+    let count = 0;
+    bridge.setResponse(path, () => new Response(JSON.stringify({ conversations: [item], next_cursor: `token-${++count}` })));
+    const checkpoint = { watermark: '2026-08-01T00:00:00Z' };
+    const result = await bridge.sync('100000001', 'no-data-progress', checkpoint);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /no data progress/);
+    assert.equal(count, 2);
+    assert.equal(bridge.posts.some(item => item.type === 'recovery_scan_complete' && item.request_id.startsWith('no-data-progress')), false);
   } finally { bridge.dispose(); }
 });
