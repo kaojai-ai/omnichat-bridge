@@ -36,13 +36,6 @@ test("LINE OA recovery waits for local persistence before completing", () => {
   assert.match(source, /post\(\{ type: "recovery_complete"/);
 });
 
-test("LINE OA replaces an existing polling interval before starting another", () => {
-  const start = source.indexOf("function start(");
-  const end = source.indexOf("\n  const listener", start);
-  assert.ok(start >= 0);
-  assert.ok(end > start);
-  assert.match(source.slice(start, end), /stopTimer\(\);/);
-});
 
 
 function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {}, durableCheckpoints = new Map(), checkpointError = null, completionError = null } = {}) {
@@ -267,6 +260,14 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", ...data } });
     },
     tick() { for (const callback of [...intervals.values()]) callback(); },
+    // Simulate coordinator timer requests; provider scripts own no interval.
+    scheduleAccounts() {
+      const status = posts.filter(post => post.type === "provider_status").at(-1);
+      if (status?.provider_polling_active) return;
+      for (const account of status?.accessible_account_ids ?? []) {
+        this.dispatch({ type: "sync_v3", request_id: `poll:${crypto.randomUUID()}`, provider_account_id: account });
+      }
+    },
     get intervalCount() { return intervals.size; },
     async captureManualSend(payload) {
       await context.window.fetch(`${origin}/api/v1/bots/bot-1/chats/chat-1/messages/send`, {
@@ -487,6 +488,8 @@ test("LINE OA recovers every chat and message page only after each page is ackno
     ok: true,
     recovered: 3,
     queued: 3,
+    conversations_checked: 2,
+    duration_ms: 0,
   });
   assert.match(watermark, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_batch").length, 3);
@@ -1092,7 +1095,7 @@ test("transient LINE inbound poll failure retains verified send account but not 
     const successfulAt = lastPollingStatus(bridge).last_successful_poll_at_by_account["@exampleoa"];
     assert.ok(successfulAt);
     fail = true;
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     const status = lastPollingStatus(bridge);
     assert.equal(status.account_access_verified, true);
@@ -1102,17 +1105,21 @@ test("transient LINE inbound poll failure retains verified send account but not 
   } finally { bridge.dispose(); }
 });
 
-test("LINE OA restores and continuously polls three accounts from one tab", async () => {
+test("LINE OA executes coordinator-scheduled scans for three accounts without creating a timer", async () => {
   const bridge = createBridge({ availableAccounts: ["@first", "@second", "@third"].map((basicSearchId) => ({ basicSearchId, botId: "bot-1" })), chatCount: 0 });
   for (const account of ["@first", "@second", "@third"]) startAccount(bridge, account);
   await settleBridge();
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@second", "@third"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
   const successes = lastPollingStatus(bridge).last_successful_poll_at_by_account;
   for (const account of ["@first", "@second", "@third"]) assert.ok(Date.parse(successes[account]) > 0);
   assert.equal(successes["@unpolled"], undefined, "one OA cannot inherit another OA poll success");
   assert.equal(bridge.posts.filter((post) => post.type === "recovery_complete" && post.ok).length, 3);
-  assert.equal(bridge.intervalCount, 1);
+  assert.equal(bridge.intervalCount, 0);
+  const idleRequests = bridge.requests.length;
   bridge.tick();
+  await settleBridge();
+  assert.equal(bridge.requests.length, idleRequests, "page cannot schedule autonomous scans");
+  bridge.scheduleAccounts();
   await settleBridge();
   const periodic = bridge.posts.filter((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:"));
   assert.deepEqual(periodic.map((post) => post.provider_account_id), ["@first", "@second", "@third"]);
@@ -1139,12 +1146,12 @@ test("LINE OA scoped cancellation preserves other active and queued account poll
   assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first", "@third"]);
   bridge.dispatch({ type: "cancel_sync_v3", request_id: "sync-@first" });
   await settleBridge();
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@third"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.provider_account_id === "@third" && post.ok));
   release();
   await settleBridge();
   assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && ["@first", "@second"].includes(post.provider_account_id)), false);
-  bridge.tick();
+  bridge.scheduleAccounts();
   await settleBridge();
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:") && post.provider_account_id === "@third"));
   bridge.dispose();
@@ -1164,8 +1171,8 @@ test("LINE OA stale cancellation cannot stop a replacement request or completed 
   await settleBridge();
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "replacement" && post.ok));
   bridge.dispatch({ type: "cancel_sync_v3", provider_account_id: "@first", request_id: "replacement" });
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first"]);
-  assert.equal(bridge.intervalCount, 1);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
+  assert.equal(bridge.intervalCount, 0);
   release();
   await settleBridge();
   assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "old"), false);
@@ -1201,7 +1208,7 @@ test("LINE OA stalled recovery emits no synthetic activity and scoped cancellati
     ["active", "loading_conversations"], ["queued", "waiting_recovery"], ["active", "loading_conversations"],
   ]);
   const before = bridge.posts.length;
-  for (let tick = 0; tick < 5; tick += 1) bridge.tick();
+  for (let tick = 0; tick < 5; tick += 1) bridge.scheduleAccounts();
   assert.equal(bridge.posts.slice(before).some((post) => ["recovery_activity", "recovery_phase"].includes(post.type)), false);
   // The content/background idle deadline sends this scoped cancellation.
   bridge.dispatch({ type: "cancel_sync_v3", request_id: "active", provider_account_id: "@first" });
@@ -1209,7 +1216,7 @@ test("LINE OA stalled recovery emits no synthetic activity and scoped cancellati
   assert.ok(bridge.posts.some((post) => post.type === "recovery_phase" && post.request_id === "queued" && post.phase === "loading_conversations"));
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "queued" && post.ok));
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "poll:periodic" && post.ok));
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@second", "@third"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
   release();
   await settleBridge();
   assert.equal(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id === "active"), false);
@@ -1226,8 +1233,8 @@ test("LINE access refresh removes revoked polling but preserves another account"
   bridge.setAccounts([accounts[0]]);
   await bridge.detect();
   assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@first"]);
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@first"]);
-  bridge.tick();
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
+  bridge.scheduleAccounts();
   await settleBridge();
   assert.ok(bridge.posts.some((post) => post.type === "recovery_complete" && post.request_id.startsWith("poll:") && post.provider_account_id === "@first" && post.ok));
   bridge.dispose();
@@ -1240,7 +1247,7 @@ test("LINE account-list failure marks access unknown without revoking known acco
   await bridge.detect();
   assert.equal(lastPollingStatus(bridge).account_access_verified, false);
   assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@exampleoa"]);
-  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, ["@exampleoa"]);
+  assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids, []);
   bridge.setAccountError(null);
   bridge.setAccounts([]);
   await bridge.detect();
@@ -1293,7 +1300,7 @@ test("LINE queued deadlines renew only while the active account makes real progr
   assert.ok(bridge.posts.some((post) => post.type === "recovery_activity" && post.request_id === "queued"));
   assert.equal(bridge.posts.some((post) => post.type === "recovery_activity" && post.request_id === "active"), false);
   const before = bridge.posts.length;
-  for (let tick = 0; tick < 5; tick += 1) bridge.tick();
+  for (let tick = 0; tick < 5; tick += 1) bridge.scheduleAccounts();
   assert.equal(bridge.posts.slice(before).some((post) => post.type === "recovery_activity"), false);
   releaseSecond();
   await settleBridge();
@@ -1528,7 +1535,7 @@ test("LINE reset stops recovery bookkeeping and preserves explicit-send profiles
     assert.equal(lastPollingStatus(bridge).account_access_verified, false);
     assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, []);
     assert.equal(bridge.resetRecovery("Already clean"), false);
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     assert.equal(bridge.sentPayloads.length, before);
     const accountRequests = bridge.requests.filter(url => url.pathname === "/api/v1/bots").length;
@@ -1586,7 +1593,7 @@ test("LINE manual recovery reports real list-page progress while requests are pe
     assert.equal(pending.at(-1).conversation_pages, 0);
     assert.equal(pending.some(post => post.phase === "fetching_messages"), false);
     const count = pending.length;
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     assert.equal(bridge.posts.filter(post => post.type === "recovery_phase" && post.request_id === "visible-progress").length, count);
     release();
@@ -1612,7 +1619,7 @@ test("LINE manual recovery waits for active work and then runs before queued rou
     await settleBridge();
     const before = bridge.posts.length;
     blockNext = true;
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     startAccount(bridge, "@third", "manual-priority");
     await settleBridge();
@@ -1645,7 +1652,7 @@ test("LINE explicit sync refreshes metadata from its existing account and conver
     assert.equal(bridge.requests.filter(url => url.pathname.includes("/chats") && !url.pathname.includes("/messages")).length, 2);
     assert.equal(bridge.requests.some(url => url.pathname.includes("/messages")), false);
     assert.ok(bridge.requests.filter(url => url.pathname.includes("/chats")).every(url => url.searchParams.get("prioritizePinnedChat") === "false"));
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     const routine = bridge.posts.filter(post => post.type === "recovery_complete" && post.request_id.startsWith("poll:"));
     assert.ok(routine.length > 0);
@@ -1972,7 +1979,7 @@ test("LINE reloads durable progress before routine polls and after a fresh page 
     // Another valid owner can advance storage after this page's previous scan.
     durableCheckpoints.set("@exampleoa", { watermark: new Date(6000).toISOString() });
     const before = bridge.requests.length;
-    bridge.tick();
+    bridge.scheduleAccounts();
     await settleBridge();
     assert.ok(bridge.posts.some(post => post.type === "recovery_checkpoint" && post.request_id.startsWith("poll:")));
     assert.equal(bridge.requests.slice(before).some(url => url.pathname.includes("/messages")), false);
@@ -2213,3 +2220,22 @@ test("LINE readiness refresh revokes a cached account mapping before the next se
     assert.equal(bridge.requests.length, before, "verified empty access does not trigger redundant metadata reads");
   } finally { bridge.dispose(); }
 });
+
+for (const bootstrap of [false, true]) {
+  test(`LINE changing cursors without new chats cannot keep ${bootstrap ? 'bootstrap' : 'incremental scan'} alive`, async () => {
+    const chat = { chatId: 'repeat', updatedAt: 6000, latestEvent: { timestamp: 6000 } };
+    const bridge = createBridge({ chatPages: {
+      first: { list: [chat], next: 'second' },
+      second: { list: [chat], next: 'third' },
+      third: { list: [chat], next: 'fourth' },
+    } });
+    try {
+      const checkpoint = bootstrap ? {} : { watermark: new Date(1000).toISOString() };
+      const result = await bridge.sync({ checkpoint });
+      assert.equal(result.ok, false);
+      assert.equal(result.watermark, undefined);
+      assert.equal(bridge.posts.some(post => post.type === 'recovery_scan_complete'), false);
+      assert.ok(bridge.requests.filter(url => url.pathname.endsWith('/chats')).length <= 2);
+    } finally { bridge.dispose(); }
+  });
+}

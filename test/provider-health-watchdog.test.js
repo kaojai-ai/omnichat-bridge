@@ -84,7 +84,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
       reload: async () => { calls.reloaded++; },
     } },
   };
-  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(), ...globals });
+  const runtime = vm.createContext({ ensureInboundTimer: () => {}, crypto: { randomUUID: () => "run-fixture" }, recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(), ...globals });
   vm.runInContext(source.slice(source.indexOf("function providerRecoveryKey("), source.indexOf("function providerRecoveryUrl(")), runtime);
   vm.runInContext([
     functionSource("resolveProviderRecoveryTab", "function ensureProviderRecoveryTab("),
@@ -203,7 +203,7 @@ for (const recoveryEnabled of [false, true]) {
 
 test("fresh matching provider health clears stale attention without hiding unhealthy or mismatched tabs", async () => {
   let patch;
-  const runtime = vm.createContext({ recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
+  const runtime = vm.createContext({ ensureInboundTimer: () => {}, crypto: { randomUUID: () => "run-fixture" }, recoveryTemplateReloads: new Map(), activeProviderSendAccounts: new Set(),
     PROVIDER_RECOVERY_STATES,
     updateLiveState: async (_context, value) => { patch = value; },
     providerTabCanSend: (status) => status.matches === true,
@@ -245,22 +245,22 @@ test("Shopee: a tracked same-origin sign-in page does not open another chat", as
 });
 
 
-test("LINE watchdog restores every missing OA without marking them ready from another account's polling", async () => {
+test("LINE watchdog verifies account surfaces without starting a second polling engine", async () => {
   const { run, calls } = harness({ recoveryEnabled: true,
     accounts: ["oa-a", "oa-b", "oa-c"], pollingAccounts: ["oa-a"] });
   await run();
-  assert.deepEqual(calls.polling, ["oa-b", "oa-c"]);
+  assert.deepEqual(calls.polling, []);
   assert.equal(calls.lives["oa-a"].state, "ready");
-  assert.equal(calls.lives["oa-b"].state, "needs_attention");
-  assert.equal(calls.lives["oa-c"].state, "needs_attention");
+  assert.equal(calls.lives["oa-b"].state, "ready");
+  assert.equal(calls.lives["oa-c"].state, "ready");
 });
 
-test("LINE watchdog leaves missing OA polling stopped when automatic recovery is disabled", async () => {
+test("LINE watchdog leaves polling ownership with the coordinator when automatic recovery is disabled", async () => {
   const { run, calls } = harness({ accounts: ["oa-a", "oa-b"], pollingAccounts: ["oa-a"] });
   await run();
   assert.equal(calls.polling.length, 0);
   assert.equal(calls.lives["oa-a"].state, "ready");
-  assert.equal(calls.lives["oa-b"].state, "needs_attention");
+  assert.equal(calls.lives["oa-b"].state, "ready");
 });
 
 for (const restorePolling of [false, true]) {
@@ -269,7 +269,7 @@ for (const restorePolling of [false, true]) {
     const control = { controller: new AbortController(), restorePolling };
     const state = { in_progress: false, last_auto_at: new Date().toISOString() };
     let recoveries = 0;
-    const runtime = vm.createContext({ STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
+    const runtime = vm.createContext({ ensureInboundTimer: () => {}, crypto: { randomUUID: () => "run-fixture" }, STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
       exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
       getAccountScanState: async () => ({ state, stored: {} }),
       readAccountState: (_stored, _key, fallback) => fallback,
@@ -293,7 +293,7 @@ test("unattended failure clears in-progress scan state instead of treating its o
   const control = { accountKey: context.key, controller: new AbortController(), restorePolling: true };
   const state = {};
   let status;
-  const runtime = vm.createContext({ providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
+  const runtime = vm.createContext({ ensureInboundTimer: () => {}, crypto: { randomUUID: () => "run-fixture" }, providerPolicyContexts: new Map(), accountSyncs: new Map([[context.key, control]]),
     STORAGE: { status: "status", scanState: "scan" }, RESUME_SYNC_COOLDOWN_MS: 60_000,
     exclusive: async operation => operation(), throwIfSyncCancelled: () => {},
     getAccountScanState: async () => ({ state, stored: {} }),

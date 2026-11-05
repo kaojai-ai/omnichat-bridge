@@ -71,7 +71,7 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(ready.eligible, true);
     h.result = null;
     const grace = await h.snapshot();
-    assert.equal(grace.ready, true);
+    assert.equal(grace.send_ready, false, "uncertain checks retain transport grace without advertising send readiness");
     assert.equal(grace.reason_code, "provider_check_grace");
     assert.equal(grace.readiness_grace_expires_at, new Date(130_000).toISOString());
     assert.equal((await h.select()).id, h.tab.id, "command preflight consumes the same recent evidence");
@@ -79,14 +79,14 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal((await h.snapshot()).readiness_grace_expires_at, grace.readiness_grace_expires_at);
     h.result = h.healthy;
     const recovered = await h.snapshot();
-    assert.equal(recovered.ready, true);
+    assert.equal(recovered.send_ready, true);
     assert.equal(recovered.readiness_grace_expires_at, undefined);
     assert.equal(h.policy.generation(h.context.key), ready.generation);
     h.result = null;
     await h.assess();
     h.now = 160_000;
     const expired = await h.snapshot();
-    assert.equal(expired.ready, false);
+    assert.equal(expired.send_ready, false);
     assert.equal(expired.reason_code, "checking_session");
     assert.equal(expired.readiness_grace_expires_at, undefined);
     assert.notEqual(h.policy.generation(h.context.key), ready.generation);
@@ -102,10 +102,10 @@ for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: confirmed negatives and a restarted worker never borrow recent readiness`, async () => {
     const h = fixture(provider);
     await h.assess();
-    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { capabilities: { ...h.healthy.capabilities, send_text: false } } : {}) };
-    assert.equal((await h.snapshot()).ready, false);
+    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { capabilities: { ...h.healthy.capabilities, send_text: false } } : { command_capabilities_by_account: { shop: [] } }) };
+    assert.equal((await h.snapshot()).send_ready, false);
     h.result = null;
-    assert.equal((await h.snapshot()).ready, false, "negative evidence cannot become grace");
+    assert.equal((await h.snapshot()).send_ready, false, "negative evidence cannot become grace");
     h.result = h.healthy;
     await h.assess();
     h.result = provider === "shopee" ? { ...h.healthy, current_provider_account_id: "other" }
@@ -115,12 +115,12 @@ for (const provider of ["shopee", "line_oa"]) {
     await h.assess();
     h.result = provider === "shopee" ? { ...h.healthy, capabilities: { ...h.healthy.capabilities, send_text: false } }
       : { ...h.healthy, command_capabilities_by_account: { shop: [] } };
-    assert.equal((await h.snapshot()).ready, false);
+    assert.equal((await h.snapshot()).send_ready, false);
     h.result = h.healthy;
     await h.assess();
     h.policy.reset();
     h.result = null;
-    assert.equal((await h.snapshot()).ready, false, "no evidence survives worker restart");
+    assert.equal((await h.snapshot()).send_ready, false, "no evidence survives worker restart");
     h.tabs = [];
     assert.equal((await h.assess()).retain_transport, false);
   });
@@ -164,7 +164,7 @@ test("grace expiry during asynchronous installation lookup cannot publish ready"
   h.now = 130_000;
   h.finishInstallation();
   const report = await pending;
-  assert.equal(report.ready, false);
+  assert.equal(report.send_ready, false);
   assert.equal(report.readiness_grace_expires_at, undefined);
 });
 
@@ -240,19 +240,19 @@ for (const provider of ["shopee", "line_oa"]) {
     await h.assess();
     h.result = { ok: false, provider_check_outcome: "unknown", error: "Provider check timed out." };
     const grace = await h.snapshot();
-    assert.equal(grace.ready, true);
+    assert.equal(grace.send_ready, false, "uncertain checks retain transport grace without advertising send readiness");
     assert.equal(grace.reason_code, "provider_check_grace");
     assert.equal(grace.readiness_grace_expires_at, new Date(130_000).toISOString());
     h.now = 129_000;
     assert.equal((await h.snapshot()).readiness_grace_expires_at, grace.readiness_grace_expires_at);
     h.now = 130_000;
-    assert.equal((await h.snapshot()).ready, false);
+    assert.equal((await h.snapshot()).send_ready, false);
     h.result = h.healthy;
-    assert.equal((await h.snapshot()).ready, true);
+    assert.equal((await h.snapshot()).send_ready, true);
     h.result = { ok: false, provider_check_outcome: "failed" };
-    assert.equal((await h.snapshot()).ready, false);
+    assert.equal((await h.snapshot()).send_ready, false);
     h.result = { ok: false, provider_check_outcome: "unknown" };
-    assert.equal((await h.snapshot()).ready, false, "missing evidence cannot resurrect a confirmed failed session");
+    assert.equal((await h.snapshot()).send_ready, false, "missing evidence cannot resurrect a confirmed failed session");
   });
 }
 
@@ -275,7 +275,7 @@ test("Shopee polling uncertainty cannot hide a known account switch", async () =
   await h.assess();
   h.result = { ...h.healthy, provider_check_outcome: "unknown", current_provider_account_id: "other" };
   const result = await h.snapshot();
-  assert.equal(result.ready, false);
+  assert.equal(result.send_ready, false);
   assert.equal(result.reason_code, "wrong_account");
 });
 

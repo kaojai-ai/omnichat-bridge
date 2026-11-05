@@ -99,6 +99,9 @@ const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
 const MAX_FLUSH_BATCHES = 10;
 const RESUME_SYNC_COOLDOWN_MS = 5 * 60_000;
+let inboundTimer = null;
+let inboundTickRunning = false;
+const inboundNextAt = new Map();
 const UPDATE_CHECK_CACHE_MS = 6 * 60 * 60_000;
 const UPDATE_RETRY_DELAY_MS = 5 * 60_000;
 const API_PING_COOLDOWN_MS = 5 * 60_000;
@@ -611,6 +614,9 @@ function updateLiveState(context, patch) {
 async function writeLiveState(context, patch) {
   const stored = await readStorage([STORAGE.live]);
   const current = readAccountState(stored[STORAGE.live], context.key, {});
+  if (patch.leader === false && current.leader === true) {
+    accountSyncs.get(context.key)?.controller.abort();
+  }
   if (Object.entries(patch).every(([key, value]) => current[key] === value)) return;
   await writeStorage({
     [STORAGE.live]: writeAccountState(stored[STORAGE.live], context.key, {
@@ -1136,6 +1142,9 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       const checkpoint = watermark > 0 ? { ...state,
         watermark: new Date(Math.max(watermark, Date.now() - 7 * 24 * 60 * 60 * 1_000)).toISOString(),
       } : state;
+      if (watermark > 0 && checkpoint.watermark !== state.watermark) {
+        await updateScopedState(STORAGE.status, accountKey(message.provider, message.provider_account_id), { skipped_before: checkpoint.watermark });
+      }
       const stored = await readStorage([STORAGE.config]);
       let history = null;
       try {
@@ -2255,6 +2264,58 @@ function startUnattendedProviderSync(tab, context) {
   return operation;
 }
 
+// The background coordinator owns periodic work; provider scripts execute one scan.
+function ensureInboundTimer(enabled) {
+  if (!enabled) { clearInterval(inboundTimer); inboundTimer = null; return; }
+  if (!inboundTimer) inboundTimer = setInterval(() => {
+    void runInboundTick().catch(error => recordUnexpected("inbound_schedule", error));
+  }, 3_000);
+}
+
+async function runInboundTick() {
+  if (inboundTickRunning) return;
+  inboundTickRunning = true;
+  try {
+    const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts,
+      STORAGE.serverInitialized, STORAGE.live, STORAGE.status, STORAGE.scanState]);
+    if (!hasServerInitialized(stored) || !hasLocalConsent(stored[STORAGE.consent])) return;
+    for (const context of configuredAccountContexts(stored)) {
+      if (accountSyncs.has(context.key) || Date.now() < (inboundNextAt.get(context.key) ?? 0)) continue;
+      const live = readAccountState(stored[STORAGE.live], context.key, {});
+      const connection = liveConnections.get(context.key);
+      if (live.leader !== true || connection?.socket?.readyState !== WebSocket.OPEN) continue;
+      const policy = sessionEligibility.state(context.key);
+      if (!policy?.eligible || policy.unknown) continue;
+      const status = readAccountState(stored[STORAGE.status], context.key, {});
+      if (!status.last_sync_at && !readAccountState(stored[STORAGE.scanState], context.key, {}).started_at) continue; // Sync button initializes each account.
+      const retryAt = Math.max(providerAutomaticRetryAt.get(context.key) ?? 0, Date.parse(status.next_retry_at ?? "") || 0);
+      if (Date.now() < retryAt) continue;
+      inboundNextAt.set(context.key, Date.now() + (context.adapter.id === "line_oa" ? 15_000 : 3_000));
+      void requestAccountSync(context, "periodic", { restorePolling: true }).then(async result => {
+        if (result?.skipped) return;
+        if (result?.error) throw new Error(result.error);
+        const interval = context.adapter.id === "line_oa" ? 15_000 : 3_000;
+        const pages = Math.max(1, Number(result.conversation_pages) || 1);
+        // Schedule from completion, amortizing multi-page work. Unknown ordering
+        // gets a quiet interval instead of repeating a whole-store crawl at 3s.
+        const delay = context.adapter.id === "shopee" && !result.discovery_ordered
+          ? Math.max(60_000, pages * interval) : pages * interval;
+        inboundNextAt.set(context.key, Date.now() + delay);
+        providerAutomaticRetryAttempts.delete(context.key);
+        providerAutomaticRetryAt.delete(context.key);
+        await updateScopedState(STORAGE.status, context.key, { next_retry_at: null });
+      }).catch(async error => {
+        if (error?.name === "AbortError") return;
+        const attempts = (providerAutomaticRetryAttempts.get(context.key) ?? 0) + 1;
+        const next = Date.now() + Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5));
+        providerAutomaticRetryAttempts.set(context.key, attempts);
+        providerAutomaticRetryAt.set(context.key, next);
+        await updateScopedState(STORAGE.status, context.key, { next_retry_at: new Date(next).toISOString() });
+      });
+    }
+  } finally { inboundTickRunning = false; }
+}
+
 async function runProviderHealthWatchdogOnce() {
   const stored = await readStorage([
     STORAGE.config,
@@ -2377,17 +2438,9 @@ async function runProviderHealthWatchdogOnce() {
           })
           : recovery.record;
         for (const item of matchingContexts) {
-          const polling = adapter.id === "shopee"
-            ? status.current_provider_account_id === item.account.provider_account_id
-            : (status.provider_polling_active === true
-            && Array.isArray(status.provider_polling_account_ids)
-            && status.provider_polling_account_ids.includes(item.account.provider_account_id));
-          if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
           await updateProviderRecoveryLiveState([item], adapter, {
-            state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
-            reason: polling ? null : adapter.id === "shopee"
-              ? "Shopee account changed. Check the connection for this browser."
-              : "LINE OA polling is not running for this account. Sync this account to resume.",
+            state: PROVIDER_RECOVERY_STATES.ready,
+            reason: null,
             tabId: record?.tab_id ?? tab.id,
           });
         }
@@ -2674,14 +2727,13 @@ async function connectionStatusSnapshot(context) {
   return {
     type: "connection_status",
     schema: "omnichat.connection_status",
-    version: 1,
+    version: 2,
     provider: context.account.provider,
     provider_account_id: canonicalProviderAccountId(context),
     installation_id: id,
     device_name: deviceName || null,
     extension_version: chrome.runtime.getManifest().version,
     reported_at: new Date().toISOString(),
-    ready,
     send_ready: sendReady,
     send_reason_code: sendReady ? "healthy" : !samePolicy ? "checking_session" : current?.reason_code ?? "provider_unready",
     receive_ready: receiveReady,
@@ -2691,13 +2743,29 @@ async function connectionStatusSnapshot(context) {
     ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
     client: { platform: platform.os },
     last_sync_at: health.last_sync_at,
+    sync_state: !ready ? "action_required"
+      : ["discovering", "syncing"].includes(status.state) ? (status.last_sync_at ? "catching_up" : "initializing")
+      : status.sync_error || status.delivery_error ? "retrying"
+      : pending.length ? "catching_up" : status.last_sync_at ? "up_to_date" : "initializing",
+    sync_stage: ["discovering", "syncing"].includes(status.state) ? "fetching" : pending.length ? "forwarding" : null,
+    pending_messages: pending.length,
+    last_successful_scan_at: health.last_sync_at,
+    last_delivery_at: health.last_delivery_at,
+    next_retry_at: status.next_retry_at ?? null,
+    skipped_before: status.skipped_before ?? null,
     ...(Array.isArray(commandCapabilities) ? { command_capabilities: ready ? commandCapabilities : [] } : {}),
   };
 }
 
 function statusPublishKey(status) {
   return JSON.stringify({
-    ready: status.ready,
+    sync_state: status.sync_state,
+    sync_stage: status.sync_stage,
+    pending_messages: status.pending_messages,
+    last_successful_scan_at: status.last_successful_scan_at,
+    next_retry_at: status.next_retry_at,
+    skipped_before: status.skipped_before,
+    last_delivery_at: status.last_delivery_at,
     send_ready: status.send_ready,
     send_reason_code: status.send_reason_code,
     receive_ready: status.receive_ready,
@@ -2742,7 +2810,13 @@ async function sendConnectionStatus(socket, context) {
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...providerPolicyContexts.get(context.key)?.readinessDiagnostics,
-    ready: status.ready,
+    sync_state: status.sync_state,
+    sync_stage: status.sync_stage,
+    pending_messages: status.pending_messages,
+    last_successful_scan_at: status.last_successful_scan_at,
+    next_retry_at: status.next_retry_at,
+    skipped_before: status.skipped_before,
+    last_delivery_at: status.last_delivery_at,
     send_ready: status.send_ready,
     send_reason_code: status.send_reason_code,
     receive_ready: status.receive_ready,
@@ -2804,6 +2878,7 @@ async function ensureLiveConnection() {
     && hasServerInitialized(stored)
     && hasLocalConsent(stored[STORAGE.consent]);
   await ensureProviderHealthAlarm(canWatch);
+  ensureInboundTimer(canWatch);
   // First Sync can initialize the extension while the alarm/status checks
   // above are pending. Never clean up sockets or readiness from that old view.
   const current = await readStorage(stateKeys);
@@ -4270,6 +4345,11 @@ function requestAccountSync(context, trigger, options = {}) {
     if (!configured || !hasLocalConsent(current[STORAGE.consent])
       || JSON.stringify(configured.config) !== JSON.stringify(context.config)) throw syncCancelledError();
     if (trigger !== "manual" && !hasServerInitialized(current)) return { skipped: "not_initialized" };
+    if (trigger === "periodic") {
+      const live = await readStorage([STORAGE.live]);
+      if (readAccountState(live[STORAGE.live], context.key, {}).leader !== true) return { skipped: "not_leader" };
+      throwIfSyncCancelled(signal);
+    }
     let selected = context;
     if (Number.isInteger(options.tab_id)) {
       const selection = trigger === "manual" && options.allow_tab_fallback === true
@@ -4383,7 +4463,9 @@ async function runAccountSync(trigger, control, context) {
   const { signal } = control.controller;
   control.adapter = context.adapter;
   control.providerAccountId = context.account.provider_account_id;
-  const automatic = trigger === "automatic";
+  const runStartedAt = Date.now();
+  const runId = crypto.randomUUID();
+  const automatic = trigger === "automatic" || trigger === "periodic";
   const providerAccountId = context.account.provider_account_id;
   const prepared = await exclusive(async () => {
     throwIfSyncCancelled(signal);
@@ -4415,8 +4497,6 @@ async function runAccountSync(trigger, control, context) {
       phase: "preparing",
       sync_attempt_id: null,
       caught_up: false,
-      sync_error: null,
-      sync_error_at: null,
       completed_conversations: null,
       total_conversations: null,
     });
@@ -4442,7 +4522,7 @@ async function runAccountSync(trigger, control, context) {
     await recordLog("debug", "delivery", "pre_sync_flush", "Checking queued messages before recovery.", {
       provider_account_id: providerAccountId,
     });
-    void attemptDelivery(context, { resetBackoff: true })
+    void attemptDelivery(context, { resetBackoff: trigger === "manual" })
       .catch((error) => recordUnexpected("message_delivery", error));
     throwIfSyncCancelled(signal);
     await updateScopedState(STORAGE.status, context.key, {
@@ -4467,7 +4547,7 @@ async function runAccountSync(trigger, control, context) {
       completed_conversations: null,
       total_conversations: null,
     });
-    const delivered = await attemptDelivery(context, { resetBackoff: true, signal });
+    const delivered = await attemptDelivery(context, { resetBackoff: trigger === "manual", signal });
     throwIfSyncCancelled(signal);
     throwIfSyncCancelled(signal);
     const result = {
@@ -4477,6 +4557,8 @@ async function runAccountSync(trigger, control, context) {
       queued: recovered.queued ?? 0,
       sent: delivered.sent,
       pending: delivered.pending,
+      conversation_pages: recovered.conversation_pages ?? 1,
+      discovery_ordered: recovered.discovery_ordered === true,
       ...(recovered.metadata ? { metadata: recovered.metadata } : {}),
     };
     await updateScopedState(STORAGE.status, context.key, {
@@ -4484,13 +4566,17 @@ async function runAccountSync(trigger, control, context) {
       phase: null,
       last_sync_at: new Date().toISOString(),
       caught_up: result.pending === 0,
+      next_retry_at: null,
       sync_error: null,
       sync_error_at: null,
       completed_conversations: null,
       total_conversations: null,
       last_result: result,
     });
-    await recordLog("info", "sync", "completed", "Sync completed.", result);
+    await recordLog(trigger === "periodic" ? "debug" : "info", "sync", "completed", "Sync completed.", {
+      ...result, diagnostic_version: 1, request_id: runId, trigger, duration_ms: Date.now() - runStartedAt,
+      stop_reason: "completed", stage: "forwarding",
+    });
     const live = liveConnections.get(context.key);
     if (live?.socket) {
       void sendConnectionStatus(live.socket, context)
@@ -4518,8 +4604,7 @@ async function runAccountSync(trigger, control, context) {
       state: cancelled ? "watching" : "error",
       phase: null,
       caught_up: false,
-      sync_error: cancelled ? null : message,
-      sync_error_at: cancelled ? null : new Date().toISOString(),
+      ...(!cancelled ? { sync_error: message, sync_error_at: new Date().toISOString() } : {}),
       completed_conversations: null,
       total_conversations: null,
       pending: pending.length,
@@ -4714,6 +4799,13 @@ async function queueMessagesForContext(messages, context, shouldFlush) {
         context.key,
         [...pending, ...added],
       );
+      // Bound the shared durable queue; rejecting capture also withholds its
+      // checkpoint acknowledgement, allowing catch-up after delivery drains it.
+      if (new TextEncoder().encode(JSON.stringify(writes[STORAGE.pending])).byteLength > 4 * 1024 * 1024) {
+        throw Object.assign(new Error("Forwarding queue is full. Waiting for target delivery before capturing more messages."), {
+          reason_code: "forwarding_queue_full",
+        });
+      }
     }
     if (eligible.length) {
       const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
@@ -5299,7 +5391,8 @@ async function flushBatch(context, signal) {
   );
   const deliveredKeys = new Set(outcome.delivered.map(messageKey));
   for (const message of outcome.skipped) deliveredKeys.add(messageKey(message));
-  const failure = outcome.failed[0]?.error ?? outcome.blocked?.error ?? null;
+  for (const item of outcome.failed) deliveredKeys.add(messageKey(item.message));
+  const failure = outcome.blocked?.error ?? null;
   const failureMessage = failure instanceof Error ? failure.message : String(failure ?? "");
   const now = new Date().toISOString();
   const remaining = await serializeAccountStorage(async () => {

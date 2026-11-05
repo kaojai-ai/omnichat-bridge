@@ -21,7 +21,7 @@ function harness(overrides = {}) {
   const uploads = [];
   let failWrite = false;
   const runtime = vm.createContext({ preemptAutomaticLogUpload: () => {},
-    performance, STORAGE, readAccountState, writeAccountState,
+    performance, TextEncoder, STORAGE, readAccountState, writeAccountState,
     metadataScope: async context => context.key,
     customerMetadata: { enrich: async (_scope, message) => message },
     readStorage: async () => { const snapshot = structuredClone(state); await turn(); return snapshot; },
@@ -234,4 +234,61 @@ test("legacy scan migration never infers completeness from pending messages", as
   assert.deepEqual(result.state.conversations, {});
   assert.equal(result.state.watermark, null);
   assert.equal(readAccountState(state[STORAGE.pending], a.key)[0].id, "unscanned-live");
+});
+
+test('permanently rejected and skipped messages are dropped with error diagnostics and no archive', async () => {
+  const logs = [];
+  const h = harness({
+    messageReference: value => `${value.conversation_id}:${value.id}`,
+    deliveryMessageDetails: async () => ({}), diagnosticErrorDetails: () => ({}),
+    recordLog: async (level, area, event) => logs.push({ level, area, event }),
+  });
+  const a = context('a');
+  await h.runtime.queueMessagesForContext([message('skipped'), message('rejected'), message('good')], a, false);
+  const upload = h.runtime.flushBatch(a);
+  while (!h.uploads.length) await turn();
+  const [skipped, rejected, good] = h.uploads[0].selected;
+  h.uploads[0].resolve({ delivered: [good], skipped: [skipped], failed: [{ message: rejected, error: new Error('Rejected') }] });
+  assert.equal((await upload).pending, 0);
+  assert.equal(readAccountState(h.state[STORAGE.pending], a.key, []).length, 0);
+  assert.equal(Object.hasOwn(h.state, 'failed_messages_v1'), false);
+  assert.ok(logs.some(item => item.level === 'error' && item.event === 'server_skipped'));
+  assert.ok(logs.some(item => item.level === 'error' && item.event === 'failed'));
+  assert.equal(readAccountState(h.state[STORAGE.status], a.key, {}).delivery_error, null);
+});
+
+test('queue pressure rejects capture before changing durable messages or checkpoints and resumes after drain', async () => {
+  const h = harness();
+  const a = context('a');
+  const existing = { ...message('existing'), text: 'x'.repeat(4 * 1024 * 1024 - 500) };
+  h.state[STORAGE.pending] = writeAccountState({}, a.key, [existing]);
+  h.state[STORAGE.scanState] = writeAccountState({}, a.key, { watermark: '2026-10-25T00:00:00Z' });
+  const checkpoint = JSON.stringify(h.state[STORAGE.scanState]);
+  await assert.rejects(h.runtime.queueMessagesForContext([{ ...message('new'), text: 'x'.repeat(1000) }], a, false), /queue is full/);
+  assert.equal(readAccountState(h.state[STORAGE.pending], a.key, []).length, 1);
+  assert.equal(JSON.stringify(h.state[STORAGE.scanState]), checkpoint);
+  h.state[STORAGE.pending] = writeAccountState({}, a.key, []);
+  assert.equal((await h.runtime.queueMessagesForContext([message('new')], a, false)).queued, 1);
+});
+
+test('temporary target outage respects stored backoff and preserves pending messages', async () => {
+  const pending = [message('unacknowledged')];
+  let requests = 0;
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const deliver = vm.runInNewContext(`(${section('async function deliverPendingForAccount(', 'async function attemptAllDeliveries(')})`, {
+    STORAGE, readAccountState,
+    readStorage: async () => ({
+      [STORAGE.consent]: true,
+      [STORAGE.pending]: writeAccountState({}, 'a', pending),
+      [STORAGE.deliveryRetry]: writeAccountState({}, 'a', { next_at: retryAt }),
+    }),
+    hasLocalConsent: () => true, hasServerInitialized: () => true,
+    resetDeliveryRetry: async () => assert.fail('automatic work must not reset backoff'),
+    flushAll: async () => { requests++; return { sent: 0, pending: 1 }; },
+  });
+  const result = await deliver(context('a'), { resetBackoff: false });
+  assert.equal(result.skipped, 'backoff');
+  assert.equal(result.pending, 1);
+  assert.equal(requests, 0);
+  assert.equal(pending[0].id, 'unacknowledged');
 });

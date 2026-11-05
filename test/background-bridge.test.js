@@ -112,14 +112,15 @@ test("reattaches an invalidated content bridge without refreshing the provider p
   assert.ok(manifest.permissions.includes("scripting"));
 });
 
-test("keeps connection status compatible with the server's strict version 1 envelope", () => {
+test("publishes explicit version 2 connection status without legacy overall readiness", () => {
   const statusStart = source.indexOf("async function connectionStatusSnapshot(");
   const statusEnd = source.indexOf("\n}\n\nasync function sendConnectionStatus", statusStart);
   assert.ok(statusStart >= 0);
   assert.ok(statusEnd > statusStart);
   const statusSource = source.slice(statusStart, statusEnd);
   assert.match(statusSource, /schema: "omnichat\.connection_status"/);
-  assert.match(statusSource, /version: 1/);
+  assert.match(statusSource, /version: 2/);
+  assert.doesNotMatch(statusSource, /^    ready[, :]/m);
   assert.match(statusSource, /ready,/);
   assert.match(statusSource, /current\?\.reason_code === "ready" \? health\.reason_code/);
   assert.match(statusSource, /readiness_grace_expires_at/);
@@ -459,6 +460,7 @@ for (const provider of ['line_oa', 'shopee']) {
     }))`, {
       Date: class extends Date { static now() { return now; } },
       exclusive: action => action(), getAccountScanState: async () => ({ state }),
+      accountKey: (provider, id) => `${provider}:${id}`, updateScopedState: async () => {},
       STORAGE: {}, readStorage: async () => ({}), historySyncSettings: () => history,
       historySinceMs: days => now - days * 24 * 60 * 60 * 1_000,
     });

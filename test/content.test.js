@@ -1061,15 +1061,15 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(bridge.runtimeMessages.find(message => message.type === "sync_v3").request_id, requestId);
     assert.equal(bridge.runtimeMessages.some(message => message.type === "sync_complete"), false);
     await bridge.providerEvent({ type: "recovery_complete", provider_account_id: providerAccountId,
-      request_id: requestId, ok: true, recovered: 3, queued: 3 });
+      request_id: requestId, ok: true, recovered: 3, queued: 3, conversation_pages: 4, discovery_ordered: true });
     await bridge.providerEvent({ type: "recovery_complete", provider_account_id: providerAccountId,
-      request_id: requestId, ok: true, recovered: 3, queued: 3 });
+      request_id: requestId, ok: true, recovered: 3, queued: 3, conversation_pages: 4, discovery_ordered: true });
     const completions = bridge.runtimeMessages.filter(message => message.type === "sync_complete");
     assert.equal(completions.length, 1, "a repeated page completion cannot notify the background twice");
     assert.equal(completions[0].provider, provider);
     assert.equal(completions[0].provider_account_id, providerAccountId);
     assert.equal(completions[0].request_id, requestId);
-    assert.deepEqual(plain(completions[0].result), { ok: true, recovered: 3, queued: 3, watermark: null });
+    assert.deepEqual(plain(completions[0].result), { ok: true, recovered: 3, queued: 3, watermark: null, conversation_pages: 4, discovery_ordered: true });
   });
 }
 

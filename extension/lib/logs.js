@@ -44,7 +44,7 @@ export function sanitizeSendDiagnostics(input) {
     provider: ["shopee", "line_oa"],
     confirmation_source: ["send_response", "history"],
     operation: ["initialize", "upload", "send", "confirm", "poll", "recovery"],
-    stage: ["preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window", "provider_identity", "conversation_list_fetch", "poll_batch_persist", "poll_cursor_save", "recovery_batch_persist", "history_backfill_save", "cursor_save", "history_window_save", "scan_checkpoint_save"],
+    stage: ["fetching", "forwarding", "preparation", "storage", "tab_selection", "bridge_verification", "provider_dispatch", "media_download", "upload_grant", "upload_transfer", "upload_report", "upload_processing", "native_send", "confirmation", "history_fetch", "history_persistence", "history_completeness", "checkpoint_load", "checkpoint_save", "bootstrap_save", "history_backfill", "history_window", "provider_identity", "conversation_list_fetch", "poll_batch_persist", "poll_cursor_save", "recovery_batch_persist", "history_backfill_save", "cursor_save", "history_window_save", "scan_checkpoint_save"],
     error_name: ["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"],
     response_format: ["json", "non_json", "empty", "unreadable"],
     surface: ["new-webchat", "webchat", "seller-centre"],
