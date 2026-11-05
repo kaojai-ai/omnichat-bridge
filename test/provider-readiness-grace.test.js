@@ -446,6 +446,8 @@ test("expired cached evidence rejects locally and repeated reports cannot renew 
     conversation_id: "conversation", request_id: "expired" });
   assert.equal(failure.dispatch_started, false);
   assert.match(failure.error, /readiness is unavailable or stale/);
+  assert.equal(failure.retryable, true);
+  assert.equal(failure.error_code, "OMNICHAT_BRIDGE_NOT_READY");
   assert.equal(attempts, 0);
   assert.equal(refreshes, 1);
 });
@@ -558,5 +560,21 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(snapshot.send_ready, true);
     assert.equal(snapshot.receive_ready, false);
     assert.equal((await h.select()).id, h.tab.id);
+  });
+}
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: changed session rejects before dispatch with safe failover classification`, async () => {
+    const h = fixture(provider);
+    const ready = await h.assess();
+    let attempts = 0;
+    wireSender(h, async () => { attempts++; return { ok: true }; });
+    h.scope.invalidateProviderTab(h.tab.id, "navigation");
+    const failure = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "changed" }, { expectedGeneration: ready.generation });
+    assert.equal(attempts, 0);
+    assert.equal(failure.dispatch_started, false);
+    assert.equal(failure.retryable, true);
+    assert.equal(failure.error_code, "OMNICHAT_BRIDGE_NOT_READY");
   });
 }

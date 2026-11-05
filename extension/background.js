@@ -1491,7 +1491,7 @@ async function selectSendContext(context, { expectedGeneration } = {}) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
   const originalEpoch = providerSessionEpoch(adapter.id);
   if (expectedGeneration !== undefined && sessionEligibility.generation(context.key) !== expectedGeneration) {
-    throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
+    throw Object.assign(new Error("Provider session changed while this command was queued. Verify the account and retry."), { code: "OMNICHAT_BRIDGE_NOT_READY" });
   }
   const policy = sessionEligibility.state(context.key);
   const tab = policy?.evidence?.tab;
@@ -1500,13 +1500,13 @@ async function selectSendContext(context, { expectedGeneration } = {}) {
     || !providerTabCanSend(policy.evidence.status, context)
     || !providerAccountMatchesTab(adapter, context.account, tab)) {
     void runProviderHealthWatchdog().catch(error => recordUnexpected("provider_watchdog", error));
-    throw new Error(`${providerLabel(adapter)} send readiness is unavailable or stale. Background verification scheduled.`);
+    throw Object.assign(new Error(`${providerLabel(adapter)} send readiness is unavailable or stale. Background verification scheduled.`), { code: "OMNICHAT_BRIDGE_NOT_READY" });
   }
   if (originalEpoch !== providerSessionEpoch(adapter.id)) {
-    throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
+    throw Object.assign(new Error("Provider session changed while this command was queued. Verify the account and retry."), { code: "OMNICHAT_BRIDGE_NOT_READY" });
   }
   if (!sessionEligibility.isCurrent(context.key, policy.generation)) {
-    throw new Error("Provider session changed during tab selection. Verify the account and retry.");
+    throw Object.assign(new Error("Provider session changed during tab selection. Verify the account and retry."), { code: "OMNICHAT_BRIDGE_NOT_READY" });
   }
   // Carry this generation through dispatch; never adopt a replacement session.
   return { tab, generation: policy.generation };
@@ -1579,7 +1579,9 @@ async function sendViaProvider(message, options = {}) {
     const timing = { preparation_duration_ms: Math.round((state.dispatchStartedAt ?? (globalThis.performance?.now() ?? Date.now())) - started), total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started) };
     if (state.dispatchStarted) return { ok: false, uncertain: true, execution_stage: "provider_dispatch", dispatch_started: true, retryable: false, error: String(error), diagnostics: { diagnostic_version: 1, ...timing } };
     return { ok: false, execution_stage: "preparation", dispatch_started: false,
-      retryable: error?.name === "TimeoutError", error_code: error?.name === "TimeoutError" ? "OMNICHAT_PREPARATION_TIMEOUT" : "OMNICHAT_PREPARATION_FAILED",
+      retryable: error?.name === "TimeoutError" || error?.code === "OMNICHAT_BRIDGE_NOT_READY",
+      error_code: error?.name === "TimeoutError" ? "OMNICHAT_PREPARATION_TIMEOUT"
+        : error?.code === "OMNICHAT_BRIDGE_NOT_READY" ? error.code : "OMNICHAT_PREPARATION_FAILED",
       error: error instanceof Error ? error.message : String(error),
       diagnostics: { diagnostic_version: 1, ...timing, stage: "preparation", duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - started), native_attempted: false } };
   } finally { activeProviderSendAccounts.delete(accountKey); }
@@ -1649,7 +1651,8 @@ async function prepareAndSendViaProvider(message, state = {}) {
       : { media_base64: btoa(binary), media_type: imageType };
   }
   if (!sessionEligibility.isCurrent(context.key, selectedGeneration)) {
-    return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry." };
+    return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry.",
+      execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_BRIDGE_NOT_READY" };
   }
   if (deadlineAt <= Date.now()) return { ok: false, error: "Reply deadline expired before sending.", execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" };
   let result;
