@@ -50,11 +50,10 @@
   const SELLER_CENTRE_SEND_PATH = "/webchat/api/v1.2/mini/messages";
   const LEGACY_SEND_PATH = "/webchat/api/v1.2/messages";
   const LEGACY_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
-  const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
+  const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/mini/images";
   const SELLER_CENTRE_SURFACE = "seller-centre";
   const NEW_WEBCHAT_SURFACE = "new-webchat";
-  // Both standalone pages use the existing Webchat API; only the preferred
-  // page has verified outbound video support. Keep one request profile.
+  // Standalone and Seller Centre share send semantics with surface-specific APIs.
   const STANDALONE_PROFILE = Object.freeze({
     listPaths: Object.freeze([
       LEGACY_CONVERSATIONS_PATH,
@@ -63,6 +62,8 @@
     loginPath: LEGACY_LOGIN_PATH,
     sendPath: LEGACY_SEND_PATH,
     imagePath: LEGACY_IMAGE_PATH,
+    videoPath: "/webchat/api/coreapi/v1.2/video",
+    videoRegion: "sg",
     historyPath: (conversationId) => `/webchat/api/v1.2/conversations/${encodeURIComponent(conversationId)}/messages`,
     historyPathPattern: /^\/webchat\/api\/v1\.2\/conversations\/[^/]+\/messages$/,
     syncPath: null,
@@ -79,6 +80,9 @@
       loginPath: "/api/v2/login/",
       sendPath: SELLER_CENTRE_SEND_PATH,
       imagePath: SELLER_CENTRE_IMAGE_PATH,
+      videoPath: "/webchat/api/coreapi/v1.2/mini/video",
+      // Keep the observed Thai uploader; other markets reuse standalone MMS.
+      videoRegion: globalThis.OmnichatShopeeUrl.countryForUrl(window.location.href) === "TH" ? "th" : "sg",
       historyPath: (conversationId) => `${SELLER_CENTRE_MESSAGE_PREFIX}${encodeURIComponent(conversationId)}/messages`,
       historyPathPattern: /^\/webchat\/api\/v1\.2\/mini\/conversations\/[^/]+\/messages$/,
       syncPath: SELLER_CENTRE_SYNC_PATH,
@@ -152,6 +156,7 @@
     state.lookupListTemplate = null;
     state.historyTemplate = null;
     state.sendTemplate = null;
+    state.senderReadTemplate = null;
     state.latestMessageIdsByConversation = new Map();
     state.pendingSellerCentreMessages = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
@@ -225,8 +230,13 @@
     details,
   });
 
+  const sendRequestSource = () => state.getTemplate ?? state.listTemplate ?? state.senderReadTemplate;
+  let senderInitializationPromise = null;
+
+  const sendIdentityFresh = () => Number.isFinite(state.sendVerifiedMono)
+    && (globalThis.performance?.now() ?? Date.now()) - state.sendVerifiedMono < 120_000;
   const surfaceSendReady = () => {
-    if (!state.listTemplate || !state.getTemplate) return false;
+    if (!state.currentAccountId || !sendIdentityFresh() || !(state.sendTemplate || sendRequestSource())) return false;
     if (isSellerCentreSurface()) return typeof state.nativeFetch === "function";
     return typeof window.__chat_anti_fraud__?.poster === "function";
   };
@@ -237,15 +247,11 @@
       ? Boolean(state.listTemplate && state.getTemplate)
       : Boolean(state.socket),
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
-    send_text: surfaceSendReady(),
-    send_image: surfaceSendReady(),
-    send_video: surfaceSendReady() && state.surface === NEW_WEBCHAT_SURFACE && Boolean(globalThis.OmnichatShopeeVideo),
-    send_product: surfaceSendReady(),
   });
 
   const publishSurfaceStatus = (requestId = null) => {
     const capabilities = surfaceCapabilities();
-    const ready = Boolean(state.listTemplate && state.getTemplate);
+    const ready = surfaceSendReady();
     const chatOpen = isSellerCentreSurface()
       ? (() => {
         const launcher = sellerCentreChatLauncher();
@@ -265,6 +271,7 @@
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
+      send_verified_at: state.sendVerifiedAt ?? null,
       list_ready: Boolean(state.listTemplate),
       history_ready: Boolean(state.getTemplate),
       sender_available: isSellerCentreSurface() ? typeof state.nativeFetch === "function"
@@ -480,7 +487,7 @@
     const account = providerAdapter.currentAccountFromPayload(body);
     const nextId = value(account?.provider_account_id);
     const previousId = state.currentAccountId ?? null;
-    if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate))) {
+    if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate || state.senderReadTemplate))) {
       if (previousId || !nextId) {
         state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
         if (cancelRecovery) resetRecovery("Shopee session changed. Retry sync for the open shop.");
@@ -489,6 +496,7 @@
         state.getTemplate = null;
         state.historyTemplate = null;
         state.sendTemplate = null;
+        state.senderReadTemplate = null;
         state.sendErrorsByClientMessageId.clear();
         state.activeConversationId = null;
         state.conversationsById.clear();
@@ -511,6 +519,8 @@
         provider_account_id: nextId,
       });
     }
+    state.sendVerifiedAt = account ? new Date().toISOString() : null;
+    state.sendVerifiedMono = account ? (globalThis.performance?.now() ?? Date.now()) : null;
     if (account) mergeAccounts([account]);
     publishSurfaceStatus();
     return account ? [account] : [];
@@ -703,7 +713,10 @@
 
   async function discoverAccounts() {
     if (state.accountDiscoveryPromise) return state.accountDiscoveryPromise;
-    state.accountDiscoveryPromise = detectSessionAccount().finally(() => {
+    state.accountDiscoveryPromise = detectSessionAccount().then(accounts => {
+      void initializeSender().catch(error => logAsyncError("sender_initialization", error));
+      return accounts;
+    }).finally(() => {
       state.accountDiscoveryPromise = null;
     });
     return state.accountDiscoveryPromise;
@@ -1133,9 +1146,10 @@
     if (state.sendTemplate && pathOf(state.sendTemplate.url) === surfaceProfile().sendPath) {
       return state.sendTemplate;
     }
-    if (!state.getTemplate) return null;
+    const source = sendRequestSource();
+    if (!source) return null;
 
-    const sourceUrl = new URL(state.getTemplate.url);
+    const sourceUrl = new URL(source.url);
     const profile = surfaceProfile();
     const url = new URL(profile.sendPath, sourceUrl.origin);
     for (const key of authQueryKeys) {
@@ -1147,7 +1161,7 @@
       url.searchParams.set("uuid", clientMessageId);
     }
 
-    const headers = Object.fromEntries(new Headers(state.getTemplate.init.headers).entries());
+    const headers = Object.fromEntries(new Headers(source.init.headers).entries());
     headers["content-type"] = "application/json";
     return {
       url: url.toString(),
@@ -1178,7 +1192,7 @@
       if (typeof state.nativeFetch !== "function") {
         throw new Error("Shopee Seller Centre native sender is unavailable. Refresh Seller Chat.");
       }
-      const sourceInit = state.getTemplate?.init ?? {};
+      const sourceInit = sendRequestSource()?.init ?? {};
       const init = {
         method: "POST",
         headers: new Headers(template.headers ?? sourceInit.headers ?? {}),
@@ -1274,7 +1288,7 @@
     if (!(message.image_bytes instanceof ArrayBuffer) || message.image_bytes.byteLength === 0) {
       throw new Error("Reply image is invalid.");
     }
-    const sourceTemplateUrl = state.getTemplate?.url ?? state.sendTemplate?.url;
+    const sourceTemplateUrl = sendRequestSource()?.url ?? state.sendTemplate?.url;
     if (!sourceTemplateUrl) throw new Error("Shopee image uploader is still initializing.");
     const sourceUrl = new URL(sourceTemplateUrl);
     const url = new URL(surfaceProfile().imagePath, sourceUrl.origin);
@@ -1290,7 +1304,7 @@
     form.append("file", new Blob([message.image_bytes], { type }), `omnichat-reply.${extension}`);
     form.append("conversation_id", routing.conversation_id);
     const headers = new Headers(
-      state.getTemplate?.init?.headers ?? state.sendTemplate?.headers ?? {},
+      sendRequestSource()?.init?.headers ?? state.sendTemplate?.headers ?? {},
     );
     headers.delete("content-type");
     headers.delete("content-length");
@@ -1355,41 +1369,21 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Reply command is invalid." });
       return;
     }
-    if (commandType === "send_video" && (state.surface !== NEW_WEBCHAT_SURFACE || !globalThis.OmnichatShopeeVideo)) {
+    if (commandType === "send_video" && ((state.surface !== NEW_WEBCHAT_SURFACE
+      && !isSellerCentreSurface())
+      || !globalThis.OmnichatShopeeVideo)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
-        error: "Shopee video sending requires initialized New Webchat." });
+        error: "Shopee video sending requires initialized New Webchat or Seller Centre." });
       return;
     }
-    try {
-      await ensureSellerCentreChatOpen();
-      if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
-    } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
-      return;
-    }
-    if (isSellerCentreSurface() && (!state.listTemplate || !state.getTemplate)) {
-      post({
-        type: "api_send_result",
-        request_id: requestId,
-        ok: false,
-        error: "Seller Centre chat is still initializing. Open the Chat panel and wait for its conversation list.",
-      });
+    if (!surfaceSendReady()) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
+        error: "Shopee sender is not initialized or its verified session has expired. Refresh the provider connection." });
       publishSurfaceStatus();
       return;
     }
     if (!isBridgeActive()) return;
-    if (isSellerCentreSurface() && typeof state.nativeFetch !== "function") {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Seller Centre native sender is unavailable." });
-      return;
-    }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
-    try {
-      stage("session_verification");
-      await verifySessionAccount(accountId, deadlineAt - Date.now());
-    } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
-      return;
-    }
     if (state.currentAccountId && accountId !== state.currentAccountId) {
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error: "Shopee signed-in shop does not match the reply command." });
@@ -1487,14 +1481,14 @@
         payload.content = withQuotedMessageId(await uploadImage(message, routing), providerMessageId);
       } else if (commandType === "send_video") {
         payload.type = "video";
-        const source = new URL(state.getTemplate?.url ?? state.sendTemplate.url);
-        const headers = new Headers(state.getTemplate?.init?.headers ?? state.sendTemplate.headers);
+        const source = new URL(sendRequestSource()?.url ?? state.sendTemplate.url);
+        const headers = new Headers(sendRequestSource()?.init?.headers ?? state.sendTemplate.headers);
         headers.set("content-type", "application/json");
         payload.content = { ...await globalThis.OmnichatShopeeVideo.upload({
-          bytes: message.media_bytes, type: message.media_type,
+          bytes: message.media_bytes, type: message.media_type, region: surfaceProfile().videoRegion,
           deadline: Math.min(deadlineAt, sendStartedAt + 30_000), fetch: state.nativeFetch,
           chatRequest: (action, init) => {
-            const url = new URL(`/webchat/api/coreapi/v1.2/video/${action}`, source.origin);
+            const url = new URL(`${surfaceProfile().videoPath}/${action}`, source.origin);
             for (const key of authQueryKeys) if (source.searchParams.has(key)) url.searchParams.set(key,source.searchParams.get(key));
             const { vid, ...options } = init;
             if (vid) url.searchParams.set("vid",vid);
@@ -1553,6 +1547,7 @@
         ...(url.searchParams.has("biz_id") ? { url_biz_matches_route: value(url.searchParams.get("biz_id")) === value(routing.biz_id) } : {}),
         ...(Object.hasOwn(payload.choice_info ?? {}, "real_shop_id")
           ? { choice_shop_matches_route: value(payload.choice_info.real_shop_id) === value(routing.shop_id) } : {}) };
+      if (!sessionUnchanged() || !sendIdentityFresh()) throw new Error("Shopee verified session changed or expired before sending.");
       nativeAttempted = true;
       stage("provider_dispatch");
       const providerRequestStarted = globalThis.performance?.now() ?? Date.now();
@@ -1560,6 +1555,11 @@
       try { response = await sendThroughSurface(template, url.toString(), payload); }
       finally { diagnostics.provider_request_duration_ms = Math.round((globalThis.performance?.now() ?? Date.now()) - providerRequestStarted); }
       nativeResponseReceived = true;
+      if ([401, 403].includes(response?.status)) {
+        state.sendVerifiedAt = null;
+        state.sendVerifiedMono = null;
+        publishSurfaceStatus();
+      }
       stage("provider_response");
       if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
       let body = response;
@@ -1839,6 +1839,47 @@
       url = page.next;
     }
     return { conversations, firstPage, exhausted, pages, stopReason };
+  }
+
+  // Late attachment can miss page-load traffic. Reuse only known read endpoints
+  // already observed on this origin; never replay a send or a POST list request.
+  async function initializeSender() {
+    if (state.sendTemplate || sendRequestSource() || !state.currentAccountId) return;
+    if (senderInitializationPromise) return senderInitializationPromise;
+    const epoch = state.routeSessionEpoch;
+    const operation = (async () => {
+      const entries = globalThis.performance?.getEntriesByType?.("resource") ?? [];
+      const urls = [...new Set(entries.map(entry => entry.name))].reverse();
+      const candidate = urls.find(name => {
+        try {
+          const url = new URL(name);
+          return url.origin === window.location.origin
+            && (isHistoryPath(url.pathname) || ["/webchat/api/workbenchapi/v1.2/mini/shop/setting",
+              "/webchat/api/v1.2/mini/user/setting", "/webchat/api/v1.2/shop_list"].includes(url.pathname))
+            && (!url.searchParams.has("shop_id") || url.searchParams.get("shop_id") === state.currentAccountId);
+        } catch { return false; }
+      });
+      if (!candidate) {
+        postLog("debug", "sender_initialization_waiting", "Waiting for Shopee request configuration.", {});
+        return;
+      }
+      const request = new Request(candidate, { method: "GET", credentials: "include" });
+      const body = await fetchProviderJson(request, undefined, 5_000);
+      const failed = body?.error || (body?.error_code !== undefined && ![0, "0", null].includes(body.error_code));
+      const valid = isHistoryPath(new URL(request.url).pathname)
+        ? Array.isArray(body) || Array.isArray(body?.messages) || Array.isArray(body?.data?.messages)
+        : value(providerAdapter.currentAccountFromPayload(body)?.provider_account_id) === state.currentAccountId;
+      if (failed || !valid) throw new Error("Shopee initialization read did not confirm usable request configuration.");
+      if (!sessionIsCurrent(epoch) || state.sendTemplate || sendRequestSource()) return;
+      // Request configuration is for sending only, not a recovered history cursor.
+      const template = await templateFrom(request);
+      if (!sessionIsCurrent(epoch)) return;
+      state.senderReadTemplate = template;
+      publishSurfaceStatus();
+    })();
+    senderInitializationPromise = operation;
+    try { await operation; }
+    finally { if (senderInitializationPromise === operation) senderInitializationPromise = null; }
   }
 
   async function detectCurrentAccount(requestId) {

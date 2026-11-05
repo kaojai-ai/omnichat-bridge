@@ -284,9 +284,6 @@ export function readinessLogDetails(status, { provider, tabId, accountId, ready 
     list_ready: bool(status?.list_ready), history_ready: bool(status?.history_ready),
     sender_available: bool(status?.sender_available),
     history_capable: bool(status?.capabilities?.message_recovery),
-    text_capable: provider === "line_oa"
-      ? Boolean(status?.command_capabilities_by_account?.[accountId]?.includes("send_text"))
-      : bool(status?.capabilities?.send_text),
     realtime_connected: bool(status?.realtime_connected),
     provider_check_outcome: status?.provider_check_outcome ?? null,
     ready,

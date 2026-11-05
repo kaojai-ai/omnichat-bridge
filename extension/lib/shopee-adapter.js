@@ -146,9 +146,6 @@
       && status?.capabilities?.account_detection === true
       && status?.capabilities?.message_observation === true
       && status?.capabilities?.message_recovery === true
-      && status?.capabilities?.send_text === true
-      && status?.capabilities?.send_image === true
-      && status?.capabilities?.send_product === true
     );
   }
 

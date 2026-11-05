@@ -40,20 +40,21 @@ function fixture(provider = "shopee") {
     chrome: { runtime: { getPlatformInfo: async () => ({ os: "mac" }), getManifest: () => ({ version: "test" }) } },
     accountSyncs: new Map(), lineTabSyncs: new Map(),
     liveConnections: new Map(), stopAccountLiveConnection: (key, _connection, reason) => { closed.push({ key, reason }); scope.liveConnections.delete(key); },
-    rememberCommandTab: async () => {},
+    runProviderHealthWatchdog: async () => {}, recordUnexpected: async () => {},
   });
   installProviderPolicy(scope);
   vm.runInContext(part("function orderProviderTabs(", "async function providerTabStatus(")
     + part("function providerTabIsReady(", "async function isReadyProviderTab(")
     + part("async function providerTabStatus(", "function providerTabIsReady(")
     + part("async function connectionStatusSnapshot(", "function statusPublishKey(")
-    + part("async function sendReadiness(", "function providerAdapterForCommand(")
+    + part("async function selectSendContext(", "function providerAdapterForCommand(")
     + part("function invalidateProviderSession(", "chrome.tabs.onUpdated.addListener"), scope);
   const healthy = provider === "shopee"
     ? { ok: true, current_provider_account_id: "shop", surface_ready: true, realtime_connected: true,
       capabilities: Object.fromEntries(["account_detection", "message_observation", "message_recovery", "send_text", "send_image", "send_product"].map((key) => [key, true])) }
     : { ok: true, account_access_verified: true, accessible_account_ids: ["shop"], realtime_connected: true,
       command_capabilities_by_account: { shop: ["send_text", "send_image"] } };
+  healthy.send_verified_at = new Date(now).toISOString();
   result = healthy;
   return { scope, policy, context, tab, healthy, closed, events, timerCallbacks,
     set result(value) { result = value; }, set now(value) { now = value; }, set tabs(value) { tabs = value; },
@@ -74,7 +75,7 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(grace.ready, true);
     assert.equal(grace.reason_code, "provider_check_grace");
     assert.equal(grace.readiness_grace_expires_at, new Date(130_000).toISOString());
-    assert.equal((await h.select()).id, h.tab.id, "command preflight consumes the same recent evidence");
+    await assert.rejects(h.select(), /readiness is unavailable or stale/, "unknown evidence does not authorize a new send");
     h.now = 129_999;
     assert.equal((await h.snapshot()).readiness_grace_expires_at, grace.readiness_grace_expires_at);
     h.result = h.healthy;
@@ -90,7 +91,7 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(expired.reason_code, "checking_session");
     assert.equal(expired.readiness_grace_expires_at, undefined);
     assert.notEqual(h.policy.generation(h.context.key), ready.generation);
-    await assert.rejects(h.select(), /not ready/);
+    await assert.rejects(h.select(), /readiness is unavailable or stale/);
     assert.equal(h.policy.state(h.context.key).retain_transport, true);
     h.now = 190_000;
     assert.equal((await h.snapshot()).reason_code, "needs_attention");
@@ -102,7 +103,7 @@ for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: confirmed negatives and a restarted worker never borrow recent readiness`, async () => {
     const h = fixture(provider);
     await h.assess();
-    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { capabilities: { ...h.healthy.capabilities, send_text: false } } : {}) };
+    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { surface_ready: false } : { account_access_verified: false }) };
     assert.equal((await h.snapshot()).ready, false);
     h.result = null;
     assert.equal((await h.snapshot()).ready, false, "negative evidence cannot become grace");
@@ -113,8 +114,8 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal((await h.assess()).retain_transport, false);
     h.result = h.healthy;
     await h.assess();
-    h.result = provider === "shopee" ? { ...h.healthy, capabilities: { ...h.healthy.capabilities, send_text: false } }
-      : { ...h.healthy, command_capabilities_by_account: { shop: [] } };
+    h.result = provider === "shopee" ? { ...h.healthy, surface_ready: false }
+      : { ...h.healthy, account_access_verified: false };
     assert.equal((await h.snapshot()).ready, false);
     h.result = h.healthy;
     await h.assess();
@@ -186,10 +187,8 @@ function wireSender(h, send) {
     + part("async function handleLiveCommand(", "chrome.storage.onChanged.addListener"), h.scope);
 }
 for (const provider of ["shopee", "line_oa"]) {
-  test(`${provider}: grace permits one provider attempt; duplicate command never retries an uncertain result`, async () => {
+  test(`${provider}: cached readiness permits one provider attempt; duplicate command never retries an uncertain result`, async () => {
     const h = fixture(provider);
-    await h.assess();
-    h.result = null;
     await h.assess();
     const sent = [];
     let finish;
@@ -218,7 +217,12 @@ test("navigation after tab selection blocks the final provider attempt", async (
   await h.assess();
   let sends = 0;
   wireSender(h, async () => { sends++; return { ok: true }; });
-  h.scope.ensureProviderBridge = async () => h.scope.invalidateProviderTab(h.tab.id, "provider_tab_navigated");
+  const select = h.scope.selectSendContext;
+  h.scope.selectSendContext = async (...args) => {
+    const selected = await select(...args);
+    h.scope.invalidateProviderTab(h.tab.id, "provider_tab_navigated");
+    return selected;
+  };
   const result = await h.scope.sendViaProvider({ provider: "shopee", provider_account_id: "shop", type: "send_text", conversation_id: "conversation", request_id: "request", text: "reply" });
   assert.equal(result.ok, false);
   assert.equal(sends, 0);
@@ -227,7 +231,7 @@ test("navigation after tab selection blocks the final provider attempt", async (
 test("late older positive observations cannot overwrite a newer confirmed failure", async () => {
   const h = fixture();
   await h.assess();
-  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false, capabilities: { ...h.healthy.capabilities, send_text: false } }], observation: 100 });
+  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false, surface_ready: false }], observation: 100 });
   assert.equal(blocked.eligible, false);
   const stale = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [h.healthy], observation: 99 });
   assert.equal(stale.eligible, false);
@@ -280,7 +284,7 @@ test("Shopee polling uncertainty cannot hide a known account switch", async () =
 });
 
 for (const provider of ["shopee", "line_oa"]) {
-  test(`${provider}: one readiness probe per queued send and no dispatch after a queued session change`, async () => {
+  test(`${provider}: no readiness probes per queued send and no dispatch after a queued session change`, async () => {
     const h = fixture(provider);
     await h.assess();
     const sent = [];
@@ -297,7 +301,7 @@ for (const provider of ["shopee", "line_oa"]) {
     const second = h.scope.handleLiveCommand(JSON.stringify({ ...command, request_id: "queued" }), h.context, socket);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(sent.length, 1);
-    assert.equal(h.probes - before, 1, "ready tab is selected once after leaving the queue");
+    assert.equal(h.probes - before, 0, "cached tab selection never probes on send");
     h.scope.invalidateProviderTab(h.tab.id, "provider_tab_navigated");
     h.result = h.healthy;
     await h.assess();
@@ -322,34 +326,19 @@ test("missing bridge responses invalidate initialization reuse without changing 
 });
 
 for (const provider of ["shopee", "line_oa"]) {
-  test(`${provider}: a replacement session during tab persistence cannot adopt an old send`, async () => {
+  test(`${provider}: cached send never persists selection or initializes a bridge`, async () => {
     const h = fixture(provider);
     await h.assess();
     let sends = 0;
-    wireSender(h, async () => { sends++; return { ok: true }; });
-    h.scope.rememberCommandTab = async () => {
-      h.scope.invalidateProviderTab(h.tab.id, "navigation");
-      await h.assess();
-    };
-    const failure = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
-      conversation_id: "conversation", request_id: "stale", text: "reply" });
-    assert.equal(failure.dispatch_started, false);
-    assert.match(failure.error, /session changed during tab selection/);
-    assert.equal(sends, 0);
-  });
-  test(`${provider}: bridge initialization cannot replace the selected send generation`, async () => {
-    const h = fixture(provider);
-    await h.assess();
-    let sends = 0;
-    wireSender(h, async () => { sends++; return { ok: true }; });
-    h.scope.ensureProviderBridge = async () => {
-      h.scope.invalidateProviderTab(h.tab.id, "navigation");
-      await h.assess();
-    };
+    wireSender(h, async () => { sends++; return { ok: true, provider_message_id: "receipt" }; });
+    h.scope.rememberCommandTab = () => assert.fail("send must not persist selection");
+    h.scope.ensureProviderBridge = () => assert.fail("send must not initialize a bridge");
+    h.scope.providerChatTabs = () => assert.fail("send must not discover tabs");
+    h.scope.providerTabStatus = () => assert.fail("send must not probe readiness");
     const result = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
-      conversation_id: "conversation", request_id: "stale", text: "reply" });
-    assert.equal(result.ok, false);
-    assert.equal(sends, 0);
+      conversation_id: "conversation", request_id: "warm", text: "reply" });
+    assert.equal(result.ok, true);
+    assert.equal(sends, 1);
   });
 }
 
@@ -364,7 +353,7 @@ test("MY readiness ignores another market's identity and refuses wrong-region se
   assert.equal(result.evidence.tab.id, 2);
   h.tabs = [h.tab];
   assert.equal((await h.assess()).eligible, false);
-  await assert.rejects(h.select, /not ready for this account/);
+  await assert.rejects(h.select, /readiness is unavailable or stale/);
 });
 
 test("revoked country access cannot borrow ready status from already injected regional tabs", async () => {
@@ -443,20 +432,24 @@ test("a command that exhausts its relative budget in queue never reaches the pro
   assert.notEqual(socket.sent[0].uncertain, true);
 });
 
-test("expired bridge preflight cannot dispatch a late reply", async () => {
+test("expired cached evidence rejects locally and repeated reports cannot renew it", async () => {
   const h = fixture();
   await h.assess();
-  let finish;
   let attempts = 0;
+  let refreshes = 0;
   wireSender(h, async () => { attempts++; return { ok: true }; });
-  h.scope.ensureProviderBridge = () => new Promise(resolve => { finish = resolve; });
+  h.scope.runProviderHealthWatchdog = async () => { refreshes++; };
+  h.now = 220_000;
+  assert.equal(h.policy.state(h.context.key).eligible, false);
+  assert.equal((await h.assess()).eligible, false, "same old timestamp must not renew evidence");
   const failure = await h.scope.sendViaProvider({ provider: "shopee", provider_account_id: "shop", type: "send_text",
-    conversation_id: "conversation", request_id: "expired", deadline_at_ms: 100_020 });
+    conversation_id: "conversation", request_id: "expired" });
   assert.equal(failure.dispatch_started, false);
-  assert.equal(failure.error_code, "OMNICHAT_PREPARATION_TIMEOUT");
-  finish();
-  await new Promise(resolve => setImmediate(resolve));
+  assert.match(failure.error, /readiness is unavailable or stale/);
+  assert.equal(failure.retryable, true);
+  assert.equal(failure.error_code, "OMNICHAT_BRIDGE_NOT_READY");
   assert.equal(attempts, 0);
+  assert.equal(refreshes, 1);
 });
 
 for (const provider of ["shopee", "line_oa"]) {
@@ -503,9 +496,11 @@ test("outbound selection does not await a stalled extra tab", async () => {
   const h = fixture();
   const backup = { ...h.tab, id: 2 };
   h.tabs = [h.tab, backup];
+  await h.assess();
   h.scope.providerTabStatus = tab => tab.id === h.tab.id ? Promise.resolve(h.healthy) : new Promise(() => {});
-  const selected = await h.scope.sendReadiness(h.context);
-  assert.equal(selected.evidence.tab.id, h.tab.id);
+  h.scope.providerTabStatus = () => assert.fail("cached send must not probe any tab");
+  const selected = await h.scope.selectSendContext(h.context);
+  assert.equal(selected.tab.id, h.tab.id);
 });
 
 for (const provider of ["line_oa", "shopee"]) {
@@ -547,3 +542,63 @@ for (const provider of ["line_oa", "shopee"]) {
     }
   });
 }
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: missing, future and expired verification timestamps never authorize a send`, async () => {
+    const h = fixture(provider);
+    for (const timestamp of [null, "invalid", new Date(100_001).toISOString(), new Date(-20_000).toISOString()]) {
+      h.result = { ...h.healthy, send_verified_at: timestamp };
+      assert.equal((await h.assess()).eligible, false);
+      await assert.rejects(h.select(), /readiness is unavailable or stale/);
+    }
+  });
+  test(`${provider}: failed inbound polling leaves independently verified sending available`, async () => {
+    const h = fixture(provider);
+    h.result = { ...h.healthy, realtime_connected: false, provider_check_outcome: "unknown",
+      last_provider_check_at: null, capabilities: { ...h.healthy.capabilities, message_recovery: false } };
+    const snapshot = await h.snapshot();
+    assert.equal(snapshot.send_ready, true);
+    assert.equal(snapshot.receive_ready, false);
+    assert.equal((await h.select()).id, h.tab.id);
+  });
+}
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: changed session rejects before dispatch with safe failover classification`, async () => {
+    const h = fixture(provider);
+    const ready = await h.assess();
+    let attempts = 0;
+    wireSender(h, async () => { attempts++; return { ok: true }; });
+    h.scope.invalidateProviderTab(h.tab.id, "navigation");
+    const failure = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "changed" }, { expectedGeneration: ready.generation });
+    assert.equal(attempts, 0);
+    assert.equal(failure.dispatch_started, false);
+    assert.equal(failure.retryable, true);
+    assert.equal(failure.error_code, "OMNICHAT_BRIDGE_NOT_READY");
+  });
+}
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: stable message support comes from adapter, not page feature flags`, async () => {
+    const h = fixture(provider);
+    h.result = { ...h.healthy, capabilities: { message_recovery: false },
+      command_capabilities_by_account: {}, surface: provider === "shopee" ? "new-webchat" : "line-oa" };
+    const snapshot = await h.snapshot();
+    assert.equal(snapshot.send_ready, true);
+    assert.deepEqual(Array.from(snapshot.command_capabilities), Array.from(h.context.adapter.sendCommands));
+  });
+}
+test("Shopee video routing supports New Webchat and regional Seller Centre", async () => {
+  const h = fixture();
+  h.result = { ...h.healthy, surface: "seller-centre" };
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
+  h.context.account.country = "MY";
+  h.scope.hasRegionalShopeePermission = async () => true;
+  h.tab.url = "https://seller.shopee.com.my/";
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
+  h.context.account.country = "TH";
+  h.tab.url = "https://seller.shopee.co.th/new-webchat/conversations";
+  h.result = { ...h.healthy, surface: "new-webchat" };
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
+});

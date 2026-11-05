@@ -70,11 +70,17 @@ function commandHarness({ primaryReady = true, miniShop = "shop" } = {}) {
     providerTabStatus: async tab => status(tab),
     providerTabCanSend: (state, command) => state.ready && state.current_provider_account_id === command.account.provider_account_id,
     prepareProviderTab: async tab => { preparations.push(tab.id); miniReady = true; },
-    rememberCommandTab: async () => {}, recordLog: async () => {},
+    runProviderHealthWatchdog: async () => {}, recordUnexpected: async () => {}, recordLog: async () => {},
   });
   installProviderPolicy(context);
   vm.runInContext(extract("function orderProviderTabs(", "async function providerTabStatus(")
-    + extract("async function sendReadiness(", "function providerAdapterForCommand("), context);
+    + extract("async function selectSendContext(", "function providerAdapterForCommand("), context);
+  const initialized = primaryReady ? primary : null;
+  if (initialized) context.sessionEligibility.observe(commandContext.key, {
+    hasTab: true, verified: true, ready: true, identity: "shop",
+    context: context.providerTabContext(initialized, adapter.id),
+    evidence: { tab: initialized, status: status(initialized), expires_at: Date.now() + 120_000 },
+  });
   return { preparations, run: () => context.commandTab(commandContext, { prepareForSend: true }) };
 }
 
@@ -86,10 +92,10 @@ test("ready New Webchat sends without initializing closed mini-chat first", asyn
 
 test("confirmed unready surfaces fail immediately without preparing or retrying a send", async () => {
   const fallback = commandHarness({ primaryReady: false });
-  await assert.rejects(fallback.run(), /not ready for this account/);
+  await assert.rejects(fallback.run(), /readiness is unavailable or stale/);
   assert.deepEqual(fallback.preparations, []);
   const wrongShop = commandHarness({ primaryReady: false, miniShop: "other-shop" });
-  await assert.rejects(wrongShop.run(), /not ready for this account/);
+  await assert.rejects(wrongShop.run(), /readiness is unavailable or stale/);
   assert.deepEqual(wrongShop.preparations, []);
 });
 

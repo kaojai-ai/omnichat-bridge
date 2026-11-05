@@ -116,7 +116,7 @@ test("update waits for queued replies and their acknowledgements before restarti
 test("concurrent tab selections preserve both accounts", async () => {
   let stored = {};
   const start = source.indexOf("function rememberCommandTab(");
-  const end = source.indexOf("\n// A slow extra tab", start);
+  const end = source.indexOf("\nasync function selectSendContext", start);
   const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
     rememberedCommandTabs: new Map(), readAccountState: (state, key, fallback) => state?.[key] ?? fallback, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
     readStorage: async () => ({ tabs: { ...stored } }),
@@ -134,7 +134,7 @@ test("unchanged selected tabs do not repeatedly read or write storage", async ()
   let stored = { "shopee:one": 1 };
   const remembered = new Map();
   const start = source.indexOf("function rememberCommandTab(");
-  const end = source.indexOf("\n// A slow extra tab", start);
+  const end = source.indexOf("\nasync function selectSendContext", start);
   const remember = vm.runInNewContext(`(${source.slice(start, end).trim()})`, { preemptAutomaticLogUpload: () => {},
     rememberedCommandTabs: remembered, commandTabWriteQueue: Promise.resolve(), STORAGE: { commandTab: "tabs" },
     readAccountState: (state, key, fallback) => state?.[key] ?? fallback,

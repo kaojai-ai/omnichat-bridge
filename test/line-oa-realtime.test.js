@@ -282,6 +282,8 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       await new Promise((resolve) => setImmediate(resolve));
     },
     async sendCommand(command) {
+      // Model the extension's initialization before handing it a warm command.
+      if (!requests.some(url => url.pathname === "/api/v1/bots") && command.initialize !== false) await this.detect();
       const before = posts.length;
       for (const listener of listeners) {
         listener({
@@ -793,7 +795,9 @@ test("LINE OA republishes realtime health when a replacement content bridge dete
   const status = bridge.posts.find((post) => post.type === "provider_status");
   assert.equal(status?.realtime_connected, true);
   assert.equal(status?.realtime_transport, "authenticated_polling");
-  assert.deepEqual(plain(status.command_capabilities_by_account), { "@exampleoa": ["send_text", "send_image", "send_video", "send_file", "send_sticker"] });
+  assert.equal(status.account_access_verified, true);
+  assert.deepEqual(plain(status.accessible_account_ids), ["@exampleoa"]);
+  assert.equal(status.command_capabilities_by_account, undefined);
   bridge.dispose();
 });
 
@@ -1033,8 +1037,7 @@ test("LINE OA account resolution failure returns diagnostics instead of an unhan
   assert.equal(result.ok, false);
   assert.equal(result.diagnostics.operation, "initialize");
   assert.equal(result.diagnostics.failure_kind, "pre_dispatch_failure");
-  assert.equal(result.diagnostics.timed_out, false);
-  assert.equal(result.diagnostics.error_name, "TypeError");
+
   assert.equal(result.diagnostics.native_attempted, false);
   assert.equal(bridge.sentPayloads.length, 0);
   assert.doesNotMatch(JSON.stringify(result), /secret|private/);
@@ -1532,6 +1535,7 @@ test("LINE reset stops recovery bookkeeping and preserves explicit-send profiles
     await settleBridge();
     assert.equal(bridge.sentPayloads.length, before);
     const accountRequests = bridge.requests.filter(url => url.pathname === "/api/v1/bots").length;
+    await bridge.detect();
     const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture explicit reply" });
     assert.equal(result.ok, true);
     assert.equal(bridge.sentPayloads.length, before + 1);
@@ -1921,24 +1925,14 @@ for (const [name, fields, shouldFetch] of [
 }
 
 
-test("LINE OA reply expires during shared account lookup without a late submission", async () => {
-  let release;
-  const blocked = new Promise(resolve => { release = resolve; });
-  const bridge = createBridge({ beforeAccountRequest: async () => { await blocked; } });
+test("LINE cold send rejects without waiting for account discovery", async () => {
+  const bridge = createBridge();
   try {
-    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply", deadline_at_ms: Date.now() + 20 });
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply", initialize: false });
     assert.equal(result.ok, false);
-    assert.equal(result.diagnostics.operation, "initialize");
-    assert.equal(result.diagnostics.native_attempted, false);
-    assert.equal(result.diagnostics.delivery_uncertain, false);
-    assert.equal(result.diagnostics.timed_out, true);
-    release();
-    await settleBridge();
-    assert.equal(bridge.sentPayloads.length, 0);
-  } finally {
-    release();
-    bridge.dispose();
-  }
+    assert.equal(result.dispatch_started, false);
+    assert.equal(bridge.requests.length, 0);
+  } finally { bridge.dispose(); }
 });
 
 test("LINE OA stalled confirmation is aborted within its confirmation budget", async () => {
@@ -2091,7 +2085,7 @@ test("LINE initial capture selects the newest 25 within its frozen 24-hour windo
 });
 
 
-test("LINE sends reuse verified session metadata after minutes and hours", async () => {
+test("LINE sends reuse fresh metadata and reject expired evidence without refresh", async () => {
   const bridge = createBridge();
   try {
     await bridge.detect();
@@ -2104,7 +2098,8 @@ test("LINE sends reuse verified session metadata after minutes and hours", async
     assert.equal(bridge.requests.slice(before).length, 2, "one send and one history confirmation; fast response acceptance is not evidence-qualified");
     bridge.advanceMonotonic(3 * 60 * 60 * 1_000);
     const later = await bridge.sendCommand({ command_type: "send_sticker", package_id: "1", sticker_id: "2" });
-    assert.equal(later.ok, true);
+    assert.equal(later.ok, false);
+    assert.equal(later.dispatch_started, false);
     assert.equal(bridge.requests.slice(before).filter(url => url.pathname === "/api/v1/bots").length, 0);
   } finally { bridge.dispose(); }
 });
@@ -2131,11 +2126,11 @@ test("LINE navigation invalidates fresh metadata before an account send", async 
     const result = await bridge.sendCommand({ command_type: "send_text", text: "must not send" });
     assert.equal(result.ok, false);
     assert.equal(bridge.sentPayloads.length, 0);
-    assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, 2);
+    assert.equal(bridge.requests.filter(url => url.pathname === "/api/v1/bots").length, 1);
   } finally { bridge.dispose(); }
 });
 
-test("LINE concurrent sends after session reset share a single metadata refresh", async () => {
+test("LINE concurrent sends after session reset reject without metadata refresh", async () => {
   let probes = 0;
   let release;
   const blocked = new Promise(resolve => { release = resolve; });
@@ -2146,11 +2141,11 @@ test("LINE concurrent sends after session reset share a single metadata refresh"
     const first = bridge.sendCommand({ command_type: "send_text", text: "first" });
     const second = bridge.sendCommand({ command_type: "send_text", text: "second" });
     await settleBridge();
-    assert.equal(probes, 2);
+    assert.equal(probes, 1);
     release();
-    assert.equal((await first).ok, true);
-    assert.equal((await second).ok, true);
-    assert.equal(probes, 2);
+    assert.equal((await first).ok, false);
+    assert.equal((await second).ok, false);
+    assert.equal(probes, 1);
   } finally { release(); bridge.dispose(); }
 });
 

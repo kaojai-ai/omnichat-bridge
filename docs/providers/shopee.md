@@ -13,7 +13,10 @@ preferred; recovery retains a matching legacy tab, including while it initialize
 instead of repeatedly creating a New Webchat replacement. User tabs are not navigated.
 Legacy compatibility has automated fixture coverage; live legacy receiving and
 sending remain unverified on an affected account. Legacy outbound video is not
-advertised and is rejected before uploading; video remains New Webchat only.
+advertised and is rejected before uploading. Video is supported on New Webchat
+and Seller Centre mini-chat across recognized markets. Thai mini-chat has live
+native coverage; other markets reuse the shared upload profile and remain
+unverified live.
 
 ## Taiwan regional access
 
@@ -145,9 +148,8 @@ transfers Shopee cookies, passwords, or login tokens.
 - The bridge uses a short-lived ticket and browser presence. Target-server
   storage and retention are deployment-specific.
 
-New Webchat additionally supports outbound MP4 video (up to 5 MB) through the
-generic `send_video` command when its advertised capability is ready. Mini-chat
-video remains unsupported. Upload and sending share the command deadline and
+New Webchat and Seller Centre mini-chat support outbound MP4 video (up to 5 MB)
+through the generic `send_video` command when their advertised capability is ready. Upload and sending share the command deadline and
 never retry an uncertain send. See [routing and video contracts](../payload-contract.md#shopee-conversation-routing).
 
 Ready, shop-matching New Webchat tabs take precedence over legacy Webchat, then

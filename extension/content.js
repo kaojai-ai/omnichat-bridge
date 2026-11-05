@@ -34,7 +34,6 @@
   let providerSurfaceReady = false;
   let providerReadinessDetails = {};
   let providerCapabilities = {};
-  let providerCommandCapabilitiesByAccount = {};
   let providerAccountIds = [];
   let accessibleAccountIds = [];
   let accountAccessVerified = false;
@@ -48,6 +47,7 @@
   let providerPollingRequestId = null;
   let providerPollingAccountId = null;
   let lastProviderCheckAt = null;
+  let sendVerifiedAt = null;
   let lastSuccessfulPollAtByAccount = {};
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -1096,7 +1096,11 @@
     } else if (event.data.type === "provider_status") {
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
+      const previousSendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+        accessibleAccountIds, providerSurfaceReady,
+        Boolean(sendVerifiedAt)]);
       const wasSurfaceReady = providerSurfaceReady;
+      sendVerifiedAt = typeof event.data.send_verified_at === "string" ? event.data.send_verified_at : null;
       providerCheckOutcome = ["unknown", "failed", "passed"].includes(event.data.provider_check_outcome)
         ? event.data.provider_check_outcome : null;
       if (providerAdapter.id === "line_oa") {
@@ -1117,10 +1121,6 @@
       providerCapabilities = event.data.capabilities && typeof event.data.capabilities === "object"
         ? { ...event.data.capabilities }
         : providerCapabilities;
-      providerCommandCapabilitiesByAccount = event.data.command_capabilities_by_account
-        && typeof event.data.command_capabilities_by_account === "object"
-        ? { ...event.data.command_capabilities_by_account }
-        : providerCommandCapabilitiesByAccount;
       providerRealtimeTransport = typeof event.data.realtime_transport === "string"
         ? event.data.realtime_transport
         : providerRealtimeTransport;
@@ -1148,6 +1148,12 @@
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
+      const sendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+        accessibleAccountIds, providerSurfaceReady,
+        Boolean(sendVerifiedAt)]);
+      if (sendState !== previousSendState) void sendRuntimeMessage({
+        type: "send_readiness_changed", provider: providerAdapter.id,
+      }).catch(() => {});
       // Missing probe evidence must not look like a logout/reconnect cycle.
       const sessionIdentity = providerCheckOutcome === "unknown" ? null
         : providerAdapter.id === "shopee"
@@ -1249,9 +1255,9 @@
       ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
       surface_ready: providerSurfaceReady,
+      send_verified_at: sendVerifiedAt,
       ...providerReadinessDetails,
       capabilities: { ...providerCapabilities },
-      command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
       realtime_transport: providerRealtimeTransport,
       chat_open: providerChatOpen,
       realtime_connected: realtimeConnected,
@@ -1276,8 +1282,7 @@
     }
     const responded = status?.ok === true;
     const prerequisitesReady = responded && Boolean(currentProviderAccountId)
-      && status.surface_ready === true && status.capabilities?.message_recovery === true
-      && status.capabilities?.send_text === true;
+      && status.surface_ready === true;
     const details = {
       outcome: responded ? "response_received" : "response_timeout",
       prerequisites_ready: prerequisitesReady,
@@ -1287,7 +1292,6 @@
         ...providerReadinessDetails,
         surface_ready: status.surface_ready === true,
         history_capable: status.capabilities?.message_recovery === true,
-        text_capable: status.capabilities?.send_text === true,
         realtime_connected: status.realtime_connected === true,
       } : {}),
     };

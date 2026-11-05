@@ -23,6 +23,8 @@
   const pollingAccounts = new Map();
   let accessibleAccounts = [];
   let accountAccessVerified = false;
+  let sendVerifiedAt = null;
+  let sendVerifiedMono = null;
   let providerCheckOutcome = "unknown";
   let accountAccessRequest = null;
   let metadataSessionEpoch = 0;
@@ -94,29 +96,26 @@
     void publishProviderStatus();
   }
 
-  function commandCapabilities(botId) {
-    return botId ? ["send_text", "send_image", "send_video", "send_file", "send_sticker"] : [];
-  }
-
   function pollingAccountIds() {
     if (timer) return [...pollingAccounts.keys()];
     return [...new Set([...(activePoll ? [activePoll.providerAccountId] : []), ...queuedSyncs.map((request) => request.providerAccountId)])];
   }
 
+  function sendIdentityFresh() {
+    return accountMetadataCacheState() === "hit" && Number.isFinite(sendVerifiedMono)
+      && monotonicNow() - sendVerifiedMono < 120_000;
+  }
+
   function postProviderStatus() {
-    const commandCapabilitiesByAccount = Object.fromEntries((accountAccessVerified ? accessibleAccounts : []).map((account) => [
-      account.provider_account_id,
-      commandCapabilities(value(account.bot_id)),
-    ]));
     post({
       type: "provider_status",
       surface: "line-oa",
       bridge_version: BRIDGE_VERSION,
       surface_ready: true,
       capabilities: { account_detection: true, message_observation: true, message_recovery: true },
-      command_capabilities_by_account: commandCapabilitiesByAccount,
       accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
-      account_access_verified: accountAccessVerified,
+      account_access_verified: sendIdentityFresh(),
+      send_verified_at: sendVerifiedAt,
       provider_check_outcome: providerCheckOutcome,
       realtime_transport: "authenticated_polling",
       realtime_connected: !lastProviderCheckAt || Date.now() - Date.parse(lastProviderCheckAt) < 45_000,
@@ -171,7 +170,7 @@
 
   function invalidProviderResponse(message) {
     const error = new Error(message);
-    markProviderCheckFailure(error);
+    markProviderCheckFailure(error, { retainVerifiedAccess: true });
     return error;
   }
 
@@ -205,6 +204,8 @@
         if (accessibleAccounts.some((previous) => !accounts.some((account) => account.provider_account_id === previous.provider_account_id && account.bot_id === previous.bot_id))) metadataSessionEpoch += 1;
         accessibleAccounts = accounts;
         accountAccessVerified = true;
+        sendVerifiedAt = new Date().toISOString();
+        sendVerifiedMono = monotonicNow();
         providerCheckOutcome = "passed";
         accountMetadataEpoch = metadataSessionEpoch;
         const ids = new Set(accounts.map((account) => account.provider_account_id));
@@ -1066,24 +1067,6 @@
     };
   }
 
-  async function withinReplyDeadline(action, deadlineAt) {
-    const remaining = deadlineAt - Date.now();
-    if (remaining <= 0) throw new Error("LINE OA reply deadline expired.");
-    let timer;
-    try {
-      // Account discovery can be shared with recovery. Stop waiting without
-      // cancelling that shared read, and never continue this send after expiry.
-      return await Promise.race([
-        action(),
-        new Promise((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("LINE OA reply deadline expired.")), remaining);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
   async function sendBrowserMessage(command) {
     const commandType = value(command?.command_type ?? command?.type);
     const browserAccountId = normalizeBasicId(command?.browser_provider_account_id ?? command?.provider_account_id);
@@ -1112,13 +1095,17 @@
       client_id_is_uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value(command?.client_message_id)),
       template_source: templateSource, ...providerDetails,
     });
-    const reject = (error) => post({ type: "api_send_result", request_id: requestId, ok: false, error, diagnostics: diagnostics("validation_failure") });
+    const reject = (error, kind = "validation_failure") => post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: false, execution_stage: "preparation", dispatch_started: false, error, diagnostics: diagnostics(kind) });
     if (!requestId || !browserAccountId || !conversationId) {
       reject("LINE OA reply command is invalid.");
       return;
     }
     try {
-      const botId = await withinReplyDeadline(() => resolveBotId(browserAccountId), deadlineAt);
+      const sessionEpoch = metadataSessionEpoch;
+      const sessionLocation = metadataLocation();
+      const botId = sendIdentityFresh() ? accessibleAccounts.find(
+        (account) => account.provider_account_id === browserAccountId,
+      )?.bot_id : null;
       const expectedType = commandType === "send_text" ? "text"
         : commandType === "send_sticker" ? "sticker"
           : commandType === "send_image" ? "image"
@@ -1128,7 +1115,7 @@
       const profile = botId && expectedType ? profileFor(botId, expectedType) : null;
       templateSource = sendProfilesByBot.get(botId)?.has(expectedType) ? "captured" : "derived";
       if (!botId || !profile) {
-        reject("LINE OA sender is not initialized for this reply type.");
+        reject("LINE OA sender is not initialized or its verified session has expired.", "pre_dispatch_failure");
         return;
       }
       const payload = clone(profile.payload);
@@ -1216,6 +1203,9 @@
         if (!token) throw new Error("LINE OA attachment upload returned no content token.");
         endpoint = `${apiBase}/v1/bots/${encodeURIComponent(botId)}/chats/${encodeURIComponent(conversationId)}/messages/bulkSendFiles`;
         body = JSON.stringify({ items: [{ sendId: confirmationSendId, contentMessageToken: token }] });
+      }
+      if (!sendIdentityFresh() || sessionEpoch !== metadataSessionEpoch || sessionLocation !== metadataLocation()) {
+        throw new Error("LINE OA verified session changed or expired before sending.");
       }
       const signal = requestSignal();
       operation = "send";
