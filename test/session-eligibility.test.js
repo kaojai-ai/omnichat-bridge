@@ -78,3 +78,24 @@ test("recovery and reset cancel stale callbacks without reusing generations", ()
   assert.notEqual(replacement.generation, ready.generation);
   assert.equal(session.isCurrent("first", ready.generation), false);
 });
+
+test("evidence expiry fences queued generations and fresh verification restores eligibility", () => {
+  const { session, advance } = fixture();
+  const observation = { hasTab: true, verified: true, identity: "shop", context: "page-1",
+    evidence: { expires_at: 120_000 } };
+  const first = session.observe("account", observation);
+  advance(120_000);
+  const expired = session.state("account");
+  assert.equal(expired.eligible, false);
+  assert.equal(expired.reason_code, "send_evidence_stale");
+  assert.notEqual(expired.generation, first.generation);
+  assert.equal(session.state("account").generation, expired.generation, "expiry fences once");
+  assert.equal(session.isCurrent("account", first.generation), false);
+  const renewed = session.observe("account", { ...observation, evidence: { expires_at: 240_000 } });
+  assert.equal(renewed.eligible, true);
+  assert.equal(session.isCurrent("account", first.generation), false, "fresh evidence cannot revive queued work");
+  advance(240_000);
+  const expiredAgain = session.state("account");
+  assert.equal(expiredAgain.eligible, false);
+  assert.notEqual(expiredAgain.generation, renewed.generation);
+});

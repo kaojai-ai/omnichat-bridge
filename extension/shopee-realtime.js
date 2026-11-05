@@ -225,8 +225,10 @@
     details,
   });
 
+  const sendIdentityFresh = () => Number.isFinite(state.sendVerifiedMono)
+    && (globalThis.performance?.now() ?? Date.now()) - state.sendVerifiedMono < 120_000;
   const surfaceSendReady = () => {
-    if (!state.listTemplate || !state.getTemplate) return false;
+    if (!state.currentAccountId || !sendIdentityFresh() || !(state.sendTemplate || state.getTemplate)) return false;
     if (isSellerCentreSurface()) return typeof state.nativeFetch === "function";
     return typeof window.__chat_anti_fraud__?.poster === "function";
   };
@@ -245,7 +247,7 @@
 
   const publishSurfaceStatus = (requestId = null) => {
     const capabilities = surfaceCapabilities();
-    const ready = Boolean(state.listTemplate && state.getTemplate);
+    const ready = surfaceSendReady();
     const chatOpen = isSellerCentreSurface()
       ? (() => {
         const launcher = sellerCentreChatLauncher();
@@ -265,6 +267,7 @@
       surface: state.surface,
       current_provider_account_id: state.currentAccountId ?? null,
       surface_ready: ready,
+      send_verified_at: state.sendVerifiedAt ?? null,
       list_ready: Boolean(state.listTemplate),
       history_ready: Boolean(state.getTemplate),
       sender_available: isSellerCentreSurface() ? typeof state.nativeFetch === "function"
@@ -511,6 +514,8 @@
         provider_account_id: nextId,
       });
     }
+    state.sendVerifiedAt = account ? new Date().toISOString() : null;
+    state.sendVerifiedMono = account ? (globalThis.performance?.now() ?? Date.now()) : null;
     if (account) mergeAccounts([account]);
     publishSurfaceStatus();
     return account ? [account] : [];
@@ -1360,36 +1365,14 @@
         error: "Shopee video sending requires initialized New Webchat." });
       return;
     }
-    try {
-      await ensureSellerCentreChatOpen();
-      if (isSellerCentreSurface()) await waitForSellerCentreTemplates();
-    } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
-      return;
-    }
-    if (isSellerCentreSurface() && (!state.listTemplate || !state.getTemplate)) {
-      post({
-        type: "api_send_result",
-        request_id: requestId,
-        ok: false,
-        error: "Seller Centre chat is still initializing. Open the Chat panel and wait for its conversation list.",
-      });
+    if (!surfaceSendReady()) {
+      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
+        error: "Shopee sender is not initialized or its verified session has expired. Refresh the provider connection." });
       publishSurfaceStatus();
       return;
     }
     if (!isBridgeActive()) return;
-    if (isSellerCentreSurface() && typeof state.nativeFetch !== "function") {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Seller Centre native sender is unavailable." });
-      return;
-    }
     const accountId = value(message.provider_account_id) || state.currentAccountId;
-    try {
-      stage("session_verification");
-      await verifySessionAccount(accountId, deadlineAt - Date.now());
-    } catch (error) {
-      post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: String(error) });
-      return;
-    }
     if (state.currentAccountId && accountId !== state.currentAccountId) {
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error: "Shopee signed-in shop does not match the reply command." });
@@ -1553,6 +1536,7 @@
         ...(url.searchParams.has("biz_id") ? { url_biz_matches_route: value(url.searchParams.get("biz_id")) === value(routing.biz_id) } : {}),
         ...(Object.hasOwn(payload.choice_info ?? {}, "real_shop_id")
           ? { choice_shop_matches_route: value(payload.choice_info.real_shop_id) === value(routing.shop_id) } : {}) };
+      if (!sessionUnchanged() || !sendIdentityFresh()) throw new Error("Shopee verified session changed or expired before sending.");
       nativeAttempted = true;
       stage("provider_dispatch");
       const providerRequestStarted = globalThis.performance?.now() ?? Date.now();
@@ -1560,6 +1544,11 @@
       try { response = await sendThroughSurface(template, url.toString(), payload); }
       finally { diagnostics.provider_request_duration_ms = Math.round((globalThis.performance?.now() ?? Date.now()) - providerRequestStarted); }
       nativeResponseReceived = true;
+      if ([401, 403].includes(response?.status)) {
+        state.sendVerifiedAt = null;
+        state.sendVerifiedMono = null;
+        publishSurfaceStatus();
+      }
       stage("provider_response");
       if (!sessionUnchanged() || !isBridgeActive()) throw new Error("Shopee session changed after sending. Check Seller Chat before retrying.");
       let body = response;

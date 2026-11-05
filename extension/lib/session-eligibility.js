@@ -29,10 +29,15 @@ export function createSessionEligibility({
       emit(key, state, "needs_attention");
     }
     const grace = unknown && state.hadReady && !state.expired;
-    const eligible = state.mode === "verified" || grace;
+    const stale = state.evidence?.expires_at !== undefined && now() >= state.evidence.expires_at;
+    if (stale && !state.evidenceExpired) {
+      state.evidenceExpired = true;
+      state.generation = ++nextGeneration;
+    }
+    const eligible = !stale && (state.mode === "verified" || grace);
     return {
       eligible,
-      reason_code: grace ? "provider_check_grace" : state.mode === "verified" ? "ready"
+      reason_code: stale ? "send_evidence_stale" : grace ? "provider_check_grace" : state.mode === "verified" ? "ready"
         : state.mode === "missing" ? "waiting_for_tab" : state.mode === "mismatch" ? "wrong_account"
           : state.mode === "blocked" ? state.reason : elapsed >= 60_000 ? "needs_attention" : "checking_session",
       generation: state.generation,
@@ -58,7 +63,7 @@ export function createSessionEligibility({
     const resolvedIdentity = mode === "unknown" && sameContext ? previous?.identity ?? null : identity;
     const sameIdentity = previous?.identity === resolvedIdentity;
     if (previous && previous.mode === mode && sameContext && sameIdentity) {
-      if (mode === "verified") previous.evidence = evidence;
+      if (mode === "verified") { previous.evidence = evidence; previous.evidenceExpired = false; }
       if (mode === "blocked") previous.reason = reason_code;
       previous.accountVerified = account_verified;
       return snapshot(previous, key);

@@ -27,6 +27,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
   const stored = { config: {}, consent, serverInitialized: true, unattendedRecovery: recoveryEnabled };
   const globals = {
     readinessLogDetails, providerWatchdogFailures: new Map(),
+    refreshSendPrerequisites: async () => {},
     sessionEligibility: createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} }),
     STORAGE: { config: "config", consent: "consent", serverInitialized: "serverInitialized", unattendedRecovery: "unattendedRecovery" },
     readStorage: async () => stored,
@@ -348,4 +349,70 @@ test("Shopee repairs a missing bridge before selecting its active shop", async (
   assert.equal(calls.lives.a.state, null);
   assert.equal(calls.lives.b.state, "ready");
   assert.equal(calls.created, 0);
+});
+
+test("send prerequisite refresh runs before recovery and still publishes when recovery is unavailable", async () => {
+  const events = [];
+  const adapter = { id: "shopee" };
+  const context = { key: "shopee:shop", adapter };
+  const scope = vm.createContext({
+    providerAdapters: { list: () => [adapter] }, providerSessionEpoch: () => 0,
+    providerObservationSequence: 0, providerChatTabs: async () => [{ id: 7 }],
+    providerTabContext: () => "tab-session", ensureProviderBridge: async () => {},
+    sendProviderMessage: async () => { events.push("verify"); return { ok: true }; },
+    providerLabel: () => "Shopee", providerTabStatus: async () => ({ send_verified_at: new Date().toISOString() }),
+    providerReadiness: async (_context, options) => { events.push("policy"); assert.equal(options.statuses.length, 1); },
+    ensureLiveConnection: async () => { events.push("publish"); },
+  });
+  vm.runInContext(functionSource("refreshSendPrerequisites", "async function runProviderHealthWatchdogOnce("), scope);
+  await scope.refreshSendPrerequisites([context]);
+  assert.deepEqual(events, ["verify", "policy", "publish"]);
+
+});
+
+
+test("minute ticks refresh send evidence while an earlier recovery remains busy", async () => {
+  const events = [];
+  let finishRecovery;
+  const recovery = new Promise(resolve => { finishRecovery = resolve; });
+  const scope = vm.createContext({
+    sendPrerequisitesPromise: null, providerHealthWatchdogPromise: null,
+    STORAGE: {}, readStorage: async () => ({ consent: true }),
+    hasServerInitialized: () => true, hasLocalConsent: () => true,
+    configuredAccountContexts: () => ["account"],
+    refreshSendPrerequisites: async () => { events.push("refresh"); },
+    runProviderHealthWatchdogOnce: async () => { events.push("recovery"); await recovery; },
+  });
+  vm.runInContext(functionSource("runProviderHealthWatchdog", "async function pingConfiguredAccountApis("), scope);
+  const first = scope.runProviderHealthWatchdog();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["refresh", "recovery"]);
+  const second = scope.runProviderHealthWatchdog();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["refresh", "recovery", "refresh"]);
+  finishRecovery();
+  await Promise.all([first, second]);
+});
+
+test("concurrent watchdog calls share one active prerequisite refresh", async () => {
+  let refreshes = 0, recoveries = 0, finishRefresh;
+  const refresh = new Promise(resolve => { finishRefresh = resolve; });
+  const scope = vm.createContext({
+    sendPrerequisitesPromise: null, providerHealthWatchdogPromise: null,
+    STORAGE: {}, readStorage: async () => ({ consent: true }),
+    hasServerInitialized: () => true, hasLocalConsent: () => true,
+    configuredAccountContexts: () => ["account"],
+    refreshSendPrerequisites: async () => { refreshes++; await refresh; },
+    runProviderHealthWatchdogOnce: async () => { recoveries++; },
+  });
+  vm.runInContext(functionSource("runProviderHealthWatchdog", "async function pingConfiguredAccountApis("), scope);
+  const first = scope.runProviderHealthWatchdog();
+  const second = scope.runProviderHealthWatchdog();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshes, 1);
+  assert.equal(recoveries, 0, "verification precedes recovery");
+  finishRefresh();
+  await Promise.all([first, second]);
+  assert.equal(refreshes, 1);
+  assert.equal(recoveries, 1);
 });

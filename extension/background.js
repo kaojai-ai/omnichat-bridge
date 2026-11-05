@@ -188,6 +188,7 @@ const providerAutomaticRetryAttempts = new Map();
 const providerAutomaticRetryAt = new Map();
 const providerRecoveryTabLocks = new Map();
 let providerHealthWatchdogPromise = null;
+let sendPrerequisitesPromise = null;
 const providerSessionEpochs = new Map();
 const providerTabEpochs = new Map();
 const providerPolicyTabIds = new Map();
@@ -472,7 +473,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
     ready,
     reason_code: !verified ? "provider_account_unverified" : !providerTabCanSend(status, context)
       ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
-    evidence: ready ? { tab, status, command_capabilities: providerCommandCapabilities(status, context) } : null,
+    evidence: ready ? { tab, status, expires_at: Date.parse(status.send_verified_at) + 120_000, command_capabilities: providerCommandCapabilities(status, context) } : null,
   });
   context.readinessDiagnostics = {
     ...readinessLogDetails(status, { provider: adapter.id, tabId: tab?.id,
@@ -984,6 +985,12 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "send_readiness_changed") {
+    const adapter = providerAdapterForId(message.provider);
+    if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return false;
+    void ensureLiveConnection().then(() => respond({ ok: true }), () => respond({ ok: false }));
+    return true;
+  }
   if (message?.type === "repair_provider_tabs") {
     void repairOpenProviderTabs().then(respond,
       error => respond({ ok: false, error: error.message || "Could not repair provider tabs." }));
@@ -1479,37 +1486,6 @@ function rememberCommandTab(account, tabId) {
   return result;
 }
 
-// A slow extra tab must not delay the selected account's outbound command.
-async function sendReadiness(context) {
-  const adapter = context.adapter;
-  const tabs = (await providerChatTabs(adapter)).filter(tab => providerAccountMatchesTab(adapter, context.account, tab));
-  const previousId = sessionEligibility.state(context.key)?.last_evidence?.tab.id;
-  const statuses = new Array(tabs.length).fill(null);
-  const matches = status => providerStatusMeetsPolicy(status, context) && (adapter.id === "shopee"
-    ? status?.current_provider_account_id === context.account.provider_account_id
-    : status?.account_access_verified === true && status.accessible_account_ids?.includes(context.account.provider_account_id));
-  const probe = async tab => {
-    const index = tabs.findIndex(candidate => candidate.id === tab.id);
-    const epoch = providerTabContext(tab, adapter.id);
-    const status = await withRequestTimeout(() => providerTabStatus(tab), 1_000).catch(() => null);
-    if (epoch !== providerTabContext(tab, adapter.id)) return false;
-    statuses[index] = status;
-    return matches(status);
-  };
-  const previous = tabs.find(tab => tab.id === previousId);
-  if (previous && await probe(previous)) return providerReadiness(context, { tabs, statuses: [...statuses] });
-  const alternatives = orderProviderTabs(adapter, tabs.filter(tab => tab.id !== previousId));
-  if (alternatives.length) {
-    await new Promise(resolve => {
-      let remaining = alternatives.length;
-      for (const tab of alternatives) void probe(tab).then(ready => {
-        if (ready || --remaining === 0) resolve();
-      }, () => { if (--remaining === 0) resolve(); });
-    });
-  }
-  return providerReadiness(context, { tabs, statuses: [...statuses] });
-}
-
 async function selectSendContext(context, { expectedGeneration } = {}) {
   const adapter = context?.adapter ?? providerAdapterForAccount(context?.account);
   if (!adapter) throw new Error("Provider adapter is unavailable.");
@@ -1517,13 +1493,18 @@ async function selectSendContext(context, { expectedGeneration } = {}) {
   if (expectedGeneration !== undefined && sessionEligibility.generation(context.key) !== expectedGeneration) {
     throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
   }
-  const policy = await sendReadiness({ ...context, adapter });
+  const policy = sessionEligibility.state(context.key);
   const tab = policy?.evidence?.tab;
-  if (!policy?.eligible || !tab?.id || !providerAccountMatchesTab(adapter, context.account, tab)) throw new Error(`${providerLabel(adapter)} on the selected browser is not ready for this account. Verify the provider connection and retry.`);
+  if (!policy?.eligible || policy.unknown || !tab?.id
+    || policy.context !== providerTabContext(tab, adapter.id)
+    || !providerTabCanSend(policy.evidence.status, context)
+    || !providerAccountMatchesTab(adapter, context.account, tab)) {
+    void runProviderHealthWatchdog().catch(error => recordUnexpected("provider_watchdog", error));
+    throw new Error(`${providerLabel(adapter)} send readiness is unavailable or stale. Background verification scheduled.`);
+  }
   if (originalEpoch !== providerSessionEpoch(adapter.id)) {
     throw new Error("Provider session changed while this command was queued. Verify the account and retry.");
   }
-  await rememberCommandTab(context.key, tab.id);
   if (!sessionEligibility.isCurrent(context.key, policy.generation)) {
     throw new Error("Provider session changed during tab selection. Verify the account and retry.");
   }
@@ -1627,8 +1608,7 @@ async function prepareAndSendViaProvider(message, state = {}) {
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   stageLog("tab_selection");
   const { tab, generation: selectedGeneration } = await withinDeadline(() => selectSendContext(context, { expectedGeneration }));
-  stageLog("bridge_verification", { tab_id: tab.id, surface: adapter.surfaceForUrl?.(tab.url) ?? "unknown", document_generation: providerTabEpochs.get(tab.id) ?? 0, tab_discarded: tab.discarded === true, tab_backgrounded: tab.active !== true });
-  await withinDeadline(() => ensureProviderBridge(tab.id, adapter, { reuseVerified: true }));
+  stageLog("cached_send_context", { tab_id: tab.id, surface: adapter.surfaceForUrl?.(tab.url) ?? "unknown", document_generation: providerTabEpochs.get(tab.id) ?? 0, tab_discarded: tab.discarded === true, tab_backgrounded: tab.active !== true });
   let imagePayload = {};
   if (["send_image", "send_video", "send_file"].includes(commandType)) {
     const imageUrl = typeof (message.image_url ?? message.media_url) === "string" ? (message.image_url ?? message.media_url) : "";
@@ -2255,6 +2235,29 @@ function startUnattendedProviderSync(tab, context) {
   return operation;
 }
 
+// Verify send prerequisites before entering any recovery/polling work.
+async function refreshSendPrerequisites(contexts) {
+  for (const adapter of providerAdapters.list()) {
+    const selected = contexts.filter(context => context.adapter.id === adapter.id);
+    if (!selected.length) continue;
+    const epoch = providerSessionEpoch(adapter.id);
+    const observation = ++providerObservationSequence;
+    const tabs = await providerChatTabs(adapter);
+    const tabContexts = tabs.map(tab => providerTabContext(tab, adapter.id));
+    const statuses = await Promise.all(tabs.map(async tab => {
+      try {
+        await ensureProviderBridge(tab.id, adapter, { reuseVerified: true });
+        const detected = await sendProviderMessage(tab.id, { type: "detect_account_v3", provider: adapter.id }, {
+          label: providerLabel(adapter), operation: "send readiness refresh", timeoutMs: 15_000,
+        });
+        return detected?.ok ? await providerTabStatus(tab) : null;
+      } catch { return null; }
+    }));
+    for (const context of selected) await providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation });
+  }
+  await ensureLiveConnection();
+}
+
 async function runProviderHealthWatchdogOnce() {
   const stored = await readStorage([
     STORAGE.config,
@@ -2282,7 +2285,7 @@ async function runProviderHealthWatchdogOnce() {
         && providerContexts[0].account.country !== "TH"
         && !await hasRegionalShopeePermission(globalThis.chrome, providerContexts[0].account)) continue;
       let matchingContexts = adapter.id === "line_oa"
-        ? await lineSessionContexts(providerContexts, { refresh: true })
+        ? await lineSessionContexts(providerContexts)
         : await activeLiveCommandContexts(providerContexts, { forRecovery: true });
       if (adapter.id === "shopee" && providerContexts.length && !matchingContexts.length) {
         // A missing content bridge is not an account conflict. Repair it before
@@ -2412,6 +2415,20 @@ async function runProviderHealthWatchdogOnce() {
 }
 
 async function runProviderHealthWatchdog() {
+  // Minute ticks must renew send evidence even while an earlier recovery is busy.
+  if (!sendPrerequisitesPromise) {
+    const operation = (async () => {
+      const stored = await readStorage([STORAGE.config, STORAGE.consent, STORAGE.detectedAccounts, STORAGE.serverInitialized]);
+      if (hasServerInitialized(stored) && hasLocalConsent(stored[STORAGE.consent])) {
+        await refreshSendPrerequisites(configuredAccountContexts(stored));
+      }
+    })();
+    sendPrerequisitesPromise = operation;
+    void operation.finally(() => {
+      if (sendPrerequisitesPromise === operation) sendPrerequisitesPromise = null;
+    }).catch(() => {});
+  }
+  await sendPrerequisitesPromise;
   if (providerHealthWatchdogPromise) return providerHealthWatchdogPromise;
   const operation = runProviderHealthWatchdogOnce();
   providerHealthWatchdogPromise = operation;
@@ -3552,6 +3569,8 @@ function providerTabIsReady(status, adapter) {
 }
 
 function providerTabCanSend(status, context) {
+  const verifiedAt = Date.parse(status?.send_verified_at ?? "");
+  if (!Number.isFinite(verifiedAt) || verifiedAt > Date.now() || Date.now() - verifiedAt >= 120_000) return false;
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
   return (adapter?.id === "shopee" ? status?.surface_ready === true && status?.capabilities?.send_text === true : providerTabIsReady(status, adapter))
     && (adapter?.id !== "shopee"

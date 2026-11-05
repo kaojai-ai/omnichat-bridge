@@ -54,6 +54,8 @@ function createBridge({ authenticatedAccountId = null, pathname = null, sellerCe
     } : {}),
     __omnichatRealtimeState: {
       currentAccountId: authenticatedAccountId ?? "shop-1",
+      sendVerifiedAt: new Date().toISOString(),
+      sendVerifiedMono: Date.now(),
       nativeFetch: async (input, init) => {
         const request = input instanceof Request ? input : new Request(input, init);
         const path = new URL(request.url, origin).pathname;
@@ -181,16 +183,13 @@ const baseCommand = {
   client_message_id: "client-1",
 };
 
-test("fresh authenticated shop verification blocks a stale tab before native sending", async () => {
+test("cached verified shop identity blocks another account without network verification", async () => {
   const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: "shop-2" });
-  bridge.state.currentAccountId = "shop-1";
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
   assert.equal(result.ok, false);
   assert.match(result.error, /signed-in shop does not match/);
   assert.equal(bridge.nativePayloads.length, 0);
-  assert.equal(bridge.state.currentAccountId, "shop-2");
-  assert.equal(bridge.state.sendTemplate, null);
-  assert.equal(bridge.state.listTemplate, null);
+  assert.equal(bridge.nativeRequests.length, 0);
 });
 
 test("maps a quoted text command to Shopee content.quoted_msg_id", async () => {
@@ -397,7 +396,7 @@ test("keeps the New Webchat secure-sender failure scoped to the New Webchat surf
   });
 
   assert.equal(payload, undefined);
-  assert.match(result.error, /secure sender is unavailable/);
+  assert.match(result.error, /sender is not initialized/);
   assert.equal(bridge.nativeRequests.includes("/webchat/api/v1.2/messages"), false);
 });
 
@@ -411,7 +410,7 @@ test("reports a Seller Centre native-sender failure without falling back", async
   });
 
   assert.equal(payload, undefined);
-  assert.match(result.error, /Seller Centre native sender is unavailable/);
+  assert.match(result.error, /sender is not initialized/);
   assert.deepEqual(bridge.sentUrls, []);
   assert.deepEqual(bridge.nativeRequests, []);
 });
@@ -427,7 +426,7 @@ test("fails explicitly when Seller Centre capabilities are not initialized", asy
   });
   assert.equal(payload, undefined);
   assert.equal(result.ok, false);
-  assert.match(result.error, /Seller Centre chat is still initializing/);
+  assert.match(result.error, /sender is not initialized/);
 });
 
 test("does not dispatch expired Shopee commands", async () => {
@@ -612,26 +611,14 @@ test("does not label malformed conversation responses as missing", async () => {
 });
 
 
-test("uses routing discovered while Seller Centre initializes without a list lookup", async () => {
-  let initialized = false;
-  const bridge = createBridge({ sellerCentre: true, ready: false, conversationPages: [],
-    onTemplateWait: async (state) => {
-      assert.equal(initialized, false);
-      initialized = true;
-      await new Promise(resolve => setImmediate(resolve));
-      state.listTemplate = { url: `${origin}/webchat/api/v1.2/mini/conversations`, init: { method: "POST" }, body: new TextEncoder().encode("{}").buffer };
-      state.getTemplate = { url: `${origin}/webchat/api/v1.2/mini/user/setting`, init: { method: "GET" } };
-      state.routesByShopConversation.set(JSON.stringify(["shop-1", "conversation-1"]), {
-        conversation_id: "conversation-1", shop_id: "shop-1", to_id: "301", biz_id: "0",
-      });
-    },
-  });
-  const { result } = await bridge.send({ ...baseCommand, provider_account_id: "shop-1", command_type: "send_text", text: "Hello" });
-  assert.equal(initialized, true);
-  assert.equal(result.ok, true);
-  assert.equal(bridge.listRequests.length, 0);
-  assert.equal(bridge.nativePayloads.length, 1);
-  assert.equal(bridge.nativePayloads[0].to_id, 301);
+test("Seller Centre send does not wait for missing initialization", async () => {
+  let waits = 0;
+  const bridge = createBridge({ sellerCentre: true, ready: false, onTemplateWait: () => { waits++; } });
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Hello" });
+  assert.equal(result.ok, false);
+  assert.equal(result.dispatch_started, false);
+  assert.equal(waits, 0);
+  assert.equal(bridge.nativeRequests.length, 0);
 });
 
 test("partial observations preserve a usable route and explicit zero updates biz_id", async () => {
@@ -952,7 +939,7 @@ test("redirected Webchat video is rejected before upload or native send", async 
   assert.equal(bridge.nativePayloads.length, 0);
 });
 
-test("initialized Seller Centre sends skip template waits and lookup but verify the account for every command", async () => {
+test("initialized Seller Centre sends skip template waits, lookup and account verification", async () => {
   let templateWaits = 0;
   const bridge = createBridge({ sellerCentre: true, ready: true,
     onTemplateWait: () => { templateWaits++; },
@@ -962,12 +949,35 @@ test("initialized Seller Centre sends skip template waits and lookup but verify 
   await new Promise(resolve => setImmediate(resolve));
   const identityRequestsBefore = bridge.nativeRequests.filter(path => path === "/api/v2/login/").length;
   const first = await bridge.send(command);
-  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore + 1);
+  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore);
   const second = await bridge.send({ ...command, request_id: "request-2", client_message_id: "client-2" });
   assert.equal(first.result.ok, true);
   assert.equal(second.result.ok, true);
   assert.equal(templateWaits, 0);
   assert.equal(bridge.listRequests.length, 0);
   assert.equal(bridge.nativePayloads.length, 2);
-  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore + 2);
+  assert.equal(bridge.nativeRequests.filter(path => path === "/api/v2/login/").length, identityRequestsBefore);
+});
+
+test("cached Shopee send configuration and routing do not require list or history templates", async () => {
+  const bridge = createBridge({ sellerCentre: true });
+  bridge.state.sendTemplate = {
+    url: `${origin}/webchat/api/v1.2/mini/messages?csrf_token=test`,
+    headers: { "content-type": "application/json" }, payload: { content: {} },
+  };
+  bridge.state.listTemplate = null;
+  bridge.state.getTemplate = null;
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Cached" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(bridge.nativeRequests, ["/webchat/api/v1.2/mini/messages"]);
+});
+
+test("expired Shopee identity evidence rejects without refreshing or dispatching", async () => {
+  const bridge = createBridge();
+  bridge.state.sendVerifiedMono = Date.now() - 120_001;
+  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Expired" });
+  assert.equal(result.ok, false);
+  assert.equal(result.dispatch_started, false);
+  assert.equal(bridge.nativeRequests.length, 0);
+  assert.equal(bridge.sentUrls.length, 0);
 });

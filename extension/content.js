@@ -48,6 +48,7 @@
   let providerPollingRequestId = null;
   let providerPollingAccountId = null;
   let lastProviderCheckAt = null;
+  let sendVerifiedAt = null;
   let lastSuccessfulPollAtByAccount = {};
   let automaticSellerCentreLandingStartupChecked = false;
   let automaticSellerCentreLandingPromise = null;
@@ -1096,7 +1097,11 @@
     } else if (event.data.type === "provider_status") {
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
+      const previousSendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+        accessibleAccountIds, providerSurfaceReady, providerCommandCapabilitiesByAccount, providerCapabilities.send_text,
+        Boolean(sendVerifiedAt)]);
       const wasSurfaceReady = providerSurfaceReady;
+      sendVerifiedAt = typeof event.data.send_verified_at === "string" ? event.data.send_verified_at : null;
       providerCheckOutcome = ["unknown", "failed", "passed"].includes(event.data.provider_check_outcome)
         ? event.data.provider_check_outcome : null;
       if (providerAdapter.id === "line_oa") {
@@ -1148,6 +1153,12 @@
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
+      const sendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+        accessibleAccountIds, providerSurfaceReady, providerCommandCapabilitiesByAccount, providerCapabilities.send_text,
+        Boolean(sendVerifiedAt)]);
+      if (sendState !== previousSendState) void sendRuntimeMessage({
+        type: "send_readiness_changed", provider: providerAdapter.id,
+      }).catch(() => {});
       // Missing probe evidence must not look like a logout/reconnect cycle.
       const sessionIdentity = providerCheckOutcome === "unknown" ? null
         : providerAdapter.id === "shopee"
@@ -1249,6 +1260,7 @@
       ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
       surface_ready: providerSurfaceReady,
+      send_verified_at: sendVerifiedAt,
       ...providerReadinessDetails,
       capabilities: { ...providerCapabilities },
       command_capabilities_by_account: { ...providerCommandCapabilitiesByAccount },
