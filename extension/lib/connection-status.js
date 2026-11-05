@@ -2,13 +2,6 @@ export function isoOrNull(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-function latestTimestamp(...values) {
-  return values
-    .map(isoOrNull)
-    .filter(Boolean)
-    .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
-}
-
 export function buildConnectionHealth({
   provider = "shopee",
   tabCount,
@@ -35,17 +28,6 @@ export function buildConnectionHealth({
   const realtimeDisconnectedReason = `${providerId}_realtime_disconnected`;
   const deliveryErrorAt = status?.delivery_error ? isoOrNull(status.delivery_error_at) : null;
   const syncErrorAt = status?.sync_error ? isoOrNull(status.sync_error_at) : null;
-  const latestSuccessfulActivityAt = latestTimestamp(
-    lastRealtimeConnectedAt,
-    status?.last_capture_at,
-    status?.last_delivery_at,
-    status?.last_sync_at,
-  );
-  const hasRecoveredFromSyncError = Boolean(
-    syncErrorAt
-    && latestSuccessfulActivityAt
-    && Date.parse(latestSuccessfulActivityAt) > Date.parse(syncErrorAt),
-  );
   const checks = [
     {
       key: "provider_tab",
@@ -86,7 +68,7 @@ export function buildConnectionHealth({
   let reasonCode = "healthy";
   if (deliveryErrorAt) {
     reasonCode = "message_delivery_failed";
-  } else if (syncErrorAt && !hasRecoveredFromSyncError) {
+  } else if (syncErrorAt) {
     reasonCode = "message_sync_failed";
   } else if (!tabCount) {
     reasonCode = tabClosedReason;

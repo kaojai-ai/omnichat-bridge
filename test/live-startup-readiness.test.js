@@ -19,7 +19,7 @@ function harness({ initialized = false, pause = false } = {}) {
   let paused;
   const reachedPause = new Promise((resolve) => { paused = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
-  const ensure = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return ensureLiveConnection; })()`, {
+  const ensure = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return ensureLiveConnection; })()`, { ensureInboundTimer: () => {},
     STORAGE: { config: "config", consent: "consent", detectedAccounts: "detected", serverInitialized: "initialized", unattendedRecovery: "recovery" },
     readStorage: async () => structuredClone(state),
     configuredAccountContexts: () => [context],

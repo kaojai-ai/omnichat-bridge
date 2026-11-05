@@ -35,7 +35,7 @@ test('leader diagnostics record changes after persistence without changing store
   let current={leader_installation_id:'old',leader:false};
   const events=[];
   const write=vm.runInNewContext(`(${source.slice(source.indexOf('async function writeLiveState('),source.indexOf('\nasync function persistProviderSurfaceState')).trim()})`,{
-    STORAGE:{live:'live'},readStorage:async()=>({live:current}),
+    accountSyncs:new Map(), STORAGE:{live:'live'},readStorage:async()=>({live:current}),
     readAccountState:state=>state,writeAccountState:(_state,_key,value)=>value,
     writeStorage:async value=>{current=value.live;events.push('persist');},
     recordLog:async(_level,_area,event,_message,details)=>events.push({event,details}),

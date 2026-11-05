@@ -151,7 +151,7 @@ test("close diagnostics retain code and duration and status refresh respects ret
 
 test("readiness diagnostics publish changed states once without recording message content", async () => {
   let now = 0;
-  let status = { ready: false, reason_code: "seller_chat_bridge_unavailable" };
+  let status = { send_ready: false, reason_code: "seller_chat_bridge_unavailable" };
   const logs = [];
   const sent = [];
   const socket = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) };
@@ -167,12 +167,12 @@ test("readiness diagnostics publish changed states once without recording messag
   });
   await send(socket, account);
   await send(socket, account);
-  status = { ready: true, reason_code: "healthy" };
+  status = { send_ready: true, reason_code: "healthy" };
   await send(socket, account);
   assert.equal(sent.length, 2);
   assert.equal(logs.length, 2);
   assert.equal(logs[0].details.reason_code, "seller_chat_bridge_unavailable");
-  assert.equal(logs[1].details.ready, true);
+  assert.equal(logs[1].details.send_ready, true);
   status = { ...status, send_ready: true, sync_ready: false };
   await send(socket, account);
   status = { ...status, sync_ready: true };

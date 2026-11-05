@@ -235,3 +235,28 @@ test("legacy scan migration never infers completeness from pending messages", as
   assert.equal(result.state.watermark, null);
   assert.equal(readAccountState(state[STORAGE.pending], a.key)[0].id, "unscanned-live");
 });
+
+test('permanently rejected messages remain durable and recapture does not automatically retry them', async () => {
+  const h = harness({
+    messageReference: value => `${value.conversation_id}:${value.id}`,
+    deliveryMessageDetails: async () => ({}), diagnosticErrorDetails: () => ({}),
+  });
+  const a = context('a');
+  const item = message('rejected');
+  await h.runtime.queueMessagesForContext([item], a, false);
+  const upload = h.runtime.flushBatch(a);
+  while (!h.uploads.length) await turn();
+  h.uploads[0].resolve({ delivered: [], skipped: [h.uploads[0].selected[0]], failed: [] });
+  assert.equal((await upload).pending, 0);
+  assert.equal(readAccountState(h.state[STORAGE.failedMessages], a.key, []).length, 1);
+  assert.equal(readAccountState(h.state[STORAGE.status], a.key, {}).failed_messages, 1);
+  await h.runtime.queueMessagesForContext([item], a, false);
+  assert.equal(readAccountState(h.state[STORAGE.pending], a.key, []).length, 0);
+  await h.runtime.queueMessagesForContext([message('good')], a, false);
+  const second = h.runtime.flushBatch(a);
+  while (h.uploads.length < 2) await turn();
+  h.uploads[1].resolve({ delivered: h.uploads[1].selected, skipped: [], failed: [] });
+  await second;
+  assert.equal(readAccountState(h.state[STORAGE.failedMessages], a.key, []).length, 1);
+  assert.equal(readAccountState(h.state[STORAGE.status], a.key, {}).failed_messages, 1);
+});

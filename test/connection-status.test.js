@@ -52,7 +52,7 @@ test("prioritizes delivery failure and keeps its timestamp", () => {
   assert.equal(result.metrics.pending_messages, 3);
 });
 
-test("keeps a recovered sync failure as history without marking the bridge inactive", () => {
+test("keeps a sync failure active despite newer connection and captured messages", () => {
   const result = buildConnectionHealth({
     ...healthy,
     lastRealtimeConnectedAt: "2026-07-31T00:00:06.000Z",
@@ -64,7 +64,7 @@ test("keeps a recovered sync failure as history without marking the bridge inact
     },
   });
 
-  assert.equal(result.reason_code, "healthy");
+  assert.equal(result.reason_code, "message_sync_failed");
   assert.deepEqual(result.checks.map((check) => check.status), ["pass", "pass", "pass", "pass"]);
   assert.deepEqual(result.last_error, {
     code: "message_sync_failed",

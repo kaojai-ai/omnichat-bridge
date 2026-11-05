@@ -121,7 +121,7 @@ test("idle LINE recovery settles error and releases only its own account slot", 
   recoveries.set("line_oa:B", { healthy: true });
   const account = { key: "line_oa:A", account: { provider: "line_oa", provider_account_id: "A" }, adapter: { id: "line_oa" } };
   Object.assign(h.runtime, {
-    AbortController, STORAGE: {}, lineTabSyncs: new Map(), accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    crypto: { randomUUID: () => "run-id" }, AbortController, STORAGE: {}, lineTabSyncs: new Map(), accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
     accountContextFor: () => account,
     hasServerInitialized: () => true, throwIfSyncCancelled() {},
     readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
