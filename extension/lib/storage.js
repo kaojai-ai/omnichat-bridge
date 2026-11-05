@@ -8,7 +8,6 @@ export const STORAGE = {
   logForwardState: "log_forward_state",
   deviceName: "device_name",
   pending: "pending_messages",
-  failedMessages: "failed_messages_v1",
   status: "status",
   targetCursor: "target_sync_cursor",
   lastResumeSyncAt: "last_resume_sync_at",

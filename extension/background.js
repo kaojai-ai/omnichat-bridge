@@ -2736,14 +2736,12 @@ async function connectionStatusSnapshot(context) {
     ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
     client: { platform: platform.os },
     last_sync_at: health.last_sync_at,
-    sync_state: status.failed_messages > 0 ? "action_required"
-      : !ready ? "action_required"
+    sync_state: !ready ? "action_required"
       : ["discovering", "syncing"].includes(status.state) ? (status.last_sync_at ? "catching_up" : "initializing")
       : status.sync_error || status.delivery_error ? "retrying"
       : pending.length ? "catching_up" : status.last_sync_at ? "up_to_date" : "initializing",
     sync_stage: ["discovering", "syncing"].includes(status.state) ? "fetching" : pending.length ? "forwarding" : null,
     pending_messages: pending.length,
-    failed_messages: status.failed_messages ?? 0,
     last_successful_scan_at: health.last_sync_at,
     last_delivery_at: health.last_delivery_at,
     next_retry_at: status.next_retry_at ?? null,
@@ -2757,7 +2755,6 @@ function statusPublishKey(status) {
     sync_state: status.sync_state,
     sync_stage: status.sync_stage,
     pending_messages: status.pending_messages,
-    failed_messages: status.failed_messages,
     last_successful_scan_at: status.last_successful_scan_at,
     next_retry_at: status.next_retry_at,
     skipped_before: status.skipped_before,
@@ -2809,7 +2806,6 @@ async function sendConnectionStatus(socket, context) {
     sync_state: status.sync_state,
     sync_stage: status.sync_stage,
     pending_messages: status.pending_messages,
-    failed_messages: status.failed_messages,
     last_successful_scan_at: status.last_successful_scan_at,
     next_retry_at: status.next_retry_at,
     skipped_before: status.skipped_before,
@@ -4519,7 +4515,7 @@ async function runAccountSync(trigger, control, context) {
     await recordLog("debug", "delivery", "pre_sync_flush", "Checking queued messages before recovery.", {
       provider_account_id: providerAccountId,
     });
-    void attemptDelivery(context, { resetBackoff: true })
+    void attemptDelivery(context, { resetBackoff: trigger === "manual" })
       .catch((error) => recordUnexpected("message_delivery", error));
     throwIfSyncCancelled(signal);
     await updateScopedState(STORAGE.status, context.key, {
@@ -4544,7 +4540,7 @@ async function runAccountSync(trigger, control, context) {
       completed_conversations: null,
       total_conversations: null,
     });
-    const delivered = await attemptDelivery(context, { resetBackoff: true, signal });
+    const delivered = await attemptDelivery(context, { resetBackoff: trigger === "manual", signal });
     throwIfSyncCancelled(signal);
     throwIfSyncCancelled(signal);
     const result = {
@@ -4766,7 +4762,6 @@ async function queueMessagesForContext(messages, context, shouldFlush) {
     const stored = await readStorage([
       STORAGE.consent,
       STORAGE.pending,
-      STORAGE.failedMessages,
       STORAGE.serverInitialized,
       STORAGE.status,
     ]);
@@ -4778,7 +4773,7 @@ async function queueMessagesForContext(messages, context, shouldFlush) {
     }
     const pending = readAccountState(stored[STORAGE.pending], context.key, []);
     // Capture deduplicates message IDs; only completed history scans own checkpoints.
-    const known = new Set([...pending.map(messageKey), ...readAccountState(stored[STORAGE.failedMessages], context.key, []).map(item => messageKey(item.message))]);
+    const known = new Set(pending.map(messageKey));
     const eligible = [];
     const added = [];
     for (const message of scopedMessages) {
@@ -4795,6 +4790,13 @@ async function queueMessagesForContext(messages, context, shouldFlush) {
         context.key,
         [...pending, ...added],
       );
+      // Bound the shared durable queue; rejecting capture also withholds its
+      // checkpoint acknowledgement, allowing catch-up after delivery drains it.
+      if (new TextEncoder().encode(JSON.stringify(writes[STORAGE.pending])).byteLength > 4 * 1024 * 1024) {
+        throw Object.assign(new Error("Forwarding queue is full. Waiting for target delivery before capturing more messages."), {
+          reason_code: "forwarding_queue_full",
+        });
+      }
     }
     if (eligible.length) {
       const currentStatus = readAccountState(stored[STORAGE.status], context.key, {});
@@ -5381,31 +5383,19 @@ async function flushBatch(context, signal) {
   const deliveredKeys = new Set(outcome.delivered.map(messageKey));
   for (const message of outcome.skipped) deliveredKeys.add(messageKey(message));
   for (const item of outcome.failed) deliveredKeys.add(messageKey(item.message));
-  const failure = outcome.failed[0]?.error ?? outcome.blocked?.error ?? null;
+  const failure = outcome.blocked?.error ?? null;
   const failureMessage = failure instanceof Error ? failure.message : String(failure ?? "");
   const now = new Date().toISOString();
   const remaining = await serializeAccountStorage(async () => {
-    const current = await readStorage([STORAGE.pending, STORAGE.status, STORAGE.failedMessages]);
+    const current = await readStorage([STORAGE.pending, STORAGE.status]);
     const remaining = readAccountState(current[STORAGE.pending], context.key, [])
       .filter((message) => !deliveredKeys.has(messageKey(message)));
     const currentStatus = readAccountState(current[STORAGE.status], context.key, {});
-    const failedItems = new Map(readAccountState(current[STORAGE.failedMessages], context.key, [])
-      .map(item => [messageKey(item.message), item]));
-    for (const message of outcome.skipped) failedItems.set(messageKey(message), {
-      message, failed_at: now,
-      reason: skippedMessageDetails.get(messageReference(message))?.server_error_code ?? "server_skipped",
-    });
-    for (const item of outcome.failed) failedItems.set(messageKey(item.message), {
-      message: item.message, failed_at: now,
-      reason: sanitizeLogDetails({ server_error_code: item.error?.server_error_code }).server_error_code || "message_rejected",
-    });
     await writeStorage({
-      [STORAGE.failedMessages]: writeAccountState(current[STORAGE.failedMessages], context.key, [...failedItems.values()]),
       [STORAGE.pending]: writeAccountState(current[STORAGE.pending], context.key, remaining),
       [STORAGE.status]: writeAccountState(current[STORAGE.status], context.key, {
         ...currentStatus,
         state: ["discovering", "syncing"].includes(currentStatus.state) ? currentStatus.state : "watching",
-        failed_messages: failedItems.size,
         delivery_error: failureMessage || null,
         delivery_error_at: failureMessage ? now : null,
         ...(outcome.delivered.length ? { last_delivery_at: now } : {}),
