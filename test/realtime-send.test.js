@@ -838,6 +838,28 @@ test("captured template cannot leak recipient shop or business between command c
   assert.equal(bridge.state.sendTemplate.payload.to_shop_id, 999, "the captured template itself stays unchanged");
 });
 
+for (const sellerCentre of [true, false]) {
+  test(`captured ${sellerCentre ? "Seller Centre" : "New Webchat"} template cannot reuse another shop's choice identity`, async () => {
+    const bridge = createBridge({ sellerCentre, authenticatedAccountId: "123456789" });
+    const template = {
+      url: `${origin}/webchat/api/v1.2/${sellerCentre ? "mini/" : ""}messages?csrf_token=test`,
+      headers: { "content-type": "application/json" },
+      payload: { content: { uid: "template" }, choice_info: { real_shop_id: 999 } },
+    };
+    bridge.state.sendTemplate = template;
+    for (const command_type of ["send_text", "send_product"]) {
+      const { result, payload } = await bridge.send({ ...baseCommand, request_id: command_type,
+        provider_account_id: "123456789", command_type, text: "Hello",
+        provider_product_id: "123", product_name: "Test product", omnichat: commandRouting({ to_id: "123" }) });
+      assert.equal(result.ok, true, result.error);
+      const sent = sellerCentre ? bridge.nativePayloads.at(-1) : payload;
+      assert.equal(sent.choice_info.real_shop_id, sellerCentre ? 123456789 : null);
+      assert.equal(sent.shop_id, 123456789);
+      assert.equal(template.payload.choice_info.real_shop_id, 999, "captured template stays unchanged");
+    }
+  });
+}
+
 test("profile routing contains only observed numeric destination fields and preserves explicit zero", async () => {
   const bridge = createBridge({ sellerCentre: true, conversationPages: [{ conversations: [
     { id: "conversation-1", shop_id: "shop-1", to_id: "123" },
