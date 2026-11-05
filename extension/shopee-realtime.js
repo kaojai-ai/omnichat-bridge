@@ -81,7 +81,8 @@
       sendPath: SELLER_CENTRE_SEND_PATH,
       imagePath: SELLER_CENTRE_IMAGE_PATH,
       videoPath: "/webchat/api/coreapi/v1.2/mini/video",
-      videoRegion: "th",
+      // Keep the observed Thai uploader; other markets reuse standalone MMS.
+      videoRegion: globalThis.OmnichatShopeeUrl.countryForUrl(window.location.href) === "TH" ? "th" : "sg",
       historyPath: (conversationId) => `${SELLER_CENTRE_MESSAGE_PREFIX}${encodeURIComponent(conversationId)}/messages`,
       historyPathPattern: /^\/webchat\/api\/v1\.2\/mini\/conversations\/[^/]+\/messages$/,
       syncPath: SELLER_CENTRE_SYNC_PATH,
@@ -1369,7 +1370,7 @@
       return;
     }
     if (commandType === "send_video" && ((state.surface !== NEW_WEBCHAT_SURFACE
-      && !(isSellerCentreSurface() && globalThis.OmnichatShopeeUrl.countryForUrl(window.location.href) === "TH"))
+      && !isSellerCentreSurface())
       || !globalThis.OmnichatShopeeVideo)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
         error: "Shopee video sending requires initialized New Webchat or Seller Centre." });

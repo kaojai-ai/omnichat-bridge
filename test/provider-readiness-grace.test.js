@@ -589,13 +589,16 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.deepEqual(Array.from(snapshot.command_capabilities), Array.from(h.context.adapter.sendCommands));
   });
 }
-test("Shopee video routing supports New Webchat and verified Thai Seller Centre", async () => {
+test("Shopee video routing supports New Webchat and regional Seller Centre", async () => {
   const h = fixture();
   h.result = { ...h.healthy, surface: "seller-centre" };
   assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
   h.context.account.country = "MY";
-  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), false);
+  h.scope.hasRegionalShopeePermission = async () => true;
+  h.tab.url = "https://seller.shopee.com.my/";
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
   h.context.account.country = "TH";
+  h.tab.url = "https://seller.shopee.co.th/new-webchat/conversations";
   h.result = { ...h.healthy, surface: "new-webchat" };
   assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
 });

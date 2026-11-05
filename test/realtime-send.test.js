@@ -11,7 +11,7 @@ const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adap
 const origin = "https://seller.shopee.co.th";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function createBridge({ authenticatedAccountId = null, pathname = null, sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
+function createBridge({ origin = "https://seller.shopee.co.th", authenticatedAccountId = null, pathname = null, sellerCentre = false, ready = true, secureSender = true, nativeSender = true, conversationPages = null, listFailure = false, sendBody = null, cachedRouting = null, transportFailure = false, onList = null, onTemplateWait = null, videoUploader = null, imageFailure = null } = {}) {
   let sendingAccountId = "shop-1";
   const listeners = [];
   const posts = [];
@@ -884,25 +884,27 @@ test("video upload failure never dispatches a Shopee chat message or retries", a
   assert.equal(bridge.nativePayloads.length, 0);
 });
 
-test("Seller Centre video uses Thai upload profile and mini registration paths", async () => {
-  let uploads = 0;
-  const bridge = createBridge({ sellerCentre: true, videoUploader: async options => {
-    uploads++;
-    assert.equal(options.region, "th");
-    await options.chatRequest("report_upload", { method: "POST", body: "{}" });
-    await options.chatRequest("upload_status", { method: "GET", vid: "th-test" });
-    await options.chatRequest("get_upload_info", { method: "GET", vid: "th-test" });
-    return { vid: "th-test", video_url: "https://down-ws-th.vod.susercontent.com/video.mp4" };
-  } });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4",
-    media_bytes: new Uint8Array([1, 2, 3]).buffer });
-  assert.equal(result.ok, true, result.error);
-  assert.equal(uploads, 1);
-  assert.deepEqual(bridge.nativeRequests, ["/webchat/api/coreapi/v1.2/mini/video/report_upload",
-    "/webchat/api/coreapi/v1.2/mini/video/upload_status", "/webchat/api/coreapi/v1.2/mini/video/get_upload_info",
-    "/webchat/api/v1.2/mini/messages"]);
-  assert.equal(bridge.nativePayloads.at(-1).type, "video");
-});
+for (const [country, sellerOrigin] of Object.entries({ TH: "https://seller.shopee.co.th", MY: "https://seller.shopee.com.my", PH: "https://seller.shopee.ph", SG: "https://seller.shopee.sg", ID: "https://seller.shopee.co.id", VN: "https://banhang.shopee.vn", TW: "https://seller.shopee.tw" })) {
+  test(`Seller Centre ${country} video uses shared pipeline and mini registration paths`, async () => {
+    let uploads = 0;
+    const bridge = createBridge({ origin: sellerOrigin, sellerCentre: true, videoUploader: async options => {
+      uploads++;
+      assert.equal(options.region, country === "TH" ? "th" : "sg");
+      await options.chatRequest("report_upload", { method: "POST", body: "{}" });
+      await options.chatRequest("upload_status", { method: "GET", vid: "th-test" });
+      await options.chatRequest("get_upload_info", { method: "GET", vid: "th-test" });
+      return { vid: "th-test", video_url: "https://down-ws-th.vod.susercontent.com/video.mp4" };
+    } });
+    const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4",
+      media_bytes: new Uint8Array([1, 2, 3]).buffer });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(uploads, 1);
+    assert.deepEqual(bridge.nativeRequests, ["/webchat/api/coreapi/v1.2/mini/video/report_upload",
+      "/webchat/api/coreapi/v1.2/mini/video/upload_status", "/webchat/api/coreapi/v1.2/mini/video/get_upload_info",
+      "/webchat/api/v1.2/mini/messages"]);
+    assert.equal(bridge.nativePayloads.at(-1).type, "video");
+  });
+}
 
 
 test("Shopee image rejection retains upload stage and status without provider description or chat send", async () => {

@@ -388,7 +388,7 @@ function providerTabContext(tab, provider) {
 function providerCommandCapabilities(status, context) {
   return context.adapter.sendCommands.filter(command => context.adapter.id !== "shopee"
     || command !== "send_video" || status?.surface === "new-webchat"
-    || (status?.surface === "seller-centre" && (context.account.country ?? "TH") === "TH"));
+    || status?.surface === "seller-centre");
 }
 
 function invalidateBridgeVerification(tabId) {
