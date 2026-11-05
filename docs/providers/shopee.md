@@ -13,7 +13,9 @@ preferred; recovery retains a matching legacy tab, including while it initialize
 instead of repeatedly creating a New Webchat replacement. User tabs are not navigated.
 Legacy compatibility has automated fixture coverage; live legacy receiving and
 sending remain unverified on an affected account. Legacy outbound video is not
-advertised and is rejected before uploading; video remains New Webchat only.
+advertised and is rejected before uploading. Video is supported on New Webchat
+and the Thailand Seller Centre mini-chat profile; other regional mini-chat
+profiles remain unverified.
 
 ## Taiwan regional access
 

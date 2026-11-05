@@ -36,6 +36,7 @@ function fixture({ initial = null, transferStatus = 200, registerOk = true, stat
   const chatRequest = async (path, init) => {
     chatRequests.push({ path, init });
     if (path === "report_upload") return { ok: registerOk };
+    if (path === "get_upload_info") return json(status ?? {});
     if (path === "upload_status") return json(status ?? { status: "successful", video: "https://down-ws-global.vod.susercontent.com/processed.mp4",
       thumbnail: "https://down-ws-global.vod.susercontent.com/thumb.jpg", width: 320, height: 240, duration: 2500 });
     throw new Error(`Unexpected chat endpoint: ${path}`);
@@ -178,4 +179,57 @@ test("video provider code rejection retains the bounded code and no response bod
     return true;
   });
   assert.equal(f.requests.length, 1, "rejection must not retry or transfer");
+});
+
+
+test("Thai Seller Centre reuses upload pipeline with Thai MMS and transfer hosts", async () => {
+  const f = fixture({ initial: grant("th-test-1", { uploaddomain: "https://up-ws-th.vod.susercontent.com",
+    domain: "https://down-ws-global.vod.susercontent.com" }) });
+  const result = await upload({ ...f.options, region: "th" });
+  assert.equal(result.vid, "th-test-1");
+  assert.equal(f.requests[0].url, "https://api.mms.shopee.co.th/uploadapi/api/v1/vod/preupload");
+  assert.equal(f.requests[1].url, "https://up-ws-th.vod.susercontent.com/file/upload");
+  assert.equal(f.requests[2].url, "https://api.mms.shopee.co.th/uploadapi/api/v1/vod/reportupload");
+  assert.equal(f.requests.every(request => request.init.credentials === "omit"), true);
+  assert.equal(f.requests.every(request => request.init.redirect === "error"), true);
+});
+
+test("a successful processing status can resolve metadata through get_upload_info", async () => {
+  const f = fixture();
+  const result = await upload({ ...f.options, chatRequest: async (path, init) => {
+    if (path === "upload_status") return json({ status: "successful" });
+    if (path === "get_upload_info") return json({ data: { video: "https://down-ws-global.vod.susercontent.com/video.mp4",
+      thumbnail: "https://down-ws-global.vod.susercontent.com/thumb.jpg", width: 320, height: 240, duration: 2500 } });
+    return f.options.chatRequest(path, init);
+  } });
+  assert.equal(result.duration_seconds, 3);
+});
+
+for (const changes of [
+  { uploaddomain: "https://up-ws-th.vod.susercontent.com.attacker.example", domain: "https://down-ws-global.vod.susercontent.com" },
+  { uploaddomain: "https://up-ws-th.vod.susercontent.com", domain: "https://attacker.example" },
+]) {
+  test("Thai upload grants cannot redirect media or grants outside the allowlist", async () => {
+    const f = fixture({ initial: grant("th-test-1", changes) });
+    await assert.rejects(upload({ ...f.options, region: "th" }), /service is unsupported/);
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.chatRequests.length, 0);
+  });
+}
+
+
+test("Seller Centre resolves double-encoded dispatcher metadata from get_upload_info", async () => {
+  const f = fixture();
+  const result = await upload({ ...f.options, chatRequest: async (path, init) => {
+    if (path === "upload_status") return json({ status: "successful", video: "present", thumbnail: "present", duration: 2500 });
+    if (path === "get_upload_info") return json({ dispatcher_info: JSON.stringify(JSON.stringify({
+      duration: 2500, cover: "https://down-ws-sg.img.susercontent.com/thumb.jpg", formats: [{
+        profile: "MP4", url: "https://down-ws-sg.vod.susercontent.com/video.mp4", width: 320, height: 240,
+      }],
+    })) });
+    return f.options.chatRequest(path, init);
+  } });
+  assert.equal(result.video_url, "https://down-ws-sg.vod.susercontent.com/video.mp4");
+  assert.equal(result.thumb_width, 320);
+  assert.equal(result.duration_seconds, 3);
 });

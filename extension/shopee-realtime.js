@@ -50,11 +50,10 @@
   const SELLER_CENTRE_SEND_PATH = "/webchat/api/v1.2/mini/messages";
   const LEGACY_SEND_PATH = "/webchat/api/v1.2/messages";
   const LEGACY_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
-  const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/images";
+  const SELLER_CENTRE_IMAGE_PATH = "/webchat/api/coreapi/v1.2/mini/images";
   const SELLER_CENTRE_SURFACE = "seller-centre";
   const NEW_WEBCHAT_SURFACE = "new-webchat";
-  // Both standalone pages use the existing Webchat API; only the preferred
-  // page has verified outbound video support. Keep one request profile.
+  // Standalone and Seller Centre share send semantics with surface-specific APIs.
   const STANDALONE_PROFILE = Object.freeze({
     listPaths: Object.freeze([
       LEGACY_CONVERSATIONS_PATH,
@@ -63,6 +62,8 @@
     loginPath: LEGACY_LOGIN_PATH,
     sendPath: LEGACY_SEND_PATH,
     imagePath: LEGACY_IMAGE_PATH,
+    videoPath: "/webchat/api/coreapi/v1.2/video",
+    videoRegion: "sg",
     historyPath: (conversationId) => `/webchat/api/v1.2/conversations/${encodeURIComponent(conversationId)}/messages`,
     historyPathPattern: /^\/webchat\/api\/v1\.2\/conversations\/[^/]+\/messages$/,
     syncPath: null,
@@ -79,6 +80,8 @@
       loginPath: "/api/v2/login/",
       sendPath: SELLER_CENTRE_SEND_PATH,
       imagePath: SELLER_CENTRE_IMAGE_PATH,
+      videoPath: "/webchat/api/coreapi/v1.2/mini/video",
+      videoRegion: "th",
       historyPath: (conversationId) => `${SELLER_CENTRE_MESSAGE_PREFIX}${encodeURIComponent(conversationId)}/messages`,
       historyPathPattern: /^\/webchat\/api\/v1\.2\/mini\/conversations\/[^/]+\/messages$/,
       syncPath: SELLER_CENTRE_SYNC_PATH,
@@ -1365,9 +1368,11 @@
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false, error: "Reply command is invalid." });
       return;
     }
-    if (commandType === "send_video" && (state.surface !== NEW_WEBCHAT_SURFACE || !globalThis.OmnichatShopeeVideo)) {
+    if (commandType === "send_video" && ((state.surface !== NEW_WEBCHAT_SURFACE
+      && !(isSellerCentreSurface() && globalThis.OmnichatShopeeUrl.countryForUrl(window.location.href) === "TH"))
+      || !globalThis.OmnichatShopeeVideo)) {
       post({ type: "api_send_result", request_id: requestId, ok: false, execution_stage: "preparation", dispatch_started: false, retryable: false,
-        error: "Shopee video sending requires initialized New Webchat." });
+        error: "Shopee video sending requires initialized New Webchat or Seller Centre." });
       return;
     }
     if (!surfaceSendReady()) {
@@ -1479,10 +1484,10 @@
         const headers = new Headers(sendRequestSource()?.init?.headers ?? state.sendTemplate.headers);
         headers.set("content-type", "application/json");
         payload.content = { ...await globalThis.OmnichatShopeeVideo.upload({
-          bytes: message.media_bytes, type: message.media_type,
+          bytes: message.media_bytes, type: message.media_type, region: surfaceProfile().videoRegion,
           deadline: Math.min(deadlineAt, sendStartedAt + 30_000), fetch: state.nativeFetch,
           chatRequest: (action, init) => {
-            const url = new URL(`/webchat/api/coreapi/v1.2/video/${action}`, source.origin);
+            const url = new URL(`${surfaceProfile().videoPath}/${action}`, source.origin);
             for (const key of authQueryKeys) if (source.searchParams.has(key)) url.searchParams.set(key,source.searchParams.get(key));
             const { vid, ...options } = init;
             if (vid) url.searchParams.set("vid",vid);

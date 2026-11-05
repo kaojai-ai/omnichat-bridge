@@ -1,4 +1,4 @@
-// Shopee TH New Webchat protocol observed from its native video sender.
+// Native Shopee video protocol shared by standalone chat and Seller Centre.
 // Upload grants are request-local and never leave this browser process.
 (() => {
   function md5(buffer) {
@@ -45,9 +45,16 @@
     }
   }
 
-  async function upload({ bytes, type, deadline, fetch, chatRequest }) {
+  const uploadProfiles = {
+    sg: { api: "https://api.mms.shopee.sg", upload: "https://up-ws-sg.vod.susercontent.com" },
+    th: { api: "https://api.mms.shopee.co.th", upload: "https://up-ws-th.vod.susercontent.com" },
+  };
+
+  async function upload({ bytes, type, deadline, fetch, chatRequest, region = "sg" }) {
     if (!(bytes instanceof ArrayBuffer) || !bytes.byteLength || bytes.byteLength > 5*1024*1024
       || type !== "video/mp4") throw new Error("Shopee video must be an MP4 file of 5 MB or smaller.");
+    const profile = Object.hasOwn(uploadProfiles, region) ? uploadProfiles[region] : null;
+    if (!profile) throw new Error("Shopee video upload region is unsupported.");
     let stage = "upload_grant";
     let httpStatus;
     let nativeCode;
@@ -60,7 +67,7 @@
         return ms;
       };
       const request = async (url, init) => {
-        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(remaining()) });
+        const response = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(remaining()) });
         httpStatus = response.status;
         if (!response.ok) { rejected = true; throw new Error(`Shopee video upload returned ${response.status}.`); }
         const body = await response.json();
@@ -74,11 +81,11 @@
       };
       const json = (body) => ({ method:"POST", credentials:"omit", headers:{"content-type":"application/json"}, body:JSON.stringify(body) });
       const reportdata = () => ({sdkversion:"mms-3.5.15",appversion:"mms-3.5.15",ostype:"2",reporttime:Date.now()});
-      const initial = await request("https://api.mms.shopee.sg/uploadapi/api/v1/vod/preupload", json({biz:120,ver:2,mediatype:1,reportdata:reportdata()}));
+      const initial = await request(`${profile.api}/uploadapi/api/v1/vod/preupload`, json({biz:120,ver:2,mediatype:1,reportdata:reportdata()}));
       const grant = initial?.data;
       const service = grant?.services?.find(item => item.serviceid === "wscloud");
-      if (!/^sg-[a-zA-Z0-9-]+$/.test(grant?.vid ?? "") || !service?.token
-        || service.uploaddomain !== "https://up-ws-sg.vod.susercontent.com"
+      if (!new RegExp(`^${region}-[a-zA-Z0-9-]+$`).test(grant?.vid ?? "") || !service?.token
+        || service.uploaddomain !== profile.upload
         || service.domain !== "https://down-ws-global.vod.susercontent.com") {
         throw new Error("Shopee video upload service is unsupported.");
       }
@@ -89,14 +96,14 @@
       form.append("token",token); form.append("key",key); form.append("mimeType",type);
       enterStage("upload_transfer");
       const uploaded = await fetch(`${service.uploaddomain}/file/upload`, {
-        method:"POST", credentials:"omit", body:form, signal:AbortSignal.timeout(remaining()),
+        method:"POST", credentials:"omit", redirect:"error", body:form, signal:AbortSignal.timeout(remaining()),
       });
       httpStatus = uploaded.status;
       if (!uploaded.ok) { rejected = true; throw new Error(`Shopee video transfer returned ${uploaded.status}.`); }
       const digest = md5(bytes);
       const videoUrl = `${service.domain}/${key}`;
       enterStage("upload_report");
-      await request("https://api.mms.shopee.sg/uploadapi/api/v1/vod/reportupload",json({
+      await request(`${profile.api}/uploadapi/api/v1/vod/reportupload`,json({
         vid:grant.vid,mid:"",serviceid:service.serviceid,biz:120,code:0,extendid:grant.vid,
         fileinfos:{mediatype:1},fsize:bytes.byteLength,md5:digest,reportdata:reportdata(),
         updomain:service.uploaddomain,videourl:videoUrl,
@@ -112,9 +119,30 @@
         enterStage("upload_processing");
         const response = await chatRequest("upload_status",{method:"GET",vid:grant.vid,signal:AbortSignal.timeout(remaining())});
         httpStatus = response.status;
-        const status = await response.json();
+        let status = await response.json();
         if (!response.ok) { rejected = true; throw new Error("Shopee video processing check failed."); }
         if (status.status === "successful") {
+          if (!status.video || !status.thumbnail || !(status.width > 0) || !(status.height > 0)
+            || !Number.isFinite(status.duration) || !(status.duration > 0)) {
+            const info = await chatRequest("get_upload_info", { method: "GET", vid: grant.vid,
+              signal: AbortSignal.timeout(remaining()) });
+            httpStatus = info.status;
+            if (!info.ok) { rejected = true; throw new Error("Shopee processed video metadata request failed."); }
+            const body = await info.json();
+            status = body?.data ?? body;
+            if (status?.dispatcher_info !== undefined) {
+              let metadata = status.dispatcher_info;
+              try {
+                for (let i = 0; i < 2 && typeof metadata === "string"; i++) {
+                  if (metadata.length > 65_536) throw new Error();
+                  metadata = JSON.parse(metadata);
+                }
+              } catch { throw new Error("Shopee processed video metadata is invalid."); }
+              const format = metadata?.formats?.find(item => item.profile === "MP4" && item.url && item.width > 0 && item.height > 0);
+              status = { video: format?.url, thumbnail: metadata?.cover, width: format?.width,
+                height: format?.height, duration: metadata?.duration };
+            }
+          }
           const durationSeconds = Math.ceil(status.duration / 1000);
           if (!status.video || !status.thumbnail || !(status.width>0) || !(status.height>0)
             || !Number.isFinite(status.duration) || !(status.duration>0)

@@ -350,7 +350,7 @@ test("keeps Seller Centre image and product replies on the new request profile",
     image_type: "image/jpeg",
   });
   assert.equal(image.result.ok, true);
-  assert.equal(imageBridge.nativeRequests.includes("/webchat/api/coreapi/v1.2/images"), true);
+  assert.equal(imageBridge.nativeRequests.includes("/webchat/api/coreapi/v1.2/mini/images"), true);
   assert.equal(imageBridge.nativeRequests.includes("/webchat/api/v1.2/mini/messages"), true);
   assert.equal(imageBridge.nativePayloads.at(-1).type, "image");
   assert.equal(image.result.provider_message_id, "provider-native-message-1");
@@ -884,15 +884,24 @@ test("video upload failure never dispatches a Shopee chat message or retries", a
   assert.equal(bridge.nativePayloads.length, 0);
 });
 
-test("unverified mini-chat video returns unsupported before uploading or sending", async () => {
+test("Seller Centre video uses Thai upload profile and mini registration paths", async () => {
   let uploads = 0;
-  const bridge = createBridge({ sellerCentre: true, videoUploader: async () => { uploads++; return {}; } });
+  const bridge = createBridge({ sellerCentre: true, videoUploader: async options => {
+    uploads++;
+    assert.equal(options.region, "th");
+    await options.chatRequest("report_upload", { method: "POST", body: "{}" });
+    await options.chatRequest("upload_status", { method: "GET", vid: "th-test" });
+    await options.chatRequest("get_upload_info", { method: "GET", vid: "th-test" });
+    return { vid: "th-test", video_url: "https://down-ws-th.vod.susercontent.com/video.mp4" };
+  } });
   const { result } = await bridge.send({ ...baseCommand, command_type: "send_video", media_type: "video/mp4",
     media_bytes: new Uint8Array([1, 2, 3]).buffer });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /video.*requires initialized New Webchat/i);
-  assert.equal(uploads, 0);
-  assert.equal(bridge.nativePayloads.length, 0);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(uploads, 1);
+  assert.deepEqual(bridge.nativeRequests, ["/webchat/api/coreapi/v1.2/mini/video/report_upload",
+    "/webchat/api/coreapi/v1.2/mini/video/upload_status", "/webchat/api/coreapi/v1.2/mini/video/get_upload_info",
+    "/webchat/api/v1.2/mini/messages"]);
+  assert.equal(bridge.nativePayloads.at(-1).type, "video");
 });
 
 

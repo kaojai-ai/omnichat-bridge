@@ -387,7 +387,8 @@ function providerTabContext(tab, provider) {
 // Message-type support is fixed by the adapter and selected Shopee surface.
 function providerCommandCapabilities(status, context) {
   return context.adapter.sendCommands.filter(command => context.adapter.id !== "shopee"
-    || command !== "send_video" || status?.surface === "new-webchat");
+    || command !== "send_video" || status?.surface === "new-webchat"
+    || (status?.surface === "seller-centre" && (context.account.country ?? "TH") === "TH"));
 }
 
 function invalidateBridgeVerification(tabId) {

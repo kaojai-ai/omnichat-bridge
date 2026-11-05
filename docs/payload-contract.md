@@ -416,8 +416,9 @@ native Shopee parameters or establish a successful live send.
 ### Shopee outbound video
 
 Use the existing generic `send_video` command with `media_url`, a client message ID
-and command deadline. New Webchat advertises `send_video` only after its sender is
-ready. Embedded mini-chat does not advertise video and rejects it before upload.
+and command deadline. Initialized New Webchat and Thailand Seller Centre mini-chat
+advertise `send_video`. Legacy standalone Webchat and unverified regional Seller
+Centre profiles continue to reject video before upload.
 Targets must respect advertised capabilities; older installations remain usable
 for their existing message types.
 
@@ -426,6 +427,14 @@ upload grant, uploads the file, registers it with Seller Chat and waits for proc
 media references before attempting the chat send. Grants stay in page memory. All
 steps share the command deadline. Upload/processing failure sends no chat message;
 a failed, timed-out or uncertain native send is never retried on another surface.
+
+Standalone chat retains its Singapore MMS upload profile. Thailand Seller Centre
+uses Thai MMS/upload hosts and `/webchat/api/coreapi/v1.2/mini/video/` for registration
+and processing, with `get_upload_info` when processing status lacks final metadata.
+Its image uploads use `/webchat/api/coreapi/v1.2/mini/images`; all three message
+types use `/webchat/api/v1.2/mini/messages`. Regional upload hosts do not determine
+the recipient shop. Upload grants are restricted to the selected profile, and
+MMS/file-transfer redirects are rejected.
 
 
 ### Provider failure diagnostics (0.6.64, planned)
