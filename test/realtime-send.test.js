@@ -981,3 +981,14 @@ test("expired Shopee identity evidence rejects without refreshing or dispatching
   assert.equal(bridge.nativeRequests.length, 0);
   assert.equal(bridge.sentUrls.length, 0);
 });
+
+
+test("Seller Centre can derive a send from the captured list request without history capture", async () => {
+  const bridge = createBridge({ sellerCentre: true, authenticatedAccountId: "123456789" });
+  bridge.state.getTemplate = null;
+  const { result } = await bridge.send({ ...baseCommand, provider_account_id: "123456789", command_type: "send_text", text: "Hello",
+    omnichat: commandRouting({ to_id: "123" }) });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(bridge.nativePayloads.at(-1).shop_id, 123456789);
+  assert.equal(bridge.nativeRequests.includes("/api/v2/login/"), false);
+});

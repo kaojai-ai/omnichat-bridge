@@ -93,7 +93,7 @@ test("an operation-specific 403 does not erase an authenticated shop", async () 
   assert.ok(bridge.state.listTemplate);
 });
 
-function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, socket = null, requestTimeoutMs = 15_000 } = {}) {
+function createBridge({ pathname = "/new-webchat/conversations", captureIntervals = false, miniChatOpen = null, initialResponses = {}, socket = null, requestTimeoutMs = 15_000, resourceUrls = [], secureSender = false } = {}) {
   const listeners = [];
   const documentListeners = new Map();
   const posts = [];
@@ -194,6 +194,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       }
     },
     __CHAT_GLOBAL__: socket ? { socket } : {},
+    ...(secureSender ? { __chat_anti_fraud__: { poster: async () => { throw new Error("initialization must not send"); } } } : {}),
   };
   const clockStartedAt = Date.now();
   let clockOffset = 0;
@@ -210,6 +211,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     ArrayBuffer,
     Uint8Array,
     structuredClone,
+    performance: { now: () => Date.now(), getEntriesByType: () => resourceUrls.map(name => ({ name })) },
     AbortController,
     setInterval: (callback, delay) => {
       if (!captureIntervals) return 0;
@@ -2027,5 +2029,73 @@ test("Shopee next-page fetch failures do not retain the preceding page evidence"
     assert.equal(result.diagnostics.page_count, undefined);
     assert.equal(result.diagnostics.first_message_id, undefined);
     assert.equal(result.diagnostics.last_message_id, undefined);
+  } finally { bridge.dispose(); }
+});
+
+
+test("idle Shopee initialization recovers missed read capture and retries a transient failure", async () => {
+  const path = "/webchat/api/v1.2/conversations/bootstrap/messages";
+  const bridge = createBridge({ secureSender: true, resourceUrls: [`${origin}${path}?shop_id=100000001`],
+    initialResponses: { [path]: () => new Response("{}", { status: 503 }) } });
+  try {
+    await bridge.detect("initial-failure");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.checkStatus("failed").surface_ready, false);
+    bridge.setResponse(path, []);
+    await Promise.all([bridge.detect("retry-a"), bridge.detect("retry-b")]);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.checkStatus("ready").surface_ready, true);
+    assert.equal(bridge.requests.filter(request => request === path).length, 2, "concurrent initialization shares one read per attempt");
+    assert.equal(bridge.state.getTemplate, null, "send bootstrap does not pretend history recovery is initialized");
+    assert.equal(bridge.requests.some(request => request.endsWith("/messages") && request !== path), false);
+  } finally { bridge.dispose(); }
+});
+
+test("Shopee bootstrap does not replay send, foreign-origin, or wrong-shop resource URLs", async () => {
+  const bridge = createBridge({ secureSender: true, resourceUrls: [
+    `${origin}/webchat/api/v1.2/messages`,
+    "https://foreign.example/webchat/api/v1.2/conversations/a/messages",
+    `${origin}/webchat/api/v1.2/conversations/a/messages?shop_id=200000002`,
+  ] });
+  try {
+    await bridge.detect();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.state.senderReadTemplate, undefined);
+    assert.equal(bridge.checkStatus("waiting").surface_ready, false);
+    assert.equal(bridge.requests.every(path => path === "/api/v2/login/"), true);
+  } finally { bridge.dispose(); }
+});
+
+test("an old bootstrap result cannot restore readiness after a shop change", async () => {
+  const path = "/webchat/api/v1.2/conversations/bootstrap/messages";
+  let finish;
+  const bridge = createBridge({ secureSender: true, resourceUrls: [`${origin}${path}?shop_id=100000001`],
+    initialResponses: { [path]: () => new Promise(resolve => { finish = resolve; }) } });
+  try {
+    await bridge.detect("first-shop");
+    bridge.setResponse("/api/v2/login/", { shop_id: 200000002 });
+    await bridge.detect("new-shop");
+    finish(new Response("[]", { status: 200 }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.state.currentAccountId, "200000002");
+    assert.equal(bridge.state.senderReadTemplate, null);
+    assert.equal(bridge.checkStatus("changed").surface_ready, false);
+  } finally { bridge.dispose(); }
+});
+
+
+test("HTTP200 provider errors cannot initialize a Shopee sender", async () => {
+  const path = "/webchat/api/v1.2/conversations/bootstrap/messages";
+  const bridge = createBridge({ secureSender: true, resourceUrls: [`${origin}${path}?shop_id=100000001`],
+    initialResponses: { [path]: { error_code: "csrf_invalid" } } });
+  try {
+    await bridge.detect("rejected-read");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.checkStatus("rejected").surface_ready, false);
+    assert.equal(bridge.state.senderReadTemplate, undefined);
+    bridge.setResponse(path, []);
+    await bridge.detect("retry-read");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bridge.checkStatus("recovered").surface_ready, true);
   } finally { bridge.dispose(); }
 });

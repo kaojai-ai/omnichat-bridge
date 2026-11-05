@@ -152,6 +152,7 @@
     state.lookupListTemplate = null;
     state.historyTemplate = null;
     state.sendTemplate = null;
+    state.senderReadTemplate = null;
     state.latestMessageIdsByConversation = new Map();
     state.pendingSellerCentreMessages = new Map();
     state.sellerCentreCaptureEpoch = (state.sellerCentreCaptureEpoch ?? 0) + 1;
@@ -225,10 +226,13 @@
     details,
   });
 
+  const sendRequestSource = () => state.getTemplate ?? state.listTemplate ?? state.senderReadTemplate;
+  let senderInitializationPromise = null;
+
   const sendIdentityFresh = () => Number.isFinite(state.sendVerifiedMono)
     && (globalThis.performance?.now() ?? Date.now()) - state.sendVerifiedMono < 120_000;
   const surfaceSendReady = () => {
-    if (!state.currentAccountId || !sendIdentityFresh() || !(state.sendTemplate || state.getTemplate)) return false;
+    if (!state.currentAccountId || !sendIdentityFresh() || !(state.sendTemplate || sendRequestSource())) return false;
     if (isSellerCentreSurface()) return typeof state.nativeFetch === "function";
     return typeof window.__chat_anti_fraud__?.poster === "function";
   };
@@ -479,7 +483,7 @@
     const account = providerAdapter.currentAccountFromPayload(body);
     const nextId = value(account?.provider_account_id);
     const previousId = state.currentAccountId ?? null;
-    if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate))) {
+    if (previousId !== nextId || (!nextId && (state.listTemplate || state.getTemplate || state.sendTemplate || state.senderReadTemplate))) {
       if (previousId || !nextId) {
         state.routeSessionEpoch = (state.routeSessionEpoch ?? 0) + 1;
         if (cancelRecovery) resetRecovery("Shopee session changed. Retry sync for the open shop.");
@@ -488,6 +492,7 @@
         state.getTemplate = null;
         state.historyTemplate = null;
         state.sendTemplate = null;
+        state.senderReadTemplate = null;
         state.sendErrorsByClientMessageId.clear();
         state.activeConversationId = null;
         state.conversationsById.clear();
@@ -704,7 +709,10 @@
 
   async function discoverAccounts() {
     if (state.accountDiscoveryPromise) return state.accountDiscoveryPromise;
-    state.accountDiscoveryPromise = detectSessionAccount().finally(() => {
+    state.accountDiscoveryPromise = detectSessionAccount().then(accounts => {
+      void initializeSender().catch(error => logAsyncError("sender_initialization", error));
+      return accounts;
+    }).finally(() => {
       state.accountDiscoveryPromise = null;
     });
     return state.accountDiscoveryPromise;
@@ -1134,9 +1142,10 @@
     if (state.sendTemplate && pathOf(state.sendTemplate.url) === surfaceProfile().sendPath) {
       return state.sendTemplate;
     }
-    if (!state.getTemplate) return null;
+    const source = sendRequestSource();
+    if (!source) return null;
 
-    const sourceUrl = new URL(state.getTemplate.url);
+    const sourceUrl = new URL(source.url);
     const profile = surfaceProfile();
     const url = new URL(profile.sendPath, sourceUrl.origin);
     for (const key of authQueryKeys) {
@@ -1148,7 +1157,7 @@
       url.searchParams.set("uuid", clientMessageId);
     }
 
-    const headers = Object.fromEntries(new Headers(state.getTemplate.init.headers).entries());
+    const headers = Object.fromEntries(new Headers(source.init.headers).entries());
     headers["content-type"] = "application/json";
     return {
       url: url.toString(),
@@ -1179,7 +1188,7 @@
       if (typeof state.nativeFetch !== "function") {
         throw new Error("Shopee Seller Centre native sender is unavailable. Refresh Seller Chat.");
       }
-      const sourceInit = state.getTemplate?.init ?? {};
+      const sourceInit = sendRequestSource()?.init ?? {};
       const init = {
         method: "POST",
         headers: new Headers(template.headers ?? sourceInit.headers ?? {}),
@@ -1275,7 +1284,7 @@
     if (!(message.image_bytes instanceof ArrayBuffer) || message.image_bytes.byteLength === 0) {
       throw new Error("Reply image is invalid.");
     }
-    const sourceTemplateUrl = state.getTemplate?.url ?? state.sendTemplate?.url;
+    const sourceTemplateUrl = sendRequestSource()?.url ?? state.sendTemplate?.url;
     if (!sourceTemplateUrl) throw new Error("Shopee image uploader is still initializing.");
     const sourceUrl = new URL(sourceTemplateUrl);
     const url = new URL(surfaceProfile().imagePath, sourceUrl.origin);
@@ -1291,7 +1300,7 @@
     form.append("file", new Blob([message.image_bytes], { type }), `omnichat-reply.${extension}`);
     form.append("conversation_id", routing.conversation_id);
     const headers = new Headers(
-      state.getTemplate?.init?.headers ?? state.sendTemplate?.headers ?? {},
+      sendRequestSource()?.init?.headers ?? state.sendTemplate?.headers ?? {},
     );
     headers.delete("content-type");
     headers.delete("content-length");
@@ -1466,8 +1475,8 @@
         payload.content = withQuotedMessageId(await uploadImage(message, routing), providerMessageId);
       } else if (commandType === "send_video") {
         payload.type = "video";
-        const source = new URL(state.getTemplate?.url ?? state.sendTemplate.url);
-        const headers = new Headers(state.getTemplate?.init?.headers ?? state.sendTemplate.headers);
+        const source = new URL(sendRequestSource()?.url ?? state.sendTemplate.url);
+        const headers = new Headers(sendRequestSource()?.init?.headers ?? state.sendTemplate.headers);
         headers.set("content-type", "application/json");
         payload.content = { ...await globalThis.OmnichatShopeeVideo.upload({
           bytes: message.media_bytes, type: message.media_type,
@@ -1824,6 +1833,47 @@
       url = page.next;
     }
     return { conversations, firstPage, exhausted, pages, stopReason };
+  }
+
+  // Late attachment can miss page-load traffic. Reuse only known read endpoints
+  // already observed on this origin; never replay a send or a POST list request.
+  async function initializeSender() {
+    if (state.sendTemplate || sendRequestSource() || !state.currentAccountId) return;
+    if (senderInitializationPromise) return senderInitializationPromise;
+    const epoch = state.routeSessionEpoch;
+    const operation = (async () => {
+      const entries = globalThis.performance?.getEntriesByType?.("resource") ?? [];
+      const urls = [...new Set(entries.map(entry => entry.name))].reverse();
+      const candidate = urls.find(name => {
+        try {
+          const url = new URL(name);
+          return url.origin === window.location.origin
+            && (isHistoryPath(url.pathname) || ["/webchat/api/workbenchapi/v1.2/mini/shop/setting",
+              "/webchat/api/v1.2/mini/user/setting", "/webchat/api/v1.2/shop_list"].includes(url.pathname))
+            && (!url.searchParams.has("shop_id") || url.searchParams.get("shop_id") === state.currentAccountId);
+        } catch { return false; }
+      });
+      if (!candidate) {
+        postLog("debug", "sender_initialization_waiting", "Waiting for Shopee request configuration.", {});
+        return;
+      }
+      const request = new Request(candidate, { method: "GET", credentials: "include" });
+      const body = await fetchProviderJson(request, undefined, 5_000);
+      const failed = body?.error || (body?.error_code !== undefined && ![0, "0", null].includes(body.error_code));
+      const valid = isHistoryPath(new URL(request.url).pathname)
+        ? Array.isArray(body) || Array.isArray(body?.messages) || Array.isArray(body?.data?.messages)
+        : value(providerAdapter.currentAccountFromPayload(body)?.provider_account_id) === state.currentAccountId;
+      if (failed || !valid) throw new Error("Shopee initialization read did not confirm usable request configuration.");
+      if (!sessionIsCurrent(epoch) || state.sendTemplate || sendRequestSource()) return;
+      // Request configuration is for sending only, not a recovered history cursor.
+      const template = await templateFrom(request);
+      if (!sessionIsCurrent(epoch)) return;
+      state.senderReadTemplate = template;
+      publishSurfaceStatus();
+    })();
+    senderInitializationPromise = operation;
+    try { await operation; }
+    finally { if (senderInitializationPromise === operation) senderInitializationPromise = null; }
   }
 
   async function detectCurrentAccount(requestId) {
