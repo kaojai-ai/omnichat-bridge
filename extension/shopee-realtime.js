@@ -239,10 +239,6 @@
       ? Boolean(state.listTemplate && state.getTemplate)
       : Boolean(state.socket),
     message_recovery: Boolean(state.listTemplate && state.getTemplate),
-    send_text: surfaceSendReady(),
-    send_image: surfaceSendReady(),
-    send_video: surfaceSendReady() && state.surface === NEW_WEBCHAT_SURFACE && Boolean(globalThis.OmnichatShopeeVideo),
-    send_product: surfaceSendReady(),
   });
 
   const publishSurfaceStatus = (requestId = null) => {

@@ -104,7 +104,7 @@ for (const config of [
     const canonicalEnd = source.indexOf('\nfunction hasServerInitialized', canonicalStart);
     const canonicalProviderAccountId = vm.runInNewContext(`(${source.slice(canonicalStart, canonicalEnd)})`, { URL });
     const lineContext = { key: 'line_oa:@first', account: { provider: 'line_oa', provider_account_id: '@first' },
-      adapter: { id: 'line_oa' }, config };
+      adapter: { id: 'line_oa', sendCommands: ['send_text', 'send_image', 'send_video', 'send_file', 'send_sticker'] }, config };
     let polls = { '@first': new Date().toISOString() };
     const snapshot = fn('connectionStatusSnapshot', '\nfunction statusPublishKey', {
       STORAGE: {}, readStorage: async () => ({}), readAccountState: (_state, _key, fallback) => fallback,

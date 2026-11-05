@@ -96,10 +96,6 @@
     void publishProviderStatus();
   }
 
-  function commandCapabilities(botId) {
-    return botId ? ["send_text", "send_image", "send_video", "send_file", "send_sticker"] : [];
-  }
-
   function pollingAccountIds() {
     if (timer) return [...pollingAccounts.keys()];
     return [...new Set([...(activePoll ? [activePoll.providerAccountId] : []), ...queuedSyncs.map((request) => request.providerAccountId)])];
@@ -111,17 +107,12 @@
   }
 
   function postProviderStatus() {
-    const commandCapabilitiesByAccount = Object.fromEntries((sendIdentityFresh() ? accessibleAccounts : []).map((account) => [
-      account.provider_account_id,
-      commandCapabilities(value(account.bot_id)),
-    ]));
     post({
       type: "provider_status",
       surface: "line-oa",
       bridge_version: BRIDGE_VERSION,
       surface_ready: true,
       capabilities: { account_detection: true, message_observation: true, message_recovery: true },
-      command_capabilities_by_account: commandCapabilitiesByAccount,
       accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
       account_access_verified: sendIdentityFresh(),
       send_verified_at: sendVerifiedAt,

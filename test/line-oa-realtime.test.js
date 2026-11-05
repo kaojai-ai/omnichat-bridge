@@ -795,7 +795,9 @@ test("LINE OA republishes realtime health when a replacement content bridge dete
   const status = bridge.posts.find((post) => post.type === "provider_status");
   assert.equal(status?.realtime_connected, true);
   assert.equal(status?.realtime_transport, "authenticated_polling");
-  assert.deepEqual(plain(status.command_capabilities_by_account), { "@exampleoa": ["send_text", "send_image", "send_video", "send_file", "send_sticker"] });
+  assert.equal(status.account_access_verified, true);
+  assert.deepEqual(plain(status.accessible_account_ids), ["@exampleoa"]);
+  assert.equal(status.command_capabilities_by_account, undefined);
   bridge.dispose();
 });
 

@@ -103,7 +103,7 @@ for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: confirmed negatives and a restarted worker never borrow recent readiness`, async () => {
     const h = fixture(provider);
     await h.assess();
-    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { capabilities: { ...h.healthy.capabilities, send_text: false } } : { account_access_verified: false }) };
+    h.result = { ...h.healthy, realtime_connected: false, ...(provider === "shopee" ? { surface_ready: false } : { account_access_verified: false }) };
     assert.equal((await h.snapshot()).ready, false);
     h.result = null;
     assert.equal((await h.snapshot()).ready, false, "negative evidence cannot become grace");
@@ -114,8 +114,8 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal((await h.assess()).retain_transport, false);
     h.result = h.healthy;
     await h.assess();
-    h.result = provider === "shopee" ? { ...h.healthy, capabilities: { ...h.healthy.capabilities, send_text: false } }
-      : { ...h.healthy, command_capabilities_by_account: { shop: [] } };
+    h.result = provider === "shopee" ? { ...h.healthy, surface_ready: false }
+      : { ...h.healthy, account_access_verified: false };
     assert.equal((await h.snapshot()).ready, false);
     h.result = h.healthy;
     await h.assess();
@@ -231,7 +231,7 @@ test("navigation after tab selection blocks the final provider attempt", async (
 test("late older positive observations cannot overwrite a newer confirmed failure", async () => {
   const h = fixture();
   await h.assess();
-  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false, capabilities: { ...h.healthy.capabilities, send_text: false } }], observation: 100 });
+  const blocked = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [{ ...h.healthy, realtime_connected: false, surface_ready: false }], observation: 100 });
   assert.equal(blocked.eligible, false);
   const stale = await h.scope.providerReadiness(h.context, { tabs: [h.tab], statuses: [h.healthy], observation: 99 });
   assert.equal(stale.eligible, false);
@@ -578,3 +578,21 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(failure.error_code, "OMNICHAT_BRIDGE_NOT_READY");
   });
 }
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`${provider}: stable message support comes from adapter, not page feature flags`, async () => {
+    const h = fixture(provider);
+    h.result = { ...h.healthy, capabilities: { message_recovery: false },
+      command_capabilities_by_account: {}, surface: provider === "shopee" ? "new-webchat" : "line-oa" };
+    const snapshot = await h.snapshot();
+    assert.equal(snapshot.send_ready, true);
+    assert.deepEqual(Array.from(snapshot.command_capabilities), Array.from(h.context.adapter.sendCommands));
+  });
+}
+test("Shopee video routing remains restricted to New Webchat", async () => {
+  const h = fixture();
+  h.result = { ...h.healthy, surface: "seller-centre" };
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), false);
+  h.result = { ...h.healthy, surface: "new-webchat" };
+  assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
+});

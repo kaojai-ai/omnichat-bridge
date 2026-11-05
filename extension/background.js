@@ -384,19 +384,10 @@ function providerTabContext(tab, provider) {
   return `${provider}:${providerSessionEpoch(provider)}:${tab.id}:${providerTabEpochs.get(tab.id) ?? 0}:${tab.url ?? ""}`;
 }
 
+// Message-type support is fixed by the adapter and selected Shopee surface.
 function providerCommandCapabilities(status, context) {
-  if (context.adapter.id === "line_oa") return status?.command_capabilities_by_account?.[context.account.provider_account_id];
-  return providerTabCanSend(status, context)
-    ? context.adapter.sendCommands.filter((command) => command !== "send_video" || status?.capabilities?.send_video === true)
-    : [];
-}
-
-function providerStatusMeetsPolicy(status, context) {
-  const capabilities = providerCommandCapabilities(status, context);
-  // Sending is independent of inbound polling health. Verify account and
-  // command capability here; report capture health separately.
-  return providerTabCanSend(status, context)
-    && Array.isArray(capabilities) && capabilities.includes("send_text");
+  return context.adapter.sendCommands.filter(command => context.adapter.id !== "shopee"
+    || command !== "send_video" || status?.surface === "new-webchat");
 }
 
 function invalidateBridgeVerification(tabId) {
@@ -441,7 +432,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const previousTabId = previous?.last_evidence?.tab.id;
   const isMatchingTab = (candidate) => {
     const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
-    return identityMatches(status) && providerStatusMeetsPolicy(status, context);
+    return identityMatches(status) && providerTabCanSend(status, context);
   };
   // Browser focus and one missed probe must not move an account's sender.
   const previousTab = observedTabs.find((tab) => tab.id === previousTabId);
@@ -461,7 +452,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   if (mismatch) accountSyncs.get(context.key)?.controller.abort();
   const responded = Boolean(status);
   const verified = responded && identityMatches(status) && !conflict;
-  const ready = verified && providerStatusMeetsPolicy(status, context);
+  const ready = verified && providerTabCanSend(status, context);
   providerPolicyTabIds.set(context.key, tab?.id ?? null);
   const policy = sessionEligibility.observe(context.key, {
     hasTab: observedTabs.length > 0,
@@ -3430,7 +3421,7 @@ async function manualSyncTab(context, sourceTabId, { shared_session = false, ver
     }
     throwIfSyncCancelled(signal);
     if (epoch !== providerTabContext(tab, adapter.id)) continue;
-    if (!providerStatusMeetsPolicy(status, context) || status?.capabilities?.message_recovery !== true
+    if (!providerTabCanSend(status, context) || status?.capabilities?.message_recovery !== true
       || (status.surface === "seller-centre" && status.chat_open === false)) continue;
     const currentPolicy = await providerReadiness(context);
     throwIfSyncCancelled(signal);
@@ -3575,7 +3566,7 @@ function providerTabCanSend(status, context) {
   const verifiedAt = Date.parse(status?.send_verified_at ?? "");
   if (!Number.isFinite(verifiedAt) || verifiedAt > Date.now() || Date.now() - verifiedAt >= 120_000) return false;
   const adapter = context.adapter ?? providerAdapterForAccount(context.account);
-  return (adapter?.id === "shopee" ? status?.surface_ready === true && status?.capabilities?.send_text === true : providerTabIsReady(status, adapter))
+  return (adapter?.id === "shopee" ? status?.surface_ready === true : providerTabIsReady(status, adapter))
     && (adapter?.id !== "shopee"
       || status?.current_provider_account_id === context.account.provider_account_id)
     && (adapter?.id !== "line_oa" || (status?.account_access_verified === true
