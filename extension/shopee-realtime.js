@@ -1468,6 +1468,8 @@
       payload.request_id = requestId;
       payload.conversation_id = conversationId;
       payload.shop_id = numericId(routing.shop_id);
+      payload.choice_info = { ...payload.choice_info,
+        real_shop_id: isSellerCentreSurface() ? numericId(routing.shop_id) : null };
       payload.to_id = numericId(routing.to_id);
       delete payload.to_shop_id;
       delete payload.biz_id;
