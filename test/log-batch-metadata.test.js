@@ -25,12 +25,13 @@ for (const [configuredName, expectedName] of [['  Majestic Chrome  ', 'Majestic 
     const batchId = '22222222-2222-4222-8222-222222222222';
     await send({ config: { logs_url: 'https://ingress.kaojai.ai/logs/omnichat', tenant_id: 'tenant', hmac_secret: 'test' },
       account: { provider: 'shopee', provider_account_id: 'shop' } },
-    [{ id: 'debug', level: 'debug', event: 'initializing', scope: 'installation', account_key: 'internal' }], { batchId });
+    [{ id: 'debug', level: 'debug', event: 'initializing', scope: 'installation', account_key: 'internal' }], { batchId, automatic: true, forwardLevel: "debug" });
     const payload = JSON.parse(request.body);
     assert.equal(payload.installation_id, installation);
     assert.equal(payload.device_name, expectedName);
     assert.equal(payload.batch_id, batchId);
     assert.equal(payload.tenant_id, 'tenant');
+    assert.equal(payload.forward_level, 'debug');
     assert.equal(payload.logs.length, 1);
     assert.equal(payload.logs[0].level, 'debug');
     assert.equal(payload.logs[0].scope, 'installation');

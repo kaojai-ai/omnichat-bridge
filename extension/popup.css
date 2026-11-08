@@ -1001,7 +1001,8 @@ textarea {
   gap: 6px;
 }
 
-.log-toolbar select {
+.log-toolbar select,
+#forward-log {
   background: #fff;
   border: 1px solid #d0d5dd;
   border-radius: var(--control-radius);

@@ -1,5 +1,5 @@
 import { createAccountSyncCoordinator } from "./lib/sync-coordinator.js";
-import { automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch, routeLogEntries } from "./lib/log-forwarding.js";
+import { forwardLogLevel, automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch, routeLogEntries } from "./lib/log-forwarding.js";
 import { hasRegionalShopeePermission, reconcileRegionalShopeeScripts } from "./lib/regional-permissions.js";
 import { withRequestTimeout } from "./lib/request-timeout.js";
 import { hmacHex, sha256Hex } from "./lib/crypto.js";
@@ -4957,7 +4957,7 @@ async function signedRequest(config, providerAccountId, payload, signal) {
   });
 }
 
-async function sendLogBatch(context, logs, { automatic = false, signal, batchId, timeoutMs = automatic ? 5_000 : 15_000 } = {}) {
+async function sendLogBatch(context, logs, { automatic = false, signal, batchId, forwardLevel, timeoutMs = automatic ? 5_000 : 15_000 } = {}) {
   const deadline = performance.now() + timeoutMs;
   const url = new URL(context.config.logs_url);
   if (url.protocol !== "https:") throw new Error("Logs server must use HTTPS.");
@@ -4980,6 +4980,7 @@ async function sendLogBatch(context, logs, { automatic = false, signal, batchId,
     } : {}),
     sent_at: new Date().toISOString(),
     logs: logs.map(logEntryForUpload),
+    ...(automatic && forwardLevel ? { forward_level: forwardLevel } : {}),
   };
   const body = JSON.stringify(payload);
   const timestamp = new Date().toISOString();
@@ -5114,13 +5115,13 @@ async function flushLogBatch({ automatic = false, signal } = {}) {
     const deadline = performance.now() + 5_000;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (signal?.aborted) return { ok: true, submitted, skipped: true };
-      const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0, MAX_LOG_UPLOAD_BATCH, pending, true);
+      const batch = selectLogBatch(contexts, entries, queuedIds, state.cursor ?? 0, MAX_LOG_UPLOAD_BATCH, pending, true, forwardLogLevel(stored));
       if (!batch || performance.now() >= deadline) break;
       try {
         await persistBatch(batch);
         const timeoutMs = deadline - performance.now();
         if (timeoutMs <= 0) break;
-        await sendLogBatch(batch.context, batch.logs, { automatic: true, signal, batchId: batch.batchId, timeoutMs });
+        await sendLogBatch(batch.context, batch.logs, { automatic: true, signal, batchId: batch.batchId, forwardLevel: forwardLogLevel(stored), timeoutMs });
         await acknowledgeBatch(batch);
         submitted += batch.logs.length;
         Object.assign(state, { cursor: batch.cursor, failures: 0, next_at: 0 });

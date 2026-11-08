@@ -131,8 +131,14 @@
             <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
           </div>
           <label class="recovery-option" for="forward-log">
-            <span><span id="forward-log-label">Forward Log</span><br><small id="forward-log-description">Automatically send diagnostic logs in the background.</small></span>
-            <span class="toggle-control"><input id="forward-log" type="checkbox" checked><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span></span>
+            <span><span id="forward-log-label">Forward Log</span><br><small id="forward-log-description">Forward this level and above automatically.</small></span>
+            <select id="forward-log" aria-labelledby="forward-log-label" aria-describedby="forward-log-description">
+              <option value="debug">DEBUG</option>
+              <option value="info" selected>INFO</option>
+              <option value="warn">WARN</option>
+              <option value="error">ERROR</option>
+              <option value="off">Off</option>
+            </select>
           </label>
         </div>
 

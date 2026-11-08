@@ -97,9 +97,12 @@ for that account; existing account-only configurations remain supported. See the
 [shared setup guide](docs/setup.md) for additional fields and legacy Shopee version 2 support.
 
 Settings → **Forward Log** controls automatic diagnostic forwarding to your configured
-`logs_url`. It defaults on after setup and yields to messaging work. Turning it off
-keeps local diagnostics; **Submit logs** still sends a one-time batch. Forwarding
-is best effort and uses the existing local retention limits.
+`logs_url`. Choose the minimum level: **DEBUG**, **INFO** (default), **WARN**, or
+**ERROR** forwards that severity and above; **Off** disables automatic forwarding.
+Existing On/Off preferences become INFO/Off. Local diagnostics remain available;
+**Submit logs** still sends a one-time batch. Forwarding is best effort and uses
+the existing bounded upload budget and local retention limits. The backend must
+support the signed `forward_level` field for selected DEBUG logs to reach Grafana.
 
 ## Demo video
 
