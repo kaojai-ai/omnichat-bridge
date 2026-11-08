@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch } from '../extension/lib/log-forwarding.js';
+import { forwardLogLevel, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch } from '../extension/lib/log-forwarding.js';
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
 function fixture({ fail = false, automatic = false, busy = false, persisted, onSend, contexts, clock = () => 0 } = {}) {
   const entries = Array.from({ length: 205 }, (_, i) => ({ id: String(i), account_key: 'shop' }));
@@ -11,7 +11,7 @@ function fixture({ fail = false, automatic = false, busy = false, persisted, onS
   const batches = [];
   const telemetry = [];
   const submit = vm.runInNewContext(source.slice(source.indexOf('let logSubmission = null;'), source.indexOf('\nfunction isMessageScopedDeliveryError')) + '\nsubmitLogs', {
-    performance: { now: clock }, crypto: webcrypto, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch, automaticLogWorkBusy: () => busy,
+    performance: { now: clock }, crypto: webcrypto, forwardLogLevel, automaticLogForwardingEnabled, forwardingBackoff, routeLogEntries, selectLogBatch, automaticLogWorkBusy: () => busy,
     diagnosticBuffer: { drain: async () => {} }, logMutationQueue: Promise.resolve(),
     STORAGE: new Proxy({}, { get: (_, key) => key }), readStorage: async () => stored,
     writeStorage: async value => Object.assign(stored, value), mutateLogs: fn => fn(),
@@ -257,3 +257,13 @@ test('fresh account state precedes a 5000-error backlog without rewriting an unc
   assert.equal(retry.batchId,pending.shop.batch_id);
   assert.deepEqual(retry.logs.map(entry=>entry.id),pending.shop.entry_ids);
 });
+
+for (const [setting, expected] of [[undefined, "info"], [true, "info"], [false, "off"], ["off", "off"], ["invalid", "info"], ["debug", "debug"], ["warn", "warn"], ["error", "error"]]) {
+  test(`forwarding normalizes ${setting} to ${expected}`, () => {
+    assert.equal(forwardLogLevel({forward_log: setting}), expected);
+    const logs = ["debug", "info", "warn", "error"].map(level => ({id: level, level, account_key: "shop"}));
+    const batch = selectLogBatch([{key: "shop"}], logs, new Set(logs.map(log => log.id)), 0, 100, {}, true, expected);
+    const levels = ["debug", "info", "warn", "error"];
+    assert.deepEqual(batch?.logs.map(log => log.level) ?? [], expected === "off" ? [] : levels.slice(levels.indexOf(expected)).reverse());
+  });
+}
