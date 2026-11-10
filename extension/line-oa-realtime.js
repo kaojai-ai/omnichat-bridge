@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-12";
+  const BRIDGE_VERSION = "line-oa-poll-13";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 8;
+  const COMPATIBILITY_VERSION = 9;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -345,6 +345,12 @@
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(SEND_CONFIRM_POLL_MS, deadline - Date.now()))));
     }
     return "";
+  }
+
+  function logConfirmationFailure(requestId) {
+    post({ type: "diagnostic_log", level: "error", event: "send_confirmation_failed",
+      message: "LINE OA accepted the send request, but its message ID could not be confirmed. Check LINE history before retrying.",
+      details: { request_id: requestId, operation: "confirm", delivery_uncertain: true } });
   }
 
   function waitForAcknowledgement(requestId) {
@@ -1230,6 +1236,7 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: false, dispatch_started: true, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
       }
+      if (response.status === 200) post({ type: "api_send_accepted", request_id: requestId });
       confirmationStarted = monotonicNow();
       operation = "confirm";
       httpStatus = undefined;
@@ -1244,6 +1251,7 @@
       timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
       if (confirmedMessageId) timings.confirmation_source = "history";
       const providerMessageId = confirmedMessageId;
+      if (!confirmedMessageId) logConfirmationFailure(requestId);
       post({
         type: "api_send_result",
         request_id: requestId,
@@ -1255,7 +1263,10 @@
         ...(!confirmedMessageId ? { error: "LINE OA send could not be confirmed in message history." } : {}),
       });
     } catch (error) {
-      if (confirmationStarted !== null) timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
+      if (confirmationStarted !== null) {
+        timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
+        logConfirmationFailure(requestId);
+      }
       else if (providerRequestStarted !== null) timings.provider_request_duration_ms = monotonicNow() - providerRequestStarted;
       else timings.preparation_duration_ms = monotonicNow() - startedMono;
       if (error?.providerDiagnostics) {

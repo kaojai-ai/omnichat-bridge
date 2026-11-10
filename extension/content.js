@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 12;
+  const BRIDGE_PROTOCOL_VERSION = 13;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -183,6 +183,10 @@
   }
 
   function finishPendingApiSend(requestId, pending) {
+    if (pendingApiSends.get(requestId) !== pending) return;
+    // Runtime acceptance and the final tab response use separate Chrome channels.
+    // Keep the command alive until background has forwarded acceptance first.
+    if (pending.acceptanceForwarding && !pending.acceptanceForwarded) return;
     const providerMessageId = String(
       pending.result?.provider_message_id ?? pending.echo?.id ?? ""
     ).trim();
@@ -1234,6 +1238,15 @@
       }));
     } else if (event.data.type === "recovery_complete") {
       void observeAsync("recovery_complete", () => handleRecoveryComplete(event.data));
+    } else if (event.data.type === "api_send_accepted") {
+      const pending = pendingApiSends.get(event.data.request_id);
+      if (!pending || pending.accepted) return;
+      pending.accepted = true;
+      const requestId = event.data.request_id;
+      pending.acceptanceForwarding = sendRuntimeMessage({ type: "api_send_accepted", request_id: requestId }).then(() => {
+        pending.acceptanceForwarded = true;
+        finishPendingApiSend(requestId, pending);
+      });
     } else if (event.data.type === "api_send_result") {
       handleApiSendResult(event.data);
     } else if (event.data.type === "prepare_provider_result") {

@@ -88,12 +88,12 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 12;
+const BRIDGE_PROTOCOL_VERSION = 13;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 9;
 // Bump when an open Shopee page must replace its main-world bridge.
-const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 6;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -977,6 +977,10 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "api_send_accepted") {
+    respond({ ok: forwardProviderAcceptance(message, _sender) });
+    return false;
+  }
   if (message?.type === "send_readiness_changed") {
     const adapter = providerAdapterForId(message.provider);
     if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return false;
@@ -1558,6 +1562,16 @@ function providerAdapterForCommand(message) {
 }
 
 const activeProviderSendAccounts = new Set();
+const providerSendAcceptances = new Map();
+
+function forwardProviderAcceptance(message, sender) {
+  const pending = providerSendAcceptances.get(message.request_id);
+  if (!pending || pending.accepted || sender.tab?.id !== pending.tabId || sender.frameId !== 0
+    || (providerTabEpochs.get(pending.tabId) ?? 0) !== pending.tabEpoch) return false;
+  pending.accepted = true;
+  pending.onAccepted();
+  return true;
+}
 
 async function sendViaProvider(message, options = {}) {
   const started = (globalThis.performance?.now() ?? Date.now());
@@ -1651,6 +1665,10 @@ async function prepareAndSendViaProvider(message, state = {}) {
   stageLog("provider_dispatch");
   state.dispatchStartedAt = globalThis.performance?.now() ?? Date.now();
   state.dispatchStarted = true;
+  if (typeof state.onAccepted === "function") providerSendAcceptances.set(requestId, {
+    tabId: tab.id, tabEpoch: providerTabEpochs.get(tab.id) ?? 0,
+    onAccepted: state.onAccepted, accepted: false,
+  });
   try {
     result = await withRequestTimeout(() => chrome.tabs.sendMessage(tab.id, {
       ...message,
@@ -1670,6 +1688,8 @@ async function prepareAndSendViaProvider(message, state = {}) {
     return { ok: false, uncertain: true, dispatch_started: true, execution_stage: "provider_dispatch", retryable: false, error: "Provider reply confirmation timed out. Check provider history before retrying.",
       diagnostics: { diagnostic_version: 1, provider: adapter.id, operation: "send",
         command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure", timed_out: true } };
+  } finally {
+    providerSendAcceptances.delete(requestId);
   }
   // Once the command reaches the provider tab, an absent or malformed response
   // cannot prove the provider did not accept it. Never turn this into a
@@ -3067,7 +3087,10 @@ async function handleLiveCommand(raw, context, socket) {
       result: replyQueue.run(context.key, async () => {
         void recordLog("info", "live_command", "queue_started", "Reply command left queue.", { request_id: command.request_id, provider: adapter.id, provider_account_id: context.account.provider_account_id, queue_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt) });
         queueDurationMs = Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt);
-        const sent = await sendViaProvider(command, { expectedGeneration: selectedGeneration });
+        const sent = await sendViaProvider(command, {
+          expectedGeneration: selectedGeneration,
+          onAccepted: () => acknowledge({ type: "send_accepted", request_id: command.request_id }),
+        });
         // A pending extension restart may run as soon as this reply operation exits.
         if (sent?.ok && socket.readyState === WebSocket.OPEN) {
           acknowledge({ type: "send_result", request_id: command.request_id,

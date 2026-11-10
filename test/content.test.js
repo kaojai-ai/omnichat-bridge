@@ -1175,3 +1175,35 @@ for (const succeeds of [true, false]) {
     if (!succeeds) assert.equal(ack.error, "storage unavailable");
   });
 }
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: acceptance forwards once without resolving the final send`, async () => {
+    const bridge = contentBridge(provider === "line_oa" ? "/bot-1/chat/chat-1" : "/new-webchat/conversations", { provider });
+    let completed = false;
+    const result = bridge.sendCommand(command).then(value => { completed = true; return value; });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: "unknown" });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    assert.equal(completed, false);
+    const forwarded = bridge.runtimeMessages.filter(message => message.type === "api_send_accepted" && !message.source);
+    assert.deepEqual(plain(forwarded), [{ type: "api_send_accepted", request_id: command.request_id }]);
+    await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "real-provider-id" });
+    assert.equal((await result).provider_message_id, "real-provider-id");
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    assert.equal(bridge.runtimeMessages.filter(message => message.type === "api_send_accepted" && !message.source).length, 1);
+  });
+}
+
+test("a fast final result waits for the separate acceptance channel to acknowledge forwarding", async () => {
+  let acknowledge;
+  const bridge = contentBridge("/new-webchat/conversations", { runtimeHandler: message =>
+    message.type === "api_send_accepted" ? new Promise(resolve => { acknowledge = resolve; }) : { ok: true },
+  });
+  let completed = false;
+  const result = bridge.sendCommand(command).then(value => { completed = true; return value; });
+  await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "real-id" });
+  assert.equal(completed, false, "final response must not remove the background acceptance route too early");
+  acknowledge({ ok: true });
+  assert.equal((await result).provider_message_id, "real-id");
+});

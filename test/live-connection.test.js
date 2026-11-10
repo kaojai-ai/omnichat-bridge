@@ -419,3 +419,30 @@ for (const config of [
     assert.equal(h.liveConnections.get(account.key).config, config);
   });
 }
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: command socket receives acceptance while final send remains pending`, async () => {
+    const final = deferred();
+    const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+    const start = source.indexOf("async function handleLiveCommand(");
+    const end = source.indexOf("\nchrome.storage.onChanged", start);
+    const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+      preemptAutomaticLogUpload() {},
+      providerAdapterForCommand: () => ({ id: provider, supportsSend: () => true }),
+      messageProviderAccountId: () => "account", canonicalProviderAccountId: () => "account",
+      WebSocket: { OPEN: 1 }, liveConnections: new Map(), liveCommandResults: new Map(),
+      sessionEligibility: { generation: () => 1 }, performance: { now: () => 10 },
+      replyQueue: { run: (_, action) => action() },
+      sendViaProvider: async (_command, options) => { options.onAccepted(); return final.promise; },
+      sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
+      recordLog: async () => {}, scheduleKeepalive() {},
+    });
+    const running = run(JSON.stringify({ type: "send_text", request_id: "request-accepted", provider }),
+      { key: `${provider}:account`, account: { provider, provider_account_id: "account" } }, socket);
+    await new Promise(setImmediate);
+    assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: "request-accepted" }]);
+    final.resolve({ ok: true, provider_message_id: "real-provider-id" });
+    await running;
+    assert.deepEqual(socket.sent[1], { type: "send_result", request_id: "request-accepted", ok: true, provider_message_id: "real-provider-id" });
+  });
+}

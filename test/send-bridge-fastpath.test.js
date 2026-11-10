@@ -82,3 +82,21 @@ test("socket acknowledgement failure retains a terminal result without sending a
   assert.equal(terminal[4].request_id, "request");
   assert.equal(terminal[4].text, undefined);
 });
+
+test("acceptance forwarding is scoped to the active tab, frame and document and runs once", () => {
+  const scope = vm.createContext({ providerTabEpochs: new Map([[7, 2]]) });
+  const api = vm.runInContext(`(() => { ${section("const providerSendAcceptances =", "async function sendViaProvider(")}; return { pending: providerSendAcceptances, forward: forwardProviderAcceptance }; })()`, scope);
+  let accepted = 0;
+  api.pending.set("request", { tabId: 7, tabEpoch: 2, accepted: false, onAccepted: () => { accepted++; } });
+  const event = { request_id: "request" };
+  assert.equal(api.forward(event, { tab: { id: 8 }, frameId: 0 }), false);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 1 }), false);
+  scope.providerTabEpochs.set(7, 3);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), false);
+  scope.providerTabEpochs.set(7, 2);
+  assert.equal(api.forward({ request_id: "unknown" }, { tab: { id: 7 }, frameId: 0 }), false);
+  assert.equal(accepted, 0);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), true);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), false);
+  assert.equal(accepted, 1);
+});
