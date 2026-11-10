@@ -42,7 +42,9 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   control.bounded_message_ids = true;
   control.grace_classification = true;
   assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
-  control.compatibility_version += 1;
+  control.compatibility_version -= 1;
+  assert.equal((await status()).ready, false, "the previous deployed LINE interface requires reattachment");
+  control.compatibility_version = Number(actual[1]) + 1;
   assert.equal((await status()).ready, false, "breaking interfaces require reattachment");
   control.compatibility_version = Number(actual[1]);
   control.source = "unrelated-bridge";
