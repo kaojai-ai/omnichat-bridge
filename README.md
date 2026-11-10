@@ -185,19 +185,21 @@ Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.
 
-### Optimistic LINE command confirmation
+### LINE send receipts
 
-Opt-in LINE commands (`optimistic_confirmation: true`) report acceptance at HTTP
-200 and release the initial send response immediately. History lookup continues
-for up to 10 seconds, matching the exact send ID and conversation. A second
-`send_result` carries the real provider ID or a typed confirmation error. Only
-that final receipt is retried until `send_result_ack`, within 30 seconds after
-acceptance; the provider request is never repeated. A missing page result becomes
-confirmation-unavailable. Older commands retain final-only responses; Shopee
-continues returning its validated real ID.
+Opt-in LINE commands (`confirm_send: true`) return an ordinary successful
+`send_result` at HTTP 200, with provider ID `omnichat-pending:<request_id>`.
+History lookup continues independently for up to 10 seconds, matching the exact
+send ID and conversation. A separate `send_receipt` carries the real provider ID
+or a typed confirmation error. Only this receipt is retried until
+`send_receipt_ack`, within 30 seconds after acceptance; the provider request is
+never repeated. A missing page result becomes confirmation-unavailable. Legacy
+commands retain final-only responses; Shopee returns its validated real ID.
 
-Deploy compatible command-server, worker, and Admin support before releasing this
-extension. No collector or infrastructure change is required. Early saving is
-expected to reduce the polling race window; it does not eliminate that race. A browser shutdown or extended outage
-can interrupt the bounded final-result reporting window. This local withdrawal
-flow does not recall a message already accepted by LINE.
+Deploy compatible command-server and worker support before releasing this
+extension. The server inserts a final success/error row and withdraws the
+pending row through the existing unsend event; original message rows remain
+immutable. This local withdrawal does not recall a message already accepted by
+LINE. No Admin, collector, or infrastructure change is required. Early saving
+reduces the polling race window without eliminating it. Browser shutdown or an
+extended outage can interrupt bounded receipt reporting and leave a pending row.

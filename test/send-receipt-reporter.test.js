@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSendResultReporter } from "../extension/lib/send-result-reporter.js";
+import { createSendReceiptReporter } from "../extension/lib/send-receipt-reporter.js";
 
 function clock() {
   let now = 0;
@@ -27,15 +27,15 @@ test("final result retries identically until its matching ACK and never republis
   const time = clock();
   const sent = [];
   const settled = [];
-  const reporter = createSendResultReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
+  const reporter = createSendReceiptReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
     send: value => sent.push(value), onSettled: value => settled.push(value) });
   assert.equal(reporter.publish({ ok: true, provider_message_id: "real-id" }), true);
   assert.equal(reporter.publish({ ok: false }), false);
   time.advance(750);
   assert.equal(sent.length, 3);
-  assert.ok(sent.every(value => value.provider_message_id === "real-id"));
-  assert.equal(reporter.acknowledge({ type: "send_result_ack", request_id: "other" }), false);
-  assert.equal(reporter.acknowledge({ type: "send_result_ack", request_id: "command-1" }), true);
+  assert.ok(sent.every(value => value.type === "send_receipt" && value.provider_message_id === "real-id"));
+  assert.equal(reporter.acknowledge({ type: "send_receipt_ack", request_id: "other" }), false);
+  assert.equal(reporter.acknowledge({ type: "send_receipt_ack", request_id: "command-1" }), true);
   time.advance(30_000);
   assert.equal(sent.length, 3);
   assert.deepEqual(settled, [true]);
@@ -46,7 +46,7 @@ test("socket submission failures only retry the cached final result inside a fix
   const time = clock();
   const settled = [];
   let submissions = 0;
-  const reporter = createSendResultReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
+  const reporter = createSendReceiptReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
     send() { submissions++; throw new Error("socket unavailable"); }, onSettled: value => settled.push(value) });
   reporter.publish({ ok: false, uncertain: true, error_code: "OMNICHAT_CONFIRMATION_FAILED" });
   time.advance(30_000);
@@ -61,7 +61,7 @@ test("socket submission failures only retry the cached final result inside a fix
 test("a missing page result releases tracking by the same bounded deadline", () => {
   const time = clock();
   const settled = [];
-  createSendResultReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
+  createSendReceiptReporter({ ...time, requestId: "command-1", deadlineAt: 30_000,
     send() { assert.fail("no final result was published"); }, onSettled: value => settled.push(value) });
   time.advance(30_000);
   assert.deepEqual(settled, [false]);

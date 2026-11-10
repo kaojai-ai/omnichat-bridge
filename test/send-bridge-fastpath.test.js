@@ -101,11 +101,11 @@ test("acceptance forwarding is scoped to the active tab, frame and document and 
   assert.equal(accepted, 1);
 });
 
-test("late optimistic finals require the original request, tab, top frame and document", () => {
+test("late confirmation receipts require the original request, tab, top frame and document", () => {
   const scope = vm.createContext({ providerTabEpochs: new Map([[7, 2]]), clearTimeout() {}, setTimeout: () => 1 });
   const api = vm.runInContext(`(() => { ${section("const providerSendAcceptances =", "async function sendViaProvider(")}; return { pending: providerSendAcceptances, final: forwardProviderFinalResult }; })()`, scope);
   const finals = [];
-  api.pending.set("request", { tabId: 7, tabEpoch: 2, optimistic: true, accepted: true, onResult: result => finals.push(result) });
+  api.pending.set("request", { tabId: 7, tabEpoch: 2, confirmationTracking: true, accepted: true, onResult: result => finals.push(result) });
   const event = { request_id: "request", result: { ok: true, provider_message_id: "real-id" } };
   assert.equal(api.final(event, { tab: { id: 8 }, frameId: 0 }), false);
   assert.equal(api.final(event, { tab: { id: 7 }, frameId: 1 }), false);

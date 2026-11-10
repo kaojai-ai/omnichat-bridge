@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-15";
+  const BRIDGE_VERSION = "line-oa-poll-16";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 11;
+  const COMPATIBILITY_VERSION = 12;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -1252,7 +1252,7 @@
         botId,
         conversationId,
         sendId: confirmationSendId,
-        deadlineAt: command.optimistic_confirmation === true && response.status === 200 ? Infinity : deadlineAt,
+        deadlineAt: command.confirm_send === true && response.status === 200 ? Infinity : deadlineAt,
         onRequest: () => { timings.history_request_count += 1; },
       });
       timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;

@@ -1,6 +1,6 @@
-// A final result belongs to one command and its original WebSocket connection.
+// A final receipt belongs to one command and its original WebSocket connection.
 // Only the result is retried; the provider request must never be replayed here.
-export function createSendResultReporter({ requestId, send, deadlineAt, now = Date.now,
+export function createSendReceiptReporter({ requestId, send, deadlineAt, now = Date.now,
   setTimer = setTimeout, clearTimer = clearTimeout, onSettled = () => {} }) {
   let report = null;
   let retryTimer = null;
@@ -26,12 +26,12 @@ export function createSendResultReporter({ requestId, send, deadlineAt, now = Da
   return {
     publish(result) {
       if (closed || report) return false;
-      report = { ...result, type: "send_result", request_id: requestId };
+      report = { ...result, type: "send_receipt", request_id: requestId };
       transmit();
       return true;
     },
     acknowledge(message) {
-      if (closed || !report || message?.type !== "send_result_ack" || message.request_id !== requestId) return false;
+      if (closed || !report || message?.type !== "send_receipt_ack" || message.request_id !== requestId) return false;
       finish(true);
       return true;
     },

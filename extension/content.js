@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 14;
+  const BRIDGE_PROTOCOL_VERSION = 15;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -199,13 +199,8 @@
     // Runtime acceptance and the final tab response use separate Chrome channels.
     // Keep the command alive until background has forwarded acceptance first.
     if (pending.acceptanceForwarding && !pending.acceptanceForwarded) return;
-    if (pending.optimistic && pending.accepted && !pending.initialResolved) {
+    if (pending.confirmationTracking && pending.accepted && !pending.initialResolved) {
       pending.initialResolved = true;
-      clearTimeout(pending.timeout);
-      pending.timeout = setTimeout(() => settlePendingApiSend(requestId, pending, {
-        ok: false, uncertain: true, error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE",
-        error: `${providerLabel} final confirmation was not available before the tracking deadline.`,
-      }), Math.max(1, pending.finalDeadlineAt - Date.now()));
       pending.resolve({ ok: true, accepted: true });
     }
     const providerMessageId = String(
@@ -1070,7 +1065,7 @@
         echo: null,
         result: null,
         providerIdTimeout: null,
-        optimistic: providerAdapter.id === "line_oa" && message.optimistic_confirmation === true,
+        confirmationTracking: providerAdapter.id === "line_oa" && message.confirm_send === true,
         initialResolved: false,
       });
       const { image_base64, media_base64, ...pageCommand } = message;
@@ -1259,8 +1254,17 @@
       pending.accepted = true;
       pending.finalDeadlineAt = Date.now() + 30_000;
       const requestId = event.data.request_id;
+      if (pending.confirmationTracking) {
+        // Preserve history tracking even if the initial response channel expires
+        // while background is acknowledging the provider acceptance.
+        clearTimeout(pending.timeout);
+        pending.timeout = setTimeout(() => settlePendingApiSend(requestId, pending, {
+          ok: false, uncertain: true, error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE",
+          error: `${providerLabel} final confirmation was not available before the tracking deadline.`,
+        }), Math.max(1, pending.finalDeadlineAt - Date.now()));
+      }
       pending.acceptanceForwarding = sendRuntimeMessage({ type: "api_send_accepted", request_id: requestId }).then((response) => {
-        if (!response?.ok) pending.optimistic = false;
+        if (!response?.ok) pending.confirmationTracking = false;
         pending.acceptanceForwarded = true;
         finishPendingApiSend(requestId, pending);
       });

@@ -1,6 +1,6 @@
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import { createStatusReporter } from "../extension/lib/status-reporter.js";
-import { createSendResultReporter } from "../extension/lib/send-result-reporter.js";
+import { createSendReceiptReporter } from "../extension/lib/send-receipt-reporter.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -422,7 +422,7 @@ for (const config of [
 }
 
 for (const provider of ["line_oa", "shopee"]) {
-  test(`${provider}: command socket receives acceptance while final send remains pending`, async () => {
+  test(`${provider}: legacy command socket waits for the validated final send result`, async () => {
     const final = deferred();
     const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
     const start = source.indexOf("async function handleLiveCommand(");
@@ -438,18 +438,19 @@ for (const provider of ["line_oa", "shopee"]) {
       sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
       recordLog: async () => {}, scheduleKeepalive() {},
     });
-    const running = run(JSON.stringify({ type: "send_text", request_id: "request-accepted", provider, ...(provider === "shopee" ? { optimistic_confirmation: true } : {}) }),
+    const running = run(JSON.stringify({ type: "send_text", request_id: "request-accepted", provider, ...(provider === "shopee" ? { confirm_send: true } : {}) }),
       { key: `${provider}:account`, account: { provider, provider_account_id: "account" } }, socket);
     await new Promise(setImmediate);
-    assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: "request-accepted" }]);
+    assert.deepEqual(socket.sent, []);
     final.resolve({ ok: true, provider_message_id: "real-provider-id" });
     await running;
-    assert.deepEqual(socket.sent[1], { type: "send_result", request_id: "request-accepted", ok: true, provider_message_id: "real-provider-id" });
+    assert.deepEqual(socket.sent[0], { type: "send_result", request_id: "request-accepted", ok: true, provider_message_id: "real-provider-id" });
   });
 }
 
 for (const initialChannelFails of [false, true]) {
-test(`optimistic LINE ${initialChannelFails ? "retains history confirmation after initial tab channel failure" : "returns after acceptance"} and retries only the final result until its assigned socket ACK`, async () => {
+for (const receiptFails of [false, true]) {
+test(`confirmed LINE ${initialChannelFails ? "retains history confirmation after initial tab channel failure" : "returns after acceptance"} and retries only the ${receiptFails ? "failed" : "successful"} receipt until its assigned socket ACK`, async () => {
   const timers = new Map();
   let nextTimer = 0;
   let now = 0;
@@ -483,24 +484,29 @@ test(`optimistic LINE ${initialChannelFails ? "retains history confirmation afte
     sendViaProvider: async (_command, options) => { sends++; callbacks = options; options.onAccepted(30_000);
       if (initialChannelFails) throw new Error("Initial tab response channel closed.");
       return { ok: true, accepted: true }; },
-    createSendResultReporter: options => createSendResultReporter({ ...options, now: () => now, setTimer, clearTimer }),
+    createSendReceiptReporter: options => createSendReceiptReporter({ ...options, now: () => now, setTimer, clearTimer }),
     clearProviderSendRoute: () => { cleared++; },
     sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
     recordLog: async () => {}, scheduleKeepalive() {},
   });
-  const command = { type: "send_text", request_id: "optimistic-command", provider: "line_oa", optimistic_confirmation: true };
+  const command = { type: "send_text", request_id: "receipt-command", provider: "line_oa", confirm_send: true };
   await run(JSON.stringify(command), context, socket);
-  assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: command.request_id, optimistic_confirmation: true }]);
+  assert.deepEqual(socket.sent, [{ type: "send_result", request_id: command.request_id, ok: true,
+    provider_message_id: `omnichat-pending:${command.request_id}` }]);
   assert.equal(sends, 1);
-  callbacks.onResult({ ok: true, provider_message_id: "real-provider-id" });
-  assert.deepEqual(socket.sent[1], { type: "send_result", request_id: command.request_id,
-    ok: true, provider_message_id: "real-provider-id" });
+  callbacks.onResult(receiptFails ? { ok: false, error: "History match not found.", uncertain: true,
+    error_code: "OMNICHAT_CONFIRMATION_FAILED", execution_stage: "provider_dispatch", dispatch_started: true, retryable: false }
+    : { ok: true, provider_message_id: "real-provider-id" });
+  assert.deepEqual(socket.sent[1], receiptFails
+    ? { type: "send_receipt", request_id: command.request_id, ok: false, error: "History match not found.",
+      uncertain: true, error_code: "OMNICHAT_CONFIRMATION_FAILED" }
+    : { type: "send_receipt", request_id: command.request_id, ok: true, provider_message_id: "real-provider-id" });
   callbacks.onResult({ ok: false, uncertain: true, error: "Stale fallback" });
   advance(250);
   assert.deepEqual(socket.sent[2], socket.sent[1]);
-  await run(JSON.stringify({ type: "send_result_ack", request_id: command.request_id }), context, otherSocket);
+  await run(JSON.stringify({ type: "send_receipt_ack", request_id: command.request_id }), context, otherSocket);
   assert.equal(cleared, 0);
-  await run(JSON.stringify({ type: "send_result_ack", request_id: command.request_id }), context, socket);
+  await run(JSON.stringify({ type: "send_receipt_ack", request_id: command.request_id }), context, socket);
   await cached.get(`${context.key}:${command.request_id}`).finalTracking;
   const count = socket.sent.length;
   advance(30_000);
@@ -509,6 +515,8 @@ test(`optimistic LINE ${initialChannelFails ? "retains history confirmation afte
   advance(180_000);
   await run(JSON.stringify(command), context, socket);
   assert.equal(sends, 1, "duplicate command returns cached final result without another provider request");
+  assert.deepEqual(socket.sent.at(-2), socket.sent[0], "duplicates replay the ordinary pending-ID result first");
   assert.deepEqual(socket.sent.at(-1), socket.sent[1], "duplicates retain the first confirmed final result");
 });
+}
 }
