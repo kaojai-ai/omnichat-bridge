@@ -1,5 +1,6 @@
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
 import { createStatusReporter } from "../extension/lib/status-reporter.js";
+import { createSendResultReporter } from "../extension/lib/send-result-reporter.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -446,3 +447,61 @@ for (const provider of ["line_oa", "shopee"]) {
     assert.deepEqual(socket.sent[1], { type: "send_result", request_id: "request-accepted", ok: true, provider_message_id: "real-provider-id" });
   });
 }
+
+test("optimistic LINE returns after acceptance and retries only the late final result until its assigned socket ACK", async () => {
+  const timers = new Map();
+  let nextTimer = 0;
+  let now = 0;
+  const setTimer = (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; };
+  const clearTimer = id => timers.delete(id);
+  const advance = ms => {
+    const end = now + ms;
+    while (true) {
+      const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      now = next[1].at; timers.delete(next[0]); next[1].callback();
+    }
+    now = end;
+  };
+  const socket = { readyState: 1, sent: [], send(data) { this.sent.push(JSON.parse(data)); } };
+  const otherSocket = { readyState: 1, send() { assert.fail("another socket cannot own this result"); } };
+  const context = { key: "line_oa:account", account: { provider: "line_oa", provider_account_id: "account" } };
+  const connections = new Map([[context.key, { socket }]]);
+  const cached = new Map();
+  let callbacks;
+  let sends = 0;
+  let cleared = 0;
+  const start = source.indexOf("async function handleLiveCommand(");
+  const end = source.indexOf("\nchrome.storage.onChanged", start);
+  const run = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    preemptAutomaticLogUpload() {}, providerAdapterForCommand: () => ({ id: "line_oa", supportsSend: () => true }),
+    messageProviderAccountId: () => "account", canonicalProviderAccountId: () => "account",
+    WebSocket: { OPEN: 1 }, liveConnections: connections, liveCommandResults: cached,
+    Date: { now: () => now }, performance: { now: () => now },
+    sessionEligibility: { generation: () => 1 }, replyQueue: { run: (_, action) => action() },
+    sendViaProvider: async (_command, options) => { sends++; callbacks = options; options.onAccepted(30_000); return { ok: true, accepted: true }; },
+    createSendResultReporter: options => createSendResultReporter({ ...options, now: () => now, setTimer, clearTimer }),
+    clearProviderSendRoute: () => { cleared++; },
+    sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
+    recordLog: async () => {}, scheduleKeepalive() {},
+  });
+  const command = { type: "send_text", request_id: "optimistic-command", provider: "line_oa", optimistic_confirmation: true };
+  await run(JSON.stringify(command), context, socket);
+  assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: command.request_id }]);
+  assert.equal(sends, 1);
+  callbacks.onResult({ ok: true, provider_message_id: "real-provider-id" });
+  assert.equal(socket.sent[1].type, "send_result");
+  advance(250);
+  assert.deepEqual(socket.sent[2], socket.sent[1]);
+  await run(JSON.stringify({ type: "send_result_ack", request_id: command.request_id }), context, otherSocket);
+  assert.equal(cleared, 0);
+  await run(JSON.stringify({ type: "send_result_ack", request_id: command.request_id }), context, socket);
+  await cached.get(`${context.key}:${command.request_id}`).finalTracking;
+  const count = socket.sent.length;
+  advance(30_000);
+  assert.equal(socket.sent.length, count);
+  assert.equal(cleared, 1);
+  advance(180_000);
+  await run(JSON.stringify(command), context, socket);
+  assert.equal(sends, 1, "duplicate command returns cached final result without another provider request");
+});

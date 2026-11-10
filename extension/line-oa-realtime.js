@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-14";
+  const BRIDGE_VERSION = "line-oa-poll-15";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 10;
+  const COMPATIBILITY_VERSION = 11;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -342,7 +342,11 @@
         messageConversationId(message) === conversationId
         && messageSendId(message) === sendId
       ));
-      if (confirmed) return messageId(confirmed);
+      if (confirmed) {
+        const confirmedId = messageId(confirmed);
+        if (confirmedId) return confirmedId;
+        throw new Error("LINE OA matching confirmation history has no provider message ID.");
+      }
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(SEND_CONFIRM_POLL_MS, deadline - Date.now()))));
     }
     return "";
@@ -1248,7 +1252,7 @@
         botId,
         conversationId,
         sendId: confirmationSendId,
-        deadlineAt,
+        deadlineAt: command.optimistic_confirmation === true && response.status === 200 ? Infinity : deadlineAt,
         onRequest: () => { timings.history_request_count += 1; },
       });
       timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
@@ -1286,6 +1290,7 @@
       const failureKind = operation === "confirm" || providerDetails.timed_out ? "transport_failure"
         : httpStatus >= 400 ? "provider_rejection" : operation === "initialize" ? "pre_dispatch_failure" : "transport_failure";
       post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: sendStarted,
+        ...(operation === "confirm" ? { error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE" } : {}),
         error: operation === "confirm" ? "LINE OA message history was unavailable for send confirmation." : "LINE OA send was not acknowledged.",
         diagnostics: diagnostics(failureKind, sendStarted) });
     }

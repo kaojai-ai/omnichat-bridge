@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 13;
+  const BRIDGE_PROTOCOL_VERSION = 14;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -182,19 +182,37 @@
     return null;
   }
 
+  function settlePendingApiSend(requestId, pending, result) {
+    if (pendingApiSends.get(requestId) !== pending) return;
+    pendingApiSends.delete(requestId);
+    clearTimeout(pending.timeout);
+    if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
+    if (pending.initialResolved) {
+      void sendRuntimeMessage({ type: "api_send_final", request_id: requestId, result }).then((response) => {
+        if (!response?.ok) log("error", "send_result_forward_failed", "Final send result could not be forwarded.", { request_id: requestId });
+      });
+    } else pending.resolve(result);
+  }
+
   function finishPendingApiSend(requestId, pending) {
     if (pendingApiSends.get(requestId) !== pending) return;
     // Runtime acceptance and the final tab response use separate Chrome channels.
     // Keep the command alive until background has forwarded acceptance first.
     if (pending.acceptanceForwarding && !pending.acceptanceForwarded) return;
+    if (pending.optimistic && pending.accepted && !pending.initialResolved) {
+      pending.initialResolved = true;
+      clearTimeout(pending.timeout);
+      pending.timeout = setTimeout(() => settlePendingApiSend(requestId, pending, {
+        ok: false, uncertain: true, error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE",
+        error: `${providerLabel} final confirmation was not available before the tracking deadline.`,
+      }), Math.max(1, pending.finalDeadlineAt - Date.now()));
+      pending.resolve({ ok: true, accepted: true });
+    }
     const providerMessageId = String(
       pending.result?.provider_message_id ?? pending.echo?.id ?? ""
     ).trim();
     if (providerMessageId && (pending.result?.ok || pending.echo)) {
-      pendingApiSends.delete(requestId);
-      clearTimeout(pending.timeout);
-      if (pending.providerIdTimeout) clearTimeout(pending.providerIdTimeout);
-      pending.resolve({
+      settlePendingApiSend(requestId, pending, {
         ok: true,
         provider_message_id: providerMessageId,
         ...(pending.result?.send_id ? { send_id: pending.result.send_id } : {}),
@@ -205,18 +223,14 @@
       if (pending.providerIdTimeout) return;
       pending.providerIdTimeout = setTimeout(() => {
         if (pendingApiSends.get(requestId) !== pending) return;
-        pendingApiSends.delete(requestId);
-        clearTimeout(pending.timeout);
-        pending.resolve({ ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.`,
+        settlePendingApiSend(requestId, pending, { ok: false, uncertain: true, error: `${providerLabel} did not return a provider message ID.`,
           diagnostics: { diagnostic_version: 1, provider: providerAdapter.id, operation: "confirm",
             command_type: pending.commandType, delivery_uncertain: true, failure_kind: "unrecognized_response" } });
       }, 5_000);
       return;
     }
     if (!pending.result) return;
-    pendingApiSends.delete(requestId);
-    clearTimeout(pending.timeout);
-    pending.resolve({
+    settlePendingApiSend(requestId, pending, {
       ok: false,
       ...(["queue", "preparation", "provider_dispatch", "completed"].includes(pending.result.execution_stage)
         ? { execution_stage: pending.result.execution_stage } : {}),
@@ -1039,12 +1053,11 @@
       const timeout = setTimeout(() => {
         const pending = pendingApiSends.get(requestId);
         if (!pending) return;
-        pendingApiSends.delete(requestId);
         if (pending.echo?.id) {
-          resolve({ ok: true, provider_message_id: pending.echo.id });
+          settlePendingApiSend(requestId, pending, { ok: true, provider_message_id: pending.echo.id });
           return;
         }
-        resolve({ ok: false, uncertain: true, error: `${providerLabel} API reply timed out.`,
+        settlePendingApiSend(requestId, pending, { ok: false, uncertain: true, error: `${providerLabel} API reply timed out.`,
           diagnostics: { diagnostic_version: 1, provider: providerAdapter.id, operation: "send",
             command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure" } });
       }, Math.max(1, Math.min(30_000, (message.deadline_at_ms ?? Date.now() + 30_000) - Date.now())));
@@ -1057,6 +1070,8 @@
         echo: null,
         result: null,
         providerIdTimeout: null,
+        optimistic: providerAdapter.id === "line_oa" && message.optimistic_confirmation === true,
+        initialResolved: false,
       });
       const { image_base64, media_base64, ...pageCommand } = message;
       post({
@@ -1242,8 +1257,10 @@
       const pending = pendingApiSends.get(event.data.request_id);
       if (!pending || pending.accepted) return;
       pending.accepted = true;
+      pending.finalDeadlineAt = Date.now() + 30_000;
       const requestId = event.data.request_id;
-      pending.acceptanceForwarding = sendRuntimeMessage({ type: "api_send_accepted", request_id: requestId }).then(() => {
+      pending.acceptanceForwarding = sendRuntimeMessage({ type: "api_send_accepted", request_id: requestId }).then((response) => {
+        if (!response?.ok) pending.optimistic = false;
         pending.acceptanceForwarded = true;
         finishPendingApiSend(requestId, pending);
       });

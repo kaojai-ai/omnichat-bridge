@@ -1078,7 +1078,7 @@ test("LINE OA confirmation errors do not report the successful send HTTP status"
   assert.equal(result.diagnostics.http_status, undefined);
   assert.equal(result.diagnostics.response_format, undefined);
   assert.equal(result.diagnostics.delivery_uncertain, true);
-  assert.equal(result.error_code, undefined);
+  assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
   assert.equal(result.diagnostics.failure_kind, "transport_failure");
   assert.equal(bridge.posts.some(post => post.event === "send_confirmation_failed"), false);
   assert.equal(bridge.sentPayloads.length, 1);
@@ -1091,7 +1091,7 @@ test("LINE malformed confirmation history stays unavailable instead of reporting
     const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply" });
     assert.equal(result.ok, false);
     assert.equal(result.uncertain, true);
-    assert.equal(result.error_code, undefined);
+    assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
     assert.equal(result.diagnostics.failure_kind, "transport_failure");
     assert.equal(bridge.posts.some(post => post.event === "send_confirmation_failed"), false);
     assert.equal(bridge.sentPayloads.length, 1);
@@ -1105,7 +1105,7 @@ for (const status of [401, 503]) {
       const result = await bridge.sendCommand({ command_type: "send_text", text: "private customer message" });
       assert.equal(result.ok, false);
       assert.equal(result.uncertain, true);
-      assert.equal(result.error_code, undefined);
+      assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
       assert.equal(result.diagnostics.operation, "confirm");
       assert.equal(result.diagnostics.failure_kind, "transport_failure");
       assert.equal(result.diagnostics.http_status, status);
@@ -1993,7 +1993,7 @@ test("LINE OA stalled confirmation is aborted within its confirmation budget", a
     assert.equal(result.diagnostics.operation, "confirm");
     assert.equal(result.diagnostics.delivery_uncertain, true);
     assert.equal(result.diagnostics.timed_out, true);
-    assert.equal(result.error_code, undefined);
+    assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
     assert.equal(result.diagnostics.failure_kind, "transport_failure");
     assert.equal(bridge.posts.some(post => post.event === "send_confirmation_failed"), false);
     assert.equal(bridge.sentPayloads.length, 1);
@@ -2280,6 +2280,19 @@ test("LINE empty HTTP 200 reports acceptance before history and confirms only th
     assert.deepEqual(bridge.posts.filter(post => ["api_send_accepted", "api_send_result"].includes(post.type)).map(post => post.type),
       ["api_send_accepted", "api_send_result"]);
     assert.equal(bridge.posts.some(post => post.type === "diagnostic_log" && post.level === "error"), false);
+    assert.equal(bridge.sentPayloads.length, 1);
+  } finally { bridge.dispose(); }
+});
+
+test("LINE matching send correlation without a real message ID is unavailable, never a confirmed no-match", async () => {
+  const bridge = createBridge({ beforeMessageRequest() {
+    return { ok: true, json: async () => ({ list: [{ source: { chatId: "chat-1" }, message: { sendId: "client-malformed" } }] }) };
+  } });
+  try {
+    const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture", client_message_id: "client-malformed" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
+    assert.equal(bridge.posts.some(post => post.event === "send_confirmation_failed"), false);
     assert.equal(bridge.sentPayloads.length, 1);
   } finally { bridge.dispose(); }
 });

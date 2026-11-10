@@ -184,3 +184,19 @@ configuration and existing sync history are retained when browser access changes
 Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.
+
+### Optimistic LINE command confirmation
+
+Opt-in LINE commands (`optimistic_confirmation: true`) report acceptance at HTTP
+200 and release the initial send response immediately. History lookup continues
+for up to 10 seconds, matching the exact send ID and conversation. A second
+`send_result` carries the real provider ID or a typed confirmation error. Only
+that final receipt is retried until `send_result_ack`, within 30 seconds after
+acceptance; the provider request is never repeated. A missing page result becomes
+confirmation-unavailable. Older commands retain final-only responses; Shopee
+continues returning its validated real ID.
+
+Deploy compatible command-server, sender-correlation collector, worker, and Admin
+support before releasing this extension. A browser shutdown or extended outage
+can interrupt the bounded final-result reporting window. This local withdrawal
+flow does not recall a message already accepted by LINE.
