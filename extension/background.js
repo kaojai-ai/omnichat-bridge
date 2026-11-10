@@ -5315,8 +5315,7 @@ async function flushBatch(context, signal) {
   const deliveredKeys = new Set(outcome.delivered.map(messageKey));
   for (const message of outcome.skipped) deliveredKeys.add(messageKey(message));
   const failure = outcome.failed[0]?.error ?? outcome.blocked?.error ?? null;
-  const ownSendPending = failure?.http_status === 503 && failure.server_error_code === "own_send_pending";
-  const failureMessage = ownSendPending ? "" : failure instanceof Error ? failure.message : String(failure ?? "");
+  const failureMessage = failure instanceof Error ? failure.message : String(failure ?? "");
   const now = new Date().toISOString();
   const remaining = await serializeAccountStorage(async () => {
     const current = await readStorage([STORAGE.pending, STORAGE.status]);
@@ -5367,7 +5366,7 @@ async function flushBatch(context, signal) {
       )),
     });
   }
-  if (outcome.blocked && !ownSendPending) {
+  if (outcome.blocked) {
     const batchDetails = {
       batch_size: outcome.blocked.messages.length,
       pending_before: pending.length,

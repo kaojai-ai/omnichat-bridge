@@ -40,7 +40,7 @@
       const conversationId = id(item?.source?.chatId ?? item?.conversation_id);
       const messageId = id(message?.id ?? item?.provider_message_id);
       const sendId = id(message?.sendId ?? item?.sendId);
-      const ownSendPrefix = "omnichat_sent_v1_";
+      const ownSendPrefix = "omc_";
       const ownSend = item?.type === "messageSent" && sendId.startsWith(ownSendPrefix) && sendId.length > ownSendPrefix.length;
       const clientMessageId = ownSend ? sendId.slice(ownSendPrefix.length) : sendId;
       const timestamp = Number(item?.timestamp);

@@ -1120,7 +1120,7 @@
       }
       const payload = clone(profile.payload);
       const requestedSendId = value(command?.client_message_id);
-      const confirmationSendId = `omnichat_sent_v1_${requestedSendId || sendId(conversationId)}`;
+      const confirmationSendId = value(command?.send_id) || requestedSendId || sendId(conversationId);
       payload.sendId = confirmationSendId;
       if (expectedType === "text") {
         const textValue = value(command?.text);

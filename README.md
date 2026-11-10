@@ -184,19 +184,3 @@ configuration and existing sync history are retained when browser access changes
 Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.
-
-
-### LINE own-send echoes
-
-Bridge sends keep the existing history confirmation and return LINE's native
-message ID. Their `sendId` carries `omnichat_sent_v1_<client_message_id>` so
-outgoing history and polling can recover the original client ID and an
-`omnichat_send` marker after restart. Incoming and unmarked manual messages are
-unchanged; native provider message IDs are always preserved.
-
-Deploy the compatible collector before the extension. The collector defers a
-marked echo briefly while the send worker records its row, then suppresses the
-exact persisted duplicate. If the worker never records it, the collector falls
-back to ordinary ingestion after the grace period; Admin attribution may still
-be unavailable in that failure case. This does not resend or recall the provider
-message. No worker, command-server, Admin, or infrastructure change is required.

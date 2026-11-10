@@ -356,17 +356,17 @@ test("LINE OA decodes only marked outgoing own-send echoes without changing nati
     type, timestamp: 1000, source: { chatId: "chat-1", userId: "user-1" },
     message: { id: "native-provider-id", type: "text", text: "Fixture", sendId },
   }] }, "history_recovery"))[0];
-  const marked = normalize("messageSent", "omnichat_sent_v1_original-client-id");
+  const marked = normalize("messageSent", "omc_original-client-id");
   assert.equal(marked.id, "native-provider-id");
   assert.equal(marked.client_message_id, "original-client-id");
   assert.deepEqual(marked.provider_content, { omnichat_send: true });
   // A fresh adapter can recover the self-describing marker without local state.
   assert.equal(createRegistry({ includeLineOA: true }).get("line_oa").normalizeMessages({ messages: [{
     type: "messageSent", timestamp: 1000, source: { chatId: "chat-1" },
-    message: { id: "native-recovered", sendId: "omnichat_sent_v1_recovered-client" },
+    message: { id: "native-recovered", sendId: "omc_recovered-client" },
   }] }, "poll")[0].client_message_id, "recovered-client");
-  for (const [type, sendId] of [["messageSent", "manual-send"], ["messageSent", "omnichat_sent_v1_"],
-    ["message", "omnichat_sent_v1_original-client-id"], ["unknown", "omnichat_sent_v1_original-client-id"]]) {
+  for (const [type, sendId] of [["messageSent", "manual-send"], ["messageSent", "omc_"],
+    ["message", "omc_original-client-id"], ["unknown", "omc_original-client-id"]]) {
     const ordinary = normalize(type, sendId);
     assert.equal(ordinary.id, "native-provider-id");
     assert.equal(ordinary.client_message_id, sendId);
@@ -384,7 +384,7 @@ test("LINE reinjection refreshes an existing normalizer without replacing other 
     vm.runInContext(lineOaSource, context);
     const oldAdapter = context.OmnichatProviderAdapters.get("line_oa");
     const shopee = context.OmnichatProviderAdapters.get("shopee");
-    context.OmnichatLineOA.normalizeMessages = () => [{ id: "native-id", client_message_id: "omnichat_sent_v1_client-id" }];
+    context.OmnichatLineOA.normalizeMessages = () => [{ id: "native-id", client_message_id: "omc_client-id" }];
     worlds.set(world, { context, oldAdapter, shopee });
   }
   const injected = [];
@@ -408,7 +408,7 @@ test("LINE reinjection refreshes an existing normalizer without replacing other 
     assert.equal(context.OmnichatProviderAdapters.get("line_oa"), oldAdapter);
     assert.equal(context.OmnichatProviderAdapters.get("shopee"), shopee);
     const [message] = oldAdapter.normalizeMessages({ messages: [{ type: "messageSent", timestamp: 1000,
-      source: { chatId: "chat-1" }, message: { id: "native-id", sendId: "omnichat_sent_v1_client-id" } }] }, "poll");
+      source: { chatId: "chat-1" }, message: { id: "native-id", sendId: "omc_client-id" } }] }, "poll");
     assert.equal(message.id, "native-id");
     assert.equal(message.client_message_id, "client-id");
     assert.deepEqual(plain(message.provider_content), { omnichat_send: true });

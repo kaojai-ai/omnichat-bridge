@@ -21,7 +21,6 @@ test("LINE OA recovery paginates chat and message history", () => {
 });
 
 test("LINE OA marks caller client_message_id in sendId and confirms it from message history", () => {
-  assert.match(source, /const confirmationSendId = `omnichat_sent_v1_\$\{requestedSendId \|\| sendId\(conversationId\)\}`/);
   assert.match(source, /payload\.sendId = confirmationSendId/);
   assert.match(source, /waitForSentMessage\(\{[\s\S]*sendId: confirmationSendId/);
   assert.match(source, /messageConversationId\(message\) === conversationId/);
@@ -412,7 +411,7 @@ test("LINE OA replays an observed text request without copying cookies", async (
     type: "api_send_result",
     request_id: "send-1",
     ok: true,
-    send_id: "omnichat_sent_v1_caller-send-id",
+    send_id: "caller-send-id",
     confirmed: true,
     provider_message_id: "sent-2",
   });
@@ -420,7 +419,7 @@ test("LINE OA replays an observed text request without copying cookies", async (
   const sentBody = JSON.parse(bridge.sentPayloads[1].body);
   assert.equal(sentBody.type, "text");
   assert.equal(sentBody.text, "bridge message");
-  assert.equal(sentBody.sendId, "omnichat_sent_v1_caller-send-id");
+  assert.equal(sentBody.sendId, "caller-send-id");
   assert.deepEqual(plain(bridge.sentPayloads[1].headers), {
     accept: "application/json",
     "content-type": "application/json",
@@ -822,7 +821,7 @@ test("LINE OA acknowledges an accepted send with no response ID without inventin
     const submitted = JSON.parse(bridge.sentPayloads[0].body);
     assert.equal(result.ok, false);
     assert.equal(result.uncertain, true);
-    assert.match(submitted.sendId, /^omnichat_sent_v1_chat-1_\d+_\d{8}$/);
+    assert.match(submitted.sendId, /^chat-1_\d+_\d{8}$/);
     assert.equal(result.provider_message_id, undefined);
     bridge.dispose();
   }
@@ -836,10 +835,11 @@ test("LINE OA uses the Admin client message ID as its send correlation ID", asyn
     package_id: "1669",
     sticker_id: "31690",
     client_message_id: "admin-client-message-1",
+    send_id: "omc_admin-client-message-1",
   });
 
   const submitted = JSON.parse(bridge.sentPayloads[0].body);
-  assert.equal(submitted.sendId, "omnichat_sent_v1_admin-client-message-1");
+  assert.equal(submitted.sendId, "omc_admin-client-message-1");
   assert.equal(result.provider_message_id, undefined);
   bridge.dispose();
 });
@@ -853,7 +853,7 @@ for (const command_type of ["send_video", "send_file"]) {
     assert.equal(bridge.uploads.length, 1);
     assert.equal(bridge.uploads[0].headers["content-type"], undefined);
     assert.equal(bridge.uploads[0].body.get("file").name, "attachment.pdf");
-    assert.deepEqual(JSON.parse(bridge.sentPayloads[0].body), { items: [{ sendId: "omnichat_sent_v1_media-send", contentMessageToken: "upload-token" }] });
+    assert.deepEqual(JSON.parse(bridge.sentPayloads[0].body), { items: [{ sendId: "media-send", contentMessageToken: "upload-token" }] });
     bridge.dispose();
   });
 }
