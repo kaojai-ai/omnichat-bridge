@@ -196,7 +196,8 @@ acceptance; the provider request is never repeated. A missing page result become
 confirmation-unavailable. Older commands retain final-only responses; Shopee
 continues returning its validated real ID.
 
-Deploy compatible command-server, sender-correlation collector, worker, and Admin
-support before releasing this extension. A browser shutdown or extended outage
+Deploy compatible command-server, worker, and Admin support before releasing this
+extension. No collector or infrastructure change is required. Early saving is
+expected to reduce the polling race window; it does not eliminate that race. A browser shutdown or extended outage
 can interrupt the bounded final-result reporting window. This local withdrawal
 flow does not recall a message already accepted by LINE.
