@@ -88,7 +88,7 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 13;
+const BRIDGE_PROTOCOL_VERSION = 12;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 9;
@@ -3898,7 +3898,7 @@ async function reinjectProviderBridge(tabId, adapter) {
         const mainFiles = adapter.id === "line_oa"
           ? [
             ...(mainStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-            "lib/line-oa.js",
+            ...(mainStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
             "line-oa-realtime.js",
           ]
           : [
@@ -3933,7 +3933,7 @@ async function reinjectProviderBridge(tabId, adapter) {
       const isolatedFiles = adapter.id === "line_oa"
         ? [
           ...(isolatedStatus.hasAdapters ? [] : ["lib/provider-adapters.js"]),
-          "lib/line-oa.js",
+          ...(isolatedStatus.hasProviderAdapter ? [] : ["lib/line-oa.js"]),
           "lib/message-id-cache.js",
           "content.js",
         ]

@@ -39,10 +39,7 @@
       const message = record(item?.message);
       const conversationId = id(item?.source?.chatId ?? item?.conversation_id);
       const messageId = id(message?.id ?? item?.provider_message_id);
-      const sendId = id(message?.sendId ?? item?.sendId);
-      const ownSendPrefix = "omc_";
-      const ownSend = item?.type === "messageSent" && sendId.startsWith(ownSendPrefix) && sendId.length > ownSendPrefix.length;
-      const clientMessageId = ownSend ? sendId.slice(ownSendPrefix.length) : sendId;
+      const clientMessageId = id(message?.sendId ?? item?.sendId);
       const timestamp = Number(item?.timestamp);
       if (!conversationId || !messageId || !Number.isFinite(timestamp)) continue;
       const key = `${conversationId}:${messageId}`;
@@ -59,7 +56,6 @@
         participant: { id: userId, ...(providerAccountId ? { provider_account_id: providerAccountId } : {}) },
         id: messageId,
         ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-        ...(ownSend ? { provider_content: { omnichat_send: true } } : {}),
         event_timestamp: iso(timestamp, new Date().toISOString()),
         observed_at: new Date().toISOString(),
         sender_id: incoming ? userId : providerAccountId,
@@ -121,8 +117,7 @@
   }
 
   globalThis.OmnichatLineOA = { chatItems, normalizeMessages, normalizeAccount, basicIdFromHtml };
-  // Existing registered adapters delegate normalization to the refreshed helper.
-  if (!globalThis.OmnichatProviderAdapters?.get?.("line_oa")) globalThis.OmnichatProviderAdapters?.register({
+  globalThis.OmnichatProviderAdapters?.register({
     id: "line_oa",
     displayName: "LINE Official Account",
     accountName: "LINE Official Account",
