@@ -185,21 +185,18 @@ Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.
 
-### LINE send receipts
 
-Opt-in LINE commands (`confirm_send: true`) return an ordinary successful
-`send_result` at HTTP 200, with provider ID `omnichat-pending:<request_id>`.
-History lookup continues independently for up to 10 seconds, matching the exact
-send ID and conversation. A separate `send_receipt` carries the real provider ID
-or a typed confirmation error. Only this receipt is retried until
-`send_receipt_ack`, within 30 seconds after acceptance; the provider request is
-never repeated. A missing page result becomes confirmation-unavailable. Legacy
-commands retain final-only responses; Shopee returns its validated real ID.
+### LINE own-send echoes
 
-Deploy compatible command-server and worker support before releasing this
-extension. The server inserts a final success/error row and withdraws the
-pending row through the existing unsend event; original message rows remain
-immutable. This local withdrawal does not recall a message already accepted by
-LINE. No Admin, collector, or infrastructure change is required. Early saving
-reduces the polling race window without eliminating it. Browser shutdown or an
-extended outage can interrupt bounded receipt reporting and leave a pending row.
+Bridge sends keep the existing history confirmation and return LINE's native
+message ID. Their `sendId` carries `omnichat_sent_v1_<client_message_id>` so
+outgoing history and polling can recover the original client ID and an
+`omnichat_send` marker after restart. Incoming and unmarked manual messages are
+unchanged; native provider message IDs are always preserved.
+
+Deploy the compatible collector before the extension. The collector defers a
+marked echo briefly while the send worker records its row, then suppresses the
+exact persisted duplicate. If the worker never records it, the collector falls
+back to ordinary ingestion after the grace period; Admin attribution may still
+be unavailable in that failure case. This does not resend or recall the provider
+message. No worker, command-server, Admin, or infrastructure change is required.

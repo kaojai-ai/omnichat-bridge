@@ -1600,7 +1600,6 @@
       if (!knownAcceptance) {
         throw new Error("Shopee returned an unrecognized send result. Delivery is uncertain; check Seller Chat before retrying.");
       }
-      post({ type: "api_send_accepted", request_id: requestId });
       post({ type: "api_send_result", request_id: requestId, ok: true, execution_stage: "completed", dispatch_started: true, retryable: false, provider_message_id: providerMessageId, diagnostics: { ...diagnostics, confirmation_duration_ms: 0 } });
     } catch (error) {
       diagnostics.provider_duration_ms = Math.min(300_000, Math.max(0, Date.now() - sendStartedAt));
@@ -2595,7 +2594,7 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
-    compatibility_version: 6,
+    compatibility_version: 5,
     combined_metadata_sync: true,
     fresh_provider_status: true,
     bounded_message_ids: true,

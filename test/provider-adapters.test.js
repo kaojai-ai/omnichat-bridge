@@ -42,9 +42,7 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
   control.bounded_message_ids = true;
   control.grace_classification = true;
   assert.equal((await status()).ready, true, "script revisions do not invalidate compatibility");
-  control.compatibility_version -= 1;
-  assert.equal((await status()).ready, false, "the previous deployed LINE interface requires reattachment");
-  control.compatibility_version = Number(actual[1]) + 1;
+  control.compatibility_version += 1;
   assert.equal((await status()).ready, false, "breaking interfaces require reattachment");
   control.compatibility_version = Number(actual[1]);
   control.source = "unrelated-bridge";
@@ -349,4 +347,70 @@ test("Shopee retains observed regional origin and opens the configured market", 
   assert.equal(account.seller_origin, "https://seller.shopee.ph");
   assert.equal(adapter.chatUrlForAccount({ country: "MY" }), "https://seller.shopee.com.my/new-webchat/conversations");
   assert.equal(adapter.matchesAccountUrl("https://seller.shopee.co.th/new-webchat", { country: "MY" }), false);
+});
+
+
+test("LINE OA decodes only marked outgoing own-send echoes without changing native IDs", () => {
+  const adapter = createRegistry({ includeLineOA: true }).get("line_oa");
+  const normalize = (type, sendId) => plain(adapter.normalizeMessages({ provider_account_id: "@test", messages: [null, {
+    type, timestamp: 1000, source: { chatId: "chat-1", userId: "user-1" },
+    message: { id: "native-provider-id", type: "text", text: "Fixture", sendId },
+  }] }, "history_recovery"))[0];
+  const marked = normalize("messageSent", "omnichat_sent_v1_original-client-id");
+  assert.equal(marked.id, "native-provider-id");
+  assert.equal(marked.client_message_id, "original-client-id");
+  assert.deepEqual(marked.provider_content, { omnichat_send: true });
+  // A fresh adapter can recover the self-describing marker without local state.
+  assert.equal(createRegistry({ includeLineOA: true }).get("line_oa").normalizeMessages({ messages: [{
+    type: "messageSent", timestamp: 1000, source: { chatId: "chat-1" },
+    message: { id: "native-recovered", sendId: "omnichat_sent_v1_recovered-client" },
+  }] }, "poll")[0].client_message_id, "recovered-client");
+  for (const [type, sendId] of [["messageSent", "manual-send"], ["messageSent", "omnichat_sent_v1_"],
+    ["message", "omnichat_sent_v1_original-client-id"], ["unknown", "omnichat_sent_v1_original-client-id"]]) {
+    const ordinary = normalize(type, sendId);
+    assert.equal(ordinary.id, "native-provider-id");
+    assert.equal(ordinary.client_message_id, sendId);
+    assert.equal(ordinary.provider_content, undefined);
+  }
+});
+
+
+test("LINE reinjection refreshes an existing normalizer without replacing other provider adapters", async () => {
+  const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+  const worlds = new Map();
+  for (const world of ["MAIN", "ISOLATED"]) {
+    const context = vm.createContext({ URL });
+    for (const source of sources) vm.runInContext(source, context);
+    vm.runInContext(lineOaSource, context);
+    const oldAdapter = context.OmnichatProviderAdapters.get("line_oa");
+    const shopee = context.OmnichatProviderAdapters.get("shopee");
+    context.OmnichatLineOA.normalizeMessages = () => [{ id: "native-id", client_message_id: "omnichat_sent_v1_client-id" }];
+    worlds.set(world, { context, oldAdapter, shopee });
+  }
+  const injected = [];
+  const context = vm.createContext({
+    providerBridgeReinjections: new Map(),
+    providerMainBridgeStatus: async () => ({ ready: false, hasAdapters: true, hasProviderAdapter: true }),
+    retireProviderMainBridge: async () => {}, retireProviderContentBridge: async () => {},
+    recordUnexpected: async (_scope, error) => assert.fail(String(error)),
+    chrome: { scripting: { executeScript: async ({ world, files }) => {
+      if (!files) return [{ result: { hasAdapters: true, hasProviderAdapter: true } }];
+      injected.push({ world, files });
+      if (files.includes("lib/line-oa.js")) vm.runInContext(lineOaSource, worlds.get(world).context);
+      return [];
+    } } },
+  });
+  vm.runInContext(background.slice(background.indexOf("async function reinjectProviderBridge("),
+    background.indexOf("async function reattachOpenProviderBridges(")), context);
+  assert.equal(await context.reinjectProviderBridge(42, { id: "line_oa" }), true);
+  assert.deepEqual(injected.map(entry => entry.world), ["MAIN", "ISOLATED"]);
+  for (const { context, oldAdapter, shopee } of worlds.values()) {
+    assert.equal(context.OmnichatProviderAdapters.get("line_oa"), oldAdapter);
+    assert.equal(context.OmnichatProviderAdapters.get("shopee"), shopee);
+    const [message] = oldAdapter.normalizeMessages({ messages: [{ type: "messageSent", timestamp: 1000,
+      source: { chatId: "chat-1" }, message: { id: "native-id", sendId: "omnichat_sent_v1_client-id" } }] }, "poll");
+    assert.equal(message.id, "native-id");
+    assert.equal(message.client_message_id, "client-id");
+    assert.deepEqual(plain(message.provider_content), { omnichat_send: true });
+  }
 });

@@ -1003,22 +1003,3 @@ test("Seller Centre can derive a send from the captured list request without his
   assert.equal(bridge.nativePayloads.at(-1).shop_id, 123456789);
   assert.equal(bridge.nativeRequests.includes("/api/v2/login/"), false);
 });
-
-for (const sellerCentre of [false, true]) {
-  test(`Shopee ${sellerCentre ? "Seller Centre" : "Webchat"} emits acceptance before its final message ID`, async () => {
-    const bridge = createBridge({ sellerCentre });
-    const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Fixture reply" });
-    assert.equal(result.ok, true);
-    const events = bridge.posts.filter(post => ["api_send_accepted", "api_send_result"].includes(post.type));
-    assert.deepEqual(events.map(post => post.type), ["api_send_accepted", "api_send_result"]);
-    assert.equal(events[0].request_id, baseCommand.request_id);
-    assert.ok(events[1].provider_message_id);
-  });
-}
-
-test("Shopee HTTP 200 with a provider error never reports acceptance", async () => {
-  const bridge = createBridge({ sendBody: { id: "not-accepted", message_option: 0, error_code: "param_error" } });
-  const { result } = await bridge.send({ ...baseCommand, command_type: "send_text", text: "Fixture reply" });
-  assert.equal(result.ok, false);
-  assert.equal(bridge.posts.some(post => post.type === "api_send_accepted"), false);
-});

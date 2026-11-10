@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-16";
+  const BRIDGE_VERSION = "line-oa-poll-13";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 12;
+  const COMPATIBILITY_VERSION = 9;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -336,28 +336,15 @@
       // backward through history because a newly sent message appears at the front.
       onRequest();
       const body = await json(messagesUrl(botId, conversationId, null, PAGE_LIMIT), deadline - Date.now());
-      if (!Array.isArray(body?.list)) throw new Error("LINE OA confirmation history response is invalid.");
-      const messages = body.list;
+      const messages = Array.isArray(body?.list) ? body.list : [];
       const confirmed = messages.find((message) => (
         messageConversationId(message) === conversationId
         && messageSendId(message) === sendId
       ));
-      if (confirmed) {
-        const confirmedId = messageId(confirmed);
-        if (confirmedId) return confirmedId;
-        throw new Error("LINE OA matching confirmation history has no provider message ID.");
-      }
+      if (confirmed) return messageId(confirmed);
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(SEND_CONFIRM_POLL_MS, deadline - Date.now()))));
     }
     return "";
-  }
-
-  function logConfirmationFailure(requestId, unavailable = false) {
-    post({ type: "diagnostic_log", level: "error", event: unavailable ? "send_confirmation_unavailable" : "send_confirmation_failed",
-      message: unavailable
-        ? "LINE OA message history was unavailable for confirmation. Check LINE history before retrying."
-        : "LINE OA send confirmation failed: no matching message was found before the confirmation deadline. Check LINE history before retrying.",
-      details: { request_id: requestId, operation: "confirm", delivery_uncertain: true } });
   }
 
   function waitForAcknowledgement(requestId) {
@@ -1133,7 +1120,7 @@
       }
       const payload = clone(profile.payload);
       const requestedSendId = value(command?.client_message_id);
-      const confirmationSendId = requestedSendId || sendId(conversationId);
+      const confirmationSendId = `omnichat_sent_v1_${requestedSendId || sendId(conversationId)}`;
       payload.sendId = confirmationSendId;
       if (expectedType === "text") {
         const textValue = value(command?.text);
@@ -1243,7 +1230,6 @@
         post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: false, dispatch_started: true, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
       }
-      if (response.status === 200) post({ type: "api_send_accepted", request_id: requestId });
       confirmationStarted = monotonicNow();
       operation = "confirm";
       httpStatus = undefined;
@@ -1252,13 +1238,12 @@
         botId,
         conversationId,
         sendId: confirmationSendId,
-        deadlineAt: command.confirm_send === true && response.status === 200 ? Infinity : deadlineAt,
+        deadlineAt,
         onRequest: () => { timings.history_request_count += 1; },
       });
       timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
       if (confirmedMessageId) timings.confirmation_source = "history";
       const providerMessageId = confirmedMessageId;
-      if (!confirmedMessageId) logConfirmationFailure(requestId);
       post({
         type: "api_send_result",
         request_id: requestId,
@@ -1267,16 +1252,10 @@
         send_id: confirmationSendId,
         ...(providerMessageId ? { provider_message_id: providerMessageId } : {}),
         diagnostics: diagnostics(confirmedMessageId ? "none" : "confirmation_failure", !confirmedMessageId),
-        ...(!confirmedMessageId ? {
-          error_code: "OMNICHAT_CONFIRMATION_FAILED",
-          error: "LINE OA send confirmation failed: no matching message was found before the confirmation deadline.",
-        } : {}),
+        ...(!confirmedMessageId ? { error: "LINE OA send could not be confirmed in message history." } : {}),
       });
     } catch (error) {
-      if (confirmationStarted !== null) {
-        timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
-        logConfirmationFailure(requestId, true);
-      }
+      if (confirmationStarted !== null) timings.confirmation_duration_ms = monotonicNow() - confirmationStarted;
       else if (providerRequestStarted !== null) timings.provider_request_duration_ms = monotonicNow() - providerRequestStarted;
       else timings.preparation_duration_ms = monotonicNow() - startedMono;
       if (error?.providerDiagnostics) {
@@ -1287,12 +1266,10 @@
       providerDetails.timed_out = ["AbortError", "TimeoutError"].includes(error?.name)
         || error?.message === "LINE OA reply deadline expired." || error?.message === "LINE OA request timed out.";
       if (["Error", "TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(error?.name)) providerDetails.error_name = error.name;
-      const failureKind = operation === "confirm" || providerDetails.timed_out ? "transport_failure"
+      const failureKind = providerDetails.timed_out ? "transport_failure"
         : httpStatus >= 400 ? "provider_rejection" : operation === "initialize" ? "pre_dispatch_failure" : "transport_failure";
       post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: sendStarted,
-        ...(operation === "confirm" ? { error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE" } : {}),
-        error: operation === "confirm" ? "LINE OA message history was unavailable for send confirmation." : "LINE OA send was not acknowledged.",
-        diagnostics: diagnostics(failureKind, sendStarted) });
+        error: "LINE OA send was not acknowledged.", diagnostics: diagnostics(failureKind, sendStarted) });
     }
   }
 

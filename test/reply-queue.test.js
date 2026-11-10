@@ -19,10 +19,9 @@ function harness(sendViaProvider) {
   const sessionEligibility = createSessionEligibility({ setTimer: () => 1, clearTimer: () => {} });
   const background = deferred();
   const events = [];
-  const cached = new Map();
   const sandbox = { recordLog: async () => {}, preemptAutomaticLogUpload: () => {},
     sessionEligibility, activeLiveCommandContexts: async contexts => contexts,
-    sanitizeSendDiagnostics, replyQueue, liveCommandResults: cached, liveConnections: new Map(),
+    sanitizeSendDiagnostics, replyQueue, liveCommandResults: new Map(), liveConnections: new Map(),
     scheduleKeepalive: () => {}, WebSocket: { OPEN: 1 }, Date,
     providerAdapterForCommand: (command) => ({ id: command.provider, supportsSend: () => true }),
     messageProviderAccountId: (command) => command.provider_account_id,
@@ -47,7 +46,7 @@ function harness(sendViaProvider) {
     events.push(`ack:${result.request_id}`);
   } };
   return {
-    replyQueue, sessionEligibility, background, events, socket, update, cached,
+    replyQueue, sessionEligibility, background, events, socket, update,
     send(request, account = "shop", provider = "shopee", execution_budget_ms) {
       sessionEligibility.observe(`${provider}:${account}`, { preemptAutomaticLogUpload: () => {}, hasTab: true, verified: true });
       return run(JSON.stringify({ type: "send_text", provider, provider_account_id: account, request_id: request, execution_budget_ms }),
@@ -179,17 +178,4 @@ test("queued expiry reports not sent before the preceding send finishes and neve
   await active;
   await tick();
   assert.deepEqual(started, ["active"], "expired commands and duplicates stay cancelled");
-});
-
-test("extension updates wait for an accepted command's separate final acknowledgement", async () => {
-  const h = harness(async () => ({ ok: true, provider_message_id: "receipt" }));
-  const tracking = deferred();
-  h.cached.set("accepted-command", { finalTracking: tracking.promise });
-  const updating = h.update();
-  h.background.resolve();
-  await tick();
-  assert.equal(h.events.includes("reload"), false);
-  tracking.resolve();
-  await updating;
-  assert.equal(h.events.includes("reload"), true);
 });

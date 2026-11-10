@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { STORAGE, readAccountState, writeAccountState } from "../extension/lib/storage.js";
+import { deliverWithIsolation } from "../extension/lib/delivery-isolation.js";
 import { latestMessageCursor, migrateScanState } from "../extension/lib/sync-state.js";
 
 const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
@@ -235,3 +236,59 @@ test("legacy scan migration never infers completeness from pending messages", as
   assert.equal(result.state.watermark, null);
   assert.equal(readAccountState(state[STORAGE.pending], a.key)[0].id, "unscanned-live");
 });
+
+
+for (const serverCode of ["own_send_pending", "own_send_lookup_failed", "service_unavailable"]) {
+  test(`queued LINE echo ${serverCode} retains retries and reports only genuine delivery errors`, async () => {
+    const logs = [];
+    let acknowledge = false;
+    let retries = 0;
+    let h;
+    const a = context("a");
+    h = harness({
+      deliverWithIsolation,
+      batchFor: messages => ({ batch_id: "batch", conversations: [], messages }),
+      messageReference: message => `${message.conversation_id}\u0000${message.id}`,
+      signedRequest: async (_config, _account, payload) => {
+        if (!acknowledge) throw Object.assign(new Error(`Target server returned 503: ${serverCode}`),
+          { http_status: 503, server_error_code: serverCode });
+        return { schema: "omnichat.message_batch_ack", batch_id: payload.batch_id,
+          accepted_messages: 0, duplicate_messages: payload.messages.length };
+      },
+      recordLog: async (level, _area, event) => logs.push({ level, event }),
+      diagnosticErrorDetails: () => ({}), deliveryMessageDetails: async () => ({}),
+      recordUnexpected: async () => assert.fail("blocked batches must not escape to the outer error handler"),
+      deliveryScheduler: { run: action => action() }, MAX_FLUSH_BATCHES: 2,
+      throwIfSyncCancelled() {},
+      resetDeliveryRetry: async () => { h.state[STORAGE.deliveryRetry] = {}; },
+      clearDeliveryRetry: async () => { h.state[STORAGE.deliveryRetry] = {}; },
+      scheduleDeliveryRetry: async () => {
+        retries++;
+        h.state[STORAGE.deliveryRetry] = writeAccountState(h.state[STORAGE.deliveryRetry], a.key,
+          { next_at: new Date(Date.now() + 60_000).toISOString() });
+      },
+    });
+    vm.runInContext(section("async function flushAll(", "async function resetDeliveryRetry("), h.runtime);
+    vm.runInContext(section("async function deliverPendingForAccount(", "async function attemptAllDeliveries("), h.runtime);
+    await h.runtime.queueMessagesForContext([message("own-echo")], a, false);
+    const result = await h.runtime.deliverPendingForAccount(a, { resetBackoff: false });
+    assert.equal(result.pending, 1);
+    assert.equal(retries, 1);
+    assert.equal(readAccountState(h.state[STORAGE.pending], a.key, []).length, 1);
+    const status = readAccountState(h.state[STORAGE.status], a.key, {});
+    if (serverCode === "own_send_pending") {
+      assert.equal(status.delivery_error, null);
+      assert.equal(status.delivery_error_at, null);
+      assert.equal(logs.some(log => log.level === "error"), false);
+    } else {
+      assert.match(status.delivery_error, new RegExp(serverCode));
+      assert.equal(logs.some(log => log.level === "error" && log.event === "batch_blocked"), true);
+      assert.equal(logs.some(log => log.level === "error" && log.event === "message_blocked"), true);
+    }
+    assert.equal((await h.runtime.deliverPendingForAccount(a, { resetBackoff: false })).skipped, "backoff");
+    acknowledge = true;
+    assert.equal((await h.runtime.deliverPendingForAccount(a, { resetBackoff: true })).pending, 0);
+    assert.equal(readAccountState(h.state[STORAGE.pending], a.key, []).length, 0);
+    assert.equal(readAccountState(h.state[STORAGE.status], a.key, {}).delivery_error, null);
+  });
+}
