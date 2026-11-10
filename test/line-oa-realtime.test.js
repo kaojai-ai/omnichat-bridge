@@ -20,7 +20,8 @@ test("LINE OA recovery paginates chat and message history", () => {
   assert.doesNotMatch(source, /\.slice\(0, 100\)/);
 });
 
-test("LINE OA marks caller client_message_id in sendId and confirms it from message history", () => {
+test("LINE OA uses caller client_message_id as sendId and confirms it from message history", () => {
+  assert.match(source, /const confirmationSendId = requestedSendId \|\| sendId\(conversationId\)/);
   assert.match(source, /payload\.sendId = confirmationSendId/);
   assert.match(source, /waitForSentMessage\(\{[\s\S]*sendId: confirmationSendId/);
   assert.match(source, /messageConversationId\(message\) === conversationId/);
@@ -835,11 +836,10 @@ test("LINE OA uses the Admin client message ID as its send correlation ID", asyn
     package_id: "1669",
     sticker_id: "31690",
     client_message_id: "admin-client-message-1",
-    send_id: "worker-supplied-send-id",
   });
 
   const submitted = JSON.parse(bridge.sentPayloads[0].body);
-  assert.equal(submitted.sendId, "worker-supplied-send-id");
+  assert.equal(submitted.sendId, "admin-client-message-1");
   assert.equal(result.provider_message_id, undefined);
   bridge.dispose();
 });
