@@ -91,7 +91,7 @@ const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
 const BRIDGE_PROTOCOL_VERSION = 12;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 9;
 // Bump when an open Shopee page must replace its main-world bridge.
 const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
 const MAX_BATCH_MESSAGES = 500;

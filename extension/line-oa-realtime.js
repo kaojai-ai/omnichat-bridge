@@ -1,8 +1,8 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_VERSION = "line-oa-poll-12";
+  const BRIDGE_VERSION = "line-oa-poll-13";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 8;
+  const COMPATIBILITY_VERSION = 9;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -1120,7 +1120,7 @@
       }
       const payload = clone(profile.payload);
       const requestedSendId = value(command?.client_message_id);
-      const confirmationSendId = requestedSendId || sendId(conversationId);
+      const confirmationSendId = value(command?.send_id) || requestedSendId || sendId(conversationId);
       payload.sendId = confirmationSendId;
       if (expectedType === "text") {
         const textValue = value(command?.text);
