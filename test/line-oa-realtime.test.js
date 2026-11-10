@@ -835,11 +835,11 @@ test("LINE OA uses the Admin client message ID as its send correlation ID", asyn
     package_id: "1669",
     sticker_id: "31690",
     client_message_id: "admin-client-message-1",
-    send_id: "omc_admin-client-message-1",
+    send_id: "worker-supplied-send-id",
   });
 
   const submitted = JSON.parse(bridge.sentPayloads[0].body);
-  assert.equal(submitted.sendId, "omc_admin-client-message-1");
+  assert.equal(submitted.sendId, "worker-supplied-send-id");
   assert.equal(result.provider_message_id, undefined);
   bridge.dispose();
 });
