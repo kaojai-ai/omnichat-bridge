@@ -448,7 +448,8 @@ for (const provider of ["line_oa", "shopee"]) {
   });
 }
 
-test("optimistic LINE returns after acceptance and retries only the late final result until its assigned socket ACK", async () => {
+for (const initialChannelFails of [false, true]) {
+test(`optimistic LINE ${initialChannelFails ? "retains history confirmation after initial tab channel failure" : "returns after acceptance"} and retries only the final result until its assigned socket ACK`, async () => {
   const timers = new Map();
   let nextTimer = 0;
   let now = 0;
@@ -479,7 +480,9 @@ test("optimistic LINE returns after acceptance and retries only the late final r
     WebSocket: { OPEN: 1 }, liveConnections: connections, liveCommandResults: cached,
     Date: { now: () => now }, performance: { now: () => now },
     sessionEligibility: { generation: () => 1 }, replyQueue: { run: (_, action) => action() },
-    sendViaProvider: async (_command, options) => { sends++; callbacks = options; options.onAccepted(30_000); return { ok: true, accepted: true }; },
+    sendViaProvider: async (_command, options) => { sends++; callbacks = options; options.onAccepted(30_000);
+      if (initialChannelFails) throw new Error("Initial tab response channel closed.");
+      return { ok: true, accepted: true }; },
     createSendResultReporter: options => createSendResultReporter({ ...options, now: () => now, setTimer, clearTimer }),
     clearProviderSendRoute: () => { cleared++; },
     sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
@@ -490,7 +493,9 @@ test("optimistic LINE returns after acceptance and retries only the late final r
   assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: command.request_id }]);
   assert.equal(sends, 1);
   callbacks.onResult({ ok: true, provider_message_id: "real-provider-id" });
-  assert.equal(socket.sent[1].type, "send_result");
+  assert.deepEqual(socket.sent[1], { type: "send_result", request_id: command.request_id,
+    ok: true, provider_message_id: "real-provider-id" });
+  callbacks.onResult({ ok: false, uncertain: true, error: "Stale fallback" });
   advance(250);
   assert.deepEqual(socket.sent[2], socket.sent[1]);
   await run(JSON.stringify({ type: "send_result_ack", request_id: command.request_id }), context, otherSocket);
@@ -504,4 +509,6 @@ test("optimistic LINE returns after acceptance and retries only the late final r
   advance(180_000);
   await run(JSON.stringify(command), context, socket);
   assert.equal(sends, 1, "duplicate command returns cached final result without another provider request");
+  assert.deepEqual(socket.sent.at(-1), socket.sent[1], "duplicates retain the first confirmed final result");
 });
+}

@@ -3169,7 +3169,7 @@ async function handleLiveCommand(raw, context, socket) {
             acknowledge({ type: "send_accepted", request_id: command.request_id });
           },
           onResult: (result) => {
-            if (!cached.finalReporter) return;
+            if (!cached.finalReporter || cached.finalResult) return;
             cached.finalResult = finalReport(result);
             cached.finalReporter.publish(cached.finalResult);
           },
@@ -3201,9 +3201,10 @@ async function handleLiveCommand(raw, context, socket) {
     return;
   }
   if (cached.finalReporter && !result?.ok) {
-    cached.finalResult = { type: "send_result", request_id: command.request_id, ok: false, uncertain: true,
-      error: result?.error ?? "Reply confirmation was unavailable.", error_code: result?.error_code ?? "OMNICHAT_CONFIRMATION_UNAVAILABLE" };
-    cached.finalReporter.publish(cached.finalResult);
+    // Acceptance already started independent page confirmation. A failure of the
+    // initial tab response cannot settle it; the retained route supplies either
+    // its real final result or the bounded confirmation-unavailable fallback.
+    if (duplicate && cached.finalResult) acknowledge(cached.finalResult);
     return;
   }
   if (duplicate && result?.ok && socket.readyState === WebSocket.OPEN) {
