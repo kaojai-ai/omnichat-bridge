@@ -763,6 +763,17 @@ test("preserves missing-conversation codes across the content bridge", async () 
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
 });
 
+test("LINE content bridge preserves typed no-match confirmation failure and uncertainty", async () => {
+  const bridge = contentBridge("/account/bot/chat", { provider: "line_oa" });
+  const pending = bridge.sendCommand({ ...command, request_id: "confirmation-failed" });
+  await bridge.providerEvent({ type: "api_send_result", request_id: "confirmation-failed", ok: false,
+    uncertain: true, error_code: "OMNICHAT_CONFIRMATION_FAILED", error: "No matching LINE message was found." });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, true);
+  assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_FAILED");
+});
+
 for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: preserves confirmed pre-send and uncertain dispatch results`, async () => {
     const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/account/bot/chat", { provider });
