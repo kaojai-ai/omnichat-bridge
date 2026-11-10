@@ -3166,7 +3166,8 @@ async function handleLiveCommand(raw, context, socket) {
           expectedGeneration: selectedGeneration,
           onAccepted: (deadlineAt) => {
             if (adapter.id === "line_oa" && command.optimistic_confirmation === true) beginFinalTracking(deadlineAt ?? Date.now() + 30_000);
-            acknowledge({ type: "send_accepted", request_id: command.request_id });
+            acknowledge({ type: "send_accepted", request_id: command.request_id,
+              ...(adapter.id === "line_oa" && command.optimistic_confirmation === true ? { optimistic_confirmation: true } : {}) });
           },
           onResult: (result) => {
             if (!cached.finalReporter || cached.finalResult) return;
@@ -3196,7 +3197,8 @@ async function handleLiveCommand(raw, context, socket) {
   if (result?.accepted) {
     if (duplicate) {
       if (cached.finalResult) acknowledge(cached.finalResult);
-      else acknowledge({ type: "send_accepted", request_id: command.request_id });
+      else acknowledge({ type: "send_accepted", request_id: command.request_id,
+        ...(adapter.id === "line_oa" && command.optimistic_confirmation === true ? { optimistic_confirmation: true } : {}) });
     }
     return;
   }

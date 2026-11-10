@@ -438,7 +438,7 @@ for (const provider of ["line_oa", "shopee"]) {
       sanitizeSendDiagnostics: () => ({}), installationId: async () => "installation",
       recordLog: async () => {}, scheduleKeepalive() {},
     });
-    const running = run(JSON.stringify({ type: "send_text", request_id: "request-accepted", provider }),
+    const running = run(JSON.stringify({ type: "send_text", request_id: "request-accepted", provider, ...(provider === "shopee" ? { optimistic_confirmation: true } : {}) }),
       { key: `${provider}:account`, account: { provider, provider_account_id: "account" } }, socket);
     await new Promise(setImmediate);
     assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: "request-accepted" }]);
@@ -490,7 +490,7 @@ test(`optimistic LINE ${initialChannelFails ? "retains history confirmation afte
   });
   const command = { type: "send_text", request_id: "optimistic-command", provider: "line_oa", optimistic_confirmation: true };
   await run(JSON.stringify(command), context, socket);
-  assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: command.request_id }]);
+  assert.deepEqual(socket.sent, [{ type: "send_accepted", request_id: command.request_id, optimistic_confirmation: true }]);
   assert.equal(sends, 1);
   callbacks.onResult({ ok: true, provider_message_id: "real-provider-id" });
   assert.deepEqual(socket.sent[1], { type: "send_result", request_id: command.request_id,
