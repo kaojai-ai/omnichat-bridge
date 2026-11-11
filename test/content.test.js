@@ -10,9 +10,10 @@ const adaptersSource = await readFile(new URL("../extension/lib/provider-adapter
 const shopeeAdapterSource = await readFile(new URL("../extension/lib/shopee-adapter.js", import.meta.url), "utf8");
 const lineOaSource = await readFile(new URL("../extension/lib/line-oa.js", import.meta.url), "utf8");
 const shopeeParserSource = await readFile(new URL("../extension/lib/shopee.js", import.meta.url), "utf8");
+const linePageSource = await readFile(new URL("../extension/line-oa-realtime.js", import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false, shopeeOrigin = "https://seller.shopee.co.th" } = {}) {
+function contentBridge(pathname = "/new-webchat/conversations", { localConsent = false, storage = {}, provider = "shopee", runtimeHandler = null, realShopeeParser = false, shopeeOrigin = "https://seller.shopee.co.th", lineFetch = null } = {}) {
   const runtimeListeners = [];
   const windowListeners = new Map();
   const documentListeners = new Map();
@@ -31,8 +32,12 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     removeEventListener(type, listener) {
       windowListeners.set(type, (windowListeners.get(type) ?? []).filter((item) => item !== listener));
     },
+    ...(lineFetch ? { fetch: lineFetch } : {}),
     postMessage(message) {
       runtimeMessages.push(message);
+      if (lineFetch) queueMicrotask(() => {
+        for (const listener of windowListeners.get("message") ?? []) listener({ source: window, origin: window.location.origin, data: message });
+      });
     },
   };
   context = vm.createContext({ performance,
@@ -46,7 +51,8 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
         documentListeners.set(type, (documentListeners.get(type) ?? []).filter(item => item !== listener));
       },
     },
-    URL,
+    URL, Headers, Request, FormData, Blob, ArrayBuffer, AbortSignal, AbortController,
+    setInterval, clearInterval,
     chrome: {
       runtime: {
         onMessage: {
@@ -98,6 +104,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   if (realShopeeParser) vm.runInContext(shopeeParserSource, context);
   vm.runInContext(shopeeAdapterSource, context);
   vm.runInContext(lineOaSource, context);
+  if (lineFetch) vm.runInContext(linePageSource, context);
   vm.runInContext(source, context);
 
   const sendCommand = (message) => new Promise((resolve) => {
@@ -763,6 +770,17 @@ test("preserves missing-conversation codes across the content bridge", async () 
   assert.equal((await pending).error_code, "SHOPEE_CONVERSATION_MISSING");
 });
 
+test("LINE content bridge preserves typed no-match confirmation failure and uncertainty", async () => {
+  const bridge = contentBridge("/account/bot/chat", { provider: "line_oa" });
+  const pending = bridge.sendCommand({ ...command, request_id: "confirmation-failed" });
+  await bridge.providerEvent({ type: "api_send_result", request_id: "confirmation-failed", ok: false,
+    uncertain: true, error_code: "OMNICHAT_CONFIRMATION_FAILED", error: "No matching LINE message was found." });
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, true);
+  assert.equal(result.error_code, "OMNICHAT_CONFIRMATION_FAILED");
+});
+
 for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: preserves confirmed pre-send and uncertain dispatch results`, async () => {
     const bridge = contentBridge(provider === "shopee" ? "/new-webchat/conversations" : "/account/bot/chat", { provider });
@@ -1175,3 +1193,111 @@ for (const succeeds of [true, false]) {
     if (!succeeds) assert.equal(ack.error, "storage unavailable");
   });
 }
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: acceptance forwards once without resolving the final send`, async () => {
+    const bridge = contentBridge(provider === "line_oa" ? "/bot-1/chat/chat-1" : "/new-webchat/conversations", { provider });
+    let completed = false;
+    const result = bridge.sendCommand(command).then(value => { completed = true; return value; });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: "unknown" });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    assert.equal(completed, false);
+    const forwarded = bridge.runtimeMessages.filter(message => message.type === "api_send_accepted" && !message.source);
+    assert.deepEqual(plain(forwarded), [{ type: "api_send_accepted", request_id: command.request_id }]);
+    await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "real-provider-id" });
+    assert.equal((await result).provider_message_id, "real-provider-id");
+    await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+    assert.equal(bridge.runtimeMessages.filter(message => message.type === "api_send_accepted" && !message.source).length, 1);
+  });
+}
+
+test("a fast final result waits for the separate acceptance channel to acknowledge forwarding", async () => {
+  let acknowledge;
+  const bridge = contentBridge("/new-webchat/conversations", { runtimeHandler: message =>
+    message.type === "api_send_accepted" ? new Promise(resolve => { acknowledge = resolve; }) : { ok: true },
+  });
+  let completed = false;
+  const result = bridge.sendCommand(command).then(value => { completed = true; return value; });
+  await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "real-id" });
+  assert.equal(completed, false, "final response must not remove the background acceptance route too early");
+  acknowledge({ ok: true });
+  assert.equal((await result).provider_message_id, "real-id");
+});
+
+for (const historyAvailable of [true, false]) {
+  test(`opt-in LINE empty HTTP 200 returns before history later ${historyAvailable ? "confirms" : "fails"}, without resending`, async () => {
+    const clientMessageId = "omc_12345678-1234-4234-9234-123456789abc";
+    let releaseHistory;
+    let sendId;
+    let sends = 0;
+    const history = new Promise(resolve => { releaseHistory = resolve; });
+    const bridge = contentBridge("/bot-1/chat/chat-1", { provider: "line_oa", lineFetch: async (input, init = {}) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/bots") return { ok: true, json: async () => ({ list: [{ botId: "bot-1", basicSearchId: "@fixture" }] }) };
+      if (url.pathname.endsWith("/messages/send")) {
+        sends++; sendId = JSON.parse(init.body).sendId;
+        return { ok: true, status: 200, json: async () => { throw new SyntaxError("empty body"); } };
+      }
+      if (url.pathname.endsWith("/messages")) {
+        await history;
+        assert.equal(init.signal.aborted, false, "confirmation must not inherit the expired initial deadline");
+        if (!historyAvailable) throw new TypeError("History unavailable");
+        return { ok: true, json: async () => ({ list: [{ source: { chatId: "chat-1" }, message: { id: "real-line-id", sendId } }] }) };
+      }
+      throw new Error("Unexpected fixture endpoint");
+    } });
+    await bridge.providerEvent({ type: "detect_account_v3", request_id: "detect-fixture" });
+    const initial = bridge.sendCommand({ ...command, conversation_id: "chat-1", browser_provider_account_id: "@fixture",
+      client_message_id: clientMessageId, confirm_send: true, deadline_at_ms: Date.now() + 200 });
+    try {
+      assert.deepEqual(plain(await initial), { ok: true, accepted: true });
+      assert.equal(bridge.runtimeMessages.some(message => message.type === "api_send_final"), false);
+      await new Promise(resolve => setTimeout(resolve, 250));
+      assert.equal(bridge.runtimeMessages.some(message => message.type === "api_send_final"), false);
+      releaseHistory();
+      for (let attempt = 0; attempt < 20 && !bridge.runtimeMessages.some(message => message.type === "api_send_final"); attempt++) await new Promise(setImmediate);
+      const final = bridge.runtimeMessages.find(message => message.type === "api_send_final");
+      assert.equal(final.result.ok, historyAvailable);
+      if (historyAvailable) assert.equal(final.result.provider_message_id, "real-line-id");
+      else {
+        assert.equal(final.result.uncertain, true);
+        assert.equal(final.result.error_code, "OMNICHAT_CONFIRMATION_UNAVAILABLE");
+        assert.equal(final.result.provider_message_id, undefined);
+      }
+      assert.equal(sends, 1);
+      assert.equal(sendId, clientMessageId, "native send preserves the Admin echo-suppression ID");
+    } finally { releaseHistory(); }
+  });
+}
+
+test("only opt-in LINE commands may finish at acceptance; Shopee still requires its real message ID", async () => {
+  const bridge = contentBridge("/new-webchat/conversations", { provider: "shopee" });
+  let completed = false;
+  const pending = bridge.sendCommand({ ...command, confirm_send: true }).then(result => { completed = true; return result; });
+  await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+  assert.equal(completed, false);
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "shopee-id" });
+  assert.equal((await pending).provider_message_id, "shopee-id");
+  assert.equal(bridge.runtimeMessages.some(message => message.type === "api_send_final"), false);
+});
+
+
+test("LINE acceptance replaces the initial deadline before delayed background forwarding completes", async () => {
+  let acknowledge;
+  const bridge = contentBridge("/bot-1/chat/chat-1", { provider: "line_oa", runtimeHandler: message =>
+    message.type === "api_send_accepted" ? new Promise(resolve => { acknowledge = resolve; }) : { ok: true } });
+  let completed = false;
+  const initial = bridge.sendCommand({ ...command, confirm_send: true, deadline_at_ms: Date.now() + 100 })
+    .then(result => { completed = true; return result; });
+  await bridge.providerEvent({ type: "api_send_accepted", request_id: command.request_id });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(completed, false, "initial deadline cannot delete accepted history tracking");
+  await bridge.providerEvent({ type: "api_send_result", request_id: command.request_id, ok: true, provider_message_id: "late-real-id" });
+  acknowledge({ ok: true });
+  assert.deepEqual(plain(await initial), { ok: true, accepted: true });
+  await new Promise(setImmediate);
+  const receipt = bridge.runtimeMessages.find(message => message.type === "api_send_final");
+  assert.equal(receipt.result.provider_message_id, "late-real-id");
+});
