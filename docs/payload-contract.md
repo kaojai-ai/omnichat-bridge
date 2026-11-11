@@ -311,6 +311,27 @@ for these lifecycle fixes. A target can continue issuing existing tickets and
 handling existing status/result envelopes. Optional deadline support does not
 require a particular target product or infrastructure.
 
+### Optional two-stage LINE confirmation
+
+Targets can set `confirm_send: true` on LINE commands to separate provider
+acceptance from history confirmation. After an HTTP 200 without an explicit
+provider error, the extension immediately sends `send_result` with `ok: true`
+and `provider_message_id: "omnichat-pending:<request_id>"`. This temporary ID
+records acceptance; it is not a real LINE message ID or proof of delivery.
+
+History confirmation continues in the background. The extension sends its
+final success with a real provider ID, or an uncertain failure, as
+`send_receipt`. It retries only that receipt for up to 30 seconds until the
+assigned socket receives `{ "type": "send_receipt_ack", "request_id": "..." }`.
+The target must settle the receipt before acknowledging it. KaoJai waits for
+the worker's exact stored-row marker, inserts or reuses the final message,
+then withdraws the temporary row through its existing unsend event.
+
+Legacy LINE commands and Shopee retain their final-result behavior. Receipt
+tracking is in memory and bound to the original socket; browser loss or a
+missing persistence marker can leave the temporary row unresolved. Neither
+missing confirmation nor receipt retries authorize resending provider content.
+
 
 Manual Retry replaces the current recovery attempt and bypasses automatic delivery
 and reconnect backoff. It preserves captured queues and never replays outgoing

@@ -27,6 +27,7 @@ import { deliverWithIsolation } from "./lib/delivery-isolation.js";
 import { createDiagnosticBuffer } from "./lib/diagnostic-buffer.js";
 import { createSessionEligibility } from "./lib/session-eligibility.js";
 import { createStatusReporter } from "./lib/status-reporter.js";
+import { createSendReceiptReporter } from "./lib/send-receipt-reporter.js";
 import { createDeliveryScheduler } from "./lib/delivery-scheduler.js";
 import { createReplyQueue } from "./lib/reply-queue.js";
 import {
@@ -88,10 +89,10 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 12;
+const BRIDGE_PROTOCOL_VERSION = 13;
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 9;
 // Bump when an open Shopee page must replace its main-world bridge.
 const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
 const MAX_BATCH_MESSAGES = 500;
@@ -966,6 +967,7 @@ async function applyExtensionUpdate() {
   await storeExtensionUpdate({ status: "updating", attempted_at: Date.now() });
   try {
     await replyQueue.pauseAndDrain();
+    await Promise.all([...liveCommandResults.values()].map((command) => command.finalTracking).filter(Boolean));
     await syncCoordinator.drain();
     await exclusive(async () => {
       chrome.runtime.reload();
@@ -977,6 +979,14 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "api_send_final") {
+    respond({ ok: forwardProviderFinalResult(message, _sender) });
+    return false;
+  }
+  if (message?.type === "api_send_accepted") {
+    respond({ ok: forwardProviderAcceptance(message, _sender) });
+    return false;
+  }
   if (message?.type === "send_readiness_changed") {
     const adapter = providerAdapterForId(message.provider);
     if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return false;
@@ -1558,6 +1568,47 @@ function providerAdapterForCommand(message) {
 }
 
 const activeProviderSendAccounts = new Set();
+const providerSendAcceptances = new Map();
+
+function clearProviderSendRoute(requestId) {
+  const pending = providerSendAcceptances.get(requestId);
+  if (pending?.finalTimer) clearTimeout(pending.finalTimer);
+  providerSendAcceptances.delete(requestId);
+}
+
+function providerSendRoute(message, sender) {
+  const pending = providerSendAcceptances.get(message.request_id);
+  if (!pending || sender.tab?.id !== pending.tabId || sender.frameId !== 0
+    || (providerTabEpochs.get(pending.tabId) ?? 0) !== pending.tabEpoch) return null;
+  return pending;
+}
+
+function forwardProviderAcceptance(message, sender) {
+  const pending = providerSendRoute(message, sender);
+  if (!pending || pending.accepted) return false;
+  pending.accepted = true;
+  pending.finalDeadlineAt = Date.now() + 30_000;
+  pending.onAccepted(pending.finalDeadlineAt);
+  if (pending.confirmationTracking) pending.finalTimer = setTimeout(() => {
+    if (providerSendAcceptances.get(message.request_id) !== pending || pending.finalReceived) return;
+    pending.finalReceived = true;
+    pending.onResult({ ok: false, uncertain: true, error_code: "OMNICHAT_CONFIRMATION_UNAVAILABLE",
+      error: "The provider page did not return a final confirmation before the tracking deadline." });
+  }, Math.max(1, pending.finalDeadlineAt - Date.now() - 5_000));
+  return true;
+}
+
+function forwardProviderFinalResult(message, sender) {
+  const pending = providerSendRoute(message, sender);
+  const result = message.result;
+  if (!pending?.confirmationTracking || !pending.accepted || !result || typeof result !== "object"
+    || typeof result.ok !== "boolean" || (result.ok && (typeof result.provider_message_id !== "string" || !result.provider_message_id.trim() || result.provider_message_id.length > 200))) return false;
+  if (!pending.finalReceived) {
+    pending.finalReceived = true;
+    pending.onResult(result);
+  }
+  return true;
+}
 
 async function sendViaProvider(message, options = {}) {
   const started = (globalThis.performance?.now() ?? Date.now());
@@ -1651,6 +1702,12 @@ async function prepareAndSendViaProvider(message, state = {}) {
   stageLog("provider_dispatch");
   state.dispatchStartedAt = globalThis.performance?.now() ?? Date.now();
   state.dispatchStarted = true;
+  if (typeof state.onAccepted === "function") providerSendAcceptances.set(requestId, {
+    tabId: tab.id, tabEpoch: providerTabEpochs.get(tab.id) ?? 0,
+    onAccepted: state.onAccepted, accepted: false,
+    confirmationTracking: adapter.id === "line_oa" && message.confirm_send === true && typeof state.onResult === "function",
+    onResult: state.onResult,
+  });
   try {
     result = await withRequestTimeout(() => chrome.tabs.sendMessage(tab.id, {
       ...message,
@@ -1670,6 +1727,9 @@ async function prepareAndSendViaProvider(message, state = {}) {
     return { ok: false, uncertain: true, dispatch_started: true, execution_stage: "provider_dispatch", retryable: false, error: "Provider reply confirmation timed out. Check provider history before retrying.",
       diagnostics: { diagnostic_version: 1, provider: adapter.id, operation: "send",
         command_type: commandType, delivery_uncertain: true, failure_kind: "transport_failure", timed_out: true } };
+  } finally {
+    const pending = providerSendAcceptances.get(requestId);
+    if (!pending?.confirmationTracking || !pending.accepted) clearProviderSendRoute(requestId);
   }
   // Once the command reaches the provider tab, an absent or malformed response
   // cannot prove the provider did not accept it. Never turn this into a
@@ -3017,6 +3077,11 @@ async function handleLiveCommand(raw, context, socket) {
     }
     return;
   }
+  if (command?.type === "send_receipt_ack") {
+    const cached = liveCommandResults.get(`${context.key}:${command.request_id}`);
+    if (cached?.socket === socket && liveConnections.get(context.key)?.socket === socket) cached.finalReporter?.acknowledge(command);
+    return;
+  }
   const adapter = providerAdapterForCommand(command);
   if (!adapter?.supportsSend(command?.type) || adapter.id !== context.account.provider) return;
   if (messageProviderAccountId(command) !== canonicalProviderAccountId(context)) return;
@@ -3046,6 +3111,7 @@ async function handleLiveCommand(raw, context, socket) {
     if (cached.expiresAt <= now) liveCommandResults.delete(cachedKey);
   }
   let cached = liveCommandResults.get(key);
+  if (cached?.socket && cached.socket !== socket) return;
   const duplicate = Boolean(cached);
   const selectedGeneration = sessionEligibility.generation(context.key);
   const receivedAt = (globalThis.performance?.now() ?? Date.now());
@@ -3062,14 +3128,54 @@ async function handleLiveCommand(raw, context, socket) {
       void recordLog("info", "live_command", "completed", "Reply command rejected before execution.", { request_id: command.request_id, provider: adapter.id, command_type: command.type, provider_account_id: context.account.provider_account_id, installation_id: await installationId(), outcome: "rejected", acknowledgement_status: acknowledgementStatus, total_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt) });
       return;
     }
-    cached = {
-      expiresAt: Infinity,
-      result: replyQueue.run(context.key, async () => {
+    cached = { expiresAt: Infinity, socket };
+    liveCommandResults.set(key, cached);
+    const beginFinalTracking = (deadlineAt) => {
+      if (cached.finalReporter) return;
+      let finishTracking;
+      cached.finalTracking = new Promise((resolve) => { finishTracking = resolve; });
+      cached.finalReporter = createSendReceiptReporter({
+        requestId: command.request_id, deadlineAt,
+        send: (report) => {
+          if (liveConnections.get(context.key)?.socket !== socket || socket.readyState !== WebSocket.OPEN) throw new Error("Command socket changed.");
+          acknowledge(report);
+        },
+        onSettled: (acknowledged) => {
+          clearProviderSendRoute(command.request_id);
+          finishTracking();
+          if (!acknowledged) void recordLog("error", "live_command", "result_ack_timeout", "Final send receipt was not acknowledged before the tracking deadline.", {
+            request_id: command.request_id, provider: adapter.id, provider_account_id: context.account.provider_account_id,
+          });
+        },
+      });
+    };
+    const finalReport = (result) => ({
+      type: "send_receipt", request_id: command.request_id, ok: result.ok === true,
+      ...(result.ok ? { provider_message_id: result.provider_message_id } : {
+        error: typeof result.error === "string" ? result.error.slice(0, 500) : "Reply failed.",
+        ...(typeof result.error_code === "string" && /^[A-Z0-9_]{1,64}$/.test(result.error_code) ? { error_code: result.error_code } : {}),
+        ...(result.uncertain === true ? { uncertain: true } : {}),
+      }),
+    });
+    cached.result = replyQueue.run(context.key, async () => {
         void recordLog("info", "live_command", "queue_started", "Reply command left queue.", { request_id: command.request_id, provider: adapter.id, provider_account_id: context.account.provider_account_id, queue_duration_ms: Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt) });
         queueDurationMs = Math.round((globalThis.performance?.now() ?? Date.now()) - receivedAt);
-        const sent = await sendViaProvider(command, { expectedGeneration: selectedGeneration });
+        const sent = await sendViaProvider(command, {
+          expectedGeneration: selectedGeneration,
+          onAccepted: (deadlineAt) => {
+            if (adapter.id !== "line_oa" || command.confirm_send !== true) return;
+            beginFinalTracking(deadlineAt ?? Date.now() + 30_000);
+            acknowledge({ type: "send_result", request_id: command.request_id,
+              ok: true, provider_message_id: `omnichat-pending:${command.request_id}` });
+          },
+          onResult: (result) => {
+            if (!cached.finalReporter || cached.finalResult) return;
+            cached.finalResult = finalReport(result);
+            cached.finalReporter.publish(cached.finalResult);
+          },
+        });
         // A pending extension restart may run as soon as this reply operation exits.
-        if (sent?.ok && socket.readyState === WebSocket.OPEN) {
+        if (sent?.ok && !sent.accepted && !cached.finalReporter && socket.readyState === WebSocket.OPEN) {
           acknowledge({ type: "send_result", request_id: command.request_id,
             ok: true, provider_message_id: sent.provider_message_id });
         }
@@ -3079,15 +3185,22 @@ async function handleLiveCommand(raw, context, socket) {
         ...(error?.name === "QueueTimeoutError" ? { execution_stage: "queue", dispatch_started: false,
           retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" } : {}),
         ...(sanitizeSendDiagnostics(error?.diagnostics) ? { diagnostics: sanitizeSendDiagnostics(error.diagnostics) } : {}),
-      })),
-    };
+      }));
     cached.result = cached.result.then((result) => {
-      cached.expiresAt = Date.now() + 120_000;
+      // Keep the final cache through the confirmation command ticket's five-minute lifetime.
+      cached.expiresAt = Date.now() + (command.confirm_send === true ? 300_000 : 120_000);
       return result;
     });
-    liveCommandResults.set(key, cached);
   }
   const result = await cached.result;
+  if (cached.finalReporter) {
+    if (duplicate) {
+      acknowledge({ type: "send_result", request_id: command.request_id,
+        ok: true, provider_message_id: `omnichat-pending:${command.request_id}` });
+      if (cached.finalResult) acknowledge(cached.finalResult);
+    }
+    return;
+  }
   if (duplicate && result?.ok && socket.readyState === WebSocket.OPEN) {
     acknowledge({ type: "send_result", request_id: command.request_id,
       ok: true, provider_message_id: result.provider_message_id });

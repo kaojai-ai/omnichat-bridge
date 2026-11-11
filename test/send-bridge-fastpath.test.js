@@ -82,3 +82,38 @@ test("socket acknowledgement failure retains a terminal result without sending a
   assert.equal(terminal[4].request_id, "request");
   assert.equal(terminal[4].text, undefined);
 });
+
+test("acceptance forwarding is scoped to the active tab, frame and document and runs once", () => {
+  const scope = vm.createContext({ providerTabEpochs: new Map([[7, 2]]) });
+  const api = vm.runInContext(`(() => { ${section("const providerSendAcceptances =", "async function sendViaProvider(")}; return { pending: providerSendAcceptances, forward: forwardProviderAcceptance }; })()`, scope);
+  let accepted = 0;
+  api.pending.set("request", { tabId: 7, tabEpoch: 2, accepted: false, onAccepted: () => { accepted++; } });
+  const event = { request_id: "request" };
+  assert.equal(api.forward(event, { tab: { id: 8 }, frameId: 0 }), false);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 1 }), false);
+  scope.providerTabEpochs.set(7, 3);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), false);
+  scope.providerTabEpochs.set(7, 2);
+  assert.equal(api.forward({ request_id: "unknown" }, { tab: { id: 7 }, frameId: 0 }), false);
+  assert.equal(accepted, 0);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), true);
+  assert.equal(api.forward(event, { tab: { id: 7 }, frameId: 0 }), false);
+  assert.equal(accepted, 1);
+});
+
+test("late confirmation receipts require the original request, tab, top frame and document", () => {
+  const scope = vm.createContext({ providerTabEpochs: new Map([[7, 2]]), clearTimeout() {}, setTimeout: () => 1 });
+  const api = vm.runInContext(`(() => { ${section("const providerSendAcceptances =", "async function sendViaProvider(")}; return { pending: providerSendAcceptances, final: forwardProviderFinalResult }; })()`, scope);
+  const finals = [];
+  api.pending.set("request", { tabId: 7, tabEpoch: 2, confirmationTracking: true, accepted: true, onResult: result => finals.push(result) });
+  const event = { request_id: "request", result: { ok: true, provider_message_id: "real-id" } };
+  assert.equal(api.final(event, { tab: { id: 8 }, frameId: 0 }), false);
+  assert.equal(api.final(event, { tab: { id: 7 }, frameId: 1 }), false);
+  scope.providerTabEpochs.set(7, 3);
+  assert.equal(api.final(event, { tab: { id: 7 }, frameId: 0 }), false);
+  scope.providerTabEpochs.set(7, 2);
+  assert.equal(api.final({ ...event, result: { ok: true } }, { tab: { id: 7 }, frameId: 0 }), false);
+  assert.equal(api.final(event, { tab: { id: 7 }, frameId: 0 }), true);
+  assert.equal(api.final(event, { tab: { id: 7 }, frameId: 0 }), true);
+  assert.equal(finals.length, 1);
+});
