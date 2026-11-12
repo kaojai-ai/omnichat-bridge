@@ -183,16 +183,17 @@ export function accountConnectionStatus(live) {
   };
 }
 
-// Explicit capabilities override historical surface/leader labels. Legacy states
-// have no capability fields and keep their existing presentation.
+// Only explicit capabilities can make an account green; old surface/leader
+// labels are not evidence that incoming messages are working.
 export function accountCapabilityStatus(live, t) {
-  if (typeof live?.send_ready !== "boolean" && typeof live?.sync_ready !== "boolean") return null;
+  if (!live) return null;
   const reason = live.eligibility_reason_code || live.provider_session_reason_code;
   if (reason === "waiting_for_tab") return { label: t("waitingBrowser"), state: "neutral" };
   if (["login_required", "authentication_required", "session_expired", "signed_out"].includes(reason)) return { label: t("loginRequired"), state: "error" };
   if (live.socket !== "connected") return null;
   if (live.provider_recovery_state === "opening") return { label: t("preparingChat"), state: "neutral", loading: true };
-  if (live.send_ready === true && live.sync_ready === true) return { label: t("messagingReady"), state: "ready" };
+  if (live.send_ready === true && live.receive_ready === true && live.sync_ready === true) return { label: t("messagingReady"), state: "ready" };
+  if (live.send_ready === true && live.receive_ready !== true) return { label: t("checkingInbound"), state: "neutral", loading: true };
   if (live.send_ready === true && live.sync_ready === false) return { label: t("syncUnavailable"), state: "neutral" };
   return { label: t("preparingChat"), state: "neutral", loading: true };
 }
@@ -201,5 +202,6 @@ export function accountCapabilitySummary(live, t) {
   if (typeof live?.send_ready !== "boolean" && typeof live?.sync_ready !== "boolean") return "";
   return [t(live.socket === "connected" ? "capConnected" : "capDisconnected"),
     t(live.send_ready === true ? "sendReady" : "sendUnavailable"),
+    t(live.receive_ready === true ? "receiveReady" : "receiveUnavailable"),
     t(live.sync_ready === true ? "syncReady" : "syncUnavailable")].join(" · ");
 }

@@ -1175,3 +1175,18 @@ for (const succeeds of [true, false]) {
     if (!succeeds) assert.equal(ack.error, "storage unavailable");
   });
 }
+
+test("LINE poll success refreshes readiness without an account or send capability change", async () => {
+  const bridge = contentBridge("/bot", { provider: "line_oa" });
+  const status = { type: "provider_status", account_access_verified: true,
+    accessible_account_ids: ["@one", "@two"], surface_ready: true,
+    send_verified_at: new Date().toISOString(), realtime_connected: true };
+  await bridge.providerEvent(status);
+  bridge.runtimeMessages.length = 0;
+  const polls = { "@one": new Date().toISOString() };
+  await bridge.providerEvent({ ...status, last_successful_poll_at_by_account: polls });
+  assert.equal(bridge.runtimeMessages.filter(message => message.type === "send_readiness_changed").length, 1);
+  bridge.runtimeMessages.length = 0;
+  await bridge.providerEvent({ ...status, last_successful_poll_at_by_account: polls });
+  assert.equal(bridge.runtimeMessages.filter(message => message.type === "send_readiness_changed").length, 0);
+});

@@ -106,12 +106,14 @@ for (const config of [
     const lineContext = { key: 'line_oa:@first', account: { provider: 'line_oa', provider_account_id: '@first' },
       adapter: { id: 'line_oa', sendCommands: ['send_text', 'send_image', 'send_video', 'send_file', 'send_sticker'] }, config };
     let polls = { '@first': new Date().toISOString() };
+    let localStatus;
     const snapshot = fn('connectionStatusSnapshot', '\nfunction statusPublishKey', {
       STORAGE: {}, readStorage: async () => ({}), readAccountState: (_state, _key, fallback) => fallback,
       normalizeDeviceName: () => '', buildConnectionHealth: () => ({ reason_code: 'healthy' }),
       persistProviderSurfaceState: async () => {}, installationId: async () => 'installation',
       chrome: { runtime: { getManifest: () => ({ version: 'test' }), getPlatformInfo: async () => ({ os: 'mac' }) } },
       PROVIDER_HEALTH_STALE_MS: 60_000, canonicalProviderAccountId,
+      updateLiveState: async (_context, status) => { localStatus = status; },
       providerTabStatus: async () => ({ ok: true, account_access_verified: true,
         accessible_account_ids: ['@first', '@second'], realtime_connected: true,
         command_capabilities_by_account: { '@first': ['send_text'] }, last_successful_poll_at_by_account: polls }),
@@ -121,10 +123,14 @@ for (const config of [
     assert.equal(fresh.send_ready, true);
     assert.equal(fresh.receive_ready, true);
     assert.equal(fresh.receive_reason_code, 'healthy');
+    assert.equal(localStatus.receive_ready, fresh.receive_ready);
+    assert.equal(localStatus.receive_reason_code, fresh.receive_reason_code);
 
     polls = { '@second': new Date().toISOString(), 'channel-1': new Date().toISOString() };
     assert.equal((await snapshot(lineContext)).receive_ready, false, 'another browser account or server ID cannot supply poll evidence');
     polls = { '@first': new Date(Date.now() - 61_000).toISOString() };
     assert.equal((await snapshot(lineContext)).receive_reason_code, 'inbound_poll_unverified');
+    assert.equal(localStatus.receive_ready, false);
+    assert.equal(localStatus.receive_reason_code, 'inbound_poll_unverified');
   });
 }

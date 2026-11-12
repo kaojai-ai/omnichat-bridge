@@ -256,10 +256,12 @@ test("LINE watchdog restores every missing OA without marking them ready from an
   assert.equal(calls.lives["oa-c"].state, "needs_attention");
 });
 
-test("LINE watchdog leaves missing OA polling stopped when automatic recovery is disabled", async () => {
+test("LINE watchdog restores missing OA polling in an open tab when automatic tab recovery is disabled", async () => {
   const { run, calls } = harness({ accounts: ["oa-a", "oa-b"], pollingAccounts: ["oa-a"] });
   await run();
-  assert.equal(calls.polling.length, 0);
+  assert.deepEqual(calls.polling, ["oa-b"]);
+  assert.equal(calls.created, 0);
+  assert.equal(calls.reloaded, 0);
   assert.equal(calls.lives["oa-a"].state, "ready");
   assert.equal(calls.lives["oa-b"].state, "needs_attention");
 });
@@ -415,4 +417,25 @@ test("concurrent watchdog calls share one active prerequisite refresh", async ()
   await Promise.all([first, second]);
   assert.equal(refreshes, 1);
   assert.equal(recoveries, 1);
+});
+
+test("LINE polling restoration reuses verified shared-session access and bypasses cooldown", async () => {
+  const context = { key: "line_oa:oa-b", adapter: { id: "line_oa" } };
+  let options;
+  const scope = vm.createContext({
+    accountSyncs: new Map(), providerAutomaticRetryAt: new Map(), providerAutomaticRetryAttempts: new Map(),
+    requestAccountSync: async (selected, trigger, value) => {
+      assert.equal(selected, context);
+      assert.equal(trigger, "automatic");
+      options = value;
+      return {};
+    },
+  });
+  const start = source.indexOf("function startUnattendedProviderSync(");
+  const end = source.indexOf("\n// Verify send prerequisites", start);
+  vm.runInContext(source.slice(start, end), scope);
+  scope.startUnattendedProviderSync({ id: 42 }, context);
+  assert.equal(options.shared_session, true);
+  assert.equal(options.restorePolling, true);
+  assert.equal(options.tab_id, 42);
 });
