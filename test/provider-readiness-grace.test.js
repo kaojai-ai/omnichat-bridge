@@ -65,6 +65,21 @@ function fixture(provider = "shopee") {
     finishInstallation() { resolveInstallation("installation"); },
   };
 }
+test("LINE receive health follows the polling owner when a different tab can send", async () => {
+  const h = fixture("line_oa");
+  const ownerTab = { ...h.tab, id: h.tab.id + 1 };
+  h.tabs = [h.tab, ownerTab];
+  h.scope.STORAGE.pollingOwners = "owners";
+  h.scope.readStorage = async () => ({ owners: { [h.context.key]: { tab_id: ownerTab.id } } });
+  h.scope.readAccountState = (state, key, fallback) => state?.[key] ?? fallback;
+  h.scope.providerTabStatus = async tab => ({ ...h.healthy,
+    last_successful_poll_at_by_account: tab.id === ownerTab.id ? { shop: new Date(100_000).toISOString() } : {},
+  });
+  const snapshot = await h.snapshot();
+  assert.equal(snapshot.send_ready, true);
+  assert.equal(snapshot.receive_ready, true);
+});
+
 for (const provider of ["shopee", "line_oa"]) {
   test(`${provider}: missing response has fixed 30s grace, restores same generation, and warns only at60s`, async () => {
     const h = fixture(provider);

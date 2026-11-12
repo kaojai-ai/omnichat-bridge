@@ -200,8 +200,7 @@ export function accountCapabilityStatus(live, t) {
 
 export function accountCapabilitySummary(live, t) {
   if (typeof live?.send_ready !== "boolean" && typeof live?.sync_ready !== "boolean") return "";
-  return [t(live.socket === "connected" ? "capConnected" : "capDisconnected"),
-    t(live.send_ready === true ? "sendReady" : "sendUnavailable"),
-    t(live.receive_ready === true ? "receiveReady" : "receiveUnavailable"),
-    t(live.sync_ready === true ? "syncReady" : "syncUnavailable")].join(" · ");
+  return [[live.send_ready, "capSend"], [live.receive_ready, "capReceive"], [live.sync_ready, "capSync"]]
+    .map(([ready, key]) => `${live.socket === "connected" && ready === true ? "✓" : "○"} ${t(key)}`)
+    .join(" · ");
 }

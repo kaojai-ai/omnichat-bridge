@@ -111,8 +111,6 @@ const deviceNameInput = document.querySelector("#device-name");
 const deviceNameBadge = document.querySelector("#device-name-badge");
 const configStatus = document.querySelector("#config-status");
 const configFile = document.querySelector("#config-file");
-const leaderStatus = document.querySelector("#leader-status");
-const leaderCurrent = leaderStatus.querySelector(".leader-current");
 const openLogsButton = document.querySelector("#open-logs");
 const logsScreen = document.querySelector("#logs-screen");
 const logList = document.querySelector("#log-list");
@@ -189,7 +187,7 @@ function renderExtensionUpdate(update) {
 
 const TRANSLATIONS = {
   en: {
-    waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and receive", checkingInbound: "Restoring incoming messages…", receiveReady: "Receiving ready", receiveUnavailable: "Receiving unverified", capConnected: "Connected", capDisconnected: "Not connected", sendReady: "Sending ready", sendUnavailable: "Sending unavailable", syncReady: "Sync ready", syncUnavailable: "Sync unavailable",
+    waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and receive", checkingInbound: "Checking incoming messages…", capSend: "Send", capReceive: "Receive", capSync: "Sync", syncUnavailable: "Sync unavailable",
     forwardLogDescription: "Forward this level and above automatically.",
     allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
@@ -206,7 +204,7 @@ const TRANSLATIONS = {
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
-    waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมรับและส่งข้อความ", checkingInbound: "กำลังกู้คืนการรับข้อความ…", receiveReady: "พร้อมรับ", receiveUnavailable: "ยังไม่ยืนยันการรับ", capConnected: "เชื่อมต่อแล้ว", capDisconnected: "ยังไม่เชื่อมต่อ", sendReady: "พร้อมส่ง", sendUnavailable: "ยังส่งไม่ได้", syncReady: "พร้อมซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
+    waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมรับและส่งข้อความ", checkingInbound: "กำลังตรวจสอบการรับข้อความ…", capSend: "ส่ง", capReceive: "รับ", capSync: "ซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
     forwardLogDescription: "ส่งบันทึกระดับที่เลือกขึ้นไปโดยอัตโนมัติ",
     allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
@@ -439,20 +437,6 @@ async function requestTargetPermission(urls) {
   if (!await chrome.permissions.request({ origins })) {
     throw new Error("Server permission was not granted.");
   }
-}
-
-function setLeaderStatus(label, state, action, isLeader = false) {
-  leaderStatus.dataset.state = state;
-  leaderStatus.dataset.action = action || "";
-  leaderStatus.disabled = !action;
-  leaderStatus.dataset.leader = String(isLeader);
-  leaderCurrent.textContent = label;
-  leaderStatus.setAttribute("aria-label", label);
-  leaderStatus.title = action === "config"
-    ? "Open settings"
-    : isLeader
-      ? "Hand over to another ready browser; keep this browser if it is the only one ready"
-      : action ? "Set this tab as leader" : "";
 }
 
 function setStatusAppearance(state = "neutral", loading = false) {
@@ -707,6 +691,36 @@ function renderAccountRow(account) {
   badge.dataset.provider = account.provider;
   badge.textContent = providerBadgeLabel(account.provider, adapter);
   heading.append(badge, name);
+  const live = readAccountState(liveState, accountConfigKey(account), null);
+  let leaderBadge;
+  if (live?.leader_installation_id) {
+    const leader = document.createElement("button");
+    leader.type = "button";
+    leader.className = "leader-status";
+    leader.dataset.state = live.leader ? "ready" : "neutral";
+    const leaderLabel = document.createElement("span");
+    leaderLabel.textContent = t(live.leader ? "leader" : "standby");
+    leader.append(document.createElement("i"), leaderLabel);
+    leader.title = live.leader
+      ? "Hand over this account to another ready browser"
+      : "Use this browser to send replies for this account";
+    leader.setAttribute("aria-label", `${name.textContent}: ${leader.textContent}`);
+    leader.addEventListener("click", async () => {
+      leader.disabled = true;
+      try {
+        const result = await chrome.runtime.sendMessage({
+          type: live.leader ? "release_leader" : "claim_leader",
+          provider: account.provider, provider_account_id: id, tab_id: popupTabId,
+        });
+        if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
+      } catch (error) {
+        renderDashboard(error.message, true);
+      } finally {
+        leader.disabled = false;
+      }
+    });
+    leaderBadge = leader;
+  }
   copy.append(heading, statusLabel);
   const capabilityText = accountCapabilitySummary(readAccountState(liveState, accountConfigKey(account), null), t);
   if (capabilityText) {
@@ -777,7 +791,11 @@ function renderAccountRow(account) {
   }
   const meta = document.createElement("div");
   meta.className = "account-row-meta";
-  meta.append(actions, shopId);
+  const identity = document.createElement("div");
+  identity.className = "account-row-identity";
+  if (leaderBadge) identity.append(leaderBadge);
+  identity.append(shopId);
+  meta.append(actions, identity);
   card.append(select, meta);
   return card;
 }
@@ -838,8 +856,6 @@ function renderDashboard(message = "", isError = false) {
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
     .at(-1);
-  const anyLeader = configuredStates.some((item) => item.live?.leader);
-  const hasLeader = configuredStates.some((item) => item.live?.leader_installation_id);
   const surfaceHint = configuredStates
     .map((item) => accountRowStatus(item.account))
     .find((item) => item?.state !== "ready");
@@ -863,7 +879,6 @@ function renderDashboard(message = "", isError = false) {
       discovery.hint = "lineAccessUnknown";
       discovery.action = "sync";
     }
-    setLeaderStatus(t("noLeader"), "neutral", "");
     setStatusAppearance(isError ? "error" : "neutral", !isError && Boolean(pendingAction || detectingAccount));
     status.textContent = message || (pendingAction ? t(pendingAction)
       : inactiveShopee ? inactiveShopHint(inactiveShopee.live) : t(discovery.hint));
@@ -878,7 +893,6 @@ function renderDashboard(message = "", isError = false) {
   }
 
   status.classList.toggle("error", isError);
-  setLeaderStatus(anyLeader ? t("leader") : hasLeader ? t("standby") : t("noLeader"), anyLeader ? "ready" : "neutral", "leader", anyLeader);
   syncButton.disabled = Boolean(pendingAction);
   syncButton.dataset.action = sellerCentreChatClosed ? "open_webchat_mini" : "sync";
   syncButton.textContent = sellerCentreChatClosed
@@ -1391,18 +1405,6 @@ cancelSyncButton.addEventListener("click", async () => {
 });
 
 document.querySelector("#open-config").addEventListener("click", openConfig);
-leaderStatus.addEventListener("click", async () => {
-  if (!leaderStatus.dataset.action) return;
-  if (leaderStatus.dataset.action === "config") {
-    openConfig();
-    return;
-  }
-  const isLeader = leaderStatus.dataset.leader === "true";
-  const result = await chrome.runtime.sendMessage(isLeader
-    ? { type: "release_leader", provider: activeProviderAdapter?.id }
-    : { type: "claim_leader", provider: activeProviderAdapter?.id, tab_id: popupTabId });
-  if (!result?.ok) renderDashboard(result?.error ?? "Could not update leader.", true);
-});
 document.querySelector("#close-config").addEventListener("click", closeConfig);
 function showLogsLoading() {
   logList.replaceChildren();

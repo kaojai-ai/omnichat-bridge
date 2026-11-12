@@ -17,6 +17,7 @@ export const STORAGE = {
   commandTab: "command_tab",
   unattendedRecovery: "unattended_recovery",
   providerRecoveryTabs: "provider_recovery_tabs",
+  pollingOwners: "polling_owners",
   language: "language",
   serverInitialized: "server_initialized",
   logs: "operational_logs",

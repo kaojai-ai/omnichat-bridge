@@ -6,9 +6,11 @@ test('connected leader status cannot imply sending or sync readiness', () => {
   const live={socket:'connected',leader:true,send_ready:false,sync_ready:false};
   assert.equal(accountCapabilityStatus(live,t).label,'preparingChat');
   assert.equal(accountCapabilityStatus(live,t).state,'neutral');
-  assert.equal(accountCapabilitySummary(live,t),'capConnected · sendUnavailable · receiveUnavailable · syncUnavailable');
+  assert.equal(accountCapabilitySummary(live,t),'○ capSend · ○ capReceive · ○ capSync');
 });
 test('send and sync capabilities remain independent', () => {
+  assert.equal(accountCapabilitySummary({socket:'connected',send_ready:true,receive_ready:false,sync_ready:true},t),'✓ capSend · ○ capReceive · ✓ capSync');
+  assert.equal(accountCapabilitySummary({socket:'reconnecting',send_ready:true,receive_ready:true,sync_ready:true},t),'○ capSend · ○ capReceive · ○ capSync');
   assert.equal(accountCapabilityStatus({socket:'connected',send_ready:true,receive_ready:true,sync_ready:false},t).label,'syncUnavailable');
   assert.equal(accountCapabilityStatus({socket:'connected',send_ready:true,receive_ready:true,sync_ready:true},t).state,'ready');
 });

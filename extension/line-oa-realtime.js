@@ -2,7 +2,7 @@
   const SOURCE = "omnichat-realtime-bridge-v4";
   const BRIDGE_VERSION = "line-oa-poll-12";
   // Script revisions remain compatible unless the page bridge interface breaks.
-  const COMPATIBILITY_VERSION = 8;
+  const COMPATIBILITY_VERSION = 9;
   const CHAT_PAGE_LIMIT = 25;
   const PAGE_LIMIT = 100;
   const INITIAL_SYNC_MAX_CONVERSATIONS = 10;
@@ -452,7 +452,7 @@
     const acknowledged = waitForAcknowledgement(requestId);
     post({ type, request_id: requestId, provider_account_id: providerAccountId, ...details });
     const result = await acknowledged;
-    if (!result?.ok) throw new Error(result?.error ?? "Could not persist recovery progress.");
+    if (!result?.ok) throw Object.assign(new Error(result?.error ?? "Could not persist recovery progress."), { reason_code: result?.reason_code });
     return result;
   }
 
@@ -879,6 +879,12 @@
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
+      if (error?.reason_code === "polling_owned_elsewhere") {
+        cancelPolling("Polling continues in another verified tab.", { providerAccountId, notifyRequests: false });
+        post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId,
+          ok: true, recovered: 0, queued: 0, skipped: "polling_owned_elsewhere" });
+        return;
+      }
       if (error?.providerCheckUnavailable) markProviderCheckFailure(error, { retainVerifiedAccess: true });
       if (pollIsActive(generation)) {
         postProviderStatus();
@@ -1326,6 +1332,9 @@
     bounded_message_ids: true,
     grace_classification: true,
     resetRecovery,
+    stopPolling(providerAccountId) {
+      cancelPolling("Polling moved to another verified tab.", { providerAccountId, notifyRequests: false });
+    },
     dispose() {
       disposed = true;
       cancelPolling("LINE OA bridge was replaced.");

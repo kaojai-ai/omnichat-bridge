@@ -1,3 +1,4 @@
+import { createPollingOwner } from "./lib/polling-owner.js";
 import { createAccountSyncCoordinator } from "./lib/sync-coordinator.js";
 import { forwardLogLevel, automaticLogForwardingEnabled, forwardingBackoff, selectLogBatch, routeLogEntries } from "./lib/log-forwarding.js";
 import { hasRegionalShopeePermission, reconcileRegionalShopeeScripts } from "./lib/regional-permissions.js";
@@ -88,13 +89,13 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 13;
+const BRIDGE_PROTOCOL_VERSION = 14;
 // Fence replies from pre-upgrade scripts that remain in open pages.
 const BRIDGE_SOURCE = "omnichat-realtime-bridge-v4";
 // Bump only when the LINE page bridge interface becomes incompatible.
-const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
+const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 9;
 // Bump when an open Shopee page must replace its main-world bridge.
-const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 5;
+const SHOPEE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 6;
 const MAX_BATCH_MESSAGES = 500;
 const MAX_BATCH_CONVERSATIONS = 50;
 const MAX_MESSAGES_PER_CONVERSATION = 100;
@@ -198,6 +199,40 @@ let providerObservationSequence = 0;
 const providerStatusProbes = new Map();
 const providerPolicyContexts = new Map();
 const providerWatchdogFailures = new Map();
+const pollingOwner = createPollingOwner({
+  load: async context => readAccountState((await readStorage([STORAGE.pollingOwners]))[STORAGE.pollingOwners], context.key, null),
+  save: (context, owner) => updateScopedState(STORAGE.pollingOwners, context.key, owner),
+  tabs: async context => orderProviderTabs(context.adapter,
+    (await providerChatTabs(context.adapter)).filter(tab => providerAccountMatchesTab(context.adapter, context.account, tab))),
+  verify: async (context, tab) => {
+    const status = await providerTabStatus(tab);
+    return providerTabCanSend(status, context) ? status : null;
+  },
+  contextOf: (context, tab) => providerTabContext(tab, context.adapter.id),
+  beforeHandover: async (context, previous) => {
+    if (!await providerChatTabById(context.adapter, previous.tab_id)) return;
+    const control = accountSyncs.get(context.key);
+    if (control?.tabId === previous.tab_id && !control.controller.signal.aborted) {
+      throw new Error("Waiting for the current sync to finish before moving polling.");
+    }
+    const stopped = await chrome.scripting.executeScript({
+      target: { tabId: previous.tab_id }, world: "MAIN",
+      args: [context.adapter.id, context.account.provider_account_id],
+      func: (provider, accountId) => {
+        const control = provider === "line_oa" ? window.__omnichatLineOABridgeControl : window.__omnichatRealtimeBridgeControl;
+        if (provider === "line_oa") {
+          if (typeof control?.stopPolling !== "function") return false;
+          control.stopPolling(accountId);
+        } else {
+          if (typeof control?.resetRecovery !== "function") return false;
+          control.resetRecovery("Polling moved to another verified tab.");
+        }
+        return true;
+      },
+    });
+    if (stopped?.[0]?.result !== true) throw new Error("The previous polling tab could not be stopped.");
+  },
+});
 const sessionEligibility = createSessionEligibility({
   onRecheck: () => ensureLiveConnection(),
   onEvent: (key, event, details) => {
@@ -438,6 +473,8 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const observedTabContexts = tabContexts ? observedIndexes.map(index => tabContexts[index]) : observedTabs.map((tab) => providerTabContext(tab, adapter.id));
   const reportedStatuses = statuses ? observedIndexes.map(index => statuses[index]) : await Promise.all(observedTabs.map(providerTabStatus));
   const observedStatuses = reportedStatuses.map(providerStatusEvidence);
+  const storedOwners = await readStorage([STORAGE.pollingOwners]);
+  const owner = readAccountState(storedOwners[STORAGE.pollingOwners], context.key, null);
   // Navigation/replacement invalidates pending reads; a late response never restores readiness.
   if (observedEpoch !== providerSessionEpoch(adapter.id)
     || observedTabs.some((tab, index) => observedTabContexts[index] !== providerTabContext(tab, adapter.id))) return sessionEligibility.state(context.key);
@@ -450,7 +487,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   // A known different Shopee account still blocks even when its polling check is unavailable.
   const identities = new Set(reportedStatuses.map((status) => status?.current_provider_account_id).filter(Boolean));
   const conflict = adapter.id === "shopee" && identities.size > 1;
-  const previousTabId = previous?.last_evidence?.tab.id;
+  const previousTabId = owner?.tab_id ?? previous?.last_evidence?.tab.id;
   const isMatchingTab = (candidate) => {
     const status = observedStatuses[observedTabs.findIndex((tab) => tab.id === candidate.id)];
     return identityMatches(status) && providerTabCanSend(status, context);
@@ -1149,31 +1186,40 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "get_sync_state") {
-    void exclusive(async () => {
-      const { state } = await getAccountScanState(message.provider_account_id, message.provider);
-      const watermark = Date.parse(state.watermark ?? "");
-      // Limit normal catch-up without advancing durable coverage before success.
-      const checkpoint = watermark > 0 ? { ...state,
-        watermark: new Date(Math.max(watermark, Date.now() - 7 * 24 * 60 * 60 * 1_000)).toISOString(),
-      } : state;
-      const stored = await readStorage([STORAGE.config]);
-      let history = null;
-      try {
-        history = historySyncSettings(stored[STORAGE.config]);
-      } catch {
-        history = null;
+    void (async () => {
+      if (String(message.request_id ?? "").startsWith("poll:") && _sender.tab) {
+        const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent]);
+        const context = accountContextFor(stored, message.provider_account_id, message.provider);
+        if (!context || !hasLocalConsent(stored[STORAGE.consent])) throw new Error("Provider account is not configured.");
+        const owner = await pollingOwner.select(context, _sender.tab);
+        if (owner.tab.id !== _sender.tab.id) return { polling_allowed: false };
       }
-      return {
-        checkpoint,
-        ...(history ? {
-          history_days: history.days,
-          history_since_ms: historySinceMs(history.days),
-          ...(history.conversation_ids.length
-            ? { history_conversation_ids: history.conversation_ids }
-            : {}),
-        } : {}),
-      };
-    }).then(
+      return exclusive(async () => {
+        const { state } = await getAccountScanState(message.provider_account_id, message.provider);
+        const watermark = Date.parse(state.watermark ?? "");
+        // Limit normal catch-up without advancing durable coverage before success.
+        const checkpoint = watermark > 0 ? { ...state,
+          watermark: new Date(Math.max(watermark, Date.now() - 7 * 24 * 60 * 60 * 1_000)).toISOString(),
+        } : state;
+        const stored = await readStorage([STORAGE.config]);
+        let history = null;
+        try {
+          history = historySyncSettings(stored[STORAGE.config]);
+        } catch {
+          history = null;
+        }
+        return {
+          checkpoint,
+          ...(history ? {
+            history_days: history.days,
+            history_since_ms: historySinceMs(history.days),
+            ...(history.conversation_ids.length
+              ? { history_conversation_ids: history.conversation_ids }
+              : {}),
+          } : {}),
+        };
+      });
+    })().then(
       (result) => respond({ ok: true, ...result }),
       (error) => respond({ ok: false, error: String(error) })
     );
@@ -1372,14 +1418,14 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "claim_leader") {
-    void claimLeader(message.tab_id, message.provider).then(respond, async (error) => {
+    void claimLeader(message.tab_id, message.provider, message.provider_account_id).then(respond, async (error) => {
       await recordUnexpected("claim_leader", error);
       respond({ ok: false, error: String(error) });
     });
     return true;
   }
   if (message?.type === "release_leader") {
-    void releaseLeader(message.provider).then(respond, async (error) => {
+    void releaseLeader(message.provider, message.provider_account_id).then(respond, async (error) => {
       await recordUnexpected("release_leader", error);
       respond({ ok: false, error: String(error) });
     });
@@ -1422,7 +1468,7 @@ async function pollingCheckpointGuard(message, tabId) {
     || status.provider_polling_request_id !== requestId
     || status.provider_polling_account_id !== message.provider_account_id) throw syncCancelledError();
   return () => {
-    if (epoch !== providerTabContext(tab, adapter.id)) throw syncCancelledError();
+    if (epoch !== providerTabContext(tab, adapter.id) || !pollingOwner.isCurrent(context.key, tabId, epoch)) throw syncCancelledError();
   };
 }
 
@@ -2398,19 +2444,21 @@ async function runProviderHealthWatchdogOnce() {
           })
           : recovery.record;
         for (const item of matchingContexts) {
+          const owner = await pollingOwner.select(item, tab);
+          const pollingStatus = owner.status;
           const polling = adapter.id === "shopee"
-            ? status.current_provider_account_id === item.account.provider_account_id
-            : (status.provider_polling_active === true
-            && Array.isArray(status.provider_polling_account_ids)
-            && status.provider_polling_account_ids.includes(item.account.provider_account_id));
+            ? pollingStatus.current_provider_account_id === item.account.provider_account_id
+            : (pollingStatus.provider_polling_active === true
+            && Array.isArray(pollingStatus.provider_polling_account_ids)
+            && pollingStatus.provider_polling_account_ids.includes(item.account.provider_account_id));
           // Restoring polling in a verified open tab does not require permission to open tabs.
-          if (!polling) startUnattendedProviderSync(tab, item);
+          if (!polling) startUnattendedProviderSync(owner.tab, item);
           await updateProviderRecoveryLiveState([item], adapter, {
             state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
             reason: polling ? null : adapter.id === "shopee"
               ? "Shopee account changed. Check the connection for this browser."
               : "Restoring LINE OA polling for this account.",
-            tabId: record?.tab_id ?? tab.id,
+            tabId: owner.tab.id,
           });
         }
       } catch (error) {
@@ -2555,9 +2603,10 @@ function providerLiveCommandContexts(contexts, provider) {
   return liveCommandContexts(contexts).filter((context) => !providerId || context.adapter.id === providerId);
 }
 
-async function claimLeader(tabId, provider = "") {
+async function claimLeader(tabId, provider = "", accountId = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider);
+  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider)
+    .filter(context => !accountId || context.account.provider_account_id === accountId);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) {
@@ -2567,9 +2616,10 @@ async function claimLeader(tabId, provider = "") {
   return results.at(-1) ?? { ok: true };
 }
 
-async function releaseLeader(provider = "") {
+async function releaseLeader(provider = "", accountId = "") {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
-  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider);
+  const contexts = providerLiveCommandContexts(await activeLiveCommandContexts(configuredAccountContexts(stored)), provider)
+    .filter(context => !accountId || context.account.provider_account_id === accountId);
   if (!contexts.length) throw new Error("No configured provider accounts support live commands.");
   const results = [];
   for (const context of contexts) results.push(await signedLeaderRequest(context, "release"));
@@ -3256,23 +3306,27 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
   }
   if (changeInfo.status !== "complete") return;
-  void reconnectProviderTab({ ...tab, id: tabId }).catch((error) => {
-    const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
-    void recordUnexpected("provider_bridge_startup", error, { provider: adapter?.id });
-  });
+  const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
+  if (!adapter) return;
+  void reconnectProviderTab({ ...tab, id: tabId })
+    .then(() => runProviderHealthWatchdog())
+    .catch((error) => recordUnexpected("provider_bridge_startup", error, { provider: adapter.id }));
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const wasOwner = pollingOwner.ownsTab(tabId) || [...providerPolicyTabIds.values()].includes(tabId);
   invalidateProviderTab(tabId, "provider_tab_closed");
   sellerCentreLandingStarts.delete(tabId);
   void markClosedProviderRecoveryTab(tabId)
-    .then(() => ensureLiveConnection())
+    .then(() => wasOwner ? runProviderHealthWatchdog() : ensureLiveConnection())
     .catch((error) => recordUnexpected("provider_watchdog", error, { tab_id: tabId }));
 });
 
 chrome.tabs.onReplaced?.addListener((_addedTabId, removedTabId) => {
+  const wasOwner = pollingOwner.ownsTab(removedTabId) || [...providerPolicyTabIds.values()].includes(removedTabId);
   invalidateProviderTab(removedTabId, "provider_tab_replaced");
-  void ensureLiveConnection().catch((error) => recordUnexpected("connection_status", error));
+  void (wasOwner ? runProviderHealthWatchdog() : ensureLiveConnection())
+    .catch((error) => recordUnexpected("provider_watchdog", error));
 });
 
 chrome.runtime.onStartup.addListener(() => {

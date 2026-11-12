@@ -919,7 +919,11 @@
   async function loadRecoveryCheckpoint(requestId, accountId) {
     const acknowledged = waitForAcknowledgement(requestId);
     post({ type: "recovery_checkpoint", request_id: requestId, provider_account_id: accountId });
-    const result = await recoveryAcknowledgement(acknowledged, "checkpoint_load", requestId, accountId, "Could not load sync checkpoint.");
+    const reply = await acknowledged;
+    if (reply?.reason_code === "polling_owned_elsewhere") {
+      throw Object.assign(new Error("Polling continues in another verified tab."), { reason_code: reply.reason_code });
+    }
+    const result = await recoveryAcknowledgement(Promise.resolve(reply), "checkpoint_load", requestId, accountId, "Could not load sync checkpoint.");
     return result.checkpoint ?? {};
   }
 
@@ -1056,6 +1060,8 @@
         state.sellerCentreCaptureFailed = false;
         state.sellerCentreCaptureOutcome = null;
       }
+    } catch (error) {
+      if (error?.reason_code !== "polling_owned_elsewhere") throw error;
     } finally {
       if (activeSellerCentrePoll === poll) activeSellerCentrePoll = null;
       publishSurfaceStatus();
@@ -1067,6 +1073,8 @@
     state.pollingRefreshInFlight = true;
     const epoch = state.sellerCentreCaptureEpoch;
     try {
+      await loadRecoveryCheckpoint(`poll:list-${epoch}-${Date.now()}:checkpoint`, state.currentAccountId);
+      if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       const template = await initialRecoveryListTemplate();
       const body = await fetchProviderJson(new Request(template.url, {
         ...template.init,
@@ -1079,6 +1087,9 @@
       await captureSellerCentreConversationList(body);
       if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
       state.lastProviderCheckAt = new Date().toISOString();
+    } catch (error) {
+      if (error?.reason_code === "polling_owned_elsewhere") return false;
+      throw error;
     } finally {
       state.pollingRefreshInFlight = false;
     }
@@ -1092,7 +1103,8 @@
       void (async () => {
         const epoch = state.sellerCentreCaptureEpoch;
         try {
-          await refreshSellerCentreConversations();
+          const refreshed = await refreshSellerCentreConversations();
+          if (refreshed === false) return;
           if (!isBridgeActive() || epoch !== state.sellerCentreCaptureEpoch) return;
           state.pollingConnected = true;
           state.sellerCentrePollOutcome = "passed";
@@ -2594,7 +2606,7 @@
   };
   window.__omnichatRealtimeBridgeControl = {
     source: SOURCE,
-    compatibility_version: 5,
+    compatibility_version: 6,
     combined_metadata_sync: true,
     fresh_provider_status: true,
     bounded_message_ids: true,

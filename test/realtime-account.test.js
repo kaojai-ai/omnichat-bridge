@@ -108,6 +108,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
   const checkpoints = new Map([["100000001", { watermark: "2026-08-01T00:00:00.000Z" }]]);
   const syncedAccounts = new Set();
   let checkpointReadAllowed = true;
+  let pollingAllowed = true;
   let pollAcknowledgement = true;
   let miniChatClicks = 0;
   let miniChatIsOpen = miniChatOpen === true;
@@ -163,7 +164,8 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
         queueMicrotask(() => {
           for (const listener of listeners) listener({ source: window, origin, data: {
             source: "omnichat-realtime-bridge-v4", type: "recovery_ack_v3",
-            request_id: message.request_id, ok: checkpointReadAllowed,
+            request_id: message.request_id, ok: checkpointReadAllowed && (pollingAllowed || !message.request_id.startsWith("poll:")),
+            ...(!pollingAllowed && message.request_id.startsWith("poll:") ? { reason_code: "polling_owned_elsewhere" } : {}),
             checkpoint: structuredClone(checkpoints.get(message.provider_account_id) ?? {}),
           } });
         });
@@ -406,6 +408,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     setResponse,
     checkpoint(accountId = "100000001") { return checkpoints.get(accountId) ?? {}; },
     setCheckpointReadAllowed(value) { checkpointReadAllowed = value; },
+    setPollingAllowed(value) { pollingAllowed = value; },
     setCheckpoint(value, accountId = "100000001") { checkpoints.set(accountId, structuredClone(value)); },
     setPollAcknowledgement(ok) { pollAcknowledgement = ok; },
     cancelSync(requestId) {
@@ -963,6 +966,16 @@ function capturedRetryIds(bridge) {
   return bridge.posts.filter((post) => post.type === "recovery_batch" && post.request_id.startsWith("poll:"))
     .flatMap((post) => Array.from(post.body, (message) => message.id));
 }
+
+test("standby Shopee tab skips automatic provider requests without reporting a failed poll", async () => {
+  const bridge = await pollingRetryBridge();
+  bridge.setPollingAllowed(false);
+  const before = bridge.requests.length;
+  await bridge.runIntervals();
+  assert.equal(bridge.requests.length, before);
+  assert.deepEqual(capturedRetryIds(bridge), []);
+  assert.equal(bridge.posts.some(post => post.type === "log" && post.level === "error"), false);
+});
 
 test("Seller Centre initial list leaves history ownership with recovery", async () => {
   const bridge = await pollingRetryBridge();

@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v4";
-  const BRIDGE_PROTOCOL_VERSION = 13;
+  const BRIDGE_PROTOCOL_VERSION = 14;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -723,11 +723,13 @@
     try {
       const result = await sendRuntimeMessage({
         type: "get_sync_state",
+        request_id: message.request_id,
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
       });
       post({ type: "recovery_ack_v3", request_id: message.request_id,
-        ok: Boolean(result?.ok), checkpoint: result?.checkpoint,
+        ok: Boolean(result?.ok) && result.polling_allowed !== false,
+        ...(result?.polling_allowed === false ? { reason_code: "polling_owned_elsewhere", error: "Polling is active in another tab." } : {}), checkpoint: result?.checkpoint,
         ...(result?.ok ? {} : { error: result?.error ?? "Could not load sync checkpoint." }) });
     } catch (error) {
       post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });

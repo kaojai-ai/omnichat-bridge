@@ -134,3 +134,24 @@ for (const config of [
     assert.equal(localStatus.receive_reason_code, 'inbound_poll_unverified');
   });
 }
+
+for (const action of ["claim", "release"]) {
+  test(`${action} leadership from an account row affects only that account`, async () => {
+    const contexts = ["first", "second"].map(id => ({ account: { provider_account_id: id } }));
+    const calls = [];
+    const globals = {
+      STORAGE: {}, readStorage: async () => ({}),
+      configuredAccountContexts: () => contexts,
+      activeLiveCommandContexts: async value => value,
+      providerLiveCommandContexts: value => value,
+      selectCommandTab: async () => {},
+      signedLeaderRequest: async (context, operation) => { calls.push([context.account.provider_account_id, operation]); return { ok: true }; },
+    };
+    const run = action === "claim"
+      ? fn("claimLeader", "\nasync function releaseLeader", globals)
+      : fn("releaseLeader", "\nasync function openCommandTab", globals);
+    if (action === "claim") await run(7, "line_oa", "second");
+    else await run("line_oa", "second");
+    assert.deepEqual(calls, [["second", action]]);
+  });
+}

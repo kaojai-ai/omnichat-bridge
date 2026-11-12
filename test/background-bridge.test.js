@@ -478,6 +478,34 @@ for (const provider of ['line_oa', 'shopee']) {
   });
 }
 
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: ownership gates routine polling while manual sync keeps its checkpoint flow`, async () => {
+    const start = source.indexOf('  if (message?.type === "get_sync_state")');
+    const end = source.indexOf('  if (message?.type === "discard_pending")', start);
+    let selections = 0;
+    let reads = 0;
+    const read = vm.runInNewContext(`(message => new Promise(resolve => {
+      const respond = resolve;
+      ${source.slice(start, end)}
+    }))`, {
+      _sender: { tab: { id: 2 } },
+      exclusive: action => action(),
+      getAccountScanState: async () => { reads++; return { state: {} }; },
+      STORAGE: {}, readStorage: async () => ({}), historySyncSettings: () => null,
+      accountContextFor: () => ({ key: "account" }), hasLocalConsent: () => true,
+      pollingOwner: { select: async () => { selections++; return { tab: { id: 1 } }; } },
+    });
+    const manual = await read({ type: "get_sync_state", provider, provider_account_id: "account", request_id: "manual-uuid:checkpoint" });
+    assert.equal(manual.ok, true);
+    assert.equal(reads, 1);
+    assert.equal(selections, 0);
+    const poll = await read({ type: "get_sync_state", provider, provider_account_id: "account", request_id: "poll:uuid:checkpoint" });
+    assert.equal(poll.polling_allowed, false);
+    assert.equal(reads, 1);
+    assert.equal(selections, 1);
+  });
+}
+
 for (const failedProvider of [null, "line_oa"]) {
   test(`reattachment immediately runs shared recovery after all provider tabs (${failedProvider ?? "all healthy"})`, async () => {
     const events = [];
@@ -503,5 +531,32 @@ for (const failedProvider of [null, "line_oa"]) {
     assert.equal(completed, false, "reattachment includes recovery instead of waiting for an alarm");
     finishRecovery();
     await task;
+  });
+}
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: a replacement tab restores polling as soon as its bridge is verified`, async () => {
+    let onUpdated, finishVerification;
+    const verification = new Promise(resolve => { finishVerification = resolve; });
+    const events = [];
+    const start = source.indexOf("chrome.tabs.onUpdated.addListener(");
+    const end = source.indexOf("\nchrome.tabs.onRemoved.addListener", start);
+    vm.runInNewContext(source.slice(start, end), {
+      chrome: { tabs: { onUpdated: { addListener: listener => { onUpdated = listener; } } } },
+      providerAdapters: { list: () => [{ id: provider, matchesUrl: url => url === provider }] },
+      invalidateProviderTab: () => events.push("invalidate"),
+      reconnectProviderTab: async tab => { assert.equal(tab.id, 42); events.push("verify"); await verification; },
+      runProviderHealthWatchdog: async () => { events.push("recover"); },
+      recordUnexpected: () => assert.fail("the healthy replacement must not report an error"),
+    });
+    onUpdated(42, { status: "loading" }, { url: provider });
+    onUpdated(42, { status: "complete" }, { url: "unrelated" });
+    assert.deepEqual(events, ["invalidate"], "unrelated tabs must not trigger provider recovery");
+    onUpdated(42, { status: "complete" }, { url: provider });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ["invalidate", "verify"], "recovery must wait for verified injection");
+    finishVerification();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ["invalidate", "verify", "recover"], "no minute alarm or manual Sync is needed");
   });
 }

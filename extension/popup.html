@@ -12,7 +12,7 @@
       <header class="brand">
         <img class="provider-mark" src="icons/icon-48.png" alt="">
         <div class="brand-copy">
-          <h1><a class="store-link" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer">Omnichat Bridge</a></h1>
+          <h1><a class="store-link" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer">Omnichat Bridge</a> <a id="node-version" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer"></a></h1>
           <span>Secured bridge to your server</span>
         </div>
         <div class="header-actions">
@@ -65,17 +65,11 @@
       </section>
 
       <section id="dashboard-screen" class="screen" hidden>
-        <section class="node-summary" aria-label="Browser node">
-          <div class="node-summary-row">
-            <span id="device-name-badge" class="device-name-badge" aria-label="Node name"></span>
-            <a id="node-version" href="https://chromewebstore.google.com/detail/omnichat-bridge/blfmmjdpjoimhnahjbcfimclhgmkjhkn" target="_blank" rel="noreferrer"></a>
-            <button id="leader-status" class="leader-status" type="button" aria-live="polite">
-              <i></i><span class="leader-current">NEED CONFIG</span>
-            </button>
-          </div>
-        </section>
         <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
-          <h2 id="detected-shops-title">ACCOUNTS</h2>
+          <div class="account-section-heading">
+            <h2 id="detected-shops-title">ACCOUNTS</h2>
+            <span id="device-name-badge" class="device-name-badge" aria-label="Node name"></span>
+          </div>
           <div id="account-list" class="account-list" aria-live="polite"></div>
           <p id="account-list-empty" class="account-list-empty" hidden>No provider accounts detected yet.</p>
         </section>
@@ -114,6 +108,13 @@
           </div>
         </header>
 
+        <div class="settings-preferences">
+          <div class="settings-preference settings-device-name">
+            <label id="device-name-label" for="device-name">Device name</label>
+            <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
+          </div>
+        </div>
+
         <div class="field">
           <div class="field-heading">
             <label id="config-label" for="config">Configuration</label>
@@ -126,10 +127,6 @@
         </div>
 
         <div class="settings-preferences">
-          <div class="settings-preference settings-device-name">
-            <label id="device-name-label" for="device-name">Device name</label>
-            <input id="device-name" type="text" maxlength="80" placeholder="e.g. Front desk MacBook" autocomplete="off">
-          </div>
           <label class="recovery-option" for="forward-log">
             <span><span id="forward-log-label">Forward Log</span><br><small id="forward-log-description">Forward this level and above automatically.</small></span>
             <select id="forward-log" aria-labelledby="forward-log-label" aria-describedby="forward-log-description">

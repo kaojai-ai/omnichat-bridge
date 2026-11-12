@@ -43,6 +43,7 @@ function harness({ provider = "line_oa", recoveryEnabled = false, tabOpen = true
     getTab: async (id) => tabOpen && id === tab.id ? tab : null,
     orderProviderTabs: (_adapter, tabs) => tabs,
     providerTabStatus: async (candidate) => { calls.checked++; if (missingBridge) return null; if (candidate?.id === alternative.id) return { healthy: true, current_provider_account_id: activeShop, surface: "new-webchat", chat_open: true }; return { healthy, provider_polling_active: pollingAccounts.length > 0, provider_polling_account_ids: pollingAccounts, current_provider_account_id: activeShop, ...(chatOpen === null ? {} : { surface: "seller-centre", chat_open: chatOpen }) }; },
+    pollingOwner: { select: async (_context, selected) => ({ tab: selected, status: await globals.providerTabStatus(selected) }) },
     providerTabHealthy: (status) => status.healthy,
     reconnectProviderTab: async () => { missingBridge = false; },
     persistProviderSurfaceState: async () => {},

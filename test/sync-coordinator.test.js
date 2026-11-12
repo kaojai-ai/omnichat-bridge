@@ -227,6 +227,7 @@ for (const provider of ["line_oa", "shopee"]) {
     let epoch = 1;
     let configured = true;
     let consent = true;
+    let ownsPolling = true;
     let beforeWrite = () => {};
     const writes = [];
     const tab = { id: 7 };
@@ -234,6 +235,7 @@ for (const provider of ["line_oa", "shopee"]) {
       provider_polling_request_id: "poll:current", provider_polling_account_id: "a" };
     const sandbox = {
       accountSyncs: new Map(), // Includes the service-worker restart case.
+      pollingOwner: { isCurrent: () => ownsPolling },
       STORAGE: { config: "config", detectedAccounts: "detected", consent: "consent" },
       providerAdapterForId: id => ({ id }),
       providerChatTabById: async (_adapter, id) => id === 7 ? tab : null,
@@ -259,6 +261,9 @@ for (const provider of ["line_oa", "shopee"]) {
     await persist(message, 7);
     await persist({ ...message, conversation_id: "second" }, 7);
     assert.equal(writes.length, 2, "routine scans can advance beyond their first conversation");
+    ownsPolling = false;
+    await assert.rejects(persist(message, 7), { name: "AbortError" });
+    ownsPolling = true;
     await assert.rejects(persist({ ...message, request_id: "poll:previous:chat:cursor:0" }, 7), { name: "AbortError" });
     await assert.rejects(persist(message, 8), { name: "AbortError" });
     status.provider_polling_account_id = "b";
