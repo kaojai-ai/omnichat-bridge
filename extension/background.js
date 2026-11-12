@@ -3992,7 +3992,7 @@ async function reattachOpenProviderBridges() {
       }
     }
   }
-  await ensureLiveConnection();
+  await runProviderHealthWatchdog();
 }
 
 async function autoStartSellerCentreTab(tab) {
