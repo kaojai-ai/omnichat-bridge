@@ -1096,9 +1096,9 @@
     } else if (event.data.type === "provider_status") {
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
-      const previousSendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+      const previousReadinessState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
         accessibleAccountIds, providerSurfaceReady,
-        Boolean(sendVerifiedAt)]);
+        Boolean(sendVerifiedAt), realtimeConnected, lastSuccessfulPollAtByAccount]);
       const wasSurfaceReady = providerSurfaceReady;
       sendVerifiedAt = typeof event.data.send_verified_at === "string" ? event.data.send_verified_at : null;
       providerCheckOutcome = ["unknown", "failed", "passed"].includes(event.data.provider_check_outcome)
@@ -1148,10 +1148,10 @@
       if (realtimeConnected) {
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
-      const sendState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
+      const readinessState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
         accessibleAccountIds, providerSurfaceReady,
-        Boolean(sendVerifiedAt)]);
-      if (sendState !== previousSendState) void sendRuntimeMessage({
+        Boolean(sendVerifiedAt), realtimeConnected, lastSuccessfulPollAtByAccount]);
+      if (readinessState !== previousReadinessState) void sendRuntimeMessage({
         type: "send_readiness_changed", provider: providerAdapter.id,
       }).catch(() => {});
       // Missing probe evidence must not look like a logout/reconnect cycle.

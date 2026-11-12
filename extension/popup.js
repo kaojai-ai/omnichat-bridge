@@ -189,7 +189,7 @@ function renderExtensionUpdate(update) {
 
 const TRANSLATIONS = {
   en: {
-    waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and sync", capConnected: "Connected", capDisconnected: "Not connected", sendReady: "Sending ready", sendUnavailable: "Sending unavailable", syncReady: "Sync ready", syncUnavailable: "Sync unavailable",
+    waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and receive", checkingInbound: "Restoring incoming messages…", receiveReady: "Receiving ready", receiveUnavailable: "Receiving unverified", capConnected: "Connected", capDisconnected: "Not connected", sendReady: "Sending ready", sendUnavailable: "Sending unavailable", syncReady: "Sync ready", syncUnavailable: "Sync unavailable",
     forwardLogDescription: "Forward this level and above automatically.",
     allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
@@ -206,7 +206,7 @@ const TRANSLATIONS = {
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
   th: {
-    waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมส่งและซิงค์", capConnected: "เชื่อมต่อแล้ว", capDisconnected: "ยังไม่เชื่อมต่อ", sendReady: "พร้อมส่ง", sendUnavailable: "ยังส่งไม่ได้", syncReady: "พร้อมซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
+    waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมรับและส่งข้อความ", checkingInbound: "กำลังกู้คืนการรับข้อความ…", receiveReady: "พร้อมรับ", receiveUnavailable: "ยังไม่ยืนยันการรับ", capConnected: "เชื่อมต่อแล้ว", capDisconnected: "ยังไม่เชื่อมต่อ", sendReady: "พร้อมส่ง", sendUnavailable: "ยังส่งไม่ได้", syncReady: "พร้อมซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
     forwardLogDescription: "ส่งบันทึกระดับที่เลือกขึ้นไปโดยอัตโนมัติ",
     allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
@@ -841,8 +841,8 @@ function renderDashboard(message = "", isError = false) {
   const anyLeader = configuredStates.some((item) => item.live?.leader);
   const hasLeader = configuredStates.some((item) => item.live?.leader_installation_id);
   const surfaceHint = configuredStates
-    .map((item) => accountConnectionStatus(item.live))
-    .find((item) => item?.state !== "ready" && item?.hint);
+    .map((item) => accountRowStatus(item.account))
+    .find((item) => item?.state !== "ready");
   const latestSync = configuredStates
     .map((item) => item.syncState?.last_sync_at)
     .filter(Boolean)
@@ -906,7 +906,7 @@ function renderDashboard(message = "", isError = false) {
   } else {
     const resultMessage = message
       || (pendingAction ? t(pendingAction) : "")
-      || surfaceHint?.hint
+      || surfaceHint?.hint || surfaceHint?.label
       || formatSyncResult(latestResult);
     progressArea.hidden = !lastSyncText && !resultMessage && !anyError;
     if (message || pendingAction || !anyError) {

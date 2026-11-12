@@ -405,6 +405,25 @@ function providerStatusEvidence(status) {
     ? status : null;
 }
 
+function providerReceiveReadiness(context, status) {
+  // LINE page evidence uses the browser account ID; canonical IDs belong to
+  // the target server and may differ (for example, a numeric channel ID).
+  const provider = context.adapter.id;
+  const checkedAt = Date.parse(provider === "line_oa"
+    ? status?.last_successful_poll_at_by_account?.[context.account.provider_account_id] ?? ""
+    : status?.last_provider_check_at ?? "");
+  const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
+  const receiveReady = receiveFresh && status?.realtime_connected === true
+    && (provider !== "shopee" || status?.capabilities?.message_recovery === true);
+  const receiveReasonCode = !status ? "provider_status_unknown"
+    : !receiveFresh ? provider === "line_oa" ? "inbound_poll_unverified" : "provider_status_stale"
+      : status.realtime_connected !== true ? "provider_realtime_disconnected"
+      : provider === "shopee" && status?.capabilities?.message_recovery !== true
+        ? "message_recovery_unavailable" : "healthy";
+
+  return { receive_ready: receiveReady, receive_reason_code: receiveReasonCode };
+}
+
 async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, observation = ++providerObservationSequence } = {}) {
   const adapter = context.adapter;
   context.readinessDiagnostics = providerPolicyContexts.get(context.key)?.readinessDiagnostics;
@@ -475,6 +494,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   };
   const active = policy.eligible;
   await updateLiveState(context, {
+    ...providerReceiveReadiness(context, policy.evidence?.status ?? status),
     send_ready: Boolean(policy.eligible && !policy.unknown),
     sync_ready: Boolean(!policy.unknown && (adapter.id !== "shopee" ? policy.eligible : status?.capabilities?.message_recovery === true)),
     eligibility_reason_code: policy.reason_code,
@@ -2212,7 +2232,9 @@ function startUnattendedProviderSync(tab, context) {
   if (!Number.isInteger(tabId) || !recoveryKey) return;
   if (accountSyncs.has(recoveryKey)) return accountSyncs.get(recoveryKey).completion;
   if ((providerAutomaticRetryAt.get(recoveryKey) ?? 0) > Date.now()) return;
-  const operation = requestAccountSync(context, "automatic", { tab_id: tabId, restorePolling: true });
+  const operation = requestAccountSync(context, "automatic", {
+    tab_id: tabId, shared_session: context.adapter.id === "line_oa", restorePolling: true,
+  });
   void operation.then((result) => {
     if (result?.error) throw new Error(result.error);
     providerAutomaticRetryAttempts.delete(recoveryKey);
@@ -2380,12 +2402,13 @@ async function runProviderHealthWatchdogOnce() {
             : (status.provider_polling_active === true
             && Array.isArray(status.provider_polling_account_ids)
             && status.provider_polling_account_ids.includes(item.account.provider_account_id));
-          if (!polling && allowTabRecovery) startUnattendedProviderSync(tab, item);
+          // Restoring polling in a verified open tab does not require permission to open tabs.
+          if (!polling) startUnattendedProviderSync(tab, item);
           await updateProviderRecoveryLiveState([item], adapter, {
             state: polling ? PROVIDER_RECOVERY_STATES.ready : PROVIDER_RECOVERY_STATES.needsAttention,
             reason: polling ? null : adapter.id === "shopee"
               ? "Shopee account changed. Check the connection for this browser."
-              : "LINE OA polling is not running for this account. Sync this account to resume.",
+              : "Restoring LINE OA polling for this account.",
             tabId: record?.tab_id ?? tab.id,
           });
         }
@@ -2669,19 +2692,7 @@ async function connectionStatusSnapshot(context) {
   const samePolicy = current?.generation === policy?.generation && current?.context === policy?.context;
   const ready = samePolicy && current?.eligible === true;
   const sendReady = ready && !current?.unknown;
-  // LINE page evidence uses the browser account ID; canonical IDs belong to
-  // the target server and may differ (for example, a numeric channel ID).
-  const checkedAt = Date.parse(adapter.id === "line_oa"
-    ? providerStatus?.last_successful_poll_at_by_account?.[context.account.provider_account_id] ?? ""
-    : providerStatus?.last_provider_check_at ?? "");
-  const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
-  const receiveReady = receiveFresh && providerStatus?.realtime_connected === true
-    && (adapter.id !== "shopee" || providerStatus?.capabilities?.message_recovery === true);
-  const receiveReasonCode = !providerStatus ? "provider_status_unknown"
-    : !receiveFresh ? adapter.id === "line_oa" ? "inbound_poll_unverified" : "provider_status_stale"
-      : providerStatus.realtime_connected !== true ? "provider_realtime_disconnected"
-      : adapter.id === "shopee" && providerStatus?.capabilities?.message_recovery !== true
-        ? "message_recovery_unavailable" : "healthy";
+  const receive = providerReceiveReadiness(context, providerStatus);
 
   return {
     type: "connection_status",
@@ -2696,8 +2707,7 @@ async function connectionStatusSnapshot(context) {
     ready,
     send_ready: sendReady,
     send_reason_code: sendReady ? "healthy" : !samePolicy ? "checking_session" : current?.reason_code ?? "provider_unready",
-    receive_ready: receiveReady,
-    receive_reason_code: receiveReasonCode,
+    ...receive,
     sync_ready: Boolean(!current?.unknown && (adapter.id !== "shopee" ? ready : providerStatus?.capabilities?.message_recovery === true)),
     reason_code: !samePolicy ? "checking_session" : current?.reason_code === "ready" ? health.reason_code : current?.reason_code ?? "checking_session",
     ...(ready && current?.readiness_grace_expires_at ? { readiness_grace_expires_at: current.readiness_grace_expires_at } : {}),
