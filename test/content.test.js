@@ -49,6 +49,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
     URL,
     chrome: {
       runtime: {
+        id: "test-extension",
         onMessage: {
           addListener(listener) {
             runtimeListeners.push(listener);
@@ -115,7 +116,7 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
       listener({
         source: window,
         origin: window.location.origin,
-        data: { source: "omnichat-realtime-bridge-v3", ...data },
+        data: { source: "omnichat-realtime-bridge-v4", ...data },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -127,8 +128,11 @@ function contentBridge(pathname = "/new-webchat/conversations", { localConsent =
   };
 
   return {
-    invalidateRuntime() {
-      context.chrome.runtime = undefined;
+    invalidateRuntime({ retainChannel = false } = {}) {
+      if (retainChannel) {
+        context.chrome.runtime.id = undefined;
+        context.chrome.runtime.sendMessage = () => { throw new Error("Extension context invalidated."); };
+      } else context.chrome.runtime = undefined;
     },
     providerEvent,
     runtimeMessages,
@@ -389,7 +393,7 @@ test("prepares Seller Centre before an outbound command is selected", async () =
 
   assert.deepEqual(
     plain(bridge.runtimeMessages.find((message) => message.type === "prepare_provider_v3")),
-    { source: "omnichat-realtime-bridge-v3", type: "prepare_provider_v3", provider: "shopee", request_id: "prepare-1" },
+    { source: "omnichat-realtime-bridge-v4", type: "prepare_provider_v3", provider: "shopee", request_id: "prepare-1" },
   );
   await bridge.providerEvent({
     type: "prepare_provider_result",
@@ -1190,3 +1194,24 @@ test("LINE poll success refreshes readiness without an account or send capabilit
   await bridge.providerEvent({ ...status, last_successful_poll_at_by_account: polls });
   assert.equal(bridge.runtimeMessages.filter(message => message.type === "send_readiness_changed").length, 0);
 });
+
+
+for (const provider of ["line_oa", "shopee"]) {
+  for (const retainChannel of [false, true]) {
+    test(`${provider}: an invalidated content script cannot reject the upgraded bridge (API retained: ${retainChannel})`, async () => {
+      const old = contentBridge(undefined, { provider });
+      old.runtimeMessages.length = 0;
+      old.invalidateRuntime({ retainChannel });
+      const request = { type: "recovery_checkpoint", request_id: "upgrade:checkpoint", provider_account_id: "account" };
+      await old.providerEvent(request);
+      assert.deepEqual(old.runtimeMessages, [], "orphaned listeners must be silent, including negative acknowledgements");
+
+      const active = contentBridge(undefined, { provider, runtimeHandler: message =>
+        message.type === "get_sync_state" ? { ok: true, checkpoint: { watermark: "saved" } } : { ok: true } });
+      await active.providerEvent(request);
+      const ack = active.runtimeMessages.find(message => message.type === "recovery_ack_v3");
+      assert.equal(ack.ok, true);
+      assert.equal(ack.checkpoint.watermark, "saved");
+    });
+  }
+}

@@ -22,7 +22,7 @@ test("LINE readiness accepts compatible revisions and rejects breaking interface
     background.indexOf("async function providerMainBridgeStatus("),
     background.indexOf("async function retireProviderMainBridge("),
   );
-  const bridgeSource = "omnichat-realtime-bridge-v3";
+  const bridgeSource = "omnichat-realtime-bridge-v4";
   const control = { source: bridgeSource, bridge_version: "line-oa-poll-7", dispose() {} };
   const context = vm.createContext({
     BRIDGE_SOURCE: bridgeSource,

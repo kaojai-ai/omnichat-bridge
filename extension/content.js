@@ -1,6 +1,6 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge-v3";
-  const BRIDGE_PROTOCOL_VERSION = 12;
+  const SOURCE = "omnichat-realtime-bridge-v4";
+  const BRIDGE_PROTOCOL_VERSION = 13;
   const UNATTENDED_RECOVERY = "unattended_recovery";
   const previousBridge = globalThis.__omnichatContentBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
@@ -9,7 +9,9 @@
   const bridgeGeneration = (Number(globalThis.__omnichatContentBridgeGeneration) || 0) + 1;
   globalThis.__omnichatContentBridgeGeneration = bridgeGeneration;
   let disposed = false;
+  // Orphaned scripts survive extension updates but must never acknowledge the new bridge.
   const isBridgeActive = () => !disposed
+    && Boolean(globalThis.chrome?.runtime?.id)
     && globalThis.__omnichatContentBridgeGeneration === bridgeGeneration;
   const currentUrl = window.location.href || `${window.location.origin}${window.location.pathname}`;
   const providerAdapter = globalThis.OmnichatProviderAdapters?.forPage?.(currentUrl);
