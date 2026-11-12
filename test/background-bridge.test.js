@@ -477,3 +477,31 @@ for (const provider of ['line_oa', 'shopee']) {
     assert.equal(explicit.history_since_ms, now - 30 * 24 * 60 * 60 * 1_000);
   });
 }
+
+for (const failedProvider of [null, "line_oa"]) {
+  test(`reattachment immediately runs shared recovery after all provider tabs (${failedProvider ?? "all healthy"})`, async () => {
+    const events = [];
+    let finishRecovery;
+    const recovery = new Promise(resolve => { finishRecovery = resolve; });
+    const start = source.indexOf("async function reattachOpenProviderBridges(");
+    const end = source.indexOf("\nasync function autoStartSellerCentreTab", start);
+    const reattach = vm.runInNewContext(`(${source.slice(start, end)})`, {
+      providerAdapters: { list: () => ["line_oa", "shopee"].map(id => ({ id,
+        tabQueryPattern: id, matchesUrl: url => url === id })) },
+      chrome: { tabs: { query: async ({ url }) => [{ id: 1, url }] } },
+      reconnectProviderTab: async tab => {
+        events.push(tab.url);
+        if (tab.url === failedProvider) throw new Error("Provider unavailable");
+      },
+      recordUnexpected: async () => {},
+      runProviderHealthWatchdog: async () => { events.push("recover"); await recovery; },
+    });
+    let completed = false;
+    const task = reattach().then(() => { completed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ["line_oa", "shopee", "recover"]);
+    assert.equal(completed, false, "reattachment includes recovery instead of waiting for an alarm");
+    finishRecovery();
+    await task;
+  });
+}
