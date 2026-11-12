@@ -88,8 +88,9 @@ function metadataScope(context) {
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = providerAdapters.get("shopee");
 const DETECTED_ACCOUNTS_RESET_VERSION = "0.5.2";
-const BRIDGE_PROTOCOL_VERSION = 12;
-const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3";
+const BRIDGE_PROTOCOL_VERSION = 13;
+// Fence replies from pre-upgrade scripts that remain in open pages.
+const BRIDGE_SOURCE = "omnichat-realtime-bridge-v4";
 // Bump only when the LINE page bridge interface becomes incompatible.
 const LINE_MAIN_BRIDGE_COMPATIBILITY_VERSION = 8;
 // Bump when an open Shopee page must replace its main-world bridge.

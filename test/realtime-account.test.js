@@ -162,7 +162,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       if (message.type === "recovery_checkpoint") {
         queueMicrotask(() => {
           for (const listener of listeners) listener({ source: window, origin, data: {
-            source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
+            source: "omnichat-realtime-bridge-v4", type: "recovery_ack_v3",
             request_id: message.request_id, ok: checkpointReadAllowed,
             checkpoint: structuredClone(checkpoints.get(message.provider_account_id) ?? {}),
           } });
@@ -175,7 +175,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
           checkpoints.set(message.provider_account_id, checkpoint);
           acknowledged.add(message.request_id);
           for (const listener of listeners) listener({ source: window, origin, data: {
-            source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
+            source: "omnichat-realtime-bridge-v4", type: "recovery_ack_v3",
             request_id: message.request_id, ok: true,
           } });
         });
@@ -185,7 +185,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
           acknowledged.add(message.request_id);
           const parsed = parserContext.OmnichatShopee.parseShopeeMessages(message.body, "poll");
           for (const listener of listeners) listener({ source: window, origin, data: {
-            source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
+            source: "omnichat-realtime-bridge-v4", type: "recovery_ack_v3",
             request_id: message.request_id, ok: pollAcknowledgement,
             parsed: parsed.length, queued: pollAcknowledgement ? parsed.length : 0,
             latest_cursor: pollAcknowledgement ? latestMessageCursor(parsed) : null,
@@ -261,7 +261,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v3", type: "reset_recovery_v3" },
+        data: { source: "omnichat-realtime-bridge-v4", type: "reset_recovery_v3" },
       });
     }
     await new Promise((resolve) => setImmediate(resolve));
@@ -292,7 +292,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v3", type: "detect_account_v3", request_id: requestId },
+        data: { source: "omnichat-realtime-bridge-v4", type: "detect_account_v3", request_id: requestId },
       });
     }
     for (let attempt = 0; attempt < 400; attempt += 1) {
@@ -322,7 +322,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
         source: window,
         origin,
         data: {
-          source: "omnichat-realtime-bridge-v3",
+          source: "omnichat-realtime-bridge-v4",
           type: "sync_v3",
           request_id: requestId,
           checkpoint,
@@ -372,7 +372,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
             source: window,
             origin,
             data: {
-              source: "omnichat-realtime-bridge-v3",
+              source: "omnichat-realtime-bridge-v4",
               type: "recovery_ack_v3",
               request_id: post.request_id,
               ok: !failed,
@@ -399,7 +399,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     advanceClock(ms) { clockOffset += ms; },
     setSocket(socket) { window.__CHAT_GLOBAL__.socket = socket; },
     checkStatus(requestId) {
-      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", type: "check_provider_status_v3", request_id: requestId } });
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v4", type: "check_provider_status_v3", request_id: requestId } });
       return posts.findLast(post => post.type === "provider_status" && post.request_id === requestId);
     },
     fetch,
@@ -410,7 +410,7 @@ function createBridge({ pathname = "/new-webchat/conversations", captureInterval
     setPollAcknowledgement(ok) { pollAcknowledgement = ok; },
     cancelSync(requestId) {
       for (const listener of listeners) listener({ source: window, origin, data: {
-        source: "omnichat-realtime-bridge-v3", type: "cancel_sync_v3", request_id: requestId,
+        source: "omnichat-realtime-bridge-v4", type: "cancel_sync_v3", request_id: requestId,
       } });
     },
     seedRecoveryState,

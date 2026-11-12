@@ -269,7 +269,7 @@ test("resets stale page-side recovery before reinjection without replaying the s
 });
 
 test("retires old bridge listeners before reattaching without a provider reload", () => {
-  assert.match(source, /const BRIDGE_SOURCE = "omnichat-realtime-bridge-v3"/);
+  assert.match(source, /const BRIDGE_SOURCE = "omnichat-realtime-bridge-v4"/);
   assert.match(source, /response\.bridge_source === BRIDGE_SOURCE/);
   assert.match(source, /!bridgeReady && await reinjectProviderBridge\(tabId, adapter\)/);
   assert.match(source, /async function retireProviderMainBridge\(/);

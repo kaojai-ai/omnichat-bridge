@@ -143,7 +143,7 @@ function createBridge({ origin = "https://seller.shopee.co.th", authenticatedAcc
       listener({
         source: window,
         origin,
-        data: { source: "omnichat-realtime-bridge-v3", type: "send_api_v3", ...message },
+        data: { source: "omnichat-realtime-bridge-v4", type: "send_api_v3", ...message },
       });
     }
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -305,7 +305,7 @@ test("rejects an invalid quote target instead of sending unquoted", async () => 
 
   assert.equal(payload, undefined);
   assert.deepEqual(plain({ ...result, diagnostics: undefined }), {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "api_send_result",
     request_id: "request-invalid-1",
     ok: false,

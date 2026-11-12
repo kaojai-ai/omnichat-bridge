@@ -1,5 +1,5 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge-v3";
+  const SOURCE = "omnichat-realtime-bridge-v4";
   const BRIDGE_VERSION = "line-oa-poll-12";
   // Script revisions remain compatible unless the page bridge interface breaks.
   const COMPATIBILITY_VERSION = 8;

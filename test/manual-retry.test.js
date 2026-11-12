@@ -62,9 +62,9 @@ test("stale attempts and other tabs cannot refresh the current recovery watchdog
 test("an already-open old content bridge is reattached before the new watchdog is used", async () => {
   let pings = 0, reinjections = 0;
   const ensure = vm.runInNewContext(`${section('async function ensureProviderBridge(', 'async function prepareProviderTab(')}\nensureProviderBridge;`, {
-    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), BRIDGE_PROTOCOL_VERSION: 3, BRIDGE_SOURCE: "omnichat-realtime-bridge-v3", PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5_000,
+    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), BRIDGE_PROTOCOL_VERSION: 3, BRIDGE_SOURCE: "omnichat-realtime-bridge-v4", PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5_000,
     providerLabel: () => "Shopee",
-    sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v3", ...(++pings > 1 ? { recovery_watchdog_version: 1 } : {}) }),
+    sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v4", ...(++pings > 1 ? { recovery_watchdog_version: 1 } : {}) }),
     reinjectProviderBridge: async () => { reinjections++; return true; },
     providerMainBridgeStatus: async () => ({ ready: true }),
     recordLog: async () => {},
@@ -100,9 +100,9 @@ test("a healthy content ping cannot hide an old Shopee main bridge after upgrade
   let replacements = 0;
   let current = false;
   const ensure = vm.runInNewContext(`${section('async function ensureProviderBridge(', 'async function prepareProviderTab(')}\nensureProviderBridge;`, {
-    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), BRIDGE_PROTOCOL_VERSION: 3, BRIDGE_SOURCE: "omnichat-realtime-bridge-v3", PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5_000,
+    providerBridgeChecks: new Map(), providerTabEpochs: new Map(), BRIDGE_PROTOCOL_VERSION: 3, BRIDGE_SOURCE: "omnichat-realtime-bridge-v4", PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5_000,
     providerLabel: () => "Shopee",
-    sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v3", recovery_watchdog_version: 1 }),
+    sendProviderMessage: async () => ({ ok: true, bridge_protocol_version: 3, bridge_source: "omnichat-realtime-bridge-v4", recovery_watchdog_version: 1 }),
     providerMainBridgeStatus: async () => ({ ready: current }),
     reinjectProviderBridge: async () => { replacements++; current = true; return true; },
     recordLog: async () => {},

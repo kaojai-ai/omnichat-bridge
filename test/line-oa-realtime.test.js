@@ -45,7 +45,7 @@ test("LINE OA replaces an existing polling interval before starting another", ()
 });
 
 
-function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {}, durableCheckpoints = new Map(), checkpointError = null, completionError = null } = {}) {
+function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false, sendError = null, accountError = null, chatError = null, confirmError = null, uploadStatus = 200, uploadDelayMs = 0, uploadBody = { contentMessageToken: "upload-token" }, basicId = "@exampleoa", availableAccounts = null, chatCount = 2, chat1MessageCount = 2, chatLatestEventTimestamps = {}, beforeChatRequest = null, beforeMessageRequest = null, messagePages = null, chatPages = null, beforeAccountRequest = null, chatProfiles = {}, durableCheckpoints = new Map(), checkpointError = null, completionError = null, legacyCheckpointReply = false } = {}) {
   const origin = "https://chat.line.biz";
   let fixtureNow = null;
   let fixtureMonotonic = 0;
@@ -171,8 +171,14 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       posts.push(message);
       if (!["recovery_batch", "recovery_cursor", "history_backfill", "history_window", "recovery_checkpoint", "recovery_bootstrap", "recovery_scan_complete"].includes(message.type)) return;
       queueMicrotask(() => {
+        if (legacyCheckpointReply && message.type === "recovery_checkpoint") {
+          for (const listener of listeners) listener({ source: window, origin, data: {
+            source: "omnichat-realtime-bridge-v3", type: "recovery_ack_v3",
+            request_id: message.request_id, ok: false, error: "Extension context invalidated.",
+          } });
+        }
         const response = {
-          source: "omnichat-realtime-bridge-v3",
+          source: "omnichat-realtime-bridge-v4",
           type: "recovery_ack_v3",
           request_id: message.request_id,
           ok: true,
@@ -264,7 +270,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
     uploads,
     dispatch(data) {
       if (data.type === "sync_v3" && data.checkpoint !== undefined) durableCheckpoints.set(data.provider_account_id, plain(data.checkpoint ?? {}));
-      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v3", ...data } });
+      for (const listener of listeners) listener({ source: window, origin, data: { source: "omnichat-realtime-bridge-v4", ...data } });
     },
     tick() { for (const callback of [...intervals.values()]) callback(); },
     get intervalCount() { return intervals.size; },
@@ -290,7 +296,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           source: window,
           origin,
           data: {
-            source: "omnichat-realtime-bridge-v3",
+            source: "omnichat-realtime-bridge-v4",
             type: "send_api_v3",
             request_id: "send-1",
             conversation_id: "chat-1",
@@ -313,7 +319,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           source: window,
           origin,
           data: {
-            source: "omnichat-realtime-bridge-v3",
+            source: "omnichat-realtime-bridge-v4",
             type: "detect_account_v3",
             request_id: "detect-1",
             account_hints: accountHints,
@@ -346,7 +352,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           source: window,
           origin,
           data: {
-            source: "omnichat-realtime-bridge-v3",
+            source: "omnichat-realtime-bridge-v4",
             type: "sync_v3",
             request_id: requestId,
             checkpoint,
@@ -380,7 +386,7 @@ test("LINE OA discovers and persists the page Basic ID with its bot ID", async (
   const bridge = createBridge();
 
   assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@exampleoa" }])), {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "accounts_detected",
     request_id: "detect-1",
     accounts: [{ provider: "line_oa", provider_account_id: "@exampleoa", bot_id: "bot-1", display_name: "Example Store" }],
@@ -391,7 +397,7 @@ test("LINE OA reports verified empty access without trusting the page or configu
   const bridge = createBridge({ availableAccounts: [] });
 
   assert.deepEqual(plain(await bridge.detect([{ provider_account_id: "@exampleoa" }])), {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "accounts_detected",
     request_id: "detect-1",
     accounts: [],
@@ -408,7 +414,7 @@ test("LINE OA replays an observed text request without copying cookies", async (
   assert.equal(diagnostics.confirmation_source, "history");
   assert.equal(diagnostics.history_request_count, 1);
   assert.deepEqual(reply, {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "api_send_result",
     request_id: "send-1",
     ok: true,
@@ -482,7 +488,7 @@ test("LINE OA recovers every chat and message page only after each page is ackno
 
   const { watermark, ...completeWithoutWatermark } = complete;
   assert.deepEqual(completeWithoutWatermark, {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "recovery_complete",
     request_id: "sync-1",
     provider_account_id: "@exampleoa",
@@ -495,7 +501,7 @@ test("LINE OA recovers every chat and message page only after each page is ackno
   const progress = bridge.posts.filter((post) => post.type === "recovery_progress");
   assert.equal(progress.length, 3);
   assert.deepEqual(plain(progress[0]), {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "recovery_progress",
     request_id: "sync-1",
     provider_account_id: "@exampleoa",
@@ -779,7 +785,7 @@ test("LINE OA completes a pending request when the page bridge is replaced", asy
 
   const complete = await pending;
   assert.deepEqual(plain(complete), {
-    source: "omnichat-realtime-bridge-v3",
+    source: "omnichat-realtime-bridge-v4",
     type: "recovery_complete",
     request_id: "sync-1",
     provider_account_id: "@exampleoa",
@@ -2206,5 +2212,16 @@ test("LINE readiness refresh revokes a cached account mapping before the next se
     assert.equal(result.ok, false);
     assert.equal(bridge.sentPayloads.length, 0);
     assert.equal(bridge.requests.length, before, "verified empty access does not trigger redundant metadata reads");
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE upgrade ignores an orphaned script's checkpoint rejection before the active reply", async () => {
+  const bridge = createBridge({ legacyCheckpointReply: true });
+  try {
+    const result = await bridge.sync();
+    assert.equal(result.ok, true);
+    assert.ok(bridge.requests.length > 0);
+    assert.ok(bridge.durableCheckpoints.get("@exampleoa")?.watermark);
   } finally { bridge.dispose(); }
 });

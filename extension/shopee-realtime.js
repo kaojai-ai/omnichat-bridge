@@ -1,5 +1,5 @@
 (() => {
-  const SOURCE = "omnichat-realtime-bridge-v3";
+  const SOURCE = "omnichat-realtime-bridge-v4";
   const LEGACY_BRIDGE_SOURCE = "omnichat-realtime-bridge-v2";
   const previousBridge = window.__omnichatRealtimeBridgeControl;
   if (previousBridge?.source === SOURCE && typeof previousBridge.dispose === "function") {
