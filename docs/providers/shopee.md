@@ -37,6 +37,25 @@ capture, text/image/product replies, and uncertain-send handling with a
 consenting test shop. Video remains conditional on New Webchat advertising its
 send capability.
 
+## Taiwan regional access
+
+For a Taiwan shop, the server-issued account configuration must include
+`"country": "TW"`. Open `https://seller.shopee.tw/new-webchat/conversations`
+under the matching Shopee login. In the extension popup, grant the requested
+Shopee TW site permission. This registers both the realtime capture and content
+bridges for the Taiwan origin. Detection, history recovery, inbound forwarding,
+and outbound command routing then use the configured shop ID and the Taiwan tab.
+The existing Thailand default is retained for legacy configurations without a
+country field. Revoking Taiwan permission stops its sync and delivery until
+access is granted again.
+
+Taiwan's authenticated chat request profile and message formats have not yet
+been verified against a real Taiwan seller session. Before enabling a live shop,
+verify account detection, initial and incremental inbound sync, text and media
+capture, text/image/product replies, and uncertain-send handling with a
+consenting test shop. Video remains conditional on New Webchat advertising its
+send capability.
+
 ## Switching shops (0.7.6)
 
 Use one signed-in Shopee shop per local Chrome profile. Separate tabs or windows
