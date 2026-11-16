@@ -119,6 +119,7 @@
   globalThis.OmnichatLineOA = { chatItems, normalizeMessages, normalizeAccount, basicIdFromHtml };
   globalThis.OmnichatProviderAdapters?.register({
     id: "line_oa",
+    icon: "icons/line-oa.png",
     displayName: "LINE Official Account",
     accountName: "LINE Official Account",
     adapterVersion: "line-oa-poll-1",

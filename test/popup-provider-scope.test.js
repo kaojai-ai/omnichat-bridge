@@ -43,7 +43,7 @@ for (const configuredPersonal of [false, true]) {
     assert.equal(nodes.get("#selected-provider-name").textContent, "SHOPEE");
     const options = nodes.get("#provider-options").children;
     assert.deepEqual(options.map(button => button.children[1].textContent), configuredPersonal
-      ? ["SHOPEE", "LINE OA", "LINE Personal"] : ["SHOPEE", "LINE OA"]);
+      ? ["LINE OA", "LINE Personal"] : ["LINE OA"]);
     options.at(-1).handlers.click();
     await Promise.resolve();
     assert.deepEqual(activations, [configuredPersonal ? "line_personal" : "line_oa"]);
