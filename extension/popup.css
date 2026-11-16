@@ -1094,6 +1094,11 @@ footer a:hover,
 .account-row-capabilities { display: block; font-size: 10px; color: var(--muted, #667085); line-height: 1.4; white-space: normal; }
 
 .provider-cards:not([hidden]) { display: grid; gap: 8px; margin: 12px 0; }
-.provider-card { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface, #fff); color: var(--ink); text-align: left; }
-.provider-card img { width: 32px; height: 32px; object-fit: contain; border-radius: 6px; }
-.provider-card:hover { border-color: var(--muted); }
+/* Match the original compact provider links. */
+.provider-card { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 38px; padding: 8px 12px; border: 0; border-radius: var(--control-radius); background: var(--shopee); color: #fff; font-weight: 650; }
+.provider-card img { width: 20px; height: 20px; object-fit: contain; border-radius: 4px; }
+.provider-card:hover { background: var(--shopee-hover); }
+.provider-card[data-provider="line_personal"] { background: #087f3d; }
+.provider-card[data-provider="line_personal"]:hover { background: #066531; }
+.provider-card[data-provider="line_oa"] { background: #06c755; }
+.provider-card[data-provider="line_oa"]:hover { background: #05a947; }
