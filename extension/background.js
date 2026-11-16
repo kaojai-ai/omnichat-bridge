@@ -4976,6 +4976,11 @@ function batchFor(messages, installId) {
       messages: []
     };
     if (!conversation.participants && participant) conversation.participants = [participant];
+    if (provider === "line_personal" && participant) {
+      const index = conversation.participants.findIndex((item) => item.id === participant.id);
+      if (index >= 0) conversation.participants[index] = { ...conversation.participants[index], ...participant };
+      else if (conversation.participants.length < 100) conversation.participants.push(participant);
+    }
     const routing = adapter.normalizeRouting?.(message.omnichat?.routing);
     if (routing && (!conversation.omnichat?.routing
       || Date.parse(routing.observed_at) >= Date.parse(conversation.omnichat.routing.observed_at))) {
