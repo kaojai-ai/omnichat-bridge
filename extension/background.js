@@ -55,6 +55,42 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
+import "./lib/line-personal.js";
+import { createProviderMessenger } from "./lib/provider-messaging.js";
+
+const providerMessenger = createProviderMessenger({ sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message) });
+
+chrome.runtime.onConnect?.addListener((port) => {
+  const adapter = globalThis.OmnichatProviderAdapters.get("line_personal");
+  if (port.name !== "omnichat-provider-tab" || port.sender?.id !== chrome.runtime.id || !adapter.matchesUrl(port.sender?.url)) return;
+  let tabId = null;
+  let registering = false;
+  let closed = false;
+  let disposed;
+  port.onMessage.addListener((message) => {
+    if (message?.kind === "register_provider_tab" && tabId === null && !registering) {
+      registering = true;
+      void chrome.tabs.get(message.tab_id).then((tab) => {
+        if (closed) return;
+        if (!adapter.matchesUrl(tab.url) || (port.sender?.tab?.id && port.sender.tab.id !== tab.id)) return port.disconnect();
+        tabId = tab.id;
+        disposed = providerMessenger.attach(tabId, port);
+        port.postMessage({ kind: "provider_registered" });
+      }).catch(() => port.disconnect());
+    }
+    if (message?.kind === "provider_state_changed" && tabId !== null) {
+      void chrome.tabs.get(tabId).then(reconnectProviderTab).catch(() => {});
+    }
+    if (message?.kind === "provider_sync_complete" && tabId !== null) completeProviderRecovery(message, tabId);
+    if (message?.kind === "provider_sync_activity" && tabId !== null) syncControlForMessage(message, tabId)?.touchRecovery?.();
+  });
+  port.onDisconnect.addListener(() => {
+    closed = true;
+    disposed?.();
+    if (tabId !== null) invalidateBridgeVerification(tabId);
+    void ensureLiveConnection().catch(() => {});
+  });
+});
 
 let metadataCacheWarningReported = false;
 function newCustomerMetadataCache() {
@@ -376,7 +412,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
     && (!providerId || item.provider === providerId));
   const account = matches.length === 1 ? matches[0] : null;
   const config = account ? findAccountConfig(stored[STORAGE.config], account) : (stored[STORAGE.config]?.accounts ?? []).find(
-    (candidate) => candidate?.provider === "line_oa"
+    (candidate) => ["line_oa", "line_personal"].includes(candidate?.provider)
       && canonicalProviderAccountId({ config: candidate, account: candidate }) === id
       && (!providerId || candidate.provider === providerId),
   );
@@ -393,7 +429,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
 function configuredAccountContexts(stored) {
   const accounts = [...detectedAccounts(stored)];
   for (const config of stored[STORAGE.config]?.accounts ?? []) {
-    if (config.provider !== "line_oa") continue;
+    if (!["line_oa", "line_personal"].includes(config.provider)) continue;
     if (accounts.some((account) => account.provider === config.provider
       && account.provider_account_id === config.provider_account_id)) continue;
     accounts.push({ provider: config.provider, provider_account_id: config.provider_account_id });
@@ -1035,6 +1071,16 @@ async function applyExtensionUpdate() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "provider_tab_message") {
+    if (!_sender.url?.startsWith(chrome.runtime.getURL(""))
+      || !["ping_v3", "detect_account_v3", "get_provider_status_v3"].includes(message.message?.type)) return false;
+    const adapter = providerAdapterForId(message.provider);
+    void providerChatTabById(adapter, message.tab_id).then((tab) => {
+      if (!tab) throw new Error("Provider tab is unavailable.");
+      return providerMessenger.send(tab.id, { ...message.message, provider: adapter.id });
+    }).then(respond, () => respond({ ok: false, error: "Provider tab is unavailable." }));
+    return true;
+  }
   if (message?.type === "send_readiness_changed") {
     const adapter = providerAdapterForId(message.provider);
     if (!_sender.tab || !adapter?.matchesUrl(_sender.tab.url)) return false;
@@ -1151,6 +1197,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       await chrome.alarms.clear(PROVIDER_HEALTH_ALARM);
       await chrome.alarms.clear(LOG_UPLOAD_ALARM);
       await chrome.storage.local.clear();
+      await chrome.storage.session?.clear();
     }))).then(
       () => respond({ ok: true }),
       () => respond({ ok: false, error: "Could not erase local extension data." }),
@@ -1306,16 +1353,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_complete") {
-    const control = syncControlForMessage(message, _sender?.tab?.id);
-    const completion = control?.recoveryCompletion;
-    if (!completion || message.provider !== control.adapter?.id
-      || message.provider_account_id !== control.providerAccountId
-      || message.request_id !== control.providerRequestId || typeof message.result?.ok !== "boolean") {
-      respond({ ok: true, skipped: "superseded" });
-      return false;
-    }
-    completion.resolve(message.result);
-    respond({ ok: true });
+    respond(completeProviderRecovery(message, _sender?.tab?.id));
     return false;
   }
   if (message?.type === "sync_activity") {
@@ -1449,6 +1487,16 @@ function syncControlForMessage(message, tabId) {
     && control.tabId === tabId && control.providerRequestId === requestId);
 }
 
+function completeProviderRecovery(message, tabId) {
+  const control = syncControlForMessage(message, tabId);
+  const completion = control?.recoveryCompletion;
+  if (!completion || message.provider !== control.adapter?.id
+    || message.provider_account_id !== control.providerAccountId
+    || message.request_id !== control.providerRequestId || typeof message.result?.ok !== "boolean") return { ok: true, skipped: "superseded" };
+  completion.resolve(message.result);
+  return { ok: true };
+}
+
 // Routine polls outlive recovery jobs and service-worker lifetimes. Verify
 // their live page identity instead of granting authority to the poll prefix alone.
 async function pollingCheckpointGuard(message, tabId) {
@@ -1494,7 +1542,7 @@ async function persistSyncCheckpoint(message, tabId) {
 }
 
 async function initializeAndStartSync(trigger, provider = null) {
-  if (!["shopee", "line_oa"].includes(provider)) throw new Error("Select a provider tab to sync.");
+  if (!providerAdapterForId(provider)?.supports("message_recovery")) throw new Error("Select a provider tab to sync.");
   await queueLiveStateWrite(() => writeStorage({
     [STORAGE.serverInitialized]: true,
     [STORAGE.logUploadEnabled]: true,
@@ -1719,7 +1767,7 @@ async function prepareAndSendViaProvider(message, state = {}) {
   state.dispatchStartedAt = globalThis.performance?.now() ?? Date.now();
   state.dispatchStarted = true;
   try {
-    result = await withRequestTimeout(() => chrome.tabs.sendMessage(tab.id, {
+    result = await withRequestTimeout(() => providerMessenger.send(tab.id, {
       ...message,
       deadline_at_ms: deadlineAt,
       ...imagePayload,
@@ -1771,7 +1819,7 @@ async function sendTextByUiClick_WIP(message) {
   if (!context) return { ok: false, error: `${providerLabel(adapter)} browser bridge is not configured.` };
   const tab = await commandTab(context, { createIfMissing: false, prepareForSend: true });
   await ensureProviderBridge(tab.id, context.adapter);
-  return chrome.tabs.sendMessage(tab.id, { ...message, type: "send_text_ui_click_wip_v3" });
+  return providerMessenger.send(tab.id, { ...message, type: "send_text_ui_click_wip_v3" });
 }
 
 function liveEndpoint(config) {
@@ -3231,7 +3279,7 @@ async function refreshRegionalShopeePermissions() {
     for (const tabId of tabIds) {
       if (!Number.isInteger(tabId)) continue;
       void cancelActiveSync("shopee", tabId).catch(() => {});
-      void chrome.tabs.sendMessage(tabId, { type: "cancel_sync_v3", provider: "shopee",
+      void providerMessenger.send(tabId, { type: "cancel_sync_v3", provider: "shopee",
         provider_account_id: context.account.provider_account_id }).catch(() => {});
     }
     sessionEligibility.reset(context.key);
@@ -3250,7 +3298,7 @@ async function reconnectProviderTab(tab) {
   const adapter = providerAdapters.list().find((candidate) => candidate.matchesUrl(tab.url));
   if (!adapter) return;
   await ensureProviderBridge(tabId, adapter);
-  if (adapter.id === "line_oa" || adapter.id === "shopee") {
+  if (adapter.supports("account_detection")) {
     const stored = await readStorage([STORAGE.consent]);
     if (hasLocalConsent(stored[STORAGE.consent])) {
       const result = await detectOpenProviderAccount(adapter.id, tabId);
@@ -3380,7 +3428,7 @@ async function reinitializeAfterUpgrade() {
     for (const tab of chatTabs) {
       try {
         await ensureProviderBridge(tab.id, adapter);
-        const result = await chrome.tabs.sendMessage(tab.id, {
+        const result = await providerMessenger.send(tab.id, {
           type: "detect_account_v3",
           provider: adapter.id,
         });
@@ -3560,7 +3608,7 @@ async function detectOpenProviderAccount(provider = shopeeAdapter.id, preferredT
   }
   await recordLog("info", "account", "detection_started", `Detecting ${label} account.`, { provider: adapter.id });
   await ensureProviderBridge(tab.id, adapter);
-  const result = await chrome.tabs.sendMessage(tab.id, {
+  const result = await providerMessenger.send(tab.id, {
     type: "detect_account_v3",
     provider: adapter.id,
   });
@@ -3690,6 +3738,10 @@ async function ensureProviderBridge(tabId, adapter, { reuseVerified = false } = 
 
 async function verifyProviderBridge(tabId, adapter, repair = true) {
   if (!adapter) throw new Error("Provider adapter is unavailable.");
+  if (adapter.transport === "extension_page") {
+    if (!providerMessenger.has(tabId)) throw new Error("Open the LINE Personal connection tab and reconnect.");
+    return;
+  }
   const label = providerLabel(adapter);
   let response = null;
   let pingFailed = false;
@@ -3835,6 +3887,7 @@ async function resetProviderRecovery(tabId) {
 }
 
 async function providerMainBridgeStatus(tabId, adapter) {
+  if (adapter?.transport === "extension_page") return { ready: providerMessenger.has(tabId) };
   const mainBridge = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -4122,7 +4175,7 @@ function sendProviderMessage(tabId, message, {
   const startedAt = (globalThis.performance?.now() ?? Date.now());
   if (signal?.aborted) return Promise.reject(syncCancelledError());
   const response = Promise.resolve()
-    .then(() => chrome.tabs.sendMessage(tabId, message)).catch((error) => {
+    .then(() => providerMessenger.send(tabId, message)).catch((error) => {
       // Chrome supplies this specific lifecycle error. Keep it a failed operation,
       // with a useful message; never classify it as cancellation or retry a send.
       if (String(error?.message ?? error).includes("moved into back/forward cache")) {
@@ -4135,7 +4188,7 @@ function sendProviderMessage(tabId, message, {
       clearTimeout(timeout);
       timeout = setTimeout(() => {
         if (recoveryControl) {
-          void Promise.resolve().then(() => chrome.tabs.sendMessage(tabId, {
+          void Promise.resolve().then(() => providerMessenger.send(tabId, {
             type: "cancel_sync_v3", request_id: message.request_id,
             ...(message.provider_account_id ? { provider_account_id: message.provider_account_id } : {}),
           })).catch(() => undefined);
@@ -4379,7 +4432,7 @@ function requestAccountSync(context, trigger, options = {}) {
 }
 
 async function retryProviderAccount(message, { controller } = {}) {
-  if (!["line_oa", "shopee"].includes(message.provider)) throw new Error("Account retry is not supported for this provider.");
+  if (!providerAdapterForId(message.provider)?.supports("message_recovery")) throw new Error("Account retry is not supported for this provider.");
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent]);
   if (!hasLocalConsent(stored[STORAGE.consent])) throw new Error("Accept local consent before syncing.");
   const context = configuredAccountContexts(stored).find(item => item.adapter.id === message.provider
@@ -4917,6 +4970,8 @@ function batchFor(messages, installId) {
     const participant = participantForBatch(message.participant);
     const conversation = conversations.get(message.conversation_id) ?? {
       id: message.conversation_id,
+      ...(message.conversation_type ? { type: message.conversation_type } : {}),
+      ...(message.conversation_name ? { display_name: message.conversation_name } : {}),
       ...(participant ? { participants: [participant] } : {}),
       messages: []
     };

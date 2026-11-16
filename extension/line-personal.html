@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LINE Personal · Omnichat Bridge</title>
+  <link rel="stylesheet" href="ui/tokens.css"><link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="line-personal.css">
+</head>
+<body class="connection-page">
+  <main>
+    <header class="brand">
+      <img class="provider-mark" src="icons/line.png" alt="">
+      <div class="brand-copy"><h1>LINE Personal</h1><span>Omnichat Bridge</span></div>
+      <a href="popup.html" class="connection-settings">Settings</a>
+    </header>
+    <section class="screen">
+      <div class="screen-intro"><h2>Connect your account</h2><p>Scan with LINE on your phone. Keep this tab and your computer awake to receive and send messages.</p></div>
+      <p id="personal-status" role="status" aria-live="polite">Ready to connect.</p>
+      <div id="personal-authorization" hidden>
+        <canvas id="personal-qr" aria-label="Scan with LINE"></canvas>
+        <p id="personal-pin" hidden></p>
+      </div>
+      <div id="personal-account" class="account-row" hidden>
+        <div><strong id="personal-name"></strong><p id="personal-id" class="account-id"></p></div>
+        <button id="personal-copy" type="button">Copy account ID</button>
+      </div>
+      <div class="sync-actions"><button id="personal-connect" type="button">Connect LINE</button><button id="personal-disconnect" class="cancel-sync-link" type="button" hidden>Disconnect</button></div>
+      <p class="connection-note">LINE credentials and encryption keys stay in this browser session. They are not included in configuration exports or sent to your server. Browser restart or an extension update requires reconnecting.</p>
+      <p class="connection-note">This is an unofficial integration. It may affect other LINE sessions or account access.</p>
+    </section>
+  </main>
+  <script type="module" src="line-personal-client.js"></script>
+</body>
+</html>

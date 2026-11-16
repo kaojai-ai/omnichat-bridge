@@ -2,6 +2,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "check:line-personal-browser": "node --test test/line-personal-browser.test.js test/line-personal-browser-fetch.test.js test/line-personal-send.test.js test/line-personal-live-case.test.js",
+    "build": "node scripts/build-extension.mjs",
+    "build:line-personal-probe": "node scripts/build-extension.mjs --outdir tmp/line-personal-probe/extension",
+    "test:line-personal-live": "node scripts/run-line-personal-live-case.mjs"
+  },
+  "devDependencies": {
+    "@evex-dev/linejs": "3.6.5",
+    "@jspm/core": "2.1.0",
+    "@noble/ciphers": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "esbuild": "0.28.2",
+    "esbuild-plugin-polyfill-node": "0.3.0",
+    "qrcode": "1.5.4"
   }
 }

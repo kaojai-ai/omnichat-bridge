@@ -121,7 +121,7 @@ test("actual cleanup and first Sync initialization serialize without erasing the
     recordLog: async () => {}, liveConnections, clearTimeout: () => {},
     ensureLiveConnection: async () => {}, recordUnexpected: async () => {},
     syncAccountsForTab: async () => { events.push("sync"); readiness = "ready"; liveConnections.set("shopee:fixture", { socket: "new" }); },
-    providerAdapterForId: id => ({ id }), findReadyProviderChatTab: async () => ({ id: 7 }),
+    providerAdapterForId: id => ({ id, supports: capability => capability === "message_recovery" }), findReadyProviderChatTab: async () => ({ id: 7 }),
   });
   const clearing = api.clearProviderRecoveryLiveState();
   await reachedPause;

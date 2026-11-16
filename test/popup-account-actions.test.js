@@ -7,7 +7,8 @@ import { syncProgressPresentation } from "../extension/lib/popup-sync-progress.j
 
 const source = readFileSync(new URL("../extension/popup.js", import.meta.url), "utf8");
 const labels = source.slice(source.indexOf("function accountLabel("), source.indexOf("function logPopup("));
-const rendering = source.slice(source.indexOf("function createAccountActionIcon("), source.indexOf("function renderDashboard("));
+const rendering = source.slice(source.indexOf("function createAccountActionIcon("), source.indexOf("function renderProviderSelector("))
+  + source.slice(source.indexOf("function renderAccountRow("), source.indexOf("function renderDashboard("));
 function element(tag) {
   return { tag, children: [], dataset: {}, attributes: {}, handlers: {}, classList: { add() {} },
     append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
@@ -29,7 +30,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const scanState = {};
     const scope = vm.createContext({
       document: { createElement: element, createElementNS: (_namespace, tag) => element(tag) },
-      popupAccountsForSession: accounts => accounts,
+      popupAccountsForSession: accounts => accounts, renderProviderSelector() {},
       detectedAccounts: [account], liveState: {}, pageAccounts: [], accountList: list,
       accountListEmpty: element("div"), detectingAccount: false, activeProviderAdapter: { id: provider },
       adapterForAccount: () => ({ id: provider, displayName: provider === "shopee" ? "Shopee Seller Chat" : "LINE Official Account", accountName: provider === "line_oa" ? "LINE OA" : "Shop", supports: capability => supportsRecovery && capability === "message_recovery" }),

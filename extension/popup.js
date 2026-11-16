@@ -22,15 +22,16 @@ import "./lib/shopee-url.js";
 import "./lib/provider-adapters.js";
 import "./lib/shopee-adapter.js";
 import "./lib/line-oa.js";
+import "./lib/line-personal.js";
+import { selectableProviders, activateProvider } from "./lib/provider-navigation.js";
 import { activeSyncAccount, currentTabSyncAccounts, hydrateDetectedAccounts, popupAccountsForSession } from "./lib/popup-accounts.js";
 import { createCoalescedRefresh, syncProgressPresentation } from "./lib/popup-sync-progress.js";
 import { accountCapabilityStatus, accountCapabilitySummary, currentAccountSyncFailure, accountConnectionStatus, accountDiscoveryStatus, sessionConnectionStatus } from "./lib/popup-status.js";
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
-function updateShopeeProviderLink(account) {
-  const link = document.querySelector("#shopee-provider-link");
-  if (link) link.href = shopeeAdapter.chatUrlForAccount(account);
+function updateProviderNavigation() {
+  renderProviderSelector();
   void renderRegionalAccess();
 }
 
@@ -88,7 +89,6 @@ const consentError = document.querySelector("#consent-error");
 const continueButton = document.querySelector("#continue");
 const loadingScreen = document.querySelector("#loading-screen");
 const consentScreen = document.querySelector("#consent-screen");
-const hintScreen = document.querySelector("#hint-screen");
 const dashboardScreen = document.querySelector("#dashboard-screen");
 const configScreen = document.querySelector("#config-screen");
 const brandHeader = document.querySelector(".brand");
@@ -241,8 +241,7 @@ function applyTranslations() {
     ["#consent-screen .consent-copy p:first-child", `<strong>${t("transfers")}</strong> ${t("transfersRest")}`],
     ["#consent-screen .consent-copy p:nth-child(2)", `<strong>${t("never")}</strong> ${t("neverRest")}`],
     ["#privacy-github", `${t("learnMore")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">GitHub</a>.`],
-    ["label.consent span", t("consent")], ["#continue", t("continue")], ["#provider-links-title", t("supported")],
-    ["#hint-screen .screen-intro p", t("chooseProvider")], ["#detected-shops-title", t("detectedAccounts")],
+    ["label.consent span", t("consent")], ["#continue", t("continue")],
     ["#account-list-empty", t("noAccounts")], ["#unattended-recovery-label", t("unattendedRecovery")], ["#cancel-sync", t("cancel")],
     ["#open-logs", t("logs")], ["#open-config", t("settings")], ["#open-privacy", t("privacy")], ["#clear", t("erase")],
     ["#config-screen h2", t("settings")], ["#save-config", t("save")], ["#logs-screen h2", t("logs")],
@@ -273,10 +272,7 @@ function applyTranslations() {
     const option = logLevel.querySelector(`option[value="${value}"]`);
     if (option) option.textContent = t(key);
   }
-  for (const link of document.querySelectorAll(".provider-link small")) link.textContent = t("openChat");
-  if (document.querySelector("#hint-screen .hint-guide")) {
-    document.querySelector("#hint-screen .hint-guide").innerHTML = `${t("help")} <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">${t("documentation")}</a>.`;
-  }
+
   renderExtensionUpdate(extensionUpdate);
   void renderRegionalAccess();
 }
@@ -291,7 +287,7 @@ function consented() {
 
 function defaultScreen() {
   if (!consented()) return "consent";
-  return isProviderChatTab ? "dashboard" : "hint";
+  return "dashboard";
 }
 
 function routeTo(target) {
@@ -304,7 +300,6 @@ function routeTo(target) {
   loadingScreen.hidden = true;
   brandHeader.hidden = screen === "config" || screen === "logs" || screen === "privacy";
   consentScreen.hidden = !onConsentGate;
-  hintScreen.hidden = screen !== "hint";
   dashboardScreen.hidden = screen !== "dashboard";
   configScreen.hidden = screen !== "config";
   logsScreen.hidden = screen !== "logs";
@@ -481,7 +476,7 @@ function formatSyncResult(result) {
 }
 
 function accountIsActiveHere(account) {
-  return !["shopee", "line_oa"].includes(account.provider)
+  return !["shopee", "line_oa", "line_personal"].includes(account.provider)
     || readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
 }
 
@@ -619,8 +614,9 @@ function createAccountActionIcon(action) {
 }
 
 function renderDetectedAccounts() {
+  renderProviderSelector();
   const accounts = popupAccountsForSession(detectedAccounts, liveState, pageAccounts).filter((account) => (
-    adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
+    account.provider === activeProviderAdapter?.id && adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
   ));
   accountList.replaceChildren();
   accountListEmpty.hidden = accounts.length !== 0;
@@ -629,6 +625,33 @@ function renderDetectedAccounts() {
   accountListEmpty.textContent = detectingAccount ? t("detectingShop")
     : activeProviderAdapter?.id === "shopee" ? t("shopUnknown") : t("noAccounts");
   accountList.append(...accounts.map(renderAccountRow).filter(Boolean));
+}
+
+function renderProviderSelector() {
+  const selector = document.querySelector("#provider-selector");
+  const options = document.querySelector("#provider-options");
+  const adapters = selectableProviders(providerAdapters.list(), storedConfig);
+  if (!activeProviderAdapter || !adapters.some((adapter) => adapter.id === activeProviderAdapter.id)) {
+    activeProviderAdapter = adapters.find((adapter) => storedConfig.accounts.some((account) => account.provider === adapter.id)) ?? adapters[0];
+  }
+  if (!activeProviderAdapter) return;
+  const icon = (adapter) => adapter.icon ?? (adapter.id === "shopee" ? "icons/shopee.png" : "icons/line.png");
+  document.querySelector("#selected-provider-logo").src = icon(activeProviderAdapter);
+  document.querySelector("#selected-provider-name").textContent = activeProviderAdapter.id === "shopee" ? "SHOPEE" : activeProviderAdapter.displayName;
+  options.replaceChildren();
+  for (const adapter of adapters) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "provider-option";
+    button.setAttribute("aria-current", String(adapter.id === activeProviderAdapter.id));
+    const logo = document.createElement("img"); logo.src = icon(adapter); logo.alt = "";
+    const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
+    button.append(logo, label);
+    button.addEventListener("click", () => {
+      selector.open = false;
+      void activateProvider(adapter, storedConfig, chrome).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+    });
+    options.append(button);
+  }
 }
 
 // One row layout; provider adapters supply identity and capabilities.
@@ -801,6 +824,7 @@ function renderAccountRow(account) {
 }
 
 function renderDashboard(message = "", isError = false) {
+  renderProviderSelector();
   syncButton.dataset.provider = activeProviderAdapter?.id || detectedAccounts[0]?.provider || "";
   renderDeviceNameBadge();
   renderDetectedAccounts();
@@ -808,7 +832,8 @@ function renderDashboard(message = "", isError = false) {
   setStatusAppearance(isError ? "error" : "neutral");
   lastSync.hidden = true;
   lastSync.textContent = "";
-  const accountStates = detectedAccounts.map((account) => {
+  const selectedAccounts = detectedAccounts.filter((account) => account.provider === activeProviderAdapter?.id);
+  const accountStates = selectedAccounts.map((account) => {
     const key = accountConfigKey(account);
     return {
       account,
@@ -851,7 +876,7 @@ function renderDashboard(message = "", isError = false) {
     && configuredStates.some((item) => (
       item.account.provider === "shopee" && item.live?.provider_chat_open === false
     ));
-  const progressAccount = activeSyncAccount(storedConfig, detectedAccounts, storedStatus, pendingStates);
+  const progressAccount = activeSyncAccount({ ...storedConfig, accounts: storedConfig.accounts.filter((account) => account.provider === activeProviderAdapter?.id) }, selectedAccounts, storedStatus, pendingStates);
   const latestResult = configuredStates
     .map((item) => item.syncState?.last_result)
     .filter(Boolean)
@@ -1055,7 +1080,7 @@ async function refreshStoredState() {
     return;
   }
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
+  updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1155,7 +1180,7 @@ async function autoStartSync(config) {
   if (!isProviderChatTab) return false;
   const tab = await chrome.tabs.get(popupTabId);
   const provider = providerAdapters.forPage(tab?.url)?.id;
-  if (!["line_oa", "shopee"].includes(provider)) return false;
+  if (!providerAdapters.get(provider)?.supports("account_detection")) return false;
   const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
   if (!detected?.ok) throw new Error("Could not detect provider accounts. Try again from the provider chat.");
   const accounts = currentTabSyncAccounts(config, detected.accounts, provider);
@@ -1196,7 +1221,7 @@ async function load() {
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
-  updateShopeeProviderLink(storedConfig.accounts.find(account => account.provider === "shopee"));
+  updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1217,6 +1242,7 @@ async function load() {
   }
   popupTabId = activeTab?.id ?? null;
   activeProviderAdapter = providerAdapters.forPage(activeTab?.url);
+  renderProviderSelector();
   activeProviderSurface = activeProviderAdapter?.surfaceForUrl?.(activeTab?.url) ?? null;
   isProviderChatTab = Boolean(activeProviderAdapter?.matchesUrl(activeTab?.url));
   detectedAccounts = bestEffortAccounts(stored[STORAGE.detectedAccounts], activeTab?.url);
@@ -1288,6 +1314,10 @@ syncButton.addEventListener("click", async () => {
   const actionId = ++syncActionId;
   if (syncButton.dataset.action === "configure") {
     openConfig();
+    return;
+  }
+  if (!isProviderChatTab && activeProviderAdapter) {
+    await activateProvider(activeProviderAdapter, storedConfig, chrome);
     return;
   }
   if (syncButton.dataset.action === "open_webchat_mini") {
@@ -1530,7 +1560,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
       } : {}),
     });
     storedConfig = config;
-    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
+    updateProviderNavigation(config.accounts.find(account => account.provider === "shopee"));
     storedDeviceName = deviceName;
     renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
@@ -1571,7 +1601,7 @@ configFile.addEventListener("change", async () => {
       [STORAGE.logOutbox]: [],
     });
     storedConfig = config;
-    updateShopeeProviderLink(config.accounts.find(account => account.provider === "shopee"));
+    updateProviderNavigation(config.accounts.find(account => account.provider === "shopee"));
     logPopup("info", "configuration_imported", "Configuration imported.", {
       accounts: config.accounts.length,
       logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),

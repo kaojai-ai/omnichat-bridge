@@ -43,7 +43,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const start = source.indexOf("async function reconnectProviderTab(tab)");
     const end = source.indexOf("\nfunction invalidateProviderSession", start);
     const reconnect = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
-      providerAdapters: { list: () => [{ id: provider, matchesUrl: () => true }] },
+      providerAdapters: { list: () => [{ id: provider, supports: capability => capability === "account_detection", matchesUrl: () => true }] },
       STORAGE: { consent: "consent" }, readStorage: async () => ({ consent: true }),
       hasLocalConsent: (consent) => consent,
       ensureProviderBridge: async () => calls.push("bridge"),
@@ -199,8 +199,8 @@ test("repairs live status independently of manual retry", () => {
 test("scopes leader changes to the provider shown in the popup", () => {
   assert.match(source, /function providerLiveCommandContexts\(contexts, provider\)/);
   assert.match(source, /context\.adapter\.id === providerId/);
-  assert.match(source, /claimLeader\(message\.tab_id, message\.provider\)/);
-  assert.match(source, /releaseLeader\(message\.provider\)/);
+  assert.match(source, /claimLeader\(message\.tab_id, message\.provider, message\.provider_account_id\)/);
+  assert.match(source, /releaseLeader\(message\.provider, message\.provider_account_id\)/);
 });
 
 test("uses the account API base for a signed generic ping", () => {

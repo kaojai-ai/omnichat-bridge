@@ -52,22 +52,13 @@
         <p id="consent-error" class="error" role="status"></p>
       </section>
 
-      <section id="hint-screen" class="screen hint-screen" hidden>
-        <div class="screen-intro">
-          <h2 id="provider-links-title" class="provider-links-title">Supported providers</h2>
-          <p>Choose a provider to manage its account here.</p>
-        </div>
-        <div class="provider-links">
-          <a id="shopee-provider-link" class="provider-link" href="https://seller.shopee.co.th/new-webchat/conversations" target="_blank" rel="noreferrer"><span>Shopee New Webchat</span><small>Open Chat</small></a>
-          <a class="provider-link provider-link-line" href="https://chat.line.biz/" target="_blank" rel="noreferrer"><span>LINE Official Account</span><small>Open Chat</small></a>
-        </div>
-        <p class="hint-guide">Need help? See the <a href="https://github.com/kaojai-ai/omnichat-bridge" target="_blank" rel="noreferrer">documentation on GitHub</a>.</p>
-      </section>
-
       <section id="dashboard-screen" class="screen" hidden>
         <section class="account-section detected-shops" aria-labelledby="detected-shops-title">
           <div class="account-section-heading">
-            <h2 id="detected-shops-title">ACCOUNTS</h2>
+            <details id="provider-selector" class="provider-selector">
+              <summary id="detected-shops-title"><img id="selected-provider-logo" src="icons/shopee.png" alt=""><span id="selected-provider-name">SHOPEE</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+              <div id="provider-options" class="provider-options" aria-label="Providers"></div>
+            </details>
             <span id="device-name-badge" class="device-name-badge" aria-label="Node name"></span>
           </div>
           <div id="account-list" class="account-list" aria-live="polite"></div>

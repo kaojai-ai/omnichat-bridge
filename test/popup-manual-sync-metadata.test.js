@@ -11,7 +11,7 @@ const accounts = [
   { provider: "line_oa", provider_account_id: "@two", bot_id: "bot-two" },
   { provider: "shopee", provider_account_id: "shop" },
 ];
-function harness({ provider = "shopee", action = "sync", unknown = false, freshAccounts = accounts } = {}) {
+function harness({ provider = "shopee", action = "sync", unknown = false, freshAccounts = accounts, isProviderChatTab = true } = {}) {
   let click;
   let finishPermission;
   let finishPreparation;
@@ -19,12 +19,14 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
   const requests = [];
   const results = [];
   const refreshes = [];
+  const activations = [];
   const button = { dataset: { action }, addEventListener: (_event, handler) => { click = handler; } };
   const scope = vm.createContext({
     syncButton: button, storedConfig: { accounts }, detectedAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
     progressArea: {}, status: { classList: { remove() {} } },
     logPopup() {}, diagnosticErrorDetails: () => ({}),
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
+    isProviderChatTab, activateProvider: async adapter => activations.push(adapter.id),
     accountOrigins: config => config.accounts,
     requestTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
     detectAccount: async () => { detections += 1; }, refreshStoredState: async () => {},
@@ -45,7 +47,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
     showSyncResult: async result => results.push(result),
   });
   vm.runInContext(handlerSource, scope);
-  return { scope, requests, refreshes, results, click: () => click(),
+  return { scope, requests, refreshes, results, activations, click: () => click(),
     allowPermission: () => finishPermission(), finishPreparation: () => finishPreparation({ ok: true }),
     cancel: () => vm.runInContext("syncActionId += 1", scope), get detections() { return detections; } };
 }
@@ -157,3 +159,12 @@ test("manual Sync can join background work but stays disabled during its own req
   vm.runInNewContext(source.slice(start, end), context);
   assert.equal(button.disabled, true);
 });
+
+for (const provider of ["shopee", "line_oa"]) {
+  test(`manual ${provider} sync opens its provider when the popup is on another tab`, async () => {
+    const h = harness({ provider, isProviderChatTab: false });
+    await h.click();
+    assert.deepEqual(h.activations, [provider]);
+    assert.deepEqual(h.requests, [], "opening the provider does not sync an unverified tab");
+  });
+}

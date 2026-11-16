@@ -36,6 +36,30 @@ for the referenced notice.
 
 ## How it works
 
+### LINE Personal (text MVP)
+
+LINE Personal uses an extension-owned connection tab, not the LINE OA website.
+Build with `pnpm build` and load `tmp/extension` unpacked. Open the extension's
+**Details → Extension options**, connect with the QR/PIN on your phone, and copy
+the detected account ID into the LINE Personal setup in your server's Admin.
+Import the resulting version 3 configuration. LINE Personal then appears in
+the popup's provider selector; selecting a provider focuses its existing tab.
+
+Keep Chrome, the connection tab and the computer running. Login credentials and
+encryption keys stay in trusted Chrome session storage; restarting Chrome or
+updating/reloading the extension requires reconnecting. Configuration exports
+contain the bridge signing secret, never LINE login credentials.
+
+This MVP sends and receives text through the existing signed incoming queue,
+account-scoped bridge and reply lifecycle. Initial recovery uses the existing
+10-conversation / 25-message limit. Attachments and quoted replies are not
+advertised. Developer probe tools are excluded from ordinary builds; explicitly
+pass `--debug-probe` to the build script for a development artifact.
+
+An isolated OA-to-Personal text roundtrip was verified during development.
+Live verification of the complete extension-to-server path, E2EE peers, groups
+and media remains pending. This source change does not publish a Store release.
+
 ![Omnichat Bridge copies supported chat messages to your server without taking browser credentials](docs/assets/omnichat-bridge-how-it-work.png)
 
 The provider chat stays in the user's browser. The extension reads supported
