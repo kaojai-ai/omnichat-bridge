@@ -3,8 +3,9 @@
 .connection-page .screen { padding-top: 16px; }
 .connection-settings { margin-left: auto; color: var(--muted); font-size: 12px; }
 .connection-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
-#personal-qr { display: block; max-width: 100%; margin: 16px auto; border-radius: 8px; }
-#personal-pin { text-align: center; font-weight: 600; font-size: 18px; }
+#personal-qr:not([hidden]) { display: block; max-width: 100%; margin: 16px auto; border-radius: 8px; }
+#personal-pin { margin: 0; padding: 40px 0 24px; text-align: center; font-weight: 700; font-size: clamp(48px, 12vw, 80px); line-height: 1.15; letter-spacing: 0.12em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#personal-pin-help { margin: 0 0 32px; text-align: center; }
 #personal-account { margin: 18px 0; grid-template-columns: 1fr auto; align-items: center; }
 #personal-account p { overflow-wrap: anywhere; }
 

@@ -8,7 +8,7 @@ import { sendPersonalText } from "./lib/provider-text-send.js";
 import { personalCommandClient } from "./lib/line-personal-command.js";
 import { STORAGE, hasLocalConsent, readStorage } from "./lib/storage.js";
 
-const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "account", "name", "id", "copy", "connect", "disconnect"].map((name) => [name, document.getElementById(`personal-${name}`)]));
+const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "pin-help", "account", "name", "id", "copy", "connect", "disconnect"].map((name) => [name, document.getElementById(`personal-${name}`)]));
 const requestedAccount = new URL(location.href).searchParams.get("account");
 const scope = /^u[a-f0-9]{32}$/i.test(requestedAccount ?? "") ? requestedAccount : "setup";
 const tab = await chrome.tabs.getCurrent();
@@ -188,9 +188,10 @@ async function start(value) {
   base.on("qrcall", (url) => {
     if (!active(value)) return;
     ui.authorization.hidden = false;
+    ui.qr.hidden = false; ui.pin.hidden = true; ui["pin-help"].hidden = true;
     void QRCode.toCanvas(ui.qr, url, { width: 280, margin: 2 }).catch(() => report("Could not display the QR code. Reconnect and try again.", true));
   });
-  base.on("pincall", (pin) => { if (active(value) && /^\d{4,8}$/.test(String(pin))) { ui.pin.hidden = false; ui.pin.textContent = `Confirm PIN ${pin} on your phone`; } });
+  base.on("pincall", (pin) => { if (active(value) && /^\d{4,8}$/.test(String(pin))) { ui.qr.hidden = true; ui.pin.hidden = false; ui.pin.textContent = String(pin); ui["pin-help"].hidden = false; } });
   try {
     const token = await storage.get("authToken");
     if (token) await base.loginProcess.login({ authToken: token });
