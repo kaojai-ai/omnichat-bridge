@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check:line-personal-browser": "node --test test/line-personal-browser.test.js",
+    "check:line-personal-browser": "node --test test/line-personal-browser.test.js test/line-personal-browser-fetch.test.js",
     "build:line-personal-probe": "node scripts/build-line-personal-probe.mjs"
   },
   "devDependencies": {

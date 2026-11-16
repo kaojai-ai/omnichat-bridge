@@ -1,6 +1,7 @@
 import { BaseClient } from "@evex-dev/linejs/base";
 import { MemoryStorage } from "@evex-dev/linejs/storage";
 import QRCode from "qrcode";
+import { createBrowserFetch } from "./browser-fetch.js";
 
 const element = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
@@ -63,18 +64,6 @@ async function stop(status = "Stopped. Local credentials cleared.") {
   ui.message.value = "";
 }
 
-function browserFetch(controller) {
-  return async (input, init) => {
-    const request = new Request(input, init);
-    controller.signal.throwIfAborted();
-    const response = await globalThis.fetch(request, {
-      signal: AbortSignal.any([request.signal, controller.signal, AbortSignal.timeout(45_000)]),
-    });
-    if (!response.ok) throw new Error("LINE_HTTP_REQUEST_FAILED");
-    return response;
-  };
-}
-
 function delay(ms, signal) {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
@@ -95,7 +84,7 @@ async function poll(session) {
   let consecutiveFailures = 0;
   while (active(session)) {
     try {
-      const response = await session.base.talk.sync({ ...revisions, limit: 100, timeout: 30_000 });
+      const response = await session.base.talk.sync({ ...revisions, limit: 100 });
       if (!active(session)) return;
       const operations = response.operationResponse;
       if (response.fullSyncResponse?.nextRevision != null) revisions.revision = response.fullSyncResponse.nextRevision;
@@ -164,7 +153,7 @@ ui.connect.addEventListener("click", async () => {
   const storage = new MemoryStorage();
   let base;
   try {
-    base = new BaseClient({ device: "ANDROIDSECONDARY", fetch: browserFetch(controller), storage });
+    base = new BaseClient({ device: "ANDROIDSECONDARY", fetch: createBrowserFetch(controller.signal), storage });
   } catch (error) {
     diagnostic(`INITIALIZE_${safeError(error)}`);
     ui.status.textContent = "Browser client initialization failed. No login was started.";

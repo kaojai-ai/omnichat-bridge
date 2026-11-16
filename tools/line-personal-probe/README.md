@@ -40,7 +40,10 @@ All executable code is bundled locally. Transitive package licenses are included
 in the generated artifact.
 
 Receiving uses LINEJS's request/response `talk.sync()` API, not its indefinitely
-streaming duplex PUSH transport. No automatic password login, send retry or
+streaming duplex PUSH transport. Preserve the upstream 180-second SYNC deadline;
+the browser transport has a 195-second outer ceiling, and Stop cancels immediately.
+Do not shorten a long poll to the ordinary 30-second API timeout or hide actual
+timeouts as successful idle polls. No automatic password login, send retry or
 external logging runs. LINEJS log events are not subscribed to because those
 may contain credentials and decrypted payloads.
 
