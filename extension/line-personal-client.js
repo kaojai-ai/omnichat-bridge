@@ -1,3 +1,4 @@
+import { initializeConnectionPage } from "./lib/connection-page.js";
 import { BaseClient } from "@evex-dev/linejs/base";
 import QRCode from "qrcode";
 import { createBrowserFetch } from "./lib/line-personal-fetch.js";
@@ -212,8 +213,19 @@ async function start(value) {
   }
 }
 
+async function disconnect() {
+  const value = session;
+  session = null; value?.controller.abort(); releaseLock?.();
+  await value?.storage?.clear(); receipts.clear();
+  ui.account.hidden = true; ui.authorization.hidden = true; ui.pin.textContent = "";
+  ui.connect.hidden = false; ui.connect.disabled = false; ui.disconnect.hidden = true;
+  report("Disconnected. Local session removed."); changed();
+}
+
+const requireConsent = await initializeConnectionPage({ onConsentRevoked: () => { void disconnect(); } });
+
 ui.connect.addEventListener("click", async () => {
-  if (session) return;
+  if (session || !await requireConsent()) return;
   const allowed = await chrome.permissions.request({ origins: ["https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*"] });
   if (!allowed) { report("Allow access to LINE servers to connect this account.", true); return; }
   ui.connect.disabled = true; ui.connect.hidden = true; ui.disconnect.hidden = false;
@@ -229,14 +241,7 @@ ui.connect.addEventListener("click", async () => {
     report("The connection could not be started.", true);
   });
 });
-ui.disconnect.addEventListener("click", async () => {
-  const value = session;
-  session = null; value?.controller.abort(); releaseLock?.();
-  await value?.storage?.clear(); receipts.clear();
-  ui.account.hidden = true; ui.authorization.hidden = true; ui.pin.textContent = "";
-  ui.connect.hidden = false; ui.connect.disabled = false; ui.disconnect.hidden = true;
-  report("Disconnected. Local session removed."); changed();
-});
+ui.disconnect.addEventListener("click", disconnect);
 ui.copy.addEventListener("click", () => { if (session?.base.profile?.mid) void navigator.clipboard.writeText(session.base.profile.mid); });
 window.addEventListener("pagehide", () => { closed = true; session?.controller.abort(); releaseLock?.(); });
 setInterval(changed, 20_000);

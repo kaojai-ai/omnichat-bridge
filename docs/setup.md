@@ -3,7 +3,9 @@
 Both providers use the same popup and configuration flow.
 
 1. Install the extension from the Chrome Web Store, or enable Developer mode
-   at `chrome://extensions` and load the repository's `extension/` folder.
+   at `chrome://extensions`, run `pnpm install --frozen-lockfile` and `pnpm build`,
+   then load `tmp/extension/`. Do not load the source `extension/` folder:
+   LINE Personal requires the bundled client produced by the build.
 2. Sign in to [Shopee Seller Centre](https://seller.shopee.co.th/) and open its
    Chat panel, or sign in to [LINE OA Chat](https://chat.line.biz/).
 3. Open the extension, accept the transfer disclosure, and open **Settings**.
