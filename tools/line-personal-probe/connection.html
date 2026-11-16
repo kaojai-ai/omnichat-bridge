@@ -43,11 +43,13 @@
     <ul id="events" aria-label="Recent sanitized diagnostics"></ul>
   </section>
   <section aria-labelledby="send-heading">
-    <h2 id="send-heading">Manual encrypted text test</h2>
+    <h2 id="send-heading">Manual text test</h2>
     <p>Enter a destination you control. Clicking Send transmits this text to that LINE direct chat or group. Sending never runs automatically and is never retried automatically.</p>
     <label>Destination LINE user or group ID<input id="destination" type="text" autocomplete="off" spellcheck="false" placeholder="u… or c…" maxlength="33"></label>
     <button id="use-latest" type="button" disabled>Use latest incoming chat</button>
     <label>Test message<textarea id="message" rows="3" maxlength="2000" autocomplete="off" placeholder="A message for your test recipient"></textarea></label>
+    <label><input id="oa-peer" type="checkbox"> This destination is my LINE Official Account. Use OA test mode without Letter Sealing; LINE transport encryption still applies.</label>
+    <p class="note">Unchecked: Letter Sealing is required. A failed encrypted send never switches to OA mode automatically.</p>
     <button id="send" type="button" disabled>Send</button>
     <p id="send-status" role="status" aria-live="polite">Not connected.</p>
   </section>

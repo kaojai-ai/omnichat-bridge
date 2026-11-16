@@ -3,8 +3,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check:line-personal-browser": "node --test test/line-personal-browser.test.js test/line-personal-browser-fetch.test.js",
-    "build:line-personal-probe": "node scripts/build-line-personal-probe.mjs"
+    "check:line-personal-browser": "node --test test/line-personal-browser.test.js test/line-personal-browser-fetch.test.js test/line-personal-send.test.js test/line-personal-live-case.test.js",
+    "build:line-personal-probe": "node scripts/build-line-personal-probe.mjs",
+    "test:line-personal-live": "node scripts/run-line-personal-live-case.mjs"
   },
   "devDependencies": {
     "@evex-dev/linejs": "3.6.5",

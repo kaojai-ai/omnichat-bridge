@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
-import { createCipheriv, createHmac, hkdfSync, webcrypto } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, diffieHellman, generateKeyPairSync, hkdfSync, webcrypto } from "node:crypto";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -92,4 +92,65 @@ test("LINEJS browser encrypted media matches native crypto and rejects tampering
     return client.e2ee.decryptByKeyMaterial(tampered, new Uint8Array(fixtureKey));
   })()`, context), /HMAC verification failed/);
   await assert.rejects(vm.runInContext("client.e2ee.decryptByKeyMaterial(new Uint8Array(2), new Uint8Array(fixtureKey))", context), /too short/);
+});
+
+test("actual LINEJS browser text send produces native-verifiable E2EE chunks", async () => {
+  const sender = generateKeyPairSync("x25519");
+  const receiver = generateKeyPairSync("x25519");
+  const rawPublic = (key) => key.export({ type: "spki", format: "der" }).subarray(-32);
+  context.senderPrivate = sender.privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32).toString("base64");
+  context.senderPublic = rawPublic(sender.publicKey).toString("base64");
+  context.receiverPublic = Array.from(rawPublic(receiver.publicKey));
+  await vm.runInContext(`(async () => {
+    client.profile = { mid: "u11111111111111111111111111111111" };
+    const key = JSON.stringify({ keyId: 1, privKey: senderPrivate, pubKey: senderPublic, e2eeVersion: 1 });
+    await client.storage.set("e2eeKeys:" + client.profile.mid, key);
+    await client.storage.set("e2eeKeys:1", key);
+    client.talk.negotiateE2EEPublicKey = async () => ({ specVersion: 2,
+      publicKey: { keyId: 2, keyData: BrowserBuffer.from(receiverPublic) } });
+    const encrypt = client.e2ee.encryptE2EEMessage.bind(client.e2ee);
+    client.e2ee.encryptE2EEMessage = async (...args) => {
+      const chunks = await encrypt(...args);
+      globalThis.textChunks = chunks;
+      return chunks;
+    };
+    globalThis.dispatches = 0;
+    client.request.request = async (_payload, method) => {
+      if (method !== "sendMessage") throw new Error("Unexpected request");
+      dispatches++;
+      return { id: "synthetic-provider-message" };
+    };
+    await client.talk.sendMessage({ to: "u22222222222222222222222222222222",
+      text: "Offline encrypted text fixture", e2ee: true });
+  })()`, context);
+  assert.equal(context.dispatches, 1);
+  const [salt, encrypted, nonce, senderId, receiverId] = context.textChunks.map((value) => Buffer.from(value));
+  const shared = diffieHellman({ privateKey: sender.privateKey, publicKey: receiver.publicKey });
+  const key = createHash("sha256").update(shared).update(salt).update("Key").digest();
+  const version = Buffer.alloc(4);
+  version.writeInt32BE(2);
+  const aad = Buffer.concat([
+    Buffer.from("u22222222222222222222222222222222"), Buffer.from("u11111111111111111111111111111111"),
+    senderId, receiverId, version, Buffer.alloc(4),
+  ]);
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+  decipher.setAAD(aad);
+  decipher.setAuthTag(encrypted.subarray(-16));
+  const plain = Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]);
+  assert.deepEqual(JSON.parse(plain.toString()), { text: "Offline encrypted text fixture" });
+});
+
+test("a peer without E2EE support fails before actual LINEJS message dispatch", async () => {
+  await vm.runInContext(`(async () => {
+    globalThis.dispatches = 0;
+    client.talk.negotiateE2EEPublicKey = async () => ({ specVersion: -1 });
+    try {
+      await client.talk.sendMessage({ to: "u22222222222222222222222222222222",
+        text: "Must never be sent", e2ee: true });
+      throw new Error("Expected unsupported recipient rejection");
+    } catch (error) {
+      if (error.name !== "Not support E2EE") throw error;
+    }
+  })()`, context);
+  assert.equal(context.dispatches, 0);
 });

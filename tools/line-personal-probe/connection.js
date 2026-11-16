@@ -2,11 +2,12 @@ import { BaseClient } from "@evex-dev/linejs/base";
 import { MemoryStorage } from "@evex-dev/linejs/storage";
 import QRCode from "qrcode";
 import { createBrowserFetch } from "./browser-fetch.js";
+import { sendEncryptedText, sendOATestText } from "./send-text.js";
 
 const element = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
   "consent", "connect", "stop", "status", "authorization", "qr", "pin-label", "pin",
-  "counts", "events", "destination", "message", "send", "send-status", "use-latest",
+  "counts", "events", "destination", "message", "send", "send-status", "use-latest", "oa-peer",
 ].map((id) => [id, element(id)]));
 const MAX_DIAGNOSTICS = 12;
 const MAX_POLL_FAILURES = 3;
@@ -62,6 +63,7 @@ async function stop(status = "Stopped. Local credentials cleared.") {
   ui["send-status"].textContent = "Not connected. Stopping cannot recall a message already sent.";
   ui.destination.value = "";
   ui.message.value = "";
+  ui["oa-peer"].checked = false;
 }
 
 function delay(ms, signal) {
@@ -220,17 +222,25 @@ ui.send.addEventListener("click", async () => {
   }
   session.sending = true;
   ui.send.disabled = true;
-  ui["send-status"].textContent = "Sending encrypted text once…";
+  const send = ui["oa-peer"].checked ? sendOATestText : sendEncryptedText;
   try {
-    await session.base.talk.sendMessage({ to, text, e2ee: true });
+    const outcome = await send(session.base, {
+      to, text, signal: session.controller.signal,
+      onStage(stage) {
+        if (!active(session)) return;
+        ui["send-status"].textContent = stage === "encryption" ? "Preparing encrypted text…" : "Sending once…";
+      },
+    });
     if (!active(session)) return;
-    ui.message.value = "";
-    ui["send-status"].textContent = "LINE accepted the send. Confirm its appearance on the recipient's device.";
-    diagnostic("ENCRYPTED_TEXT_SEND_ACCEPTED");
-  } catch (error) {
-    if (!active(session)) return;
-    ui["send-status"].textContent = "Send not confirmed. Delivery may be uncertain; check the recipient before retrying.";
-    diagnostic(`SEND_${safeError(error)}`);
+    diagnostic(`SEND_${outcome.status.toUpperCase()}_${outcome.code}${outcome.provider_code ? `_${outcome.provider_code}` : ""}`);
+    if (outcome.status === "accepted") {
+      ui.message.value = "";
+      ui["send-status"].textContent = "LINE accepted the send. Confirm its appearance on the recipient's device.";
+    } else if (outcome.status === "not_dispatched") {
+      ui["send-status"].textContent = `Not sent: ${outcome.code}. No message was dispatched.`;
+    } else {
+      ui["send-status"].textContent = `Send not confirmed: ${outcome.code}. Check the recipient before retrying.`;
+    }
   } finally {
     session.sending = false;
     if (active(session)) ui.send.disabled = !session.ready;
