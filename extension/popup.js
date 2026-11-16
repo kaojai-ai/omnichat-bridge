@@ -647,7 +647,7 @@ function renderProviderSelector() {
     cards.replaceChildren();
     if (!activeProviderAdapter) for (const adapter of adapters) {
       const button = document.createElement("button");
-      button.type = "button"; button.className = "provider-card";
+      button.type = "button"; button.className = "provider-card"; button.dataset.provider = adapter.id;
       const logo = document.createElement("img"); logo.src = icon(adapter); logo.alt = "";
       const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
       button.append(logo, label);
