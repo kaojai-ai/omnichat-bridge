@@ -6,6 +6,7 @@ import { personalSessionStorage } from "./lib/line-personal-storage.js";
 import { personalTextMessage } from "./lib/line-personal-message.js";
 import { sendPersonalText } from "./lib/provider-text-send.js";
 import { personalCommandClient } from "./lib/line-personal-command.js";
+import { createPersonalProfiles } from "./lib/line-personal-profiles.js";
 import { STORAGE, hasLocalConsent, readStorage } from "./lib/storage.js";
 
 const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "pin-help", "account", "name", "id", "copy", "connect", "disconnect"].map((name) => [name, document.getElementById(`personal-${name}`)]));
@@ -62,7 +63,8 @@ async function queue(value, raw, captureMethod) {
   if (!active(value)) throw new DOMException("Connection stopped", "AbortError");
   if (!await configured(value)) throw new Error("ACCOUNT_NOT_CONFIGURED");
   if (raw.from === value.base.profile.mid && value.replyInFlight) await value.replyInFlight;
-  const message = await personalTextMessage(value.base, raw, value.base.profile.mid, captureMethod);
+  const normalized = await personalTextMessage(value.base, raw, value.base.profile.mid, captureMethod);
+  const message = await value.profiles.enrich(normalized, value.base.profile.mid);
   if (!message || !active(value)) return;
   const correlation = receipts.get(message.id);
   if (correlation) message.client_message_id = correlation;
@@ -184,6 +186,8 @@ async function start(value) {
   value.storage = storage;
   const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(controller.signal) });
   value.base = base;
+  value.profiles = createPersonalProfiles({ signal: controller.signal,
+    loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }) });
   base.on("update:authtoken", (token) => { if (active(value)) { base.authToken = token; void storage.set("authToken", token).catch(() => { value.ready = false; changed(); }); } });
   base.on("qrcall", (url) => {
     if (!active(value)) return;
