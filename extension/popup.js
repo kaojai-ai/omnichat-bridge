@@ -850,6 +850,17 @@ function renderDashboard(message = "", isError = false) {
   setStatusAppearance(isError ? "error" : "neutral");
   lastSync.hidden = true;
   lastSync.textContent = "";
+  const choosingProvider = !activeProviderAdapter;
+  syncButton.hidden = choosingProvider;
+  const recoveryOption = document.querySelector("#unattended-recovery-option");
+  if (recoveryOption) recoveryOption.hidden = choosingProvider;
+  accountListEmpty.hidden = choosingProvider || accountListEmpty.hidden;
+  if (choosingProvider) {
+    cancelSyncButton.hidden = true;
+    progressArea.hidden = !message;
+    status.textContent = message;
+    return;
+  }
   const selectedAccounts = detectedAccounts.filter((account) => account.provider === activeProviderAdapter?.id);
   const accountStates = selectedAccounts.map((account) => {
     const key = accountConfigKey(account);
