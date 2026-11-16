@@ -1098,7 +1098,7 @@ footer a:hover,
 .provider-card { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 38px; padding: 8px 12px; border: 0; border-radius: var(--control-radius); background: var(--shopee); color: #fff; font-weight: 650; }
 .provider-card img { width: 20px; height: 20px; object-fit: contain; border-radius: 4px; }
 .provider-card:hover { background: var(--shopee-hover); }
-.provider-card[data-provider="line_personal"] { background: #06c755; }
-.provider-card[data-provider="line_personal"]:hover { background: #05a947; }
-.provider-card[data-provider="line_oa"] { background: #087f3d; }
-.provider-card[data-provider="line_oa"]:hover { background: #066531; }
+.provider-card[data-provider="line_personal"] { background: #087f3d; }
+.provider-card[data-provider="line_personal"]:hover { background: #066531; }
+.provider-card[data-provider="line_oa"] { background: #06c755; }
+.provider-card[data-provider="line_oa"]:hover { background: #05a947; }
