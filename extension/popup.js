@@ -194,7 +194,7 @@ const TRANSLATIONS = {
     review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
     transfers: "This extension transfers", transfersRest: "chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.",
     never: "It never collects or transfers", neverRest: "passwords, cookies, login tokens, or other browser credentials.", learnMore: "Learn more about this extension on", consent: "I understand and consent to this transfer.", continue: "Continue",
-    supported: "Supported providers", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", detectedAccounts: "ACCOUNTS", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
+    supported: "Supported providers", selectProvider: "Select a channel", chooseProvider: "Choose a provider to manage its account here.", openChat: "Open Chat", help: "Need help? See the", documentation: "documentation on GitHub", detectedAccounts: "ACCOUNTS", noAccounts: "No provider accounts detected yet.", deviceName: "Device name", deviceNamePlaceholder: "e.g. Front desk MacBook", configuration: "Configuration", currentConfig: "Current saved configuration", noSavedAccounts: "No saved accounts · sample shown below", logsDescription: "Logs kept up to 2 days · exports include all levels", filterLogs: "Filter logs by level", clearLogs: "Clear logs", installationId: (id) => `Installation ID: ${id}`, installationCopied: "Installation ID copied",
     sync: "Sync messages", cancel: "Cancel sync", settings: "Settings", thisBrowser: "This browser", logs: "Logs", privacy: "Privacy Policy", erase: "Erase all data", save: "Save configuration", import: "Import configuration", export: "Export configuration", download: "Download", copy: "Copy", allLevels: "All levels", info: "Info", warnings: "Warnings", errors: "Errors", debug: "Debug", upToDate: "Up to date", updateNow: "Update now", updatingExtension: "Updating…",
     submitLogs: "Submit", submittingLogs: "Submitting…", logsSubmitFailed: "Could not submit logs. Please try again.",
     logsSubmitted: (count) => `Submitted ${count} log entries.`, logsSubmitRemaining: (count) => `${count} entries remain. Submit again to send them.`,
@@ -209,7 +209,7 @@ const TRANSLATIONS = {
     allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
-    supported: "ผู้ให้บริการที่รองรับ", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
+    supported: "ผู้ให้บริการที่รองรับ", selectProvider: "เลือกช่องทาง", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
     submitLogs: "ส่ง Logs", submittingLogs: "กำลังส่ง…", logsSubmitFailed: "ส่ง Logs ไม่สำเร็จ กรุณาลองอีกครั้ง",
     logsSubmitted: (count) => `ส่ง Logs แล้ว ${count} รายการ`, logsSubmitRemaining: (count) => `เหลือ ${count} รายการ กดส่งอีกครั้งเพื่อส่งรายการที่เหลือ`,
     lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
@@ -631,15 +631,18 @@ function renderProviderSelector() {
   const selector = document.querySelector("#provider-selector");
   const options = document.querySelector("#provider-options");
   const adapters = selectableProviders(providerAdapters.list(), storedConfig);
-  if (!activeProviderAdapter || !adapters.some((adapter) => adapter.id === activeProviderAdapter.id)) {
-    activeProviderAdapter = adapters.find((adapter) => storedConfig.accounts.some((account) => account.provider === adapter.id)) ?? adapters[0];
+  if (activeProviderAdapter && !adapters.some((adapter) => adapter.id === activeProviderAdapter.id)) {
+    activeProviderAdapter = null;
   }
-  if (!activeProviderAdapter) return;
   const icon = (adapter) => adapter.icon ?? (adapter.id === "shopee" ? "icons/shopee.png" : "icons/line.png");
-  document.querySelector("#selected-provider-logo").src = icon(activeProviderAdapter);
-  document.querySelector("#selected-provider-name").textContent = activeProviderAdapter.id === "shopee" ? "SHOPEE" : activeProviderAdapter.displayName;
+  const selectedLogo = document.querySelector("#selected-provider-logo");
+  selectedLogo.hidden = !activeProviderAdapter;
+  if (activeProviderAdapter) selectedLogo.src = icon(activeProviderAdapter);
+  else selectedLogo.removeAttribute("src");
+  document.querySelector("#selected-provider-name").textContent = !activeProviderAdapter ? t("selectProvider")
+    : activeProviderAdapter.id === "shopee" ? "SHOPEE" : activeProviderAdapter.displayName;
   options.replaceChildren();
-  for (const adapter of adapters.filter((adapter) => adapter.id !== activeProviderAdapter.id)) {
+  for (const adapter of adapters.filter((adapter) => adapter.id !== activeProviderAdapter?.id)) {
     const button = document.createElement("button");
     button.type = "button"; button.className = "provider-option";
     const logo = document.createElement("img"); logo.src = icon(adapter); logo.alt = "";

@@ -22,33 +22,44 @@ test("replaces the accounts heading with a provider selector", () => {
 });
 
 for (const [configuredPersonal, setupEnabled] of [[false, false], [true, false], [false, true]]) {
-  test(`provider selector ${configuredPersonal || setupEnabled ? "includes enabled" : "hides unconfigured"} LINE Personal without an active provider tab (setup flag: ${setupEnabled})`, async () => {
-    const nodes = new Map();
-    const element = () => ({ children: [], handlers: {}, setAttribute() {},
-      replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); },
-      addEventListener(event, callback) { this.handlers[event] = callback; } });
-    const adapters = [{ id: "shopee", displayName: "Shopee" }, { id: "line_oa", displayName: "LINE OA" },
-      { id: "line_personal", displayName: "LINE Personal" }];
-    const accounts = [{ provider: "shopee" }, ...(configuredPersonal ? [{ provider: "line_personal" }] : [])];
-    const activations = [];
-    const scope = vm.createContext({
-      document: { querySelector(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element },
-      providerAdapters: { list: () => adapters }, storedConfig: { accounts, features: { line_personal: setupEnabled } }, activeProviderAdapter: null,
-      selectableProviders, activateProvider: async adapter => activations.push(adapter.id), chrome: {},
-      renderDashboard() { throw new Error("Provider activation should succeed"); },
+  for (const activeId of [null, "shopee", "line_oa"]) {
+    test(`provider selector ${configuredPersonal || setupEnabled ? "includes enabled" : "hides unconfigured"} LINE Personal (setup flag: ${setupEnabled}, active: ${activeId})`, async () => {
+      const nodes = new Map();
+      const element = () => ({ children: [], handlers: {}, setAttribute() {}, removeAttribute(name) { delete this[name]; },
+        replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); },
+        addEventListener(event, callback) { this.handlers[event] = callback; } });
+      const adapters = [{ id: "shopee", displayName: "Shopee" }, { id: "line_oa", displayName: "LINE OA" },
+        { id: "line_personal", displayName: "LINE Personal" }];
+      const accounts = [{ provider: "shopee" }, ...(configuredPersonal ? [{ provider: "line_personal" }] : [])];
+      const activations = [];
+      const scope = vm.createContext({
+        document: { querySelector(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element },
+        providerAdapters: { list: () => adapters }, storedConfig: { accounts, features: { line_personal: setupEnabled } }, activeProviderAdapter: adapters.find(adapter => adapter.id === activeId) ?? null,
+        t: key => key === "selectProvider" ? "Select a channel" : key,
+        selectableProviders, activateProvider: async adapter => activations.push(adapter.id), chrome: {},
+        renderDashboard() { throw new Error("Provider activation should succeed"); },
+      });
+      const start = popupSource.indexOf("function renderProviderSelector(");
+      vm.runInContext(popupSource.slice(start, popupSource.indexOf("// One row layout", start)), scope);
+      scope.renderProviderSelector();
+      const selected = adapters.find(adapter => adapter.id === activeId);
+      assert.equal(nodes.get("#selected-provider-name").textContent, activeId === "shopee" ? "SHOPEE" : selected?.displayName ?? "Select a channel");
+      assert.equal(nodes.get("#selected-provider-logo").hidden, !activeId);
+      if (!activeId) {
+        assert.equal(scope.activeProviderAdapter, null);
+        assert.equal(nodes.get("#selected-provider-logo").src, undefined);
+      }
+      const options = nodes.get("#provider-options").children;
+      const expected = adapters.filter(adapter => adapter.id !== activeId
+        && (adapter.id !== "line_personal" || configuredPersonal || setupEnabled));
+      assert.deepEqual(options.map(button => button.children[1].textContent),
+        expected.map(adapter => adapter.id === "shopee" ? "SHOPEE" : adapter.displayName));
+      options.at(-1).handlers.click();
+      await Promise.resolve();
+      assert.deepEqual(activations, [expected.at(-1).id]);
+      assert.equal(nodes.get("#provider-selector").open, false);
     });
-    const start = popupSource.indexOf("function renderProviderSelector(");
-    vm.runInContext(popupSource.slice(start, popupSource.indexOf("// One row layout", start)), scope);
-    scope.renderProviderSelector();
-    assert.equal(nodes.get("#selected-provider-name").textContent, "SHOPEE");
-    const options = nodes.get("#provider-options").children;
-    assert.deepEqual(options.map(button => button.children[1].textContent), (configuredPersonal || setupEnabled)
-      ? ["LINE OA", "LINE Personal"] : ["LINE OA"]);
-    options.at(-1).handlers.click();
-    await Promise.resolve();
-    assert.deepEqual(activations, [(configuredPersonal || setupEnabled) ? "line_personal" : "line_oa"]);
-    assert.equal(nodes.get("#provider-selector").open, false);
-  });
+  }
 }
 
 test("detects the account from the tab that opened the popup", () => {

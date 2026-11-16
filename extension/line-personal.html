@@ -8,13 +8,8 @@
 </head>
 <body class="connection-page">
   <main>
-    <header class="brand">
-      <img class="provider-mark" src="icons/line.png" alt="">
-      <div class="brand-copy"><h1>LINE Personal</h1><span>Omnichat Bridge</span></div>
-      <a href="popup.html" class="connection-settings">Settings</a>
-    </header>
-    <section class="screen">
-      <div class="screen-intro"><h2>Connect your account</h2><p>Scan with LINE on your phone. Keep this tab and your computer awake to receive and send messages.</p></div>
+    <section id="personal-connection" class="screen" hidden>
+      <div class="screen-intro"><h2>LINE Personal</h2><p>Scan with LINE on your phone. Keep this tab and your computer awake to receive and send messages.</p></div>
       <p id="personal-status" role="status" aria-live="polite">Ready to connect.</p>
       <div id="personal-authorization" hidden>
         <canvas id="personal-qr" aria-label="Scan with LINE"></canvas>
