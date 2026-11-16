@@ -639,10 +639,9 @@ function renderProviderSelector() {
   document.querySelector("#selected-provider-logo").src = icon(activeProviderAdapter);
   document.querySelector("#selected-provider-name").textContent = activeProviderAdapter.id === "shopee" ? "SHOPEE" : activeProviderAdapter.displayName;
   options.replaceChildren();
-  for (const adapter of adapters) {
+  for (const adapter of adapters.filter((adapter) => adapter.id !== activeProviderAdapter.id)) {
     const button = document.createElement("button");
     button.type = "button"; button.className = "provider-option";
-    button.setAttribute("aria-current", String(adapter.id === activeProviderAdapter.id));
     const logo = document.createElement("img"); logo.src = icon(adapter); logo.alt = "";
     const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
     button.append(logo, label);

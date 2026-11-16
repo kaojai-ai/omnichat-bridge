@@ -458,8 +458,8 @@ input:focus-visible {
 .provider-selector summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .provider-selector[open] summary svg { transform: rotate(180deg); }
 .provider-options { position: absolute; top: calc(100% + 5px); left: 0; min-width: 220px; padding: 5px; background: var(--panel, #fff); border: 1px solid var(--line); border-radius: var(--card-radius); box-shadow: 0 4px 16px #10182818; z-index: 10; }
-.provider-option { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px; background: transparent; color: var(--ink); border: 0; border-radius: 5px; text-align: left; font-size: 12px; }
-.provider-option:hover, .provider-option[aria-current="true"] { background: var(--soft, #f2f4f7); }
+.provider-option { display: flex; justify-content: flex-start; align-items: center; gap: 9px; width: 100%; padding: 9px; background: transparent; color: var(--ink); border: 0; border-radius: 5px; text-align: left; font-size: 12px; }
+.provider-option:hover { background: var(--soft, #f2f4f7); }
 
 .account-list-empty {
   font-size: 11px;
