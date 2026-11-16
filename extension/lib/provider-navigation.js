@@ -1,5 +1,6 @@
 export function selectableProviders(adapters, config) {
   return adapters.filter((adapter) => adapter.id !== "line_personal"
+    || config?.features?.line_personal === true
     || config?.accounts?.some((account) => account.provider === "line_personal"));
 }
 

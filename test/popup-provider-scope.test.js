@@ -21,8 +21,8 @@ test("replaces the accounts heading with a provider selector", () => {
   assert.match(css, /\.provider-selector summary/);
 });
 
-for (const configuredPersonal of [false, true]) {
-  test(`provider selector ${configuredPersonal ? "includes configured" : "hides unconfigured"} LINE Personal without an active provider tab`, async () => {
+for (const [configuredPersonal, setupEnabled] of [[false, false], [true, false], [false, true]]) {
+  test(`provider selector ${configuredPersonal || setupEnabled ? "includes enabled" : "hides unconfigured"} LINE Personal without an active provider tab (setup flag: ${setupEnabled})`, async () => {
     const nodes = new Map();
     const element = () => ({ children: [], handlers: {}, setAttribute() {},
       replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); },
@@ -33,7 +33,7 @@ for (const configuredPersonal of [false, true]) {
     const activations = [];
     const scope = vm.createContext({
       document: { querySelector(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element },
-      providerAdapters: { list: () => adapters }, storedConfig: { accounts }, activeProviderAdapter: null,
+      providerAdapters: { list: () => adapters }, storedConfig: { accounts, features: { line_personal: setupEnabled } }, activeProviderAdapter: null,
       selectableProviders, activateProvider: async adapter => activations.push(adapter.id), chrome: {},
       renderDashboard() { throw new Error("Provider activation should succeed"); },
     });
@@ -42,11 +42,11 @@ for (const configuredPersonal of [false, true]) {
     scope.renderProviderSelector();
     assert.equal(nodes.get("#selected-provider-name").textContent, "SHOPEE");
     const options = nodes.get("#provider-options").children;
-    assert.deepEqual(options.map(button => button.children[1].textContent), configuredPersonal
+    assert.deepEqual(options.map(button => button.children[1].textContent), (configuredPersonal || setupEnabled)
       ? ["LINE OA", "LINE Personal"] : ["LINE OA"]);
     options.at(-1).handlers.click();
     await Promise.resolve();
-    assert.deepEqual(activations, [configuredPersonal ? "line_personal" : "line_oa"]);
+    assert.deepEqual(activations, [(configuredPersonal || setupEnabled) ? "line_personal" : "line_oa"]);
     assert.equal(nodes.get("#provider-selector").open, false);
   });
 }
@@ -223,3 +223,19 @@ for (const ownsLeadership of [false, true]) {
     assert.equal(leader.disabled, false);
   });
 }
+
+
+test("a setup-only configuration remains editable and exportable", () => {
+  const config = { version: 3, features: { line_personal: true }, accounts: [] };
+  const scope = vm.createContext({
+    storedConfig: config, storedDeviceName: "test", unattendedRecovery: false, forwardLog: "off", sampleConfig: {},
+    deviceNameInput: {}, unattendedRecoveryInput: {}, forwardLogInput: {}, configInput: {}, configCount: {}, exportButton: {},
+    document: { querySelector: () => ({}) }, t: key => key,
+  });
+  const start = popupSource.indexOf("function renderConfigEditor(");
+  vm.runInContext(popupSource.slice(start, popupSource.indexOf("function openConfig(", start)), scope);
+  scope.renderConfigEditor();
+  assert.deepEqual(JSON.parse(scope.configInput.value), config);
+  assert.equal(scope.exportButton.disabled, false);
+  assert.equal(scope.configCount.textContent, "currentConfig");
+});

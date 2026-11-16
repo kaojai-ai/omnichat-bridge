@@ -60,5 +60,5 @@ for (const entry of await readdir(packages, { withFileTypes: true })) {
 }
 await writeFile(path.join(output, "LINE_PERSONAL_THIRD_PARTY_NOTICES.txt"), notices.join("\n\n"));
 console.log(`Extension build ready: ${output}`);
-console.log("Load this directory unpacked. LINE Personal appears in the provider selector only with its account configuration.");
+console.log("Load this directory unpacked. LINE Personal appears in the provider selector with features.line_personal enabled or its account configuration.");
 console.log("No authentication or forwarding was started by this build.");

@@ -143,6 +143,13 @@ export function validateConfigFile(value) {
   if (!SUPPORTED_CONFIG_VERSIONS.has(version) || !Array.isArray(value.accounts)) {
     throw new Error(`Configuration file must be version 2 or ${CONFIG_VERSION} with an accounts list.`);
   }
+  const features = value.features;
+  if (features !== undefined && (!features || typeof features !== "object" || Array.isArray(features))) {
+    throw new Error("Configuration features must be an object.");
+  }
+  if (features?.line_personal !== undefined && typeof features.line_personal !== "boolean") {
+    throw new Error("features.line_personal must be a boolean.");
+  }
   const logs_url = value.logs_url === undefined || value.logs_url === ""
     ? undefined
     : secureUrl(value.logs_url, "https:", "Logs URL must use HTTPS.");
@@ -158,6 +165,7 @@ export function validateConfigFile(value) {
   const history = historySyncSettings(value);
   return {
     version,
+    ...(features?.line_personal !== undefined ? { features: { line_personal: features.line_personal } } : {}),
     ...(logs_url ? { logs_url } : {}),
     ...(history ? { history_days: history.days } : {}),
     ...(history?.conversation_ids.length
