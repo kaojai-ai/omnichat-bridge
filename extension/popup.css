@@ -1092,3 +1092,8 @@ footer a:hover,
 .log-submit-status[data-state="error"] { color: var(--danger); }
 
 .account-row-capabilities { display: block; font-size: 10px; color: var(--muted, #667085); line-height: 1.4; white-space: normal; }
+
+.provider-cards:not([hidden]) { display: grid; gap: 8px; margin: 12px 0; }
+.provider-card { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface, #fff); color: var(--ink); text-align: left; }
+.provider-card img { width: 32px; height: 32px; object-fit: contain; border-radius: 6px; }
+.provider-card:hover { border-color: var(--muted); }

@@ -641,6 +641,22 @@ function renderProviderSelector() {
   else selectedLogo.removeAttribute("src");
   document.querySelector("#selected-provider-name").textContent = !activeProviderAdapter ? t("selectProvider")
     : activeProviderAdapter.id === "shopee" ? "SHOPEE" : activeProviderAdapter.displayName;
+  const cards = document.querySelector("#provider-cards");
+  if (cards) {
+    cards.hidden = Boolean(activeProviderAdapter);
+    cards.replaceChildren();
+    if (!activeProviderAdapter) for (const adapter of adapters) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "provider-card";
+      const logo = document.createElement("img"); logo.src = icon(adapter); logo.alt = "";
+      const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
+      button.append(logo, label);
+      button.addEventListener("click", () => {
+        void activateProvider(adapter, storedConfig, chrome).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+      });
+      cards.append(button);
+    }
+  }
   options.replaceChildren();
   for (const adapter of adapters.filter((adapter) => adapter.id !== activeProviderAdapter?.id)) {
     const button = document.createElement("button");
