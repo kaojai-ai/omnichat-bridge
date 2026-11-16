@@ -7,7 +7,7 @@ export function linePersonalBrowserPlugins() {
       name: "line-personal-browser-boundary",
       setup(build) {
         build.onResolve({ filter: /^node:crypto$/ }, () => ({
-          path: fileURLToPath(new URL("../tools/line-personal-probe/browser-crypto.js", import.meta.url)),
+          path: fileURLToPath(new URL("../extension/lib/line-personal-crypto.js", import.meta.url)),
         }));
         // Undici cannot run in Chrome. LINEJS accepts an explicit browser fetch;
         // fail loudly if a future upstream change attempts its Node-only path.

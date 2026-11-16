@@ -1,8 +1,8 @@
 import { BaseClient } from "@evex-dev/linejs/base";
 import { MemoryStorage } from "@evex-dev/linejs/storage";
 import QRCode from "qrcode";
-import { createBrowserFetch } from "./browser-fetch.js";
-import { sendEncryptedText, sendOATestText } from "./send-text.js";
+import { createBrowserFetch } from "../../extension/lib/line-personal-fetch.js";
+import { sendEncryptedText, sendUnsealedText } from "../../extension/lib/provider-text-send.js";
 
 const element = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
@@ -222,7 +222,7 @@ ui.send.addEventListener("click", async () => {
   }
   session.sending = true;
   ui.send.disabled = true;
-  const send = ui["oa-peer"].checked ? sendOATestText : sendEncryptedText;
+  const send = ui["oa-peer"].checked ? sendUnsealedText : sendEncryptedText;
   try {
     const outcome = await send(session.base, {
       to, text, signal: session.controller.signal,

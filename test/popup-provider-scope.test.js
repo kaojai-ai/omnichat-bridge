@@ -1,4 +1,5 @@
 import vm from "node:vm";
+import { selectableProviders } from "../extension/lib/provider-navigation.js";
 import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -11,14 +12,44 @@ const [html, css, popupSource, backgroundSource] = await Promise.all([
   readFile(new URL("../extension/background.js", import.meta.url), "utf8"),
 ]);
 
-test("opens LINE Chat from the provider landing screen", () => {
-  assert.match(
-    html,
-    /<a class="provider-link provider-link-line" href="https:\/\/chat\.line\.biz\/" target="_blank" rel="noreferrer"><span>LINE Official Account<\/span><small>Open Chat<\/small><\/a>/,
-  );
-  assert.doesNotMatch(html, /LINE Official Account<\/span><small>Coming soon<\/small>/);
-  assert.match(css, /\.provider-link-line \{ background: #06c755; \}/);
+test("replaces the accounts heading with a provider selector", () => {
+  assert.match(html, /<details id="provider-selector" class="provider-selector">/);
+  assert.match(html, /<summary id="detected-shops-title"><img id="selected-provider-logo"/);
+  assert.match(html, /id="selected-provider-name"/);
+  assert.match(html, /id="provider-options"/);
+  assert.doesNotMatch(html, /class="provider-link provider-link-line"/);
+  assert.match(css, /\.provider-selector summary/);
 });
+
+for (const configuredPersonal of [false, true]) {
+  test(`provider selector ${configuredPersonal ? "includes configured" : "hides unconfigured"} LINE Personal without an active provider tab`, async () => {
+    const nodes = new Map();
+    const element = () => ({ children: [], handlers: {}, setAttribute() {},
+      replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); },
+      addEventListener(event, callback) { this.handlers[event] = callback; } });
+    const adapters = [{ id: "shopee", displayName: "Shopee" }, { id: "line_oa", displayName: "LINE OA" },
+      { id: "line_personal", displayName: "LINE Personal" }];
+    const accounts = [{ provider: "shopee" }, ...(configuredPersonal ? [{ provider: "line_personal" }] : [])];
+    const activations = [];
+    const scope = vm.createContext({
+      document: { querySelector(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element },
+      providerAdapters: { list: () => adapters }, storedConfig: { accounts }, activeProviderAdapter: null,
+      selectableProviders, activateProvider: async adapter => activations.push(adapter.id), chrome: {},
+      renderDashboard() { throw new Error("Provider activation should succeed"); },
+    });
+    const start = popupSource.indexOf("function renderProviderSelector(");
+    vm.runInContext(popupSource.slice(start, popupSource.indexOf("// One row layout", start)), scope);
+    scope.renderProviderSelector();
+    assert.equal(nodes.get("#selected-provider-name").textContent, "SHOPEE");
+    const options = nodes.get("#provider-options").children;
+    assert.deepEqual(options.map(button => button.children[1].textContent), configuredPersonal
+      ? ["SHOPEE", "LINE OA", "LINE Personal"] : ["SHOPEE", "LINE OA"]);
+    options.at(-1).handlers.click();
+    await Promise.resolve();
+    assert.deepEqual(activations, [configuredPersonal ? "line_personal" : "line_oa"]);
+    assert.equal(nodes.get("#provider-selector").open, false);
+  });
+}
 
 test("detects the account from the tab that opened the popup", () => {
   assert.match(popupSource, /type: "detect_account",\n      tab_id: popupTabId/);
@@ -167,7 +198,28 @@ test("shows a lightweight shell before popup state finishes loading", () => {
   assert.match(popupSource, /changes\[STORAGE\.logs\] && !logsScreen\.hidden/);
 });
 
-test("changes leader status only for the active provider", () => {
-  assert.match(popupSource, /\{ type: "release_leader", provider: activeProviderAdapter\?\.id \}/);
-  assert.match(popupSource, /\{ type: "claim_leader", provider: activeProviderAdapter\?\.id, tab_id: popupTabId \}/);
-});
+for (const ownsLeadership of [false, true]) {
+  test(`${ownsLeadership ? "releases" : "claims"} leadership for the account row only`, async () => {
+    let click;
+    const requests = [];
+    const leader = { append() {}, setAttribute() {}, addEventListener(_event, callback) { click = callback; }, dataset: {} };
+    const account = { provider: "line_personal", provider_account_id: "personal-account" };
+    const scope = vm.createContext({
+      document: { createElement: tag => tag === "button" ? leader : {} },
+      readAccountState: () => ({ leader_installation_id: "browser", leader: ownsLeadership }),
+      liveState: {}, accountConfigKey: () => "line_personal:personal-account", account, id: account.provider_account_id,
+      name: { textContent: "Personal" }, popupTabId: 42, t: value => value,
+      chrome: { runtime: { sendMessage: async request => { requests.push(request); return { ok: true }; } } },
+      renderDashboard() { throw new Error("Leadership update should succeed"); },
+    });
+    const start = popupSource.indexOf("  const live = readAccountState(liveState, accountConfigKey(account), null);", popupSource.indexOf("function renderAccountRow("));
+    vm.runInContext(popupSource.slice(start, popupSource.indexOf("  copy.append(heading, statusLabel);", start)), scope);
+    await click();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].type, ownsLeadership ? "release_leader" : "claim_leader");
+    assert.equal(requests[0].provider, "line_personal");
+    assert.equal(requests[0].provider_account_id, "personal-account");
+    assert.equal(requests[0].tab_id, 42);
+    assert.equal(leader.disabled, false);
+  });
+}

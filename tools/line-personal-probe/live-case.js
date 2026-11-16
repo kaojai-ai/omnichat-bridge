@@ -1,7 +1,7 @@
 import { BaseClient } from "@evex-dev/linejs/base";
 import { MemoryStorage } from "@evex-dev/linejs/storage";
-import { createBrowserFetch } from "./browser-fetch.js";
-import { sendOATestText } from "./send-text.js";
+import { createBrowserFetch } from "../../extension/lib/line-personal-fetch.js";
+import { sendUnsealedText } from "../../extension/lib/provider-text-send.js";
 
 // Independent local test session. Never reads the installed Chrome extension,
 // its page, credentials or storage. Only the exact one-time OA challenge can
@@ -63,7 +63,7 @@ export async function runLiveCase({ marker, reply, signal, onQr, onPin, onStatus
           signal.throwIfAborted();
           counts.reply_attempts++;
           completed = true;
-          outcome = await sendOATestText(base, { to: message.from, text: reply, signal });
+          outcome = await sendUnsealedText(base, { to: message.from, text: reply, signal });
           status("oa_reply_result", { outcome });
           break;
         }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createBrowserFetch } from "../tools/line-personal-probe/browser-fetch.js";
+import { createBrowserFetch } from "../extension/lib/line-personal-fetch.js";
 
 function pendingFetch() {
   return (_request, { signal }) => new Promise((_resolve, reject) => {

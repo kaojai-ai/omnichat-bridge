@@ -35,7 +35,7 @@ for (const provider of ["shopee", "line_oa"]) {
     const requests = [];
     const context = vm.createContext({
       isProviderChatTab: true, popupTabId: 7, currentTabSyncAccounts,
-      providerAdapters: { forPage: () => ({ id: provider }) },
+      providerAdapters: { forPage: () => ({ id: provider }), get: id => ({ id, supports: capability => capability === "account_detection" }) },
       chrome: { tabs: { get: async () => ({ id: 7, url: "https://provider.example/chat" }) },
         runtime: { sendMessage: async message => {
           requests.push(message);

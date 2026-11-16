@@ -1,5 +1,6 @@
 import { createAccountSyncCoordinator } from "../extension/lib/sync-coordinator.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
+import { createProviderMessenger } from "../extension/lib/provider-messaging.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -21,6 +22,7 @@ function messageHarness() {
     clearTimeout: id => timers.delete(id),
     chrome: { tabs: { sendMessage: (_tab, message) => { calls.push(message); return message.type === "sync_now_v3" ? response.promise : Promise.resolve({ ok: true }); } } },
   });
+  runtime.providerMessenger = createProviderMessenger({ sendToTab: (tabId, message) => runtime.chrome.tabs.sendMessage(tabId, message) });
   vm.runInContext(section('function sendProviderMessage(', 'function syncCancelledError('), runtime);
   return { runtime, calls, response, advance: ms => { now += ms; for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.fn(); } } };
 }
@@ -122,6 +124,7 @@ test("idle LINE recovery settles error and releases only its own account slot", 
   const account = { key: "line_oa:A", account: { provider: "line_oa", provider_account_id: "A" }, adapter: { id: "line_oa" } };
   Object.assign(h.runtime, {
     AbortController, STORAGE: {}, lineTabSyncs: new Map(), accountSyncs: recoveries, syncCoordinator, preemptAutomaticLogUpload() {},
+    providerAdapterForId: id => ({ id, supports: capability => capability === "message_recovery" }),
     accountContextFor: () => account,
     hasServerInitialized: () => true, throwIfSyncCancelled() {},
     readStorage: async () => ({}), hasLocalConsent: () => true, configuredAccountContexts: () => [account],
@@ -176,6 +179,7 @@ test('BFCache channel closure stays a failure with a short actionable message', 
     performance: { now: () => 0 }, PROVIDER_REQUEST_TIMEOUT_MS: 100,
     setTimeout, clearTimeout, recordLog: async () => {},
   });
+  scope.providerMessenger = createProviderMessenger({ sendToTab: (tabId, message) => scope.chrome.tabs.sendMessage(tabId, message) });
   vm.runInContext(source.slice(source.indexOf('function providerMessageTimeout('), source.indexOf('function syncCancelledError(')), scope);
   await assert.rejects(scope.sendProviderMessage(7, { type: 'sync_now_v3' }), failure => {
     assert.equal(failure.message, 'Page changed. Sync again.');

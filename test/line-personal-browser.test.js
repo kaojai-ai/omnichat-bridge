@@ -17,6 +17,12 @@ before(async () => {
         import { BaseClient } from "@evex-dev/linejs/base";
         import { MemoryStorage } from "@evex-dev/linejs/storage";
         import { Buffer } from "node:buffer";
+        import { personalCommandClient } from "./extension/lib/line-personal-command.js";
+        import { createBrowserFetch } from "./extension/lib/line-personal-fetch.js";
+        globalThis.CommandBaseClient = BaseClient;
+        globalThis.CommandMemoryStorage = MemoryStorage;
+        globalThis.personalCommandClient = personalCommandClient;
+        globalThis.createBrowserFetch = createBrowserFetch;
         globalThis.BrowserBuffer = Buffer;
         globalThis.browserCrypto = crypto;
         globalThis.client = new BaseClient({ device: "ANDROIDSECONDARY", storage: new MemoryStorage(),
@@ -46,6 +52,56 @@ test("browser bundle initializes without eval, Node globals or authentication", 
   assert.ok(context.client.loginProcess);
   assert.ok(context.client.talk);
   assert.ok(!context.client.authToken);
+});
+
+test("command deadlines abort the native transport independently while preserving session tokens and request sequencing", async () => {
+  const calls = [];
+  context.fetch = (input, init) => {
+    const request = new Request(input, init);
+    calls.push(request);
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException("Test request aborted", "AbortError"));
+      if (request.signal.aborted) abort();
+      else request.signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  await vm.runInContext(`(async () => {
+    globalThis.pollController = new AbortController();
+    globalThis.commandController = new AbortController();
+    globalThis.commandBase = new CommandBaseClient({
+      device: "ANDROIDSECONDARY", storage: new CommandMemoryStorage(),
+      fetch: createBrowserFetch(pollController.signal),
+    });
+    commandBase.authToken = "fixture-original";
+    commandBase.profile = { mid: "u" + "1".repeat(32) };
+    commandBase.on("update:authtoken", (token) => { commandBase.authToken = token; });
+    globalThis.scopedCommand = personalCommandClient(commandBase, commandController.signal);
+    globalThis.secondCommand = personalCommandClient(commandBase, commandController.signal);
+    globalThis.requestSequences = await Promise.all([
+      commandBase.getReqseq(), scopedCommand.getReqseq(), secondCommand.getReqseq(),
+    ]);
+    scopedCommand.emit("update:authtoken", "fixture-rotated");
+  })()`, context);
+  assert.deepEqual(Array.from(context.requestSequences), [0, 1, 2]);
+  assert.equal(context.scopedCommand.storage, context.commandBase.storage);
+  assert.equal(context.scopedCommand.profile, context.commandBase.profile);
+  assert.equal(context.commandBase.authToken, "fixture-rotated");
+  assert.equal(context.scopedCommand.authToken, "fixture-rotated");
+  context.scopedCommand.authToken = "fixture-next";
+  assert.equal(context.secondCommand.authToken, "fixture-next");
+
+  const polling = vm.runInContext('commandBase.fetch("https://legy.line-apps.com/SYNC4")', context);
+  const command = vm.runInContext('scopedCommand.fetch("https://legy.line-apps.com/S4")', context);
+  const pollCancelled = assert.rejects(polling, { name: "AbortError" });
+  const commandCancelled = assert.rejects(command, { name: "AbortError" });
+  assert.equal(calls.length, 2);
+  context.commandController.abort();
+  await commandCancelled;
+  assert.equal(calls[1].signal.aborted, true, "reply deadline reaches the underlying fetch request");
+  assert.equal(calls[0].signal.aborted, false, "the independent poll transport remains active");
+  assert.equal(context.pollController.signal.aborted, false);
+  context.pollController.abort();
+  await pollCancelled;
 });
 
 test("browser HKDF matches RFC 5869 test case 1", async () => {

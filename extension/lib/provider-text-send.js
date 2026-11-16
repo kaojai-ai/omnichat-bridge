@@ -1,5 +1,5 @@
-// Development probe only. The outcome contains fixed diagnostics, never the
-// recipient, plaintext, ciphertext, provider response, or raw exception details.
+// Shared send preparation and dispatch. Diagnostics exclude payloads and raw
+// exceptions; callers may explicitly request a provider-message receipt.
 const ERROR_CODES = new Map([
   ["NoE2EEKey", "E2EE_KEY_UNAVAILABLE"],
   ["No E2EEKey", "E2EE_KEY_UNAVAILABLE"],
@@ -39,20 +39,21 @@ function failure(status, stage, error, signal) {
 function validate({ to, text, signal }) {
   if (typeof to !== "string" || !/^[ucr][a-f0-9]{32}$/i.test(to)
     || typeof text !== "string" || !text.trim() || text.length > 2_000) {
-    return { status: "not_dispatched", stage: "preparation", code: "INVALID_TEST_MESSAGE" };
+    return { status: "not_dispatched", stage: "preparation", code: "INVALID_MESSAGE" };
   }
   if (signal?.aborted) return { status: "not_dispatched", stage: "preparation", code: "REQUEST_CANCELLED" };
   return null;
 }
 
-async function dispatch(base, message, { signal, onStage }, acceptedCode) {
+async function dispatch(base, message, { signal, onStage, receipt = false }, acceptedCode) {
   const stage = "provider_dispatch";
   notify(onStage, stage);
   if (signal?.aborted) return { status: "not_dispatched", stage, code: "REQUEST_CANCELLED" };
   try {
-    await base.talk.sendMessage(message);
+    const result = await base.talk.sendMessage(message);
     notify(onStage, "completed");
-    return { status: "accepted", stage: "completed", code: acceptedCode };
+    return { status: "accepted", stage: "completed", code: acceptedCode,
+      ...(receipt && typeof result?.id === "string" ? { provider_message_id: result.id } : {}) };
   } catch (error) {
     return failure("uncertain", stage, error, signal);
   }
@@ -65,7 +66,7 @@ async function dispatch(base, message, { signal, onStage }, acceptedCode) {
  *
  * @returns {Promise<{status: "accepted" | "not_dispatched" | "uncertain", stage: string, code: string, provider_code?: string}>}
  */
-export async function sendEncryptedText(base, { to, text, signal, onStage }) {
+export async function sendEncryptedText(base, { to, text, signal, onStage, receipt = false }) {
   const invalid = validate({ to, text, signal });
   if (invalid) return invalid;
   const stage = "encryption";
@@ -89,16 +90,32 @@ export async function sendEncryptedText(base, { to, text, signal, onStage }) {
     contentMetadata: { e2eeVersion: "2", contentType: "0", e2eeMark: "2" },
     e2ee: true,
     chunks,
-  }, { signal, onStage }, "ENCRYPTED_TEXT_SEND_ACCEPTED");
+  }, { signal, onStage, receipt }, "ENCRYPTED_TEXT_SEND_ACCEPTED");
 }
 
 /**
- * Explicit, user-authorized OA test mode. The caller must obtain fresh consent
- * for this mode and peer before invoking it. This is never an encryption-error
- * fallback: sendEncryptedText does not call this function under any condition.
+ * Explicit unsealed mode for a peer known not to support Letter Sealing.
+ * This is never an encryption-error fallback: sendEncryptedText does not call
+ * this function under any condition.
  */
-export async function sendOATestText(base, { to, text, signal, onStage }) {
+export async function sendUnsealedText(base, { to, text, signal, onStage, receipt = false }) {
   const invalid = validate({ to, text, signal });
   if (invalid) return invalid;
-  return dispatch(base, { to, text, e2ee: false }, { signal, onStage }, "OA_TEST_TEXT_SEND_ACCEPTED");
+  return dispatch(base, { to, text, e2ee: false }, { signal, onStage, receipt }, "UNSEALED_TEXT_SEND_ACCEPTED");
+}
+
+/** Select the native peer capability before dispatch. Errors never trigger a
+ * plaintext retry. Unsupported direct peers (e.g. OA) use LINE transport;
+ * E2EE-capable direct chats and all groups always take the encrypted path. */
+export async function sendPersonalText(base, input) {
+  const invalid = validate(input);
+  if (invalid) return invalid;
+  if (input.to.startsWith("u")) {
+    let capability;
+    try { capability = await base.talk.negotiateE2EEPublicKey({ mid: input.to }); }
+    catch (error) { return failure("not_dispatched", "preparation", error, input.signal); }
+    if (capability?.specVersion === -1) return sendUnsealedText(base, input);
+    if (capability?.specVersion !== 2) return { status: "not_dispatched", stage: "preparation", code: "RECIPIENT_E2EE_UNSUPPORTED" };
+  }
+  return sendEncryptedText(base, input);
 }

@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 import { installProviderPolicy } from "./helpers/provider-policy.js";
 import { createSessionEligibility } from "../extension/lib/session-eligibility.js";
+import { createProviderMessenger } from "../extension/lib/provider-messaging.js";
 import { withRequestTimeout } from "../extension/lib/request-timeout.js";
 import { createReplyQueue } from "../extension/lib/reply-queue.js";
 import { sanitizeSendDiagnostics } from "../extension/lib/logs.js";
@@ -42,6 +43,7 @@ function fixture(provider = "shopee") {
     liveConnections: new Map(), stopAccountLiveConnection: (key, _connection, reason) => { closed.push({ key, reason }); scope.liveConnections.delete(key); },
     runProviderHealthWatchdog: async () => {}, recordUnexpected: async () => {},
   });
+  scope.providerMessenger = createProviderMessenger({ sendToTab: (tabId, message) => scope.chrome.tabs.sendMessage(tabId, message) });
   installProviderPolicy(scope);
   vm.runInContext(part("function orderProviderTabs(", "async function providerTabStatus(")
     + part("function providerTabIsReady(", "async function isReadyProviderTab(")

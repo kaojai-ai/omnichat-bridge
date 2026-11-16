@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createProviderMessenger } from "../extension/lib/provider-messaging.js";
 import test from "node:test";
 import vm from "node:vm";
 import { hasRegionalShopeePermission, regionalShopeeOrigins, regionalShopeeScripts, reconcileRegionalShopeeScripts } from "../extension/lib/regional-permissions.js";
@@ -111,6 +112,7 @@ test("revoked regional access cancels existing tab polling and closes only affec
     stopAccountLiveConnection: key => closed.push(key), updateLiveState: async context => states.push(context.key),
     reattachOpenProviderBridges: async () => {},
   });
+  scope.providerMessenger = createProviderMessenger({ sendToTab: (tabId, message) => api.tabs.sendMessage(tabId, message) });
   vm.runInContext(background.slice(start, end), scope);
   await scope.refreshRegionalShopeePermissions();
   assert.deepEqual(reset, ["my"]);

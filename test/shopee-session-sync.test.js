@@ -67,7 +67,7 @@ test("Shopee tab recovery continues when the owner is between logins", async () 
   const end = source.indexOf("\nfunction invalidateProviderSession", start);
   const calls = [];
   const reconnect = runWithPolicy(`(${source.slice(start, end)})`, { preemptAutomaticLogUpload: () => {},
-    providerAdapters: { list: () => [{ id: "shopee", matchesUrl: () => true }] },
+    providerAdapters: { list: () => [{ id: "shopee", supports: capability => capability === "account_detection", matchesUrl: () => true }] },
     crypto, STORAGE: {}, readStorage: async () => ({}), hasLocalConsent: () => true,
     ensureProviderBridge: async () => calls.push("bridge"),
     detectOpenProviderAccount: async () => ({ ok: false, error: "Logged out" }),

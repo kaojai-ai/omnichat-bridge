@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sendEncryptedText, sendOATestText } from "../tools/line-personal-probe/send-text.js";
+import { sendEncryptedText, sendPersonalText, sendUnsealedText } from "../extension/lib/provider-text-send.js";
 
 const to = `u${"a".repeat(32)}`;
 const text = "private test text";
@@ -105,7 +105,7 @@ test("only fixed diagnostics and allowlisted provider codes leave the helper", a
 test("invalid input, pre-cancelled requests and malformed encrypted output never dispatch", async () => {
   for (const input of [{ to: "invalid", text }, { to, text: "" }, { to, text: "x".repeat(2_001) }]) {
     const { base, encrypted, dispatched } = fixture();
-    assert.equal((await sendEncryptedText(base, input)).code, "INVALID_TEST_MESSAGE");
+    assert.equal((await sendEncryptedText(base, input)).code, "INVALID_MESSAGE");
     assert.equal(encrypted.length, 0);
     assert.equal(dispatched.length, 0);
   }
@@ -129,11 +129,11 @@ test("diagnostic observer cannot cause an automatic retry or interrupt an accept
 test("explicit OA test mode preserves text and deliberately bypasses encryption once", async () => {
   const stages = [];
   const { base, dispatched, encrypted } = fixture({ encrypt() { throw new Error("Encryption must not run in explicit OA mode"); } });
-  const outcome = await sendOATestText(base, { to, text, onStage: (stage) => stages.push(stage) });
+  const outcome = await sendUnsealedText(base, { to, text, onStage: (stage) => stages.push(stage) });
   assert.deepEqual(dispatched, [{ to, text, e2ee: false }]);
   assert.equal(encrypted.length, 0);
   assert.deepEqual(stages, ["provider_dispatch", "completed"]);
-  assert.deepEqual(outcome, { status: "accepted", stage: "completed", code: "OA_TEST_TEXT_SEND_ACCEPTED" });
+  assert.deepEqual(outcome, { status: "accepted", stage: "completed", code: "UNSEALED_TEXT_SEND_ACCEPTED" });
 });
 
 test("an encrypted failure never automatically switches to OA test mode", async () => {
@@ -147,7 +147,7 @@ test("an encrypted failure never automatically switches to OA test mode", async 
 test("OA test mode honors cancellation before entering send and never retries after uncertainty", async () => {
   const before = new AbortController();
   const cancelled = fixture();
-  const notDispatched = await sendOATestText(cancelled.base, {
+  const notDispatched = await sendUnsealedText(cancelled.base, {
     to, text, signal: before.signal,
     onStage(stage) { if (stage === "provider_dispatch") before.abort(); },
   });
@@ -158,7 +158,7 @@ test("OA test mode honors cancellation before entering send and never retries af
     after.abort();
     throw Object.assign(new Error(`token=secret ${text} ${to}`), { name: "AbortError" });
   } });
-  const uncertain = await sendOATestText(failed.base, { to, text, signal: after.signal });
+  const uncertain = await sendUnsealedText(failed.base, { to, text, signal: after.signal });
   assert.deepEqual(uncertain, { status: "uncertain", stage: "provider_dispatch", code: "REQUEST_CANCELLED" });
   assert.equal(failed.dispatched.length, 1);
   assert.equal(failed.encrypted.length, 0);
@@ -169,13 +169,105 @@ test("OA test mode honors cancellation before entering send and never retries af
 
 test("OA test mode shares validation and provider-error sanitization", async () => {
   const invalid = fixture();
-  assert.equal((await sendOATestText(invalid.base, { to: "invalid", text })).code, "INVALID_TEST_MESSAGE");
+  assert.equal((await sendUnsealedText(invalid.base, { to: "invalid", text })).code, "INVALID_MESSAGE");
   assert.equal(invalid.dispatched.length, 0);
   const failed = fixture({ send() {
     throw Object.assign(new Error(`private ${to}`), { name: "RequestError", data: { code: "NOT_FRIEND", private: text } });
   } });
-  assert.deepEqual(await sendOATestText(failed.base, { to, text }), {
+  assert.deepEqual(await sendUnsealedText(failed.base, { to, text }), {
     status: "uncertain", stage: "provider_dispatch", code: "LINE_REQUEST_REJECTED", provider_code: "NOT_FRIEND",
   });
   assert.equal(failed.dispatched.length, 1);
+});
+
+test("native E2EE capability selects encrypted dispatch and exposes only an explicitly requested receipt", async () => {
+  const { base, encrypted, dispatched } = fixture({ send() {
+    return { id: "native-receipt", token: "must-not-return", text: "must-not-return" };
+  } });
+  const queries = [];
+  base.talk.negotiateE2EEPublicKey = async (value) => { queries.push(value); return { specVersion: 2 }; };
+  const result = await sendPersonalText(base, { to, text, receipt: true });
+  assert.deepEqual(queries, [{ mid: to }]);
+  assert.equal(encrypted.length, 1);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].e2ee, true);
+  assert.equal(dispatched[0].text, undefined);
+  assert.equal(result.status, "accepted");
+  assert.equal(result.provider_message_id, "native-receipt");
+  assert.ok(!JSON.stringify(result).includes("must-not-return"));
+});
+
+test("an explicitly unsealed native peer uses one transport send without attempting encryption", async () => {
+  const { base, encrypted, dispatched } = fixture({ encrypt() { throw new Error("Must not encrypt an unsealed peer"); } });
+  base.talk.negotiateE2EEPublicKey = async () => ({ specVersion: -1 });
+  const result = await sendPersonalText(base, { to, text });
+  assert.equal(encrypted.length, 0);
+  assert.deepEqual(dispatched, [{ to, text, e2ee: false }]);
+  assert.equal(result.code, "UNSEALED_TEXT_SEND_ACCEPTED");
+  assert.equal(result.provider_message_id, undefined);
+});
+
+test("missing or unsupported peer capability cannot select plaintext or dispatch a message", async () => {
+  for (const capability of [null, {}, { specVersion: 0 }, { specVersion: 1 }, { specVersion: "2" }]) {
+    const { base, encrypted, dispatched } = fixture();
+    base.talk.negotiateE2EEPublicKey = async () => capability;
+    const result = await sendPersonalText(base, { to, text });
+    assert.deepEqual(result, { status: "not_dispatched", stage: "preparation", code: "RECIPIENT_E2EE_UNSUPPORTED" });
+    assert.equal(encrypted.length, 0);
+    assert.equal(dispatched.length, 0);
+  }
+});
+
+test("failed capability lookup and failed encryption never trigger an unsealed retry", async () => {
+  const lookup = fixture();
+  lookup.base.talk.negotiateE2EEPublicKey = async () => {
+    throw Object.assign(new Error(`private token ${text}`), { name: "RequestError", data: { code: "NOT_FRIEND" } });
+  };
+  assert.deepEqual(await sendPersonalText(lookup.base, { to, text }), {
+    status: "not_dispatched", stage: "preparation", code: "LINE_REQUEST_REJECTED", provider_code: "NOT_FRIEND",
+  });
+  assert.equal(lookup.encrypted.length, 0);
+  assert.equal(lookup.dispatched.length, 0);
+  const encryption = fixture({ encrypt() { throw Object.assign(new Error("Private key details"), { name: "NoE2EEKey" }); } });
+  encryption.base.talk.negotiateE2EEPublicKey = async () => ({ specVersion: 2 });
+  assert.equal((await sendPersonalText(encryption.base, { to, text })).code, "E2EE_KEY_UNAVAILABLE");
+  assert.equal(encryption.dispatched.length, 0);
+});
+
+test("groups and rooms bypass direct-peer capability lookup and always require encryption", async () => {
+  for (const prefix of ["c", "r"]) {
+    const { base, encrypted, dispatched } = fixture();
+    base.talk.negotiateE2EEPublicKey = async () => { throw new Error("Unexpected direct-peer lookup"); };
+    const destination = `${prefix}${"a".repeat(32)}`;
+    const result = await sendPersonalText(base, { to: destination, text });
+    assert.equal(result.status, "accepted");
+    assert.equal(encrypted.length, 1);
+    assert.equal(encrypted[0][0], destination);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].e2ee, true);
+  }
+});
+
+test("cancellation during capability lookup prevents either send mode from dispatching", async () => {
+  for (const specVersion of [-1, 2]) {
+    const controller = new AbortController();
+    const { base, encrypted, dispatched } = fixture();
+    let resolveLookup;
+    base.talk.negotiateE2EEPublicKey = () => new Promise((resolve) => { resolveLookup = resolve; });
+    const pending = sendPersonalText(base, { to, text, signal: controller.signal });
+    controller.abort();
+    resolveLookup({ specVersion });
+    assert.equal((await pending).code, "REQUEST_CANCELLED");
+    assert.equal(encrypted.length, 0);
+    assert.equal(dispatched.length, 0);
+  }
+});
+
+test("native-mode uncertain delivery never retries and receipts stay absent unless requested", async () => {
+  const { base, dispatched } = fixture({ send() { throw new TypeError("Private transport failure"); } });
+  base.talk.negotiateE2EEPublicKey = async () => ({ specVersion: -1 });
+  const result = await sendPersonalText(base, { to, text, receipt: true });
+  assert.equal(result.status, "uncertain");
+  assert.equal(result.provider_message_id, undefined);
+  assert.equal(dispatched.length, 1);
 });
