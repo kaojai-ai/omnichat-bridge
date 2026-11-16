@@ -444,7 +444,8 @@ input:focus-visible {
   padding: 4px 8px;
 }
 
-.provider-badge[data-provider="line_oa"] { background: #06c755; }
+.provider-badge[data-provider="line_oa"],
+.provider-badge[data-provider="line_personal"] { background: #06c755; }
 .provider-badge[data-provider="shopee"] { background: var(--shopee); }
 
 .account-list {
