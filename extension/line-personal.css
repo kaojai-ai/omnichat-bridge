@@ -7,3 +7,6 @@
 #personal-pin { text-align: center; font-weight: 600; font-size: 18px; }
 #personal-account { margin: 18px 0; grid-template-columns: 1fr auto; align-items: center; }
 #personal-account p { overflow-wrap: anywhere; }
+
+.connection-provider-title { display: flex; align-items: center; gap: 8px; }
+.connection-provider-title img { width: 24px; height: 24px; border-radius: 5px; object-fit: contain; }
