@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omnichat · LINE Personal development probe</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 760px; margin: 32px auto; padding: 0 24px; line-height: 1.5; }
+    h1 { font-size: 1.5rem; }
+    section { border: 1px solid #8887; border-radius: 12px; padding: 20px; margin: 20px 0; }
+    label { display: block; margin: 12px 0; }
+    input[type="text"], textarea { box-sizing: border-box; display: block; width: 100%; padding: 10px; margin-top: 6px; font: inherit; }
+    button { font: inherit; padding: 9px 16px; margin-right: 8px; cursor: pointer; }
+    button:disabled { cursor: default; }
+    #pin { font-size: 1.5rem; letter-spacing: .15em; }
+    #qr { display: block; max-width: 100%; }
+    #events { padding-left: 20px; }
+    .note { color: #888; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>LINE Personal · development probe</h1>
+  <p><strong>Use a test account.</strong> This is an unofficial LINE client and may affect other LINE sessions or account access.</p>
+  <p>This tab tests a bundled client inside the existing Omnichat extension. The session stays in memory and is discarded on Stop or tab closure. No messages are forwarded to a server. Keep this tab open.</p>
+  <section aria-labelledby="connection-heading">
+    <h2 id="connection-heading">Connect</h2>
+    <label><input id="consent" type="checkbox"> I am using a test account and approve this QR login.</label>
+    <button id="connect" type="button" disabled>Connect</button>
+    <button id="stop" type="button" disabled>Stop</button>
+    <p id="status" role="status" aria-live="polite">Idle. No login has started.</p>
+    <div id="authorization" hidden>
+      <canvas id="qr" aria-label="Scan this QR code with the test account's LINE mobile app"></canvas>
+      <p id="pin-label" hidden>Enter this PIN in LINE on your phone: <strong id="pin"></strong></p>
+    </div>
+    <p class="note">Stop clears this probe locally. It does not revoke the linked device on LINE; remove it from LINE's logged-in devices if needed.</p>
+  </section>
+  <section aria-labelledby="receive-heading">
+    <h2 id="receive-heading">Incoming feasibility</h2>
+    <p>Only operation counts and message types appear here. Sender IDs, profile names and message contents are not displayed or logged.</p>
+    <p id="counts">Operations: 0 · Received: 0 · Encrypted text decrypted: 0 · Sent echoes: 0 · Decryption failures: 0</p>
+    <ul id="events" aria-label="Recent sanitized diagnostics"></ul>
+  </section>
+  <section aria-labelledby="send-heading">
+    <h2 id="send-heading">Manual encrypted text test</h2>
+    <p>Enter a destination you control. Clicking Send transmits this text to that LINE direct chat or group. Sending never runs automatically and is never retried automatically.</p>
+    <label>Destination LINE user or group ID<input id="destination" type="text" autocomplete="off" spellcheck="false" placeholder="u… or c…" maxlength="33"></label>
+    <button id="use-latest" type="button" disabled>Use latest incoming chat</button>
+    <label>Test message<textarea id="message" rows="3" maxlength="2000" autocomplete="off" placeholder="A message for your test recipient"></textarea></label>
+    <button id="send" type="button" disabled>Send</button>
+    <p id="send-status" role="status" aria-live="polite">Not connected.</p>
+  </section>
+  <script type="module" src="line-personal-probe.js"></script>
+</body>
+</html>
