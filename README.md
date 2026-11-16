@@ -39,11 +39,26 @@ for the referenced notice.
 ### LINE Personal (text MVP)
 
 LINE Personal uses an extension-owned connection tab, not the LINE OA website.
-Build with `pnpm build` and load `tmp/extension` unpacked. Open the extension's
-**Details → Extension options**, connect with the QR/PIN on your phone, and copy
-the detected account ID into the LINE Personal setup in your server's Admin.
-Import the resulting version 3 configuration. LINE Personal then appears in
-the popup's provider selector; selecting a provider focuses its existing tab.
+Build with `pnpm build` and load `tmp/extension` unpacked. In the popup's
+**Settings**, add `"features": { "line_personal": true }` to your existing
+configuration and save. For setup without any configured accounts, use:
+
+```json
+{
+  "version": 3,
+  "features": { "line_personal": true },
+  "accounts": []
+}
+```
+
+Select **LINE Personal** in the provider dropdown to open its connection/setup
+page, connect with the QR/PIN on your phone, and copy the detected account ID
+into the LINE Personal setup in your server's Admin. Import the resulting
+version 3 account configuration to enable forwarding. Do not add an incomplete
+LINE Personal entry to `accounts`: account entries still require the verified
+ID and server-issued settings. Existing configured LINE Personal accounts also
+remain selectable without the flag. Selecting a provider focuses its existing
+tab when available.
 
 Keep Chrome, the connection tab and the computer running. Login credentials and
 encryption keys stay in trusted Chrome session storage; restarting Chrome or

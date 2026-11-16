@@ -242,3 +242,16 @@ test("root logs URL is preserved, requires HTTPS, and requests its origin", () =
   assert.deepEqual(accountOrigins(config), ["https://logs.example.com/ingress"]);
   assert.throws(() => validateConfigFile({ version: 3, logs_url: "http://logs.example.com", accounts: [] }), /HTTPS/);
 });
+
+
+test("preserves the LINE Personal setup flag without requiring an account", () => {
+  for (const enabled of [true, false]) {
+    const config = { version: 3, features: { line_personal: enabled }, accounts: [] };
+    assert.deepEqual(validateConfigFile(config), config);
+    assert.deepEqual(validateConfigFile(JSON.parse(JSON.stringify(validateConfigFile(config)))), config);
+  }
+  assert.deepEqual(validateConfigFile({ version: 3, accounts: [] }), { version: 3, accounts: [] });
+  for (const features of [null, [], true, { line_personal: "true" }, { line_personal: 1 }]) {
+    assert.throws(() => validateConfigFile({ version: 3, features, accounts: [] }), /features/);
+  }
+});

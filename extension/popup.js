@@ -1134,7 +1134,7 @@ async function detectAccount() {
 }
 
 function renderConfigEditor() {
-  const empty = storedConfig.accounts.length === 0;
+  const empty = storedConfig.accounts.length === 0 && !storedConfig.features;
   deviceNameInput.value = storedDeviceName;
   unattendedRecoveryInput.checked = unattendedRecovery;
   forwardLogInput.value = forwardLog;

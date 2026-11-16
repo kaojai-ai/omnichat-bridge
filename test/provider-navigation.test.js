@@ -5,7 +5,7 @@ import { activateProvider, selectableProviders } from "../extension/lib/provider
 const personal = {
   id: "line_personal", chatUrl: "chrome-extension://own/line-personal.html",
   matchesUrl: (url) => typeof url === "string" && /^chrome-extension:\/\/own\/line-personal\.html(?:\?|$)/.test(url),
-  chatUrlForAccount: (account) => `chrome-extension://own/line-personal.html?account=${account?.provider_account_id}`,
+  chatUrlForAccount: (account) => account ? `chrome-extension://own/line-personal.html?account=${account.provider_account_id}` : personal.chatUrl,
 };
 const shopee = { id: "shopee", chatUrl: "https://seller.shopee.co.th/new-webchat", matchesUrl: (url) => url?.startsWith("https://seller.shopee.co.th/") };
 const oa = { id: "line_oa", chatUrl: "https://chat.line.biz/", matchesUrl: (url) => url?.startsWith("https://chat.line.biz/") };
@@ -72,4 +72,20 @@ test("existing website providers keep their default URL when creating a tab", as
   const h = browser();
   await activateProvider(shopee, null, h.api);
   assert.deepEqual(h.calls, [["query", {}], ["create", { url: shopee.chatUrl, active: true }]]);
+});
+
+
+test("the setup flag opens Personal settings without an account and reuses its tab", async () => {
+  const setup = { features: { line_personal: true }, accounts: [] };
+  assert.deepEqual(selectableProviders([shopee, oa, personal], setup), [shopee, oa, personal]);
+  for (const flag of [false, "true", 1, undefined]) {
+    assert.deepEqual(selectableProviders([personal], { features: { line_personal: flag }, accounts: [] }), []);
+  }
+  const h = browser();
+  await activateProvider(personal, setup, h.api);
+  assert.deepEqual(h.calls, [["query", {}], ["create", { url: personal.chatUrl, active: true }]]);
+  const existing = { id: 12, windowId: 3, active: false, url: personal.chatUrl };
+  const reuse = browser([existing]);
+  await activateProvider(personal, setup, reuse.api);
+  assert.deepEqual(reuse.calls, [["query", {}], ["update", 12, { active: true }], ["window", 3, { focused: true }]]);
 });
