@@ -1027,9 +1027,9 @@ footer a:hover,
 
 /* Status color indicates outcome; animation indicates work in progress. */
 .account-row-status[data-state="neutral"],
-#status[data-state="neutral"] { color: #475467; }
-#status[data-state="ready"] { color: var(--green); }
-#status[data-state="error"] { color: var(--danger); }
+.connection-status[data-state="neutral"] { color: #475467; }
+.connection-status[data-state="ready"] { color: var(--green); }
+.connection-status[data-state="error"] { color: var(--danger); }
 .account-row-status[data-loading="true"]::before,
 #account-list-empty[data-loading="true"]::before,
 #status[data-loading="true"]::before {
@@ -1069,7 +1069,7 @@ footer a:hover,
 /* A check marks an actual healthy state; pending and unknown states keep their own indicators. */
 #status[data-state="ready"][data-loading="false"] { display: block; }
 .account-row-status[data-state="ready"][data-loading="false"]::before,
-#status[data-state="ready"][data-loading="false"]::before {
+.connection-status[data-state="ready"][data-loading="false"]::before {
   animation: none;
   background: transparent;
   border: solid #238647;
