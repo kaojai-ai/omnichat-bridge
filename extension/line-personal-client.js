@@ -187,7 +187,8 @@ async function start(value) {
   const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(controller.signal) });
   value.base = base;
   value.profiles = createPersonalProfiles({ signal: controller.signal,
-    loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }) });
+    loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }),
+    loadChat: (chatMid, signal) => personalCommandClient(base, signal).talk.getChat({ chatMid }) });
   base.on("update:authtoken", (token) => { if (active(value)) { base.authToken = token; void storage.set("authToken", token).catch(() => { value.ready = false; changed(); }); } });
   base.on("qrcall", (url) => {
     if (!active(value)) return;
