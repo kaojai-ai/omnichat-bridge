@@ -39,6 +39,7 @@
   let providerAccountIds = [];
   let accessibleAccountIds = [];
   let accountAccessVerified = false;
+  let accessDeniedAccountIds = [];
   let providerCheckOutcome = null;
   let currentProviderAccountId = null;
   let recoverySessionIdentity = null;
@@ -334,11 +335,12 @@
     return Boolean(stored.local_consent?.accepted_at
       && accountId
       && configured
+      && configured.enabled !== false
       && (detected || configuredLineBot));
   }
 
   const preparingRecoveries = new Map();
-  async function requestRecovery(providerAccountId, botId = "", attemptId = "", refreshMetadata = false) {
+  async function requestRecovery(providerAccountId, botId = "", attemptId = "", refreshMetadata = false, retryAccess = false) {
     if (!providerAdapter.supports("message_recovery")) {
       return { ok: false, error: `${providerAdapter.displayName} does not support message recovery.` };
     }
@@ -356,6 +358,7 @@
       if (preparation.cancelled || !isBridgeActive()) return { ok: false, error: "Sync cancelled." };
       const syncState = await sendRuntimeMessage({
         type: "get_sync_state",
+        retry_access: retryAccess === true,
         provider: providerAdapter.id,
         provider_account_id: accountId,
       });
@@ -365,7 +368,7 @@
         return syncState;
       }
       const result = new Promise((resolve) => {
-        recoveries.set(requestId, { resolve, accountId });
+        recoveries.set(requestId, { resolve, accountId, retryAccess });
         touchRecovery(requestId);
       });
       post({
@@ -373,6 +376,7 @@
         request_id: requestId,
         checkpoint: { ...syncState.checkpoint, refresh_metadata: refreshMetadata === true },
         refresh_metadata: refreshMetadata === true,
+        retry_access: retryAccess === true,
         provider: providerAdapter.id,
         provider_account_id: accountId,
         ...(String(botId).trim() ? { bot_id: String(botId).trim() } : {}),
@@ -724,12 +728,16 @@
       const result = await sendRuntimeMessage({
         type: "get_sync_state",
         request_id: message.request_id,
+        retry_access: [...recoveries].some(([id, pending]) => pending.retryAccess && String(message.request_id).startsWith(`${id}:`)),
         provider: providerAdapter.id,
         provider_account_id: message.provider_account_id,
       });
       post({ type: "recovery_ack_v3", request_id: message.request_id,
         ok: Boolean(result?.ok) && result.polling_allowed !== false,
-        ...(result?.polling_allowed === false ? { reason_code: "polling_owned_elsewhere", error: "Polling is active in another tab." } : {}), checkpoint: result?.checkpoint,
+        ...(result?.polling_allowed === false ? {
+          reason_code: result.reason_code ?? "polling_owned_elsewhere",
+          error: result.reason_code === "provider_access_denied" ? "LINE OA chat access denied. Click Sync to retry." : "Polling is active in another tab.",
+        } : {}), checkpoint: result?.checkpoint,
         ...(result?.ok ? {} : { error: result?.error ?? "Could not load sync checkpoint." }) });
     } catch (error) {
       post({ type: "recovery_ack_v3", request_id: message.request_id, ok: false, error: String(error) });
@@ -908,6 +916,10 @@
       }
     }
     const pending = recoveries.get(message.request_id);
+    if (providerAdapter.id === "line_oa" && (message.diagnostics?.http_status === 403 || (message.ok && pending?.retryAccess))) {
+      await sendRuntimeMessage({ type: "account_access_denied", provider: providerAdapter.id,
+        provider_account_id: message.provider_account_id, request_id: message.request_id, denied: !message.ok });
+    }
     if (!message.ok) {
       const superseded = message.reason_code === "superseded";
       const recorded = await log(superseded ? "info" : "error", superseded ? "recovery_superseded" : "recovery_failed",
@@ -1101,7 +1113,7 @@
       if (providerAdapter.id === "shopee" && event.data.request_id
         && event.data.request_id !== providerStatusRequest?.requestId) return;
       const previousReadinessState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
-        accessibleAccountIds, providerSurfaceReady,
+        accessibleAccountIds, accessDeniedAccountIds, providerSurfaceReady,
         Boolean(sendVerifiedAt), realtimeConnected, lastSuccessfulPollAtByAccount]);
       const wasSurfaceReady = providerSurfaceReady;
       sendVerifiedAt = typeof event.data.send_verified_at === "string" ? event.data.send_verified_at : null;
@@ -1109,6 +1121,14 @@
         ? event.data.provider_check_outcome : null;
       if (providerAdapter.id === "line_oa") {
         accountAccessVerified = event.data.account_access_verified === true;
+        const deniedIds = Array.isArray(event.data.access_denied_account_ids)
+          ? event.data.access_denied_account_ids.filter(id => typeof id === "string") : [];
+        for (const id of deniedIds.filter(id => !accessDeniedAccountIds.includes(id))) {
+          void observeAsync("account_access_denied", () => sendRuntimeMessage({
+            type: "account_access_denied", provider: providerAdapter.id, provider_account_id: id, denied: true,
+          }));
+        }
+        accessDeniedAccountIds = deniedIds;
         accessibleAccountIds = Array.isArray(event.data.accessible_account_ids)
           ? event.data.accessible_account_ids.filter((id) => typeof id === "string") : [];
         providerAccountIds = accountAccessVerified ? [...accessibleAccountIds] : [];
@@ -1153,7 +1173,7 @@
         lastRealtimeConnectedAt = event.data.connected_at ?? lastRealtimeConnectedAt ?? new Date().toISOString();
       }
       const readinessState = JSON.stringify([currentProviderAccountId, accountAccessVerified,
-        accessibleAccountIds, providerSurfaceReady,
+        accessibleAccountIds, accessDeniedAccountIds, providerSurfaceReady,
         Boolean(sendVerifiedAt), realtimeConnected, lastSuccessfulPollAtByAccount]);
       if (readinessState !== previousReadinessState) void sendRuntimeMessage({
         type: "send_readiness_changed", provider: providerAdapter.id,
@@ -1255,6 +1275,7 @@
       surface: providerSurface,
       provider_account_ids: providerAccountIds,
       accessible_account_ids: [...accessibleAccountIds],
+      access_denied_account_ids: [...accessDeniedAccountIds],
       account_access_verified: accountAccessVerified,
       ...(providerCheckOutcome ? { provider_check_outcome: providerCheckOutcome } : {}),
       current_provider_account_id: currentProviderAccountId,
@@ -1357,7 +1378,7 @@
     }
     if (message?.type === "sync_now_v3") {
       respond({ ok: true, started: true, request_id: message.request_id });
-      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id, message.refresh_metadata === true).then(
+      void requestRecovery(message.provider_account_id, message.bot_id, message.request_id, message.refresh_metadata === true, message.retry_access === true).then(
         result => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,
           provider_account_id: message.provider_account_id, request_id: message.request_id, result }),
         error => sendRuntimeMessage({ type: "sync_complete", provider: providerAdapter.id,

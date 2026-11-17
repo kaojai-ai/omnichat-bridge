@@ -205,12 +205,23 @@ The popup and sync select only configured accounts accessible to the current LIN
 login. Multiple accessible accounts remain supported. An account sync failure stays
 on that account; LINE and Shopee share a compact per-account progress row and a
 neutral Retry icon that does not restart other accounts. Pending messages use a
-separate Discard icon with confirmation. Detailed counts remain in the status
+filled-circle × button after the pending count, with confirmation. Detailed counts remain in the status
 tooltip. Loading rows also offer Retry to recover an interrupted run, while duplicate active runs are ignored.
 Repeated LINE Sync requests reuse the active operation. Idle recovery times out per
 account, and rows show whether LINE is connecting, waiting, or checking conversations.
 Access checks distinguish a verified empty account list from a failed request. Shared
 configuration and existing sync history are retained when browser access changes.
+
+Each configured account has a **Delete** icon in the last column. It removes only
+that account's configuration, preserving queued messages and sync history. Changes
+appear immediately in Settings and configuration exports. The optional account
+field `"enabled": false` remains supported in JSON; omitted `enabled` defaults to On.
+
+A LINE account-specific HTTP 403 pauses that account until the user clicks **Sync**
+or its retry button. Account detection and automatic recovery do not retry it;
+only successful manual recovery resumes polling. Other accounts sharing the tab
+retain their verified session. A confirmed session-wide authentication failure
+still invalidates the shared session.
 
 Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for

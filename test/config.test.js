@@ -247,3 +247,30 @@ test("root logs URL is preserved, requires HTTPS, and requests its origin", () =
 test("ignores the retired LINE Personal setup flag", () => {
   assert.deepEqual(validateConfigFile({ version: 3, features: { line_personal: true }, accounts: [] }), { version: 3, accounts: [] });
 });
+
+
+test("account enabled survives JSON round trips without changing legacy defaults", () => {
+  const account = { provider: "shopee", provider_account_id: "one", events_url: "https://example.com/events",
+    api_url: "https://example.com/api", hmac_secret: "secret" };
+  for (const enabled of [true, false]) {
+    const config = validateConfigFile({ version: 3, accounts: [{ ...account, enabled }] });
+    assert.equal(validateConfigFile(JSON.parse(JSON.stringify(config))).accounts[0].enabled, enabled);
+  }
+  assert.equal(Object.hasOwn(validateConfigFile({ version: 3, accounts: [account] }).accounts[0], "enabled"), false);
+  for (const enabled of ["false", 0, null]) {
+    assert.throws(() => validateConfigFile({ version: 3, accounts: [{ ...account, enabled }] }), /enabled must be a boolean/);
+  }
+});
+
+test("provider adapter normalization retains the account's enabled choice", () => {
+  const previous = globalThis.OmnichatProviderAdapters;
+  globalThis.OmnichatProviderAdapters = { get: provider => provider === "line_oa"
+    ? { validateConfig: value => ({ provider, provider_account_id: value.provider_account_id }) } : null };
+  try {
+    const config = validateConfigFile({ version: 3, accounts: [{ provider: "line_oa", provider_account_id: "@one", enabled: false }] });
+    assert.equal(validateConfigFile(JSON.parse(JSON.stringify(config))).accounts[0].enabled, false);
+  } finally {
+    if (previous === undefined) delete globalThis.OmnichatProviderAdapters;
+    else globalThis.OmnichatProviderAdapters = previous;
+  }
+});

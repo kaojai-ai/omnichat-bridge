@@ -128,6 +128,7 @@ test("previously injected regional content cannot queue or forward after revocat
   const flush = source.slice(source.indexOf("async function flushBatch("), source.indexOf('  await recordLog("debug", "delivery", "batch_preparing"', source.indexOf("async function flushBatch(")));
   const scope = vm.createContext({ preemptAutomaticLogUpload: () => {}, hasRegionalShopeePermission, chrome: { permissions: { contains: async () => false } },
     readStorage: async () => ({}), STORAGE: {}, readAccountState: () => [{}], hasLocalConsent: () => true,
+    findAccountConfig: () => ({}),
   });
   vm.runInContext(`${queue}return "accepted"; }\n${flush}return { sent: 1 }; }`, scope);
   const regional = { account: { provider: "shopee", country: "MY" } };

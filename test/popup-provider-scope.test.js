@@ -221,7 +221,7 @@ for (const ownsLeadership of [false, true]) {
     const scope = vm.createContext({
       document: { createElement: tag => tag === "button" ? leader : {} },
       readAccountState: () => ({ leader_installation_id: "browser", leader: ownsLeadership }),
-      liveState: {}, accountConfigKey: () => "line_personal:personal-account", account, id: account.provider_account_id,
+      enabled: true, cardState: {}, liveState: {}, accountConfigKey: () => "line_personal:personal-account", account, id: account.provider_account_id,
       name: { textContent: "Personal" }, popupTabId: 42, t: value => value,
       chrome: { runtime: { sendMessage: async request => { requests.push(request); return { ok: true }; } } },
       renderDashboard() { throw new Error("Leadership update should succeed"); },

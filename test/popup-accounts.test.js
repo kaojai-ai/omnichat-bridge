@@ -184,3 +184,18 @@ test("Shopee current tab requires one unambiguous configured detected account", 
   assert.deepEqual(currentTabSyncAccounts({ accounts: [] }, [account], "shopee"), []);
   assert.deepEqual(currentTabSyncAccounts({ accounts: [account] }, [account, account], "shopee"), []);
 });
+
+
+test("disabled accounts remain controllable but never join manual sync or active progress", () => {
+  for (const provider of ["line_oa", "shopee", "line_personal"]) {
+    const disabled = { provider, provider_account_id: "disabled", enabled: false };
+    const active = { provider, provider_account_id: "active" };
+    const config = { accounts: [disabled, active] };
+    assert.deepEqual(popupAccountsForSession([disabled], null, [], config), [disabled]);
+    assert.deepEqual(currentTabSyncAccounts(config, [disabled], provider), []);
+    assert.deepEqual(currentTabSyncAccounts(config, [active], provider), [active]);
+    assert.equal(activeSyncAccount(config, [disabled], { version: 2, accounts: {
+      [`${provider}:disabled`]: { state: "syncing" },
+    } }, null), null);
+  }
+});

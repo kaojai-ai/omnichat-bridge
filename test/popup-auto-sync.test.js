@@ -48,6 +48,7 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(await context.autoStartSync({ accounts: [account] }), true);
     assert.deepEqual(requests.map(message => message.type), ["detect_account", provider === "line_oa" ? "sync_line_tab" : "sync_account"]);
     assert.equal(requests[1].tab_id, 7);
+    assert.equal(requests[1].retry_access, false, "saving configuration cannot retry a denied account");
     if (provider === "shopee") {
       assert.equal(requests[1].provider, provider);
       assert.equal(requests[1].provider_account_id, "account");

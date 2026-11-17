@@ -54,6 +54,7 @@ function accountHarness() {
     syncCoordinator, accountSyncs: syncCoordinator.jobs, AbortController,
     STORAGE: { config: "config", detectedAccounts: "detected", consent: "consent", serverInitialized: "initialized", logUploadEnabled: "logs" },
     readStorage: async () => ({ consent: true, initialized: true }),
+    readAccountState: (_state, _key, fallback) => fallback,
     hasLocalConsent: value => value === true, hasServerInitialized: stored => stored.initialized,
     accountContextFor: (_stored, id, provider) => contexts.get(`${provider}:${id}`),
     preemptAutomaticLogUpload: () => {},

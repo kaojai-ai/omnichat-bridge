@@ -41,6 +41,10 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     throw new Error("Account configuration must be an object.");
   }
   const provider = requiredString(value.provider, "Account provider is required.");
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    throw new Error("Account enabled must be a boolean.");
+  }
+  const enabled = value.enabled === undefined ? {} : { enabled: value.enabled };
   const normalizedInput = { ...value, provider };
   if (provider !== DEFAULT_PROVIDER) {
     const adapter = registeredProviderAdapter(provider);
@@ -56,6 +60,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     }
     return {
       ...normalized,
+      ...enabled,
       provider,
       provider_account_id: requiredString(
         normalized.provider_account_id,
@@ -81,6 +86,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
     return {
       provider,
       provider_account_id,
+      ...enabled,
       ...(country ? { country } : {}),
       events_url,
       api_url,
@@ -93,6 +99,7 @@ export function validateAccountConfig(value, version = CONFIG_VERSION) {
   return {
     provider,
     provider_account_id,
+    ...enabled,
     ...(country ? { country } : {}),
     events_url,
     commands_url,

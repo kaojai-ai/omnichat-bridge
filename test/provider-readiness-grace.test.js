@@ -36,6 +36,7 @@ function fixture(provider = "shopee") {
     providerChatTabs: async () => tabs, providerLabel: () => provider,
     sendProviderMessage: async () => { probes++; return result; }, PROVIDER_STATUS_RESPONSE_TIMEOUT_MS: 5000, PROVIDER_HEALTH_STALE_MS: 60_000,
     STORAGE: {}, readStorage: async () => ({}), readAccountState: (_state, _key, fallback) => fallback,
+    findAccountConfig: () => ({}),
     normalizeDeviceName: () => "", buildConnectionHealth, persistProviderSurfaceState: async () => {},
     canonicalProviderAccountId: () => "shop", installationId: () => installation,
     chrome: { runtime: { getPlatformInfo: async () => ({ os: "mac" }), getManifest: () => ({ version: "test" }) } },
@@ -618,4 +619,30 @@ test("Shopee video routing supports New Webchat and regional Seller Centre", asy
   h.tab.url = "https://seller.shopee.co.th/new-webchat/conversations";
   h.result = { ...h.healthy, surface: "new-webchat" };
   assert.equal((await h.snapshot()).command_capabilities.includes("send_video"), true);
+});
+
+for (const provider of ["line_oa", "shopee"]) {
+  test(`${provider}: disabling an account after readiness verification prevents provider dispatch`, async () => {
+    const h = fixture(provider);
+    await h.assess();
+    let dispatched = 0;
+    wireSender(h, async () => { dispatched++; return { ok: true }; });
+    h.scope.findAccountConfig = () => ({ enabled: false });
+    const result = await h.scope.sendViaProvider({ provider, provider_account_id: "shop", type: "send_text",
+      conversation_id: "conversation", request_id: "disabled-account", text: "reply" });
+    assert.equal(result.ok, false);
+    assert.equal(result.dispatch_started, false);
+    assert.equal(dispatched, 0);
+  });
+}
+
+test("LINE account access denial blocks only that account's readiness", async () => {
+  const h = fixture("line_oa");
+  h.result = { ...h.healthy, accessible_account_ids: ["shop", "peer"], access_denied_account_ids: ["shop"] };
+  const denied = await h.assess();
+  const peer = await h.scope.providerReadiness({ ...h.context, key: "line_oa:peer",
+    account: { provider: "line_oa", provider_account_id: "peer" } });
+  assert.equal(denied.eligible, false);
+  assert.equal(denied.reason_code, "provider_access_denied");
+  assert.equal(peer.eligible, true);
 });

@@ -1215,3 +1215,20 @@ for (const provider of ["line_oa", "shopee"]) {
     });
   }
 }
+
+
+test("LINE account denial updates scoped readiness without replacing the shared session", async () => {
+  const bridge = contentBridge("/bot", { provider: "line_oa" });
+  const status = { type: "provider_status", provider_check_outcome: "passed", account_access_verified: true,
+    accessible_account_ids: ["@one", "@two"], surface_ready: true,
+    send_verified_at: new Date().toISOString(), realtime_connected: true };
+  await bridge.providerEvent(status);
+  await new Promise(resolve => setTimeout(resolve, 550));
+  bridge.runtimeMessages.length = 0;
+  await bridge.providerEvent({ ...status, access_denied_account_ids: ["@one"] });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  assert.ok(bridge.runtimeMessages.some(message => message.type === "account_access_denied"
+    && message.provider_account_id === "@one" && message.denied === true));
+  assert.ok(bridge.runtimeMessages.some(message => message.type === "send_readiness_changed"));
+  assert.equal(bridge.runtimeMessages.some(message => message.reason === "session_changed"), false);
+});

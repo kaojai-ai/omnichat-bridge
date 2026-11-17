@@ -56,10 +56,11 @@ export function hydrateDetectedAccounts({
   );
 }
 
-export function popupAccountsForSession(accounts, liveState, pageAccounts = []) {
+export function popupAccountsForSession(accounts, liveState, pageAccounts = [], config = null) {
   const pageKeys = new Set(pageAccounts.map(accountConfigKey));
   const isActive = (account) => readAccountState(liveState, accountConfigKey(account), {}).active_in_profile === true;
-  return accounts.filter((account) => !["shopee", "line_oa"].includes(account.provider)
+  return accounts.filter((account) => findAccountConfig(config, account)?.enabled === false
+    || !["shopee", "line_oa"].includes(account.provider)
     || isActive(account)
     || Boolean(sessionConnectionStatus(readAccountState(liveState, accountConfigKey(account), {})))
     || (account.provider === "shopee" && pageKeys.has(accountConfigKey(account))))
@@ -69,6 +70,7 @@ export function popupAccountsForSession(accounts, liveState, pageAccounts = []) 
 // Combined sync can process accounts outside the popup's current provider view.
 export function activeSyncAccount(config, detectedAccounts, status, pending) {
   for (const configured of config.accounts) {
+    if (configured.enabled === false) continue;
     const key = accountConfigKey(configured);
     const syncState = readAccountState(status, key, null);
     if (!["discovering", "syncing"].includes(syncState?.state)) continue;
@@ -79,7 +81,8 @@ export function activeSyncAccount(config, detectedAccounts, status, pending) {
 }
 
 export function currentTabSyncAccounts(config, accounts, provider) {
-  const detected = (Array.isArray(accounts) ? accounts : []).filter(account => account.provider === provider);
+  const detected = (Array.isArray(accounts) ? accounts : []).filter(account => account.provider === provider
+    && findAccountConfig(config, account)?.enabled !== false);
   if (provider === "line_oa") {
     const configured = detected.filter(account => findAccountConfig(config, account));
     return [...new Map(configured.map(account => [accountConfigKey(account), account])).values()];

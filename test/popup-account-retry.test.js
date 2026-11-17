@@ -55,3 +55,13 @@ test("row retry surfaces recovery errors even when the runtime envelope succeede
   assert.equal(context.accountRetryErrors.get("line_oa:@failed").message, "Recovery failed");
   assert.equal(context.retryingAccounts.size, 0);
 });
+
+
+test("row retry cannot restart an account the user turned off", async () => {
+  const { context, account, requests, configs } = harness({ ok: true });
+  account.enabled = false;
+  await context.retryAccount(account);
+  assert.equal(requests.length, 0);
+  assert.equal(configs.length, 0);
+  assert.equal(context.retryingAccounts.size, 0);
+});
