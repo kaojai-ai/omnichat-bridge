@@ -659,6 +659,14 @@ function createAccountActionIcon(action) {
     ? ["M20 7v5h-5", "M19.1 12a7.2 7.2 0 1 0-1.7 5.1", "M20 12l-3-4"]
     : action === "clear" ? ["M6 6l12 12", "M18 6L6 18"]
     : ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13", "M10 10v6", "M14 10v6"];
+  if (action === "clear") {
+    icon.classList.add("account-clear-icon");
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "12");
+    circle.setAttribute("cy", "12");
+    circle.setAttribute("r", "10");
+    icon.append(circle);
+  }
   for (const d of paths) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", d);
@@ -882,7 +890,7 @@ function renderAccountRow(account) {
       ? "Cancel sync before discarding pending messages."
       : "Discard pending messages for this account";
     discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
-    pendingRow.append(discardButton, pendingLabel);
+    pendingRow.append(pendingLabel, discardButton);
     copy.append(pendingRow);
   }
   const meta = document.createElement("div");

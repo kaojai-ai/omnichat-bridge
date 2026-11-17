@@ -205,7 +205,7 @@ The popup and sync select only configured accounts accessible to the current LIN
 login. Multiple accessible accounts remain supported. An account sync failure stays
 on that account; LINE and Shopee share a compact per-account progress row and a
 neutral Retry icon that does not restart other accounts. Pending messages use a
-small × button before the pending count, with confirmation. Detailed counts remain in the status
+filled-circle × button after the pending count, with confirmation. Detailed counts remain in the status
 tooltip. Loading rows also offer Retry to recover an interrupted run, while duplicate active runs are ignored.
 Repeated LINE Sync requests reuse the active operation. Idle recovery times out per
 account, and rows show whether LINE is connecting, waiting, or checking conversations.

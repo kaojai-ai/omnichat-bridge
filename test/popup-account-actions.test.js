@@ -72,9 +72,9 @@ for (const provider of ["line_oa", "shopee"]) {
     const meta = row.children.at(-1);
     assert.equal(meta.children.at(-1).className, "account-delete", "delete is the last column");
     const pendingRow = nodes.find(node => node.className === "account-row-pending");
-    assert.equal(pendingRow.children[0].className, "account-action");
-    assert.equal(pendingRow.children[1].textContent, "2 pending");
-    assert.equal(pendingRow.children[0].children[0].children[0].attributes.d, "M6 6l12 12");
+    assert.equal(pendingRow.children[0].textContent, "2 pending");
+    assert.equal(pendingRow.children[1].className, "account-action");
+    assert.equal(pendingRow.children[1].children[0].children[0].tag, "circle");
     assert.equal(actionButtons.find(node => /Retry/.test(node.attributes["aria-label"])).disabled, false,
       "a stuck loading row can still request a guarded retry");
     assert.equal(actionButtons.find(node => /Discard/.test(node.attributes["aria-label"])).disabled, true,

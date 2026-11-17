@@ -603,7 +603,7 @@ input:focus-visible {
   color: var(--muted);
   display: flex;
   font-size: 10px;
-  gap: 6px;
+  gap: 2px;
 }
 
 .account-row-meta { align-items: center; align-self: center; display: flex; gap: 4px; min-width: 0; }
@@ -626,7 +626,9 @@ input:focus-visible {
 .account-action:focus-visible, .account-delete:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
 .account-delete:hover { color: #b42318; }
 .account-action-icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.account-row-pending .account-action { width: 18px; min-height: 18px; padding: 1px; flex-shrink: 0; }
+.account-row-pending .account-action { width: 16px; min-height: 16px; padding: 0; flex-shrink: 0; }
+.account-clear-icon circle { fill: currentColor; stroke: none; }
+.account-clear-icon path { stroke: #fff; stroke-width: 2; }
 .account-row-copy > progress { width: 100%; height: 3px; }
 .account-row-line-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
