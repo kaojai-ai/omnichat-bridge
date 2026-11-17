@@ -231,8 +231,6 @@ const requireConsent = await initializeConnectionPage({ onConsentRevoked: () => 
 
 ui.connect.addEventListener("click", async () => {
   if (session || !await requireConsent()) return;
-  const allowed = await chrome.permissions.request({ origins: ["https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*"] });
-  if (!allowed) { report("Allow access to LINE servers to connect this account.", true); return; }
   ui.connect.disabled = true; ui.connect.hidden = true; ui.disconnect.hidden = false;
   const value = { controller: new AbortController(), ready: false, lastSuccess: 0, startedAt: Date.now() };
   session = value; report("Approve the connection in LINE on your phone.");
