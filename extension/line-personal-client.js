@@ -19,7 +19,10 @@ let closed = false;
 let releaseLock;
 const receipts = new Map();
 const active = (value) => Boolean(value && session === value && !value.controller.signal.aborted);
-const report = (text, error = false) => { ui.status.textContent = text; ui.status.classList.toggle("error", error); };
+const report = (text, error = false, ready = false) => {
+  ui.status.textContent = text;
+  ui.status.dataset.state = error ? "error" : ready ? "ready" : "neutral";
+};
 
 function connectPort() {
   if (closed) return;
@@ -105,7 +108,7 @@ async function poll(value) {
       Object.assign(revisions, next); // Never acknowledge an event before shared queue acceptance.
       await value.storage.set("syncRevisions", next);
       value.lastSuccess = Date.now(); failures = 0; changed();
-      report("Connected. Incoming messages and replies use your configured server.");
+      report("Connected. Incoming messages and replies use your configured server.", false, true);
       await new Promise((resolve) => setTimeout(resolve, 250));
     } catch {
       if (!active(value)) return;
@@ -187,7 +190,8 @@ async function start(value) {
   const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(controller.signal) });
   value.base = base;
   value.profiles = createPersonalProfiles({ signal: controller.signal,
-    loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }) });
+    loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }),
+    loadChat: (chatMid, signal) => personalCommandClient(base, signal).talk.getChat({ chatMid }) });
   base.on("update:authtoken", (token) => { if (active(value)) { base.authToken = token; void storage.set("authToken", token).catch(() => { value.ready = false; changed(); }); } });
   base.on("qrcall", (url) => {
     if (!active(value)) return;
@@ -206,7 +210,8 @@ async function start(value) {
     value.ready = true; value.lastSuccess = Date.now();
     ui.authorization.hidden = true; ui.pin.textContent = "";
     ui.account.hidden = false; ui.name.textContent = profile.displayName || "LINE Personal"; ui.id.textContent = profile.mid;
-    report(await configured(value) ? "Connected. Incoming messages and replies use your configured server." : "Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.");
+    const isConfigured = await configured(value);
+    report(isConfigured ? "Connected. Incoming messages and replies use your configured server." : "Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.", false, isConfigured);
     await account(); changed();
     void poll(value).catch(() => { if (active(value)) { value.ready = false; changed(); report("Reconnect LINE to continue receiving and sending messages.", true); } });
     await new Promise((resolve) => { releaseLock = resolve; controller.signal.addEventListener("abort", resolve, { once: true }); });

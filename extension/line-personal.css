@@ -8,6 +8,8 @@
 #personal-pin-help { margin: 0 0 32px; text-align: center; }
 #personal-account { margin: 18px 0; grid-template-columns: 1fr auto; align-items: center; }
 #personal-account p { overflow-wrap: anywhere; }
+#personal-status { padding: 12px; border-radius: 8px; background: #f2f4f7; }
+#personal-status[data-state="ready"] { background: var(--soft-green); }
 
 .connection-provider-title { display: flex; align-items: center; gap: 8px; }
 .connection-provider-title img { width: 24px; height: 24px; border-radius: 5px; object-fit: contain; }

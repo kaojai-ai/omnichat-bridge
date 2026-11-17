@@ -4975,6 +4975,7 @@ function batchFor(messages, installId) {
       ...(participant ? { participants: [participant] } : {}),
       messages: []
     };
+    if (message.conversation_name) conversation.display_name = message.conversation_name;
     if (!conversation.participants && participant) conversation.participants = [participant];
     if (provider === "line_personal" && participant) {
       const index = conversation.participants.findIndex((item) => item.id === participant.id);
