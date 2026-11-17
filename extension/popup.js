@@ -347,7 +347,7 @@ function accountLabel(adapter) {
 }
 
 function providerBadgeLabel(provider, adapter) {
-  const label = { line_oa: "LINE", shopee: "SHOPEE" }[provider] ?? adapter?.displayName ?? provider;
+  const label = { line_oa: "LINE", line_personal: "LINE", shopee: "SHOPEE" }[provider] ?? adapter?.displayName ?? provider;
   return String(label).toUpperCase();
 }
 
