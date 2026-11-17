@@ -423,7 +423,7 @@ function accountContextFor(stored, providerAccountId, provider = "") {
   if (!configuredAccount) return null;
   const key = accountConfigKey(configuredAccount);
   const adapter = providerAdapterForAccount(configuredAccount);
-  return key && config && adapter ? { key, config, account: { ...configuredAccount, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
+  return key && config && config.enabled !== false && adapter ? { key, config, account: { ...configuredAccount, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
 }
 
 function configuredAccountContexts(stored) {
@@ -438,7 +438,7 @@ function configuredAccountContexts(stored) {
     const config = findAccountConfig(stored[STORAGE.config], account);
     const key = accountConfigKey(account);
     const adapter = providerAdapterForAccount(account);
-    return key && config && adapter ? { key, config, account: { ...account, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
+    return key && config && config.enabled !== false && adapter ? { key, config, account: { ...account, ...(config.country ? { country: config.country } : {}) }, adapter } : null;
   }).filter(Boolean);
 }
 
@@ -485,9 +485,10 @@ function providerReceiveReadiness(context, status) {
     ? status?.last_successful_poll_at_by_account?.[context.account.provider_account_id] ?? ""
     : status?.last_provider_check_at ?? "");
   const receiveFresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= PROVIDER_HEALTH_STALE_MS;
-  const receiveReady = receiveFresh && status?.realtime_connected === true
+  const denied = status?.access_denied_account_ids?.includes(context.account.provider_account_id) === true;
+  const receiveReady = !denied && receiveFresh && status?.realtime_connected === true
     && (provider !== "shopee" || status?.capabilities?.message_recovery === true);
-  const receiveReasonCode = !status ? "provider_status_unknown"
+  const receiveReasonCode = denied ? "provider_access_denied" : !status ? "provider_status_unknown"
     : !receiveFresh ? provider === "line_oa" ? "inbound_poll_unverified" : "provider_status_stale"
       : status.realtime_connected !== true ? "provider_realtime_disconnected"
       : provider === "shopee" && status?.capabilities?.message_recovery !== true
@@ -509,7 +510,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const observedTabContexts = tabContexts ? observedIndexes.map(index => tabContexts[index]) : observedTabs.map((tab) => providerTabContext(tab, adapter.id));
   const reportedStatuses = statuses ? observedIndexes.map(index => statuses[index]) : await Promise.all(observedTabs.map(providerTabStatus));
   const observedStatuses = reportedStatuses.map(providerStatusEvidence);
-  const storedOwners = await readStorage([STORAGE.pollingOwners]);
+  const storedOwners = await readStorage([STORAGE.pollingOwners, STORAGE.status]);
   const owner = readAccountState(storedOwners[STORAGE.pollingOwners], context.key, null);
   // Navigation/replacement invalidates pending reads; a late response never restores readiness.
   if (observedEpoch !== providerSessionEpoch(adapter.id)
@@ -546,7 +547,9 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   if (mismatch) accountSyncs.get(context.key)?.controller.abort();
   const responded = Boolean(status);
   const verified = responded && identityMatches(status) && !conflict;
-  const ready = verified && providerTabCanSend(status, context);
+  const denied = status?.access_denied_account_ids?.includes(context.account.provider_account_id) === true
+    || readAccountState(storedOwners[STORAGE.status], context.key, {}).account_access_denied === true;
+  const ready = verified && !denied && providerTabCanSend(status, context);
   providerPolicyTabIds.set(context.key, tab?.id ?? null);
   const policy = sessionEligibility.observe(context.key, {
     hasTab: observedTabs.length > 0,
@@ -556,7 +559,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
     identity: mismatch ? adapter.id === "shopee" ? [...identities].sort().join(",") : "inaccessible" : context.account.provider_account_id,
     context: tab ? providerTabContext(tab, adapter.id) : `${adapter.id}:${observedEpoch}:missing`,
     ready,
-    reason_code: !verified ? "provider_account_unverified" : !providerTabCanSend(status, context)
+    reason_code: denied ? "provider_access_denied" : !verified ? "provider_account_unverified" : !providerTabCanSend(status, context)
       ? "provider_capability_unavailable" : `${adapter.id}_realtime_disconnected`,
     evidence: ready ? { tab, status, expires_at: Date.parse(status.send_verified_at) + 120_000, command_capabilities: providerCommandCapabilities(status, context) } : null,
   });
@@ -569,6 +572,7 @@ async function providerReadiness(context, { tabs, statuses, epoch, tabContexts, 
   const active = policy.eligible;
   await updateLiveState(context, {
     ...providerReceiveReadiness(context, policy.evidence?.status ?? status),
+    ...(denied ? { receive_ready: false, receive_reason_code: "provider_access_denied" } : {}),
     send_ready: Boolean(policy.eligible && !policy.unknown),
     sync_ready: Boolean(!policy.unknown && (adapter.id !== "shopee" ? policy.eligible : status?.capabilities?.message_recovery === true)),
     eligibility_reason_code: policy.reason_code,
@@ -1098,7 +1102,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true;
   }
   if (message?.type === "sync_line_tab") {
-    void syncLineTab(message.tab_id).then(respond,
+    void syncLineTab(message.tab_id, { retry_access: message.retry_access }).then(respond,
       error => respond({ ok: false, error: error.message || "LINE sync failed." }));
     return true;
   }
@@ -1232,12 +1236,30 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     );
     return true;
   }
+  if (message?.type === "account_access_denied") {
+    void (async () => {
+      if (!_sender.tab || message.provider !== "line_oa" || typeof message.denied !== "boolean") throw new Error("Invalid account access report.");
+      const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts]);
+      const context = accountContextFor(stored, message.provider_account_id, message.provider);
+      if (!context || !context.adapter.matchesUrl(_sender.tab.url)) throw new Error("Provider account is not configured.");
+      if (!message.denied) {
+        const control = accountSyncs.get(context.key);
+        if (!control?.retryAccess || control.controller.signal.aborted || control.tabId !== _sender.tab.id
+          || control.providerRequestId !== message.request_id) throw new Error("Access retry is no longer active.");
+      }
+      await updateScopedState(STORAGE.status, context.key, { account_access_denied: message.denied });
+      return { ok: true };
+    })().then(respond, () => respond({ ok: false }));
+    return true;
+  }
   if (message?.type === "get_sync_state") {
     void (async () => {
       if (String(message.request_id ?? "").startsWith("poll:") && _sender.tab) {
         const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent]);
         const context = accountContextFor(stored, message.provider_account_id, message.provider);
         if (!context || !hasLocalConsent(stored[STORAGE.consent])) throw new Error("Provider account is not configured.");
+        const access = await readStorage([STORAGE.status]);
+        if (readAccountState(access[STORAGE.status], context.key, {}).account_access_denied === true) return { polling_allowed: false, reason_code: "provider_access_denied" };
         const owner = await pollingOwner.select(context, _sender.tab);
         if (owner.tab.id !== _sender.tab.id) return { polling_allowed: false };
       }
@@ -1760,6 +1782,12 @@ async function prepareAndSendViaProvider(message, state = {}) {
   if (!sessionEligibility.isCurrent(context.key, selectedGeneration)) {
     return { ok: false, error: "Provider readiness or session changed before the reply attempt. Verify the account and retry.",
       execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_BRIDGE_NOT_READY" };
+  }
+  const currentConfig = await withinDeadline(() => readStorage([STORAGE.config, STORAGE.status]));
+  const enabledConfig = findAccountConfig(currentConfig[STORAGE.config], context.account);
+  if (!enabledConfig || enabledConfig.enabled === false
+    || readAccountState(currentConfig[STORAGE.status], context.key, {}).account_access_denied === true) {
+    return { ok: false, error: "Provider account is disabled, removed, or needs a manual access retry.", execution_stage: "preparation", dispatch_started: false, retryable: false };
   }
   if (deadlineAt <= Date.now()) return { ok: false, error: "Reply deadline expired before sending.", execution_stage: "preparation", dispatch_started: false, retryable: true, error_code: "OMNICHAT_DEADLINE_EXPIRED" };
   let result;
@@ -3246,8 +3274,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes[STORAGE.config]) {
     void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
   }
-  if (changes[STORAGE.config] || changes[STORAGE.consent]) {
+  if (changes[STORAGE.consent]) {
     for (const adapter of providerAdapters.list()) invalidateProviderSession(adapter.id, "configuration_or_consent_changed");
+  } else if (changes[STORAGE.config]) {
+    void reconcileAccountConfiguration(changes[STORAGE.config]).catch(error => recordUnexpected("account_configuration", error));
   }
   if (changes[STORAGE.unattendedRecovery]) {
     void runProviderHealthWatchdog().catch((error) => recordUnexpected("provider_watchdog", error));
@@ -3265,6 +3295,35 @@ chrome.permissions.onAdded.addListener(() => {
 chrome.permissions.onRemoved.addListener(() => {
   void refreshRegionalShopeePermissions().catch(error => recordUnexpected("provider_permissions", error));
 });
+
+// Configuration controls affect one account without resetting peers sharing its tab.
+async function reconcileAccountConfiguration({ oldValue, newValue }) {
+  const next = new Map((newValue?.accounts ?? []).map(account => [accountConfigKey(account), account]));
+  for (const config of oldValue?.accounts ?? []) {
+    const key = accountConfigKey(config);
+    const replacement = next.get(key);
+    if (config.enabled === false || (replacement?.enabled !== false && JSON.stringify(config) === JSON.stringify(replacement))) continue;
+    const adapter = providerAdapterForAccount(config);
+    if (!key || !adapter) continue;
+    const control = accountSyncs.get(key);
+    control?.controller.abort();
+    sessionEligibility.reset(key);
+    const tabId = providerPolicyTabIds.get(key);
+    providerPolicyTabIds.delete(key);
+    providerPolicyContexts.delete(key);
+    providerAutomaticRetryAttempts.delete(key);
+    providerAutomaticRetryAt.delete(key);
+    const connection = liveConnections.get(key);
+    if (connection) stopAccountLiveConnection(key, connection, "configuration_changed");
+    const tabs = await providerChatTabs(adapter);
+    const targets = new Set([tabId, control?.tabId, control?.lockedTabId, ...tabs.map(tab => tab.id)]);
+    await Promise.allSettled([...targets].filter(Number.isInteger).map(id => sendProviderMessage(id, {
+      type: "cancel_sync_v3", provider: config.provider, provider_account_id: config.provider_account_id,
+    }, { timeoutMs: PROVIDER_STATUS_RESPONSE_TIMEOUT_MS })));
+  }
+  await ensureLiveConnection();
+  await clearDeliveryRetryAlarmIfIdle();
+}
 
 async function refreshRegionalShopeePermissions() {
   const stored = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.commandTab, STORAGE.providerRecoveryTabs]);
@@ -3457,9 +3516,9 @@ async function providerChatTabById(adapter, tabId) {
   }
 }
 
-function syncLineTab(tabId) {
+function syncLineTab(tabId, { retry_access } = {}) {
   if (lineTabSyncs.has(tabId)) return lineTabSyncs.get(tabId).task;
-  const batch = { controller: new AbortController(), task: null };
+  const batch = { controller: new AbortController(), task: null, retryAccess: retry_access !== false };
   lineTabSyncs.set(tabId, batch);
   batch.task = runLineTabSync(tabId, batch).finally(() => {
     if (lineTabSyncs.get(tabId) === batch) lineTabSyncs.delete(tabId);
@@ -3468,7 +3527,7 @@ function syncLineTab(tabId) {
 }
 
 async function runLineTabSync(tabId, batch) {
-  return syncAccountsForTab("line_oa", tabId, "manual", { controller: batch.controller });
+  return syncAccountsForTab("line_oa", tabId, "manual", { controller: batch.controller, retry_access: batch.retryAccess });
 }
 
 async function exactProviderAccountTab(context, tabId, { shared_session = false } = {}) {
@@ -4343,6 +4402,7 @@ async function syncOpenProvider(control, context) {
     type: "sync_now_v3",
     request_id: control.providerRequestId,
     refresh_metadata: control.refreshMetadata === true,
+    retry_access: control.retryAccess === true,
     provider: context.account.provider,
     provider_account_id: context.account.provider_account_id,
     ...(context.config.bot_id || context.account.bot_id
@@ -4391,13 +4451,15 @@ function requestAccountSync(context, trigger, options = {}) {
     manualSourceTabId: trigger === "manual" && options.allow_tab_fallback === true ? options.tab_id : null,
     sharedSession: context.adapter.id === "line_oa" && options.shared_session === true,
     refreshMetadata: trigger === "manual" || options.refresh_metadata === true,
+    retryAccess: trigger === "manual" && options.retry_access !== false,
     restorePolling: options.restorePolling === true,
   };
   return syncCoordinator.run(context.key, context.adapter.id, control, async () => {
     const { signal } = control.controller;
     throwIfSyncCancelled(signal);
-    const current = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized]);
+    const current = await readStorage([STORAGE.config, STORAGE.detectedAccounts, STORAGE.consent, STORAGE.serverInitialized, STORAGE.status]);
     throwIfSyncCancelled(signal);
+    if (!control.retryAccess && readAccountState(current[STORAGE.status], context.key, {}).account_access_denied === true) return { skipped: "provider_access_denied" };
     const configured = accountContextFor(current, context.account.provider_account_id, context.adapter.id);
     if (!configured || !hasLocalConsent(current[STORAGE.consent])
       || JSON.stringify(configured.config) !== JSON.stringify(context.config)) throw syncCancelledError();
@@ -4657,7 +4719,7 @@ async function runAccountSync(trigger, control, context) {
       pending: pending.length,
     });
     if (cancelled) {
-      await recordLog("info", "sync", "cancelled", "Sync cancelled by user.", {
+      await recordLog("info", "sync", "cancelled", "Sync cancelled.", {
         provider_account_id: providerAccountId,
       });
       throw syncCancelledError();
@@ -4739,7 +4801,7 @@ async function openSessionSyncContexts(contexts, control) {
   return selected;
 }
 
-async function syncAccountsForTab(provider, tabId, trigger = "automatic", { controller } = {}) {
+async function syncAccountsForTab(provider, tabId, trigger = "automatic", { controller, retry_access } = {}) {
   const adapter = providerAdapterForId(provider);
   throwIfSyncCancelled(controller?.signal);
   if (!adapter || !Number.isInteger(tabId)) throw new Error("A verified provider tab is required.");
@@ -4770,7 +4832,7 @@ async function syncAccountsForTab(provider, tabId, trigger = "automatic", { cont
     return { ok: true, skipped: "account_unavailable", accounts: [] };
   }
   const accounts = await Promise.all(contexts.map(context => requestAccountSync(context, trigger, {
-    tab_id: tabId, shared_session: provider === "line_oa", controller,
+    tab_id: tabId, shared_session: provider === "line_oa", controller, retry_access,
     allow_tab_fallback: trigger === "manual", verified_context: tabContext,
   }).catch(error => ({ provider: context.adapter.id, provider_account_id: context.account.provider_account_id, error: error.message }))));
   return { ok: true, accounts, partial: accounts.some(result => result.error || result.metadata?.ok === false) };
@@ -4816,12 +4878,14 @@ async function queueMessagesForContext(messages, context, shouldFlush) {
   const startedAt = (globalThis.performance?.now() ?? Date.now());
   const captured = await serializeAccountStorage(async () => {
     const stored = await readStorage([
+      STORAGE.config,
       STORAGE.consent,
       STORAGE.pending,
       STORAGE.serverInitialized,
       STORAGE.status,
     ]);
-    if (!hasLocalConsent(stored[STORAGE.consent])) return null;
+    const configured = findAccountConfig(stored[STORAGE.config], context.account);
+    if (!hasLocalConsent(stored[STORAGE.consent]) || !configured || configured.enabled === false) return null;
     const scope = await metadataScope(context);
     const scopedMessages = [];
     for (const message of Array.isArray(messages) ? messages : []) {
@@ -5325,12 +5389,14 @@ async function deliveryMessageDetails(context, message, index, extra = {}) {
 
 async function flushBatch(context, signal) {
   const stored = await readStorage([
+    STORAGE.config,
     STORAGE.consent,
     STORAGE.pending,
     STORAGE.status,
   ]);
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
-  if (!hasLocalConsent(stored[STORAGE.consent]) || !context || !pending.length) {
+  const currentConfig = context && findAccountConfig(stored[STORAGE.config], context.account);
+  if (!hasLocalConsent(stored[STORAGE.consent]) || !currentConfig || currentConfig.enabled === false || !pending.length) {
     return { sent: 0, pending: pending.length };
   }
   if (context.account?.provider === "shopee" && context.account.country && context.account.country !== "TH"
@@ -5382,6 +5448,9 @@ async function flushBatch(context, signal) {
           error.server_error_code = "batch_too_large";
           throw error;
         }
+        const current = await readStorage([STORAGE.config]);
+        const config = findAccountConfig(current[STORAGE.config], context.account);
+        if (!config || config.enabled === false || JSON.stringify(config) !== JSON.stringify(context.config)) throw syncCancelledError();
         const acknowledgement = await signedRequest(
           context.config,
           context.account.provider_account_id,
@@ -5626,6 +5695,7 @@ function attemptDelivery(context, options) {
 
 async function deliverPendingForAccount(context, { resetBackoff, signal }) {
   const stored = await readStorage([
+    STORAGE.config,
     STORAGE.consent,
     STORAGE.pending,
     STORAGE.serverInitialized,
@@ -5634,7 +5704,9 @@ async function deliverPendingForAccount(context, { resetBackoff, signal }) {
   const pending = readAccountState(stored[STORAGE.pending], context?.key, []);
   if (!hasServerInitialized(stored)
     || !hasLocalConsent(stored[STORAGE.consent])
-    || !context) {
+    || !context
+    || !findAccountConfig(stored[STORAGE.config], context.account)
+    || findAccountConfig(stored[STORAGE.config], context.account)?.enabled === false) {
     return { sent: 0, pending: pending.length };
   }
   if (signal?.aborted) throw syncCancelledError();

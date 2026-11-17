@@ -212,6 +212,18 @@ account, and rows show whether LINE is connecting, waiting, or checking conversa
 Access checks distinguish a verified empty account list from a failed request. Shared
 configuration and existing sync history are retained when browser access changes.
 
+Each configured account has an **On/Off** switch and **Delete** control. Off stops
+capture, forwarding, replies, and sync for that account; Delete removes its config
+entry. Both preserve queued messages and sync history. Changes appear immediately
+in Settings and configuration exports. The optional account field `"enabled": false`
+persists Off across import/export; omitted `enabled` defaults to On.
+
+A LINE account-specific HTTP 403 pauses that account until the user clicks **Sync**
+or its retry button. Account detection and automatic recovery do not retry it;
+only successful manual recovery resumes polling. Other accounts sharing the tab
+retain their verified session. A confirmed session-wide authentication failure
+still invalidates the shared session.
+
 Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.

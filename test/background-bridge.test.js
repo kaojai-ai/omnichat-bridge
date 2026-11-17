@@ -491,7 +491,7 @@ for (const provider of ["line_oa", "shopee"]) {
       _sender: { tab: { id: 2 } },
       exclusive: action => action(),
       getAccountScanState: async () => { reads++; return { state: {} }; },
-      STORAGE: {}, readStorage: async () => ({}), historySyncSettings: () => null,
+      STORAGE: {}, readStorage: async () => ({}), readAccountState: (_state, _key, fallback) => fallback, historySyncSettings: () => null,
       accountContextFor: () => ({ key: "account" }), hasLocalConsent: () => true,
       pollingOwner: { select: async () => { selections++; return { tab: { id: 1 } }; } },
     });

@@ -31,6 +31,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const scope = vm.createContext({
       document: { createElement: element, createElementNS: (_namespace, tag) => element(tag) },
       popupAccountsForSession: accounts => accounts, renderProviderSelector() {},
+      storedConfig: { accounts: [account] }, findAccountConfig: (_config, item) => item, changingAccountConfig: false, changeAccountConfiguration() {},
       detectedAccounts: [account], liveState: {}, pageAccounts: [], accountList: list,
       accountListEmpty: element("div"), detectingAccount: false, activeProviderAdapter: { id: provider },
       adapterForAccount: () => ({ id: provider, displayName: provider === "shopee" ? "Shopee Seller Chat" : "LINE Official Account", accountName: provider === "line_oa" ? "LINE OA" : "Shop", supports: capability => supportsRecovery && capability === "message_recovery" }),
@@ -99,6 +100,14 @@ for (const provider of ["line_oa", "shopee"]) {
       "providers without message recovery never offer an unsupported retry");
     assert.equal(unavailableActions.some(node => /Discard/.test(node.attributes["aria-label"])), true,
       "local pending-data actions remain available independently of recovery capability");
+    account.enabled = false;
+    supportsRecovery = true;
+    scope.renderDetectedAccounts();
+    const disabledNodes = flatten(list);
+    assert.equal(disabledNodes.some(node => /Retry/.test(node.attributes?.["aria-label"] ?? "")), false);
+    const toggle = disabledNodes.find(node => node.attributes?.role === "switch");
+    assert.equal(toggle.attributes["aria-checked"], "false");
+    assert.ok(disabledNodes.some(node => node.className === "account-delete"), "a disabled account can still be removed");
   });
 }
 
@@ -123,3 +132,35 @@ for (const provider of ["shopee", "line_oa"]) {
     assert.equal(spinning, true);
   });
 }
+
+
+test("persisted access denial hides stale leadership and green capabilities but leaves manual retry", () => {
+  const account = { provider: "line_oa", provider_account_id: "@denied", display_name: "Denied OA" };
+  const storedStatus = {};
+  const liveState = {};
+  const live = { socket: "connected", leader: true, leader_installation_id: "browser",
+    send_ready: true, receive_ready: true, sync_ready: true };
+  const scope = vm.createContext({
+    document: { createElement: element, createElementNS: (_namespace, tag) => element(tag) },
+    storedConfig: { accounts: [account] }, storedStatus, liveState, pendingStates: {}, scanStates: {},
+    findAccountConfig: (_config, candidate) => candidate,
+    accountConfigKey: candidate => `${candidate.provider}:${candidate.provider_account_id}`,
+    readAccountState: (state, _key, fallback) => state === storedStatus ? { account_access_denied: true }
+      : state === liveState ? live : fallback,
+    changingAccountConfig: false, retryingAccounts: new Set(), accountCapabilitySummary,
+    adapterForAccount: () => ({ id: "line_oa", accountName: "LINE OA", supports: capability => capability === "message_recovery" }),
+    lineChatUrl: () => null, createCopyIcon: () => element("svg"), t: key => key,
+  });
+  const statusStart = source.indexOf("function accountRowStatus(");
+  vm.runInContext(labels + source.slice(statusStart, source.indexOf("async function retryAccount", statusStart)) + rendering, scope);
+  const denied = flatten(scope.renderAccountRow(account));
+  assert.ok(denied.some(node => node.textContent === "accountAccessDenied"));
+  assert.equal(denied.some(node => node.className === "leader-status"), false);
+  assert.equal(denied.some(node => node.className === "account-row-capabilities"), false);
+  assert.ok(denied.some(node => node.attributes?.["aria-label"] === "retry: Denied OA"));
+  // An unrelated recovery error does not discard independently valid send evidence.
+  scope.accountRowStatus = () => ({ label: "Sync failed", state: "error" });
+  const otherError = flatten(scope.renderAccountRow(account));
+  assert.ok(otherError.some(node => node.className === "leader-status"));
+  assert.ok(otherError.some(node => node.className === "account-row-capabilities" && node.textContent.includes("✓")));
+});

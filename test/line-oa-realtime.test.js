@@ -88,8 +88,11 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
           }),
         };
       }
-      if (url.pathname === "/api/v2/bots/bot-1/chats") {
-        if (beforeChatRequest) await beforeChatRequest(url);
+      if (/^\/api\/v2\/bots\/[^/]+\/chats$/.test(url.pathname)) {
+        if (beforeChatRequest) {
+          const response = await beforeChatRequest(url);
+          if (response) return response;
+        }
         if (chatError) throw chatError;
         if (chatPages) return { ok: true, json: async () => chatPages[url.searchParams.get("next") ?? "first"] ?? { list: [] } };
         const next = url.searchParams.get("next");
@@ -343,6 +346,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
       history_conversation_ids = null,
       now = 5_000,
       refresh_metadata = false,
+      retry_access = false,
     } = {}) {
       // History fixtures use epoch-millisecond timestamps. Keep bootstrap lookback in that same clock.
       fixtureNow = now;
@@ -357,6 +361,7 @@ function createBridge({ sendResponseBody, sendStatus = 200, sendNonJson = false,
             request_id: requestId,
             checkpoint,
             refresh_metadata,
+            retry_access,
             provider_account_id: providerAccountId,
             ...(botId ? { bot_id: botId } : {}),
             ...(history_days != null ? {
@@ -1428,8 +1433,8 @@ test("LINE OA malformed account list is uncertainty and a valid response restore
   } finally { bridge.dispose(); }
 });
 
-test("LINE OA polling authorization failure remains failed through subsequent unknown checks", async () => {
-  const error = Object.assign(new Error("permission denied"), { providerDiagnostics: { http_status: 403 } });
+test("LINE OA polling unauthorized session remains failed through subsequent unknown checks", async () => {
+  const error = Object.assign(new Error("session expired"), { providerDiagnostics: { http_status: 401 } });
   const bridge = createBridge({ chatError: error });
   try {
     const result = await bridge.sync();
@@ -1472,13 +1477,14 @@ test("LINE OA late account success cannot overwrite a newer authorization failur
   } finally { release(); bridge.dispose(); }
 });
 
-test("LINE OA send authorization rejection immediately reports a confirmed failed check", async () => {
+test("LINE OA send forbidden response pauses only that account", async () => {
   const bridge = createBridge({ sendStatus: 403 });
   try {
     const result = await bridge.sendCommand({ command_type: "send_text", text: "Fixture reply" });
     assert.equal(result.ok, false);
-    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "failed");
-    assert.equal(lastPollingStatus(bridge).account_access_verified, false);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.deepEqual(lastPollingStatus(bridge).access_denied_account_ids, ["@exampleoa"]);
+    assert.equal(lastPollingStatus(bridge).account_access_verified, true);
   } finally { bridge.dispose(); }
 });
 
@@ -2223,5 +2229,46 @@ test("LINE upgrade ignores an orphaned script's checkpoint rejection before the 
     assert.equal(result.ok, true);
     assert.ok(bridge.requests.length > 0);
     assert.ok(bridge.durableCheckpoints.get("@exampleoa")?.watermark);
+  } finally { bridge.dispose(); }
+});
+
+
+test("LINE 403 isolates one account, stops automatic retries, and resumes only after successful manual Sync", async () => {
+  let forbidden = true;
+  const bridge = createBridge({ chatCount: 0, availableAccounts: [
+    { basicSearchId: "@denied", botId: "bot-denied" },
+    { basicSearchId: "@healthy", botId: "bot-healthy" },
+  ], beforeChatRequest: url => forbidden && url.pathname.includes("bot-denied")
+    ? { ok: false, status: 403, json: async () => ({ code: "FORBIDDEN" }) } : null });
+  try {
+    const failure = await bridge.sync({ providerAccountId: "@denied", botId: "bot-denied" });
+    assert.equal(failure.ok, false);
+    assert.equal(failure.diagnostics.http_status, 403);
+    assert.equal(lastPollingStatus(bridge).provider_check_outcome, "passed");
+    assert.deepEqual(lastPollingStatus(bridge).accessible_account_ids, ["@denied", "@healthy"]);
+    assert.deepEqual(lastPollingStatus(bridge).access_denied_account_ids, ["@denied"]);
+    const healthy = await bridge.sync({ requestId: "healthy", providerAccountId: "@healthy", botId: "bot-healthy" });
+    assert.equal(healthy.ok, true);
+    const attempts = () => bridge.requests.filter(url => url.pathname.includes("bot-denied")).length;
+    const before = attempts();
+    bridge.tick();
+    await settleBridge();
+    assert.equal(attempts(), before, "periodic polling leaves the forbidden account alone");
+    assert.ok(bridge.posts.some(post => post.request_id?.startsWith("poll:") && post.provider_account_id === "@healthy" && post.ok));
+    await bridge.detect();
+    await bridge.sync({ requestId: "automatic", providerAccountId: "@denied", botId: "bot-denied", refresh_metadata: true });
+    assert.equal(attempts(), before, "account rediscovery/automatic metadata sync cannot bypass pause");
+    const retry = await bridge.sync({ requestId: "manual-failure", providerAccountId: "@denied", botId: "bot-denied", retry_access: true });
+    assert.equal(retry.ok, false);
+    assert.ok(attempts() > before, "manual Sync makes a fresh attempt");
+    forbidden = false;
+    const resumed = await bridge.sync({ requestId: "manual-success", providerAccountId: "@denied", botId: "bot-denied", retry_access: true });
+    assert.equal(resumed.ok, true);
+    assert.deepEqual(lastPollingStatus(bridge).access_denied_account_ids, []);
+    const restored = attempts();
+    bridge.tick();
+    await settleBridge();
+    assert.ok(attempts() > restored, "successful manual Sync restores periodic polling");
+    assert.deepEqual(lastPollingStatus(bridge).provider_polling_account_ids.sort(), ["@denied", "@healthy"]);
   } finally { bridge.dispose(); }
 });

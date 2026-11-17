@@ -147,6 +147,7 @@ heartButton.addEventListener("dblclick", () => {
 let detectedAccounts = [];
 let pageAccounts = [];
 const retryingAccounts = new Set();
+let changingAccountConfig = false;
 const accountRetryErrors = new Map();
 let storedStatus = null;
 let liveState = null;
@@ -199,6 +200,10 @@ function renderExtensionUpdate(update) {
 const TRANSLATIONS = {
   en: {
     waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and receive", checkingInbound: "Checking incoming messages…", capSend: "Send", capReceive: "Receive", capSync: "Sync", syncUnavailable: "Sync unavailable",
+    accountAccessDenied: "Chat access denied", accountAccessDeniedHint: "Click Sync to check access and reconnect this account.",
+    accountOn: "On", accountOff: "Off", accountEnable: "Turn on", accountDisable: "Turn off", accountDelete: "Delete", accountsOff: "Accounts are off. Turn on an account to sync.",
+    accountOffHint: "Sending, receiving and sync are off for this account.",
+    accountDeleteConfirm: name => `Delete configuration for ${name}? Saved messages and sync history will be kept.`,
     forwardLogDescription: "Forward this level and above automatically.",
     allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
@@ -216,6 +221,10 @@ const TRANSLATIONS = {
   },
   th: {
     waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมรับและส่งข้อความ", checkingInbound: "กำลังตรวจสอบการรับข้อความ…", capSend: "ส่ง", capReceive: "รับ", capSync: "ซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
+    accountAccessDenied: "ไม่มีสิทธิ์เข้าถึงแชต", accountAccessDeniedHint: "กดซิงค์เพื่อตรวจสอบสิทธิ์และเชื่อมต่อบัญชีนี้ใหม่",
+    accountOn: "เปิด", accountOff: "ปิด", accountEnable: "เปิดใช้งาน", accountDisable: "ปิดใช้งาน", accountDelete: "ลบ", accountsOff: "บัญชีปิดอยู่ เปิดใช้งานบัญชีเพื่อซิงค์",
+    accountOffHint: "ปิดการส่ง รับ และซิงค์ข้อความของบัญชีนี้แล้ว",
+    accountDeleteConfirm: name => `ลบการตั้งค่าของ ${name} หรือไม่? ข้อความที่บันทึกและประวัติการซิงค์จะยังอยู่`,
     forwardLogDescription: "ส่งบันทึกระดับที่เลือกขึ้นไปโดยอัตโนมัติ",
     allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
@@ -505,8 +514,13 @@ function accountRowStatus(account) {
   const key = accountConfigKey(account);
   const config = findAccountConfig(storedConfig, account);
   if (!config) return { label: t("needConfig"), state: "neutral", action: "config" };
+  if (config.enabled === false) return { label: t("accountOff"), state: "neutral", hint: t("accountOffHint") };
   const syncState = readAccountState(storedStatus, key, null);
   const live = readAccountState(liveState, key, null);
+  if (syncState?.account_access_denied || live?.eligibility_reason_code === "provider_access_denied"
+    || live?.receive_reason_code === "provider_access_denied") {
+    return { label: t("accountAccessDenied"), state: "error", hint: t("accountAccessDeniedHint"), action: "logs", accessDenied: true };
+  }
   const session = sessionConnectionStatus(live);
   if (session) return accountCapabilityStatus(live, t) || session;
   if (account.provider === "shopee" && !accountIsActiveHere(account)) {
@@ -528,7 +542,7 @@ function accountRowStatus(account) {
 
 async function retryAccount(account) {
   const key = accountConfigKey(account);
-  if (retryingAccounts.has(key)) return;
+  if (retryingAccounts.has(key) || findAccountConfig(storedConfig, account)?.enabled === false) return;
   retryingAccounts.add(key);
   accountRetryErrors.delete(key);
   renderDashboard();
@@ -549,6 +563,37 @@ async function retryAccount(account) {
   } finally {
     retryingAccounts.delete(key);
     renderDashboard();
+  }
+}
+
+async function changeAccountConfiguration(account, action) {
+  if (changingAccountConfig) return;
+  if (action === "delete" && !confirm(t("accountDeleteConfirm", account.display_name || account.provider_account_id))) return;
+  changingAccountConfig = true;
+  let failure = "";
+  renderDashboard();
+  try {
+    // Read the saved JSON so an account control preserves other saved settings.
+    const stored = await readStorage([STORAGE.config]);
+    const current = configOrEmpty(stored[STORAGE.config]);
+    const key = accountConfigKey(account);
+    const configured = current.accounts.find(candidate => accountConfigKey(candidate) === key);
+    if (!configured) return;
+    const accounts = action === "delete"
+      ? current.accounts.filter(candidate => accountConfigKey(candidate) !== key)
+      : current.accounts.map(candidate => accountConfigKey(candidate) === key
+        ? { ...candidate, enabled: candidate.enabled === false } : candidate);
+    const config = validateConfigFile({ ...current, accounts });
+    await writeStorage({ [STORAGE.config]: config });
+    storedConfig = config;
+    configInput.value = JSON.stringify(config, null, 2);
+    await refreshStoredState();
+  } catch (error) {
+    reportPopupError("account_configuration", error);
+    failure = error.message;
+  } finally {
+    changingAccountConfig = false;
+    renderDashboard(failure, Boolean(failure));
   }
 }
 
@@ -626,7 +671,7 @@ function createAccountActionIcon(action) {
 
 function renderDetectedAccounts() {
   renderProviderSelector();
-  const accounts = popupAccountsForSession(detectedAccounts, liveState, pageAccounts).filter((account) => (
+  const accounts = popupAccountsForSession(detectedAccounts, liveState, pageAccounts, storedConfig).filter((account) => (
     account.provider === activeProviderAdapter?.id && adapterForAccount(account) && String(account.provider_account_id ?? "").trim()
   ));
   accountList.replaceChildren();
@@ -690,6 +735,8 @@ function renderAccountRow(account) {
   if (!id) return null;
   const label = accountLabel(adapter);
   const cardState = accountRowStatus(account);
+  const config = findAccountConfig(storedConfig, account);
+  const enabled = Boolean(config) && config.enabled !== false;
   const card = document.createElement("div");
   card.className = "account-row";
   card.dataset.provider = account.provider;
@@ -745,7 +792,7 @@ function renderAccountRow(account) {
   heading.append(badge, name);
   const live = readAccountState(liveState, accountConfigKey(account), null);
   let leaderBadge;
-  if (live?.leader_installation_id) {
+  if (enabled && !cardState.accessDenied && live?.leader_installation_id) {
     const leader = document.createElement("button");
     leader.type = "button";
     leader.className = "leader-status";
@@ -774,7 +821,7 @@ function renderAccountRow(account) {
     leaderBadge = leader;
   }
   copy.append(heading, statusLabel);
-  const capabilityText = accountCapabilitySummary(readAccountState(liveState, accountConfigKey(account), null), t);
+  const capabilityText = enabled && !cardState.accessDenied ? accountCapabilitySummary(readAccountState(liveState, accountConfigKey(account), null), t) : "";
   if (capabilityText) {
     const capabilities = document.createElement("small");
     capabilities.className = "account-row-capabilities";
@@ -793,7 +840,7 @@ function renderAccountRow(account) {
       copy.append(bar);
     }
   }
-  if (adapter.supports?.("message_recovery") && (cardState.state === "error" || cardState.loading)) {
+  if (enabled && adapter.supports?.("message_recovery") && (cardState.state === "error" || cardState.loading)) {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.disabled = retryingAccounts.has(accountConfigKey(account));
@@ -803,6 +850,27 @@ function renderAccountRow(account) {
     retry.setAttribute("aria-label", `${t("retry")}: ${account.display_name || id}`);
     retry.addEventListener("click", () => void retryAccount(account));
     actions.append(retry);
+  }
+  if (config) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "account-toggle";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", String(enabled));
+    toggle.setAttribute("aria-label", `${t(enabled ? "accountDisable" : "accountEnable")}: ${account.display_name || id}`);
+    toggle.textContent = t(enabled ? "accountOn" : "accountOff");
+    toggle.title = t(enabled ? "accountDisable" : "accountEnable");
+    toggle.disabled = changingAccountConfig;
+    toggle.addEventListener("click", () => void changeAccountConfiguration(account, "toggle"));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "account-delete";
+    remove.title = t("accountDelete");
+    remove.append(createAccountActionIcon("discard"));
+    remove.setAttribute("aria-label", `${t("accountDelete")}: ${account.display_name || id}`);
+    remove.disabled = changingAccountConfig;
+    remove.addEventListener("click", () => void changeAccountConfiguration(account, "delete"));
+    actions.append(toggle, remove);
   }
   select.append(copy);
   const shopId = document.createElement("button");
@@ -885,7 +953,7 @@ function renderDashboard(message = "", isError = false) {
       live: readAccountState(liveState, key, null),
     };
   });
-  const configuredStates = accountStates.filter((item) => item.config && accountIsActiveHere(item.account));
+  const configuredStates = accountStates.filter((item) => item.config && item.config.enabled !== false && accountIsActiveHere(item.account));
   const pendingTotal = configuredStates.reduce((total, item) => total + item.pending.length, 0);
   const configuredAccountIds = new Set(configuredStates.map((item) => item.account.provider_account_id));
   const latestLoggedDeliveryFailure = logs.find((item) => (
@@ -929,6 +997,17 @@ function renderDashboard(message = "", isError = false) {
     .filter(Boolean)
     .sort()
     .at(-1);
+
+  if (!configuredStates.length && accountStates.some(item => item.config)
+    && accountStates.filter(item => item.config).every(item => item.config.enabled === false)) {
+    status.textContent = message || t("accountsOff");
+    syncButton.disabled = true;
+    syncButton.textContent = t("sync");
+    syncButton.setAttribute("aria-label", syncButton.textContent);
+    cancelSyncButton.hidden = true;
+    progressArea.hidden = false;
+    return;
+  }
 
   if (!configuredStates.length) {
     const inactiveShopee = accountStates.find((item) => item.config && item.account.provider === "shopee"
@@ -1229,8 +1308,8 @@ async function autoStartSync(config) {
   const accounts = currentTabSyncAccounts(config, detected.accounts, provider);
   if (!accounts.length) throw new Error("Saved configuration does not include any detected provider account.");
   const command = provider === "line_oa"
-    ? { type: "sync_line_tab", tab_id: tab.id }
-    : { type: "sync_account", provider, provider_account_id: accounts[0].provider_account_id, tab_id: tab.id };
+    ? { type: "sync_line_tab", tab_id: tab.id, retry_access: false }
+    : { type: "sync_account", provider, provider_account_id: accounts[0].provider_account_id, tab_id: tab.id, retry_access: false };
   void chrome.runtime.sendMessage(command).then((result) => {
     if (!result?.ok) reportConfigurationStatus(`Configuration saved. ${result?.error ?? "Sync failed."}`, true);
   }).catch((error) => {

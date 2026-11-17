@@ -1,6 +1,6 @@
 (() => {
   const SOURCE = "omnichat-realtime-bridge-v4";
-  const BRIDGE_VERSION = "line-oa-poll-12";
+  const BRIDGE_VERSION = "line-oa-poll-13";
   // Script revisions remain compatible unless the page bridge interface breaks.
   const COMPATIBILITY_VERSION = 9;
   const CHAT_PAGE_LIMIT = 25;
@@ -14,6 +14,7 @@
   const SEND_CONFIRM_POLL_MS = 1_000;
   const monotonicNow = () => globalThis.performance?.now() ?? Date.now();
   const previous = window.__omnichatLineOABridgeControl;
+  const accessDeniedAccounts = new Set(previous?.accessDeniedAccountIds?.() ?? []);
   previous?.dispose?.();
   let disposed = false;
   let timer = null;
@@ -115,6 +116,7 @@
       capabilities: { account_detection: true, message_observation: true, message_recovery: true },
       accessible_account_ids: accessibleAccounts.map((account) => account.provider_account_id),
       account_access_verified: sendIdentityFresh(),
+      access_denied_account_ids: [...accessDeniedAccounts],
       send_verified_at: sendVerifiedAt,
       provider_check_outcome: providerCheckOutcome,
       realtime_transport: "authenticated_polling",
@@ -141,7 +143,7 @@
       const request = input instanceof Request ? input : null;
       const url = new URL(request?.url ?? String(input), window.location.origin);
       if (url.origin === window.location.origin && /^\/api\/v\d+\/bots(?:\/|$)/.test(url.pathname)
-        && [401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
+        && [401, 403].includes(response.status)) markRequestAccessFailure(url, { providerDiagnostics: { http_status: response.status } });
       const method = String(init?.method ?? request?.method ?? "GET").toUpperCase();
       const rawBody = init?.body ?? null;
       if (method === "POST" && typeof rawBody === "string" && messageSendPath(url)) {
@@ -154,7 +156,27 @@
     return response;
   };
 
+  // A chat permission denial is not proof that the whole browser logged out.
+  function markRequestAccessFailure(input, error) {
+    const url = new URL(input, window.location.origin);
+    const botId = url.pathname.match(/^\/api\/v\d+\/bots\/([^/]+)(?:\/|$)/)?.[1];
+    const account = accessibleAccounts.find(item => item.bot_id === decodeURIComponent(botId ?? ""));
+    if (error?.providerDiagnostics?.http_status === 403 && botId) {
+      error.accountAccessDenied = true;
+      // A page request for an unconfigured bot cannot revoke verified peers.
+      if (!account) return;
+      accessDeniedAccounts.add(account.provider_account_id);
+      lastSuccessfulPollAtByAccount.delete(account.provider_account_id);
+      pollingAccounts.delete(account.provider_account_id);
+      if (!pollingAccounts.size) stopTimer();
+      postProviderStatus();
+      return;
+    }
+    markProviderCheckFailure(error);
+  }
+
   function markProviderCheckFailure(error, { retainVerifiedAccess = false } = {}) {
+    if (error?.accountAccessDenied) return;
     const confirmedFailure = [401, 403].includes(error?.providerDiagnostics?.http_status);
     if (confirmedFailure) {
       metadataSessionEpoch += 1;
@@ -288,7 +310,7 @@
       if (accountEpoch !== metadataSessionEpoch) throw supersededAccountCheck();
       const failure = error?.name === "AbortError" ? new Error("LINE OA request timed out.") : error;
       failure.providerCheckUnavailable = true;
-      if ([401, 403].includes(failure?.providerDiagnostics?.http_status)) markProviderCheckFailure(failure);
+      if ([401, 403].includes(failure?.providerDiagnostics?.http_status)) markRequestAccessFailure(url, failure);
       throw failure;
     } finally {
       clearTimeout(timeout);
@@ -619,7 +641,7 @@
     }
   }
 
-  async function poll(requestId, providerAccountId, botId, generation, history, refreshMetadata = false) {
+  async function poll(requestId, providerAccountId, botId, generation, history, refreshMetadata = false, retryAccess = false) {
     const scanStartedAt = Date.now();
     let completedCursors;
     const metadata = refreshMetadata === true && !String(requestId).startsWith("poll:")
@@ -627,6 +649,12 @@
     const metadataDeadline = scanStartedAt + 30_000;
     const metadataChats = new Set();
     try {
+      if (accessDeniedAccounts.has(normalizeBasicId(providerAccountId)) && !retryAccess) {
+        const error = new Error("LINE OA chat access denied. Click Sync to retry.");
+        error.accountAccessDenied = true;
+        error.providerDiagnostics = { http_status: 403 };
+        throw error;
+      }
       const loaded = await checkpointRequest("recovery_checkpoint", `${requestId}:checkpoint`, providerAccountId);
       if (!pollIsActive(generation)) return;
       const checkpoint = loaded.checkpoint ?? {};
@@ -875,10 +903,16 @@
       const watermark = new Date(bootstrap && !historyWindow && pendingIds.size === 0 ? bootstrapStartedAt : scanStartedAt).toISOString();
       await checkpointRequest("recovery_scan_complete", `${requestId}:complete`, providerAccountId, { watermark });
       if (!pollIsActive(generation)) return;
+      if (retryAccess) accessDeniedAccounts.delete(normalizeBasicId(providerAccountId));
       lastSuccessfulPollAtByAccount.set(normalizeBasicId(providerAccountId), new Date().toISOString());
       postProviderStatus();
       post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: true, recovered: parsed, queued, watermark, ...(metadata ? { metadata } : {}) });
     } catch (error) {
+      if (error?.reason_code === "provider_access_denied") {
+        accessDeniedAccounts.add(normalizeBasicId(providerAccountId));
+        cancelPolling("LINE OA chat access denied. Click Sync to retry.", { providerAccountId, notifyRequests: false });
+        return;
+      }
       if (error?.reason_code === "polling_owned_elsewhere") {
         cancelPolling("Polling continues in another verified tab.", { providerAccountId, notifyRequests: false });
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId,
@@ -886,6 +920,10 @@
         return;
       }
       if (error?.providerCheckUnavailable) markProviderCheckFailure(error, { retainVerifiedAccess: true });
+      if (accessDeniedAccounts.has(normalizeBasicId(providerAccountId))) {
+        pollingAccounts.delete(normalizeBasicId(providerAccountId));
+        if (!pollingAccounts.size) stopTimer();
+      }
       if (pollIsActive(generation)) {
         postProviderStatus();
         post({ type: "recovery_complete", request_id: requestId, provider_account_id: providerAccountId, ok: false, error: "LINE OA recovery failed.", diagnostics: failedOperationDiagnostics(error, "recovery") });
@@ -907,7 +945,7 @@
     else postProviderStatus();
   }
 
-  function startPoll({ requestId, providerAccountId, botId, history, refreshMetadata = false }) {
+  function startPoll({ requestId, providerAccountId, botId, history, refreshMetadata = false, retryAccess = false }) {
     const generation = { epoch: pollGeneration, cancelled: false };
     const current = { requestId, providerAccountId, generation, task: null };
     activePoll = current;
@@ -915,13 +953,19 @@
     if (!String(requestId).startsWith("poll:")) {
       post({ type: "recovery_phase", request_id: requestId, provider_account_id: providerAccountId, phase: "loading_conversations" });
     }
-    const task = poll(requestId, providerAccountId, botId, generation, history, refreshMetadata);
+    const task = poll(requestId, providerAccountId, botId, generation, history, refreshMetadata, retryAccess);
     current.task = task;
     void task.then(() => finishPoll(current), () => finishPoll(current));
   }
 
-  function start(requestId, providerAccountId, botId, history, refreshMetadata = false) {
+  function start(requestId, providerAccountId, botId, history, refreshMetadata = false, retryAccess = false) {
     const accountId = value(providerAccountId);
+    if (accessDeniedAccounts.has(accountId) && !retryAccess) {
+      post({ type: "recovery_complete", request_id: requestId, provider_account_id: accountId,
+        ok: false, reason_code: "provider_rejected", error: "LINE OA chat access denied. Click Sync to retry.",
+        diagnostics: failedOperationDiagnostics({ providerDiagnostics: { http_status: 403 } }, "recovery") });
+      return;
+    }
     stopTimer();
     const previous = pollingAccounts.get(accountId);
     const account = {
@@ -929,7 +973,7 @@
       history: history === undefined ? previous?.history ?? null : history,
     };
     pollingAccounts.set(accountId, account);
-    const request = { requestId, providerAccountId: accountId, ...account, refreshMetadata: refreshMetadata === true };
+    const request = { requestId, providerAccountId: accountId, ...account, refreshMetadata: refreshMetadata === true, retryAccess };
     if (activePoll) {
       const firstRoutine = queuedSyncs.findIndex((queued) => String(queued.requestId).startsWith("poll:"));
       if (!String(requestId).startsWith("poll:") && firstRoutine >= 0) queuedSyncs.splice(firstRoutine, 0, request);
@@ -942,7 +986,7 @@
       // Queue residence is not progress. Only actual phase/data events renew
       // recovery deadlines; scoped cancellation releases the next account.
       if (activePoll || queuedSyncs.length || disposed || !pollingAccounts.size) return;
-      const requests = [...pollingAccounts].map(([id, state]) => ({
+      const requests = [...pollingAccounts].filter(([id]) => !accessDeniedAccounts.has(id)).map(([id, state]) => ({
         requestId: `poll:${crypto.randomUUID()}`,
         providerAccountId: id,
         ...state,
@@ -1109,7 +1153,7 @@
     try {
       const sessionEpoch = metadataSessionEpoch;
       const sessionLocation = metadataLocation();
-      const botId = sendIdentityFresh() ? accessibleAccounts.find(
+      const botId = sendIdentityFresh() && !accessDeniedAccounts.has(browserAccountId) ? accessibleAccounts.find(
         (account) => account.provider_account_id === browserAccountId,
       )?.bot_id : null;
       const expectedType = commandType === "send_text" ? "text"
@@ -1201,7 +1245,7 @@
         httpStatus = upload.status;
         const uploaded = await upload.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
         if (!upload.ok) {
-          if ([401, 403].includes(upload.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: upload.status } });
+          if ([401, 403].includes(upload.status)) markRequestAccessFailure(`${apiBase}/v1/bots/${encodeURIComponent(botId)}`, { providerDiagnostics: { http_status: upload.status } });
           providerDetails = providerErrorDetails(uploaded);
           throw new Error(`LINE OA attachment upload failed (${upload.status}).`);
         }
@@ -1231,7 +1275,7 @@
       const responseBody = await response.json().then((body) => { responseFormat = "json"; return body; }).catch(() => { responseFormat = "non_json"; return null; });
       timings.provider_request_duration_ms = monotonicNow() - providerRequestStarted;
       if (classifySendResponse(response, responseBody) === "rejected") {
-        if ([401, 403].includes(response.status)) markProviderCheckFailure({ providerDiagnostics: { http_status: response.status } });
+        if ([401, 403].includes(response.status)) markRequestAccessFailure(`${apiBase}/v1/bots/${encodeURIComponent(botId)}`, { providerDiagnostics: { http_status: response.status } });
         providerDetails = providerErrorDetails(responseBody);
         post({ type: "api_send_result", request_id: requestId, ok: false, uncertain: false, dispatch_started: true, error: `LINE OA send failed (${response.status}).`, diagnostics: diagnostics("provider_rejection") });
         return;
@@ -1305,6 +1349,7 @@
         event.data.bot_id,
         historySelection(event.data),
         event.data.refresh_metadata === true,
+        event.data.retry_access === true,
       );
     } else if (event.data.type === "cancel_sync_v3") {
       cancelPolling("LINE OA recovery was cancelled.", {
@@ -1328,6 +1373,7 @@
     source: SOURCE,
     bridge_version: BRIDGE_VERSION,
     compatibility_version: COMPATIBILITY_VERSION,
+    accessDeniedAccountIds: () => [...accessDeniedAccounts],
     combined_metadata_sync: true,
     bounded_message_ids: true,
     grace_classification: true,

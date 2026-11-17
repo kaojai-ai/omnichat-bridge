@@ -22,6 +22,7 @@ function harness(overrides = {}) {
   let failWrite = false;
   const runtime = vm.createContext({ preemptAutomaticLogUpload: () => {},
     performance, STORAGE, readAccountState, writeAccountState,
+    findAccountConfig: () => ({}),
     metadataScope: async context => context.key,
     customerMetadata: { enrich: async (_scope, message) => message },
     readStorage: async () => { const snapshot = structuredClone(state); await turn(); return snapshot; },
