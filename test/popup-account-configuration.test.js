@@ -26,38 +26,22 @@ function harness({ confirmDelete = true, writeError = null } = {}) {
   return { scope, account, other, storage, writes, messages };
 }
 
-test("on/off controls persist the current saved JSON and retain other accounts and local data", async () => {
-  const h = harness();
-  await h.scope.changeAccountConfiguration(h.account, "toggle");
-  assert.equal(h.storage.config.accounts[0].enabled, false);
-  assert.equal(h.storage.config.accounts[1].provider_account_id, "two");
-  assert.equal(h.storage.config.accounts[1].enabled, undefined);
-  assert.equal(h.storage.config.history_days, 30);
-  assert.deepEqual(Object.keys(h.writes[0]), ["config"]);
-  assert.equal(JSON.parse(h.scope.configInput.value).accounts[0].enabled, false);
-  await h.scope.changeAccountConfiguration(h.account, "toggle");
-  assert.equal(h.storage.config.accounts[0].enabled, true);
-  assert.deepEqual(h.storage.pending, ["saved message"]);
-  assert.deepEqual(h.storage.checkpoint, { watermark: "saved cursor" });
-  assert.equal(h.storage.serverInitialized, true);
-});
-
 test("delete removes only the selected configuration after confirmation", async () => {
   const h = harness();
-  await h.scope.changeAccountConfiguration(h.account, "delete");
+  await h.scope.changeAccountConfiguration(h.account);
   assert.deepEqual(h.storage.config.accounts.map(account => account.provider_account_id), ["two"]);
   assert.equal(h.storage.config.history_days, 30);
   assert.deepEqual(Object.keys(h.writes[0]), ["config"]);
   assert.deepEqual(h.storage.pending, ["saved message"]);
   assert.deepEqual(h.storage.checkpoint, { watermark: "saved cursor" });
   const cancelled = harness({ confirmDelete: false });
-  await cancelled.scope.changeAccountConfiguration(cancelled.account, "delete");
+  await cancelled.scope.changeAccountConfiguration(cancelled.account);
   assert.equal(cancelled.writes.length, 0);
 });
 
 test("failed account edits keep the saved configuration and surface the error", async () => {
   const h = harness({ writeError: "Storage unavailable" });
-  await h.scope.changeAccountConfiguration(h.account, "toggle");
+  await h.scope.changeAccountConfiguration(h.account);
   assert.equal(h.storage.config.accounts[0].enabled, undefined);
   assert.equal(h.scope.changingAccountConfig, false);
   assert.deepEqual(h.messages.at(-1), ["Storage unavailable", true]);

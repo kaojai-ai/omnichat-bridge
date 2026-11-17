@@ -201,7 +201,7 @@ const TRANSLATIONS = {
   en: {
     waitingBrowser: "Waiting for browser", loginRequired: "Login required", preparingChat: "Preparing chat…", messagingReady: "Ready to send and receive", checkingInbound: "Checking incoming messages…", capSend: "Send", capReceive: "Receive", capSync: "Sync", syncUnavailable: "Sync unavailable",
     accountAccessDenied: "Chat access denied", accountAccessDeniedHint: "Click Sync to check access and reconnect this account.",
-    accountOn: "On", accountOff: "Off", accountEnable: "Turn on", accountDisable: "Turn off", accountDelete: "Delete", accountsOff: "Accounts are off. Turn on an account to sync.",
+    accountOff: "Off", accountDelete: "Delete", accountsOff: "Accounts are off. Enable them in configuration to sync.",
     accountOffHint: "Sending, receiving and sync are off for this account.",
     accountDeleteConfirm: name => `Delete configuration for ${name}? Saved messages and sync history will be kept.`,
     forwardLogDescription: "Forward this level and above automatically.",
@@ -222,7 +222,7 @@ const TRANSLATIONS = {
   th: {
     waitingBrowser: "รอเบราว์เซอร์", loginRequired: "ต้องเข้าสู่ระบบ", preparingChat: "กำลังเตรียมแชต…", messagingReady: "พร้อมรับและส่งข้อความ", checkingInbound: "กำลังตรวจสอบการรับข้อความ…", capSend: "ส่ง", capReceive: "รับ", capSync: "ซิงค์", syncUnavailable: "ซิงค์ยังไม่พร้อม",
     accountAccessDenied: "ไม่มีสิทธิ์เข้าถึงแชต", accountAccessDeniedHint: "กดซิงค์เพื่อตรวจสอบสิทธิ์และเชื่อมต่อบัญชีนี้ใหม่",
-    accountOn: "เปิด", accountOff: "ปิด", accountEnable: "เปิดใช้งาน", accountDisable: "ปิดใช้งาน", accountDelete: "ลบ", accountsOff: "บัญชีปิดอยู่ เปิดใช้งานบัญชีเพื่อซิงค์",
+    accountOff: "ปิด", accountDelete: "ลบ", accountsOff: "บัญชีปิดอยู่ เปิดใช้งานในการตั้งค่าเพื่อซิงค์",
     accountOffHint: "ปิดการส่ง รับ และซิงค์ข้อความของบัญชีนี้แล้ว",
     accountDeleteConfirm: name => `ลบการตั้งค่าของ ${name} หรือไม่? ข้อความที่บันทึกและประวัติการซิงค์จะยังอยู่`,
     forwardLogDescription: "ส่งบันทึกระดับที่เลือกขึ้นไปโดยอัตโนมัติ",
@@ -566,9 +566,9 @@ async function retryAccount(account) {
   }
 }
 
-async function changeAccountConfiguration(account, action) {
+async function changeAccountConfiguration(account) {
   if (changingAccountConfig) return;
-  if (action === "delete" && !confirm(t("accountDeleteConfirm", account.display_name || account.provider_account_id))) return;
+  if (!confirm(t("accountDeleteConfirm", account.display_name || account.provider_account_id))) return;
   changingAccountConfig = true;
   let failure = "";
   renderDashboard();
@@ -579,10 +579,7 @@ async function changeAccountConfiguration(account, action) {
     const key = accountConfigKey(account);
     const configured = current.accounts.find(candidate => accountConfigKey(candidate) === key);
     if (!configured) return;
-    const accounts = action === "delete"
-      ? current.accounts.filter(candidate => accountConfigKey(candidate) !== key)
-      : current.accounts.map(candidate => accountConfigKey(candidate) === key
-        ? { ...candidate, enabled: candidate.enabled === false } : candidate);
+    const accounts = current.accounts.filter(candidate => accountConfigKey(candidate) !== key);
     const config = validateConfigFile({ ...current, accounts });
     await writeStorage({ [STORAGE.config]: config });
     storedConfig = config;
@@ -660,6 +657,7 @@ function createAccountActionIcon(action) {
   icon.setAttribute("aria-hidden", "true");
   const paths = action === "retry"
     ? ["M20 7v5h-5", "M19.1 12a7.2 7.2 0 1 0-1.7 5.1", "M20 12l-3-4"]
+    : action === "clear" ? ["M6 6l12 12", "M18 6L6 18"]
     : ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13", "M10 10v6", "M14 10v6"];
   for (const d of paths) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -851,27 +849,6 @@ function renderAccountRow(account) {
     retry.addEventListener("click", () => void retryAccount(account));
     actions.append(retry);
   }
-  if (config) {
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "account-toggle";
-    toggle.setAttribute("role", "switch");
-    toggle.setAttribute("aria-checked", String(enabled));
-    toggle.setAttribute("aria-label", `${t(enabled ? "accountDisable" : "accountEnable")}: ${account.display_name || id}`);
-    toggle.textContent = t(enabled ? "accountOn" : "accountOff");
-    toggle.title = t(enabled ? "accountDisable" : "accountEnable");
-    toggle.disabled = changingAccountConfig;
-    toggle.addEventListener("click", () => void changeAccountConfiguration(account, "toggle"));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "account-delete";
-    remove.title = t("accountDelete");
-    remove.append(createAccountActionIcon("discard"));
-    remove.setAttribute("aria-label", `${t("accountDelete")}: ${account.display_name || id}`);
-    remove.disabled = changingAccountConfig;
-    remove.addEventListener("click", () => void changeAccountConfiguration(account, "delete"));
-    actions.append(toggle, remove);
-  }
   select.append(copy);
   const shopId = document.createElement("button");
   shopId.type = "button";
@@ -891,7 +868,7 @@ function renderAccountRow(account) {
     const discardButton = document.createElement("button");
     discardButton.type = "button";
     discardButton.className = "account-action";
-    discardButton.append(createAccountActionIcon("discard"));
+    discardButton.append(createAccountActionIcon("clear"));
     discardButton.setAttribute(
       "aria-label",
       `Discard ${pending.length} pending message${pending.length === 1 ? "" : "s"} for ${label}`,
@@ -905,8 +882,7 @@ function renderAccountRow(account) {
       ? "Cancel sync before discarding pending messages."
       : "Discard pending messages for this account";
     discardButton.addEventListener("click", () => void discardPending(account, discardButton, pending.length));
-    pendingRow.append(pendingLabel);
-    actions.append(discardButton);
+    pendingRow.append(discardButton, pendingLabel);
     copy.append(pendingRow);
   }
   const meta = document.createElement("div");
@@ -916,6 +892,17 @@ function renderAccountRow(account) {
   if (leaderBadge) identity.append(leaderBadge);
   identity.append(shopId);
   meta.append(actions, identity);
+  if (config) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "account-delete";
+    remove.title = t("accountDelete");
+    remove.append(createAccountActionIcon("discard"));
+    remove.setAttribute("aria-label", `${t("accountDelete")}: ${account.display_name || id}`);
+    remove.disabled = changingAccountConfig;
+    remove.addEventListener("click", () => void changeAccountConfiguration(account));
+    meta.append(remove);
+  }
   card.append(select, meta);
   return card;
 }

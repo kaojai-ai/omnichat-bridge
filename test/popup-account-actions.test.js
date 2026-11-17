@@ -68,6 +68,13 @@ for (const provider of ["line_oa", "shopee"]) {
     assert.equal(bar.attributes["aria-label"], "Loading…");
     const actionButtons = nodes.filter(node => node.className === "account-action");
     assert.equal(actionButtons.length, 2);
+    const row = list.children[0];
+    const meta = row.children.at(-1);
+    assert.equal(meta.children.at(-1).className, "account-delete", "delete is the last column");
+    const pendingRow = nodes.find(node => node.className === "account-row-pending");
+    assert.equal(pendingRow.children[0].className, "account-action");
+    assert.equal(pendingRow.children[1].textContent, "2 pending");
+    assert.equal(pendingRow.children[0].children[0].children[0].attributes.d, "M6 6l12 12");
     assert.equal(actionButtons.find(node => /Retry/.test(node.attributes["aria-label"])).disabled, false,
       "a stuck loading row can still request a guarded retry");
     assert.equal(actionButtons.find(node => /Discard/.test(node.attributes["aria-label"])).disabled, true,
@@ -86,7 +93,7 @@ for (const provider of ["line_oa", "shopee"]) {
       assert.equal(button.disabled, false);
       button.handlers.click();
     }
-    assert.deepEqual(calls, [["retry", account], ["discard", account, 2]]);
+    assert.deepEqual(calls, [["discard", account, 2], ["retry", account]]);
     const failure = nodes.find(node => node.textContent === "Sync failed");
     assert.equal(failure.dataset.state, "error");
     assert.equal(failure.dataset.loading, "false");
@@ -106,7 +113,7 @@ for (const provider of ["line_oa", "shopee"]) {
     const disabledNodes = flatten(list);
     assert.equal(disabledNodes.some(node => /Retry/.test(node.attributes?.["aria-label"] ?? "")), false);
     const toggle = disabledNodes.find(node => node.attributes?.role === "switch");
-    assert.equal(toggle.attributes["aria-checked"], "false");
+    assert.equal(toggle, undefined, "account toggles no longer take row space");
     assert.ok(disabledNodes.some(node => node.className === "account-delete"), "a disabled account can still be removed");
   });
 }
