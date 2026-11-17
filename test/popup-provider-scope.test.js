@@ -199,6 +199,9 @@ test("shows a lightweight shell before popup state finishes loading", () => {
 
   assert.match(html, /id="loading-screen" class="loading-screen"/);
   assert.match(html, /id="consent-screen" class="screen" hidden/);
+  assert.match(html, /id="unattended-recovery-option" class="recovery-option" hidden/);
+  assert.match(html, /id="sync" type="button" disabled hidden/);
+  assert.match(loadSource, /if \(consented\(\)\) renderDashboard\(\);\s*if \(consented\(\) && isProviderChatTab\)/);
   assert.match(popupSource, /const \[stored, \[activeTab\]\] = await Promise\.all\(\[/);
   assert.match(popupSource, /readStorage\(\[/);
   assert.match(popupSource, /chrome\.tabs\.query\(\{ active: true, currentWindow: true \}\)/);

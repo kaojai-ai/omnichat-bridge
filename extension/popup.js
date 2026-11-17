@@ -1294,8 +1294,8 @@ async function load() {
   detectedAccounts = bestEffortAccounts(stored[STORAGE.detectedAccounts], activeTab?.url);
   viewingPrivacy = false;
   routeTo(defaultScreen());
+  if (consented()) renderDashboard();
   if (consented() && isProviderChatTab) {
-    renderDashboard();
     void detectAccount().catch((error) => reportPopupError("detect_account", error));
   }
   void chrome.runtime.sendMessage({ type: "check_extension_update" }).then((result) => {
