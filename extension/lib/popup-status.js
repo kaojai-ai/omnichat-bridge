@@ -201,6 +201,6 @@ export function accountCapabilityStatus(live, t) {
 export function accountCapabilitySummary(live, t) {
   if (typeof live?.send_ready !== "boolean" && typeof live?.sync_ready !== "boolean") return "";
   return [[live.send_ready, "capSend"], [live.receive_ready, "capReceive"], [live.sync_ready, "capSync"]]
-    .map(([ready, key]) => `${live.socket === "connected" && ready === true ? "✓" : "○"} ${t(key)}`)
+    .map(([ready, key]) => live.socket === "connected" && ready === true ? `✓ ${t(key)}` : `? ${t(key)}`)
     .join(" · ");
 }
