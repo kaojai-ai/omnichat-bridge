@@ -75,17 +75,16 @@ test("existing website providers keep their default URL when creating a tab", as
 });
 
 
-test("the setup flag opens Personal settings without an account and reuses its tab", async () => {
+test("hidden features unlock Personal setup without an account", async () => {
   const setup = { features: { line_personal: true }, accounts: [] };
-  assert.deepEqual(selectableProviders([shopee, oa, personal], setup), [shopee, oa, personal]);
-  for (const flag of [false, "true", 1, undefined]) {
-    assert.deepEqual(selectableProviders([personal], { features: { line_personal: flag }, accounts: [] }), []);
-  }
+  assert.deepEqual(selectableProviders([personal], setup), []);
+  assert.deepEqual(selectableProviders([shopee, oa, personal], setup, true), [shopee, oa, personal]);
   const h = browser();
-  await activateProvider(personal, setup, h.api);
+  await assert.rejects(activateProvider(personal, setup, h.api), /not configured/);
+  await activateProvider(personal, setup, h.api, true);
   assert.deepEqual(h.calls, [["query", {}], ["create", { url: personal.chatUrl, active: true }]]);
   const existing = { id: 12, windowId: 3, active: false, url: personal.chatUrl };
   const reuse = browser([existing]);
-  await activateProvider(personal, setup, reuse.api);
+  await activateProvider(personal, setup, reuse.api, true);
   assert.deepEqual(reuse.calls, [["query", {}], ["update", 12, { active: true }], ["window", 3, { focused: true }]]);
 });

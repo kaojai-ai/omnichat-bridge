@@ -248,6 +248,11 @@ ui.connect.addEventListener("click", async () => {
 });
 ui.disconnect.addEventListener("click", disconnect);
 ui.copy.addEventListener("click", () => { if (session?.base.profile?.mid) void navigator.clipboard.writeText(session.base.profile.mid); });
+window.addEventListener("beforeunload", (event) => {
+  if (!active(session)) return;
+  event.preventDefault();
+  event.returnValue = true;
+});
 window.addEventListener("pagehide", () => { closed = true; session?.controller.abort(); releaseLock?.(); });
 setInterval(changed, 20_000);
 connectPort();

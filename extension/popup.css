@@ -1102,3 +1102,8 @@ footer a:hover,
 .provider-card[data-provider="line_personal"]:hover { background: #066531; }
 .provider-card[data-provider="line_oa"] { background: #06c755; }
 .provider-card[data-provider="line_oa"]:hover { background: #05a947; }
+
+.heart-button { border: 0; padding: 0; background: none; color: #06c755; cursor: pointer; font: inherit; perspective: 100px; }
+.heart-button span { display: inline-block; transition: transform 450ms ease, color 225ms ease; }
+.heart-button[aria-pressed="true"] span { color: #171717; transform: rotateY(180deg); }
+@media (prefers-reduced-motion: reduce) { .heart-button span { transition: none; } }

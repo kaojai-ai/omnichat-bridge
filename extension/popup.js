@@ -133,6 +133,17 @@ const consentLabel = consentScreen.querySelector(".consent");
 let detectingAccount = true;
 let pendingAction = "";
 let storedConfig = emptyConfig();
+let hiddenFeatures = false;
+const heartButton = document.querySelector("#hidden-features");
+function renderHiddenFeatures() { heartButton.setAttribute("aria-pressed", String(hiddenFeatures)); }
+heartButton.addEventListener("dblclick", () => {
+  const enabled = !hiddenFeatures;
+  void writeStorage({ [STORAGE.hiddenFeatures]: enabled }).then(() => {
+    hiddenFeatures = enabled;
+    renderHiddenFeatures();
+    renderDashboard();
+  }).catch((error) => reportPopupError("hidden_features", error));
+});
 let detectedAccounts = [];
 let pageAccounts = [];
 const retryingAccounts = new Set();
@@ -630,7 +641,7 @@ function renderDetectedAccounts() {
 function renderProviderSelector() {
   const selector = document.querySelector("#provider-selector");
   const options = document.querySelector("#provider-options");
-  const adapters = selectableProviders(providerAdapters.list(), storedConfig);
+  const adapters = selectableProviders(providerAdapters.list(), storedConfig, hiddenFeatures);
   if (activeProviderAdapter && !adapters.some((adapter) => adapter.id === activeProviderAdapter.id)) {
     activeProviderAdapter = null;
   }
@@ -652,7 +663,7 @@ function renderProviderSelector() {
       const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
       button.append(logo, label);
       button.addEventListener("click", () => {
-        void activateProvider(adapter, storedConfig, chrome).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+        void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
       });
       cards.append(button);
     }
@@ -666,7 +677,7 @@ function renderProviderSelector() {
     button.append(logo, label);
     button.addEventListener("click", () => {
       selector.open = false;
-      void activateProvider(adapter, storedConfig, chrome).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+      void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
     });
     options.append(button);
   }
@@ -1087,6 +1098,7 @@ function renderLogs() {
 async function refreshStoredState() {
   const stored = await readStorage([
     STORAGE.config,
+    STORAGE.hiddenFeatures,
     STORAGE.consent,
     STORAGE.detectedAccounts,
     STORAGE.status,
@@ -1109,6 +1121,8 @@ async function refreshStoredState() {
     return;
   }
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  hiddenFeatures = stored[STORAGE.hiddenFeatures] === true;
+  renderHiddenFeatures();
   updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
@@ -1234,6 +1248,7 @@ async function load() {
   const [stored, [activeTab]] = await Promise.all([
     readStorage([
       STORAGE.config,
+      STORAGE.hiddenFeatures,
       STORAGE.consent,
       STORAGE.detectedAccounts,
       STORAGE.status,
@@ -1250,6 +1265,8 @@ async function load() {
   ]);
   storedConsent = stored[STORAGE.consent] ?? null;
   storedConfig = configOrEmpty(stored[STORAGE.config]);
+  hiddenFeatures = stored[STORAGE.hiddenFeatures] === true;
+  renderHiddenFeatures();
   updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
@@ -1346,7 +1363,7 @@ syncButton.addEventListener("click", async () => {
     return;
   }
   if (!isProviderChatTab && activeProviderAdapter) {
-    await activateProvider(activeProviderAdapter, storedConfig, chrome);
+    await activateProvider(activeProviderAdapter, storedConfig, chrome, hiddenFeatures);
     return;
   }
   if (syncButton.dataset.action === "open_webchat_mini") {
@@ -1736,7 +1753,7 @@ const scheduleStoredRefresh = createCoalescedRefresh(async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (changes[STORAGE.forwardLog] || changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.commandTab] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language] || changes[STORAGE.extensionUpdate]) {
+  if (changes[STORAGE.hiddenFeatures] || changes[STORAGE.forwardLog] || changes[STORAGE.config] || changes[STORAGE.consent] || changes[STORAGE.deviceName] || changes[STORAGE.detectedAccounts] || changes[STORAGE.status] || changes[STORAGE.scanState] || changes[STORAGE.pending] || changes[STORAGE.live] || changes[STORAGE.commandTab] || changes[STORAGE.unattendedRecovery] || changes[STORAGE.language] || changes[STORAGE.extensionUpdate]) {
     stateRefreshPending = true;
     scheduleStoredRefresh();
   }

@@ -23,9 +23,9 @@ test("replaces the accounts heading with a provider selector", () => {
 
 for (const [configuredPersonal, setupEnabled] of [[false, false], [true, false], [false, true]]) {
   for (const activeId of [null, "shopee", "line_oa"]) {
-    test(`provider selector ${configuredPersonal || setupEnabled ? "includes enabled" : "hides unconfigured"} LINE Personal (setup flag: ${setupEnabled}, active: ${activeId})`, async () => {
+    test(`provider selector ${configuredPersonal || setupEnabled ? "includes enabled" : "hides unconfigured"} LINE Personal (hidden features: ${setupEnabled}, active: ${activeId})`, async () => {
       const nodes = new Map();
-      const element = () => ({ children: [], handlers: {}, setAttribute() {}, removeAttribute(name) { delete this[name]; },
+      const element = () => ({ children: [], handlers: {}, dataset: {}, setAttribute() {}, removeAttribute(name) { delete this[name]; },
         replaceChildren() { this.children = []; }, append(...children) { this.children.push(...children); },
         addEventListener(event, callback) { this.handlers[event] = callback; } });
       const adapters = [{ id: "shopee", displayName: "Shopee" }, { id: "line_oa", displayName: "LINE OA" },
@@ -34,7 +34,7 @@ for (const [configuredPersonal, setupEnabled] of [[false, false], [true, false],
       const activations = [];
       const scope = vm.createContext({
         document: { querySelector(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element },
-        providerAdapters: { list: () => adapters }, storedConfig: { accounts, features: { line_personal: setupEnabled } }, activeProviderAdapter: adapters.find(adapter => adapter.id === activeId) ?? null,
+        providerAdapters: { list: () => adapters }, storedConfig: { accounts }, hiddenFeatures: setupEnabled, activeProviderAdapter: adapters.find(adapter => adapter.id === activeId) ?? null,
         t: key => key === "selectProvider" ? "Select a channel" : key,
         selectableProviders, activateProvider: async adapter => activations.push(adapter.id), chrome: {},
         renderDashboard() { throw new Error("Provider activation should succeed"); },
