@@ -5,7 +5,7 @@
   "options_page": "line-personal.html",
   "description": "Syncs supported provider chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "scripting", "storage"],
-  "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*", "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*"],
+  "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*", "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*", "https://msg-store.kaojai.ai/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
