@@ -1,12 +1,12 @@
-export function selectableProviders(adapters, config) {
+export function selectableProviders(adapters, config, hiddenFeatures = false) {
   return adapters.filter((adapter) => adapter.id !== "line_personal"
-    || config?.features?.line_personal === true
+    || hiddenFeatures
     || config?.accounts?.some((account) => account.provider === "line_personal"));
 }
 
 /** Prefer an already-active provider tab; never create a duplicate on lookup failure. */
-export async function activateProvider(adapter, config, browser) {
-  if (!adapter || !selectableProviders([adapter], config).length) throw new Error("Provider is not configured.");
+export async function activateProvider(adapter, config, browser, hiddenFeatures = false) {
+  if (!adapter || !selectableProviders([adapter], config, hiddenFeatures).length) throw new Error("Provider is not configured.");
   const tabs = await browser.tabs.query({});
   const existing = tabs.filter((tab) => adapter.matchesPage?.(tab.url) || adapter.matchesUrl(tab.url))
     .sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)) || (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];

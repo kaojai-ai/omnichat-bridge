@@ -1,5 +1,6 @@
 export const STORAGE = {
   config: "config",
+  hiddenFeatures: "hidden_features",
   consent: "local_consent",
   detectedAccounts: "detected_accounts",
   customerMetadata: "customer_metadata_v1",
