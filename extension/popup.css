@@ -1036,7 +1036,8 @@ footer a:hover,
 .connection-status[data-state="error"] { color: var(--danger); }
 .account-row-status[data-loading="true"]::before,
 #account-list-empty[data-loading="true"]::before,
-#status[data-loading="true"]::before {
+#status[data-loading="true"]::before,
+#personal-status[data-loading="true"]::before {
   animation: loading-spin 700ms linear infinite;
   background: transparent;
   border: 2px solid var(--line);
