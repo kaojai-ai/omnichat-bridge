@@ -1,7 +1,10 @@
 name: Publish Chrome extension
-run-name: Submit Omnichat ${{ inputs.version }} to Chrome Web Store
+run-name: ${{ inputs.version && format('Submit Omnichat {0} to Chrome Web Store', inputs.version) || 'Queue Omnichat Chrome Web Store release' }}
 
 on:
+  push:
+    branches: [main]
+    paths: [extension/manifest.json]
   workflow_dispatch:
     inputs:
       version:
@@ -12,13 +15,41 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: chrome-web-store
-  cancel-in-progress: false
-
 jobs:
+  queue:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Dispatch the submission for a version bump
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous_version="$(git show "$BEFORE_SHA:extension/manifest.json" | jq -er .version)"
+          version="$(jq -er .version extension/manifest.json)"
+          if [[ "$version" == "$previous_version" ]]; then
+            echo "Manifest version unchanged."
+            exit 0
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$(printf '%s\n' "$version" "$previous_version" | sort -V | tail -n 1)" != "$version" ]]; then
+            echo "::error::The extension version must increase."
+            exit 1
+          fi
+          gh workflow run chrome-web-store.yml --repo "$GITHUB_REPOSITORY" --ref main -f version="$version"
+
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: chrome-web-store
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
