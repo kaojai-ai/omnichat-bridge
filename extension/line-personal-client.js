@@ -182,6 +182,11 @@ async function handle(message) {
   try { return await task; } finally { if (value.replyInFlight === task) value.replyInFlight = null; }
 }
 
+function isTransientConnectionError(error) {
+  return error?.httpStatus === 404 || (error?.httpStatus >= 500 && error.httpStatus <= 599)
+    || error?.name === "TypeError" || error?.name === "TimeoutError";
+}
+
 function connectionFailureMessage(stage, error) {
   // Never display raw SDK messages, response bodies, URLs or credentials.
   const status = error?.httpStatus;
@@ -196,7 +201,9 @@ async function start(value) {
   if (!active(value)) return;
   const controller = value.controller;
   value.storage = storage;
-  const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(controller.signal) });
+  // Use direct HTTPS RPC: the extra /enc gateway returns 404 (LINEJS #280).
+  // TLS and LINE message E2EE remain enabled.
+  const base = new BaseClient({ device: "ANDROIDSECONDARY", legy: { encrypted: false }, storage, fetch: createBrowserFetch(controller.signal) });
   value.base = base;
   value.profiles = createPersonalProfiles({ signal: controller.signal,
     loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }),
@@ -234,7 +241,9 @@ async function start(value) {
     await new Promise((resolve) => { releaseLock = resolve; controller.signal.addEventListener("abort", resolve, { once: true }); });
   } catch (error) {
     if (active(value)) {
-      await storage.clear();
+      // QR authorization may already have produced a valid token. Keep it
+      // for transport outages; explicit disconnect and invalid keys still clear.
+      if (!isTransientConnectionError(error)) await storage.clear();
       report(connectionFailureMessage(stage, error), true);
     }
   } finally {
@@ -260,7 +269,7 @@ ui.connect.addEventListener("click", async () => {
   // access directly in the click handler, before consent/storage checks await.
   try {
     const granted = await chrome.permissions.request({ origins: [
-      "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*",
+      "https://legy.line-apps.com/*", "https://obs.line-apps.com/*",
     ] });
     if (!granted) { report("Allow LINE access to connect this account.", true); return; }
     if (!await requireConsent()) return;

@@ -8,7 +8,7 @@ import { sendUnsealedText } from "../../extension/lib/provider-text-send.js";
 // trigger one reply; other conversations are not exposed or acted on.
 export async function runLiveCase({ marker, reply, signal, onQr, onPin, onStatus }) {
   const storage = new MemoryStorage();
-  const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(signal) });
+  const base = new BaseClient({ device: "ANDROIDSECONDARY", legy: { encrypted: false }, storage, fetch: createBrowserFetch(signal) });
   const startedAt = Date.now();
   const counts = { operations: 0, received: 0, decrypted: 0, matched: 0, reply_attempts: 0 };
   const status = (phase, extra = {}) => onStatus({ phase, ...counts, ...extra });

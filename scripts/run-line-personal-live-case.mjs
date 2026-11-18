@@ -33,7 +33,7 @@ const result = await build({
   write: false, logLevel: "silent", define: { "globalThis.process": "undefined" },
   plugins: linePersonalBrowserPlugins(),
 });
-const allowed = new Set(["legy.line-apps.com", "gf.line.naver.jp", "obs.line-apps.com"]);
+const allowed = new Set(["legy.line-apps.com", "obs.line-apps.com"]);
 const checkedFetch = (input, init) => {
   const request = new Request(input, init);
   const url = new URL(request.url);
