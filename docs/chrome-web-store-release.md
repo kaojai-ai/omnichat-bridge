@@ -82,10 +82,19 @@ submission later fails. Concurrent submissions are serialized.
 
 Only upload processing is polled, for at most 150 seconds. Review/publication is
 asynchronous and can be checked in the Developer Dashboard or with API v2
-`fetchStatus`. Upload and publish mutations are never automatically retried.
+`fetchStatus`. Cancel, upload and publish mutations are never automatically retried.
 After an uncertain timeout, inspect Store status/version before dispatching again.
-If an earlier submission is under review, resolve it in the existing release
-process; this workflow does not cancel or replace it automatically. Visibility
+Before uploading, the release checks the exact Store item and revision versions.
+An older `PENDING_REVIEW` submission is re-read, cancelled once, and verified
+cancelled before uploading the newer version. Equal versions already submitted
+are a no-op; newer, ambiguous, staged, policy-blocked or changing revisions stop
+without cancellation. Published revisions and listing visibility are not modified.
+
+Keep all automated submissions in this workflow's concurrency group. The Store
+API has no revision-bound cancellation precondition: do not submit manually or
+through another publisher while this workflow runs. A second status read narrows
+but cannot eliminate that external-writer race. Cancellation failure or an
+uncertain response stops the run without retrying. Visibility
 changes may require one manual dashboard publication before API use resumes.
 
 ## References
