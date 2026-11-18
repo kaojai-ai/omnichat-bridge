@@ -235,3 +235,10 @@ still invalidates the shared session.
 Access-check status belongs to its sync attempt. Cooldown skips and cancellation
 settle that attempt without overwriting newer work; verified accounts waiting for
 sequential recovery display “Waiting…” rather than “Checking access…”.
+
+### Chrome Web Store releases
+
+Use the manually triggered [publishing workflow](docs/chrome-web-store-release.md)
+to build a merged manifest version and submit its ZIP for Google review. One-time
+Google service-account linking and keyless GitHub authentication must be configured
+first. Submission, review approval and public publication are separate outcomes.
