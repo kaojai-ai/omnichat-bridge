@@ -18,7 +18,7 @@ function harness(result) {
     storedConfig: { accounts: [{ provider_account_id: "@healthy" }, account] },
     findAccountConfig: (_config, item) => item,
     accountOrigins: (config) => { configs.push(config); return []; },
-    requestTargetPermission: async () => {},
+    checkTargetPermission: async () => {},
     chrome: { runtime: { sendMessage: async (message) => { requests.push(message); return result; } } },
     renderDashboard() {}, refreshStoredState: async () => {}, reportPopupError() {},
   };
