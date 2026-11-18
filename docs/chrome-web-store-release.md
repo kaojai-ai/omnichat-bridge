@@ -1,11 +1,12 @@
 # Automated Chrome Web Store releases
 
-`Publish Chrome extension` is a manually dispatched GitHub Actions workflow.
-It checks out the dispatch's immutable `main` commit, verifies the requested
-manifest version, builds and saves the ZIP, obtains a short-lived Google access
-token, uploads the ZIP, and submits it for review. It does not run on push/PR,
-bump versions, cancel existing submissions, bypass review or wait for approval.
-Google publishes an approved submission using the item's existing visibility.
+Merging an increase to `extension/manifest.json` into `main` automatically
+queues `Publish Chrome extension`. The queue job dispatches the existing release
+job with the new version using GitHub's short-lived repository token. The release
+job checks out the dispatch's immutable `main` commit, verifies the manifest
+version, builds and saves the ZIP, obtains a short-lived Google access token, and
+submits the ZIP for review. Google publishes approved submissions using the
+item's existing visibility.
 
 ## One-time account setup
 
@@ -64,15 +65,17 @@ the downloadable artifact contains only the built extension and bundled notices.
 
 ## Submit a release
 
-First merge the extension change with its manifest patch bump. The version must
-be higher than the previously uploaded Store version. Dispatch from `main`:
+Merge the extension change with its manifest patch bump. The version must be
+higher than the previously uploaded Store version. For a manual retry, dispatch
+from `main`:
 
 ```sh
 gh workflow run chrome-web-store.yml --repo kaojai-ai/omnichat-bridge --ref main -f version=1.0.12
 ```
 
 Replace the version with the intended manifest version. The workflow refuses a
-mismatch or non-main ref. A run's summary records the source SHA, ZIP checksum,
+mismatch or non-main ref. If a newer version reaches `main` before dispatch, the version check rejects the
+superseded release. A run's summary records the source SHA, ZIP checksum,
 and returned Store submission state. `PENDING_REVIEW` means submitted, not live.
 The ZIP is retained as a GitHub Actions artifact even if authentication or
 submission later fails. Concurrent submissions are serialized.
