@@ -1,0 +1,81 @@
+name: Publish Chrome extension
+run-name: Submit Omnichat ${{ inputs.version }} to Chrome Web Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact manifest version already merged to main
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chrome-web-store
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+      CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check release configuration and version
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          WIF_PROVIDER: ${{ vars.CWS_WORKLOAD_IDENTITY_PROVIDER }}
+          SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          for key in CWS_PUBLISHER_ID CWS_EXTENSION_ID WIF_PROVIDER SERVICE_ACCOUNT; do
+            if [ -z "${!key}" ]; then echo "::error::Missing release configuration: $key"; exit 1; fi
+          done
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const { version } = JSON.parse(readFileSync("extension/manifest.json"));
+            if (version !== process.env.EXPECTED_VERSION) throw Error("Requested version does not match this main commit");
+          '
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          version: 12.18.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm build
+      - name: Package built extension
+        run: |
+          set -euo pipefail
+          (cd tmp/extension && zip -qr ../omnichat-bridge.zip .)
+          sha256sum tmp/omnichat-bridge.zip >> "$GITHUB_STEP_SUMMARY"
+          echo "Source: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omnichat-bridge-${{ inputs.version }}
+          path: tmp/omnichat-bridge.zip
+          if-no-files-found: error
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.CWS_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Upload and submit for review
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: node scripts/publish-chrome-web-store.mjs tmp/omnichat-bridge.zip
