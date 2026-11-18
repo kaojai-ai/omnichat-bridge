@@ -26,6 +26,10 @@ export function createPersonalProfiles({ loadContact, loadChat, signal, now = Da
           if (typeof contact.picturePath === "string" && contact.picturePath.startsWith("https://")) {
             try { const url = new URL(contact.picturePath); if (!url.username && !url.password) avatar_url = url.href; } catch {}
           }
+          if (!avatar_url && chat && typeof contact.picturePath === "string"
+            && /^\/?[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(contact.picturePath)) {
+            avatar_url = `https://profile.line-scdn.net/${contact.picturePath.replace(/^\//, "")}`;
+          }
           if (!avatar_url && typeof contact.pictureStatus === "string" && /^[a-zA-Z0-9_/-]+$/.test(contact.pictureStatus)) {
             avatar_url = `https://profile.line-scdn.net/${contact.pictureStatus.replace(/^\/+/, "")}`;
           }
@@ -55,7 +59,8 @@ export function createPersonalProfiles({ loadContact, loadChat, signal, now = Da
         isGroup ? lookup(message.conversation_id, true) : {},
       ]);
       return { ...message, ...(isContact ? { participant: { ...message.participant, ...profile } } : {}),
-        ...(chat.display_name ? { conversation_name: chat.display_name } : {}) };
+        ...(chat.display_name ? { conversation_name: chat.display_name } : {}),
+        ...(chat.avatar_url ? { conversation_avatar_url: chat.avatar_url } : {}) };
     },
   };
 }

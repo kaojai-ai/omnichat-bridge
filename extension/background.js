@@ -5035,11 +5035,11 @@ function batchFor(messages, installId) {
     const conversation = conversations.get(message.conversation_id) ?? {
       id: message.conversation_id,
       ...(message.conversation_type ? { type: message.conversation_type } : {}),
-      ...(message.conversation_name ? { display_name: message.conversation_name } : {}),
       ...(participant ? { participants: [participant] } : {}),
       messages: []
     };
     if (message.conversation_name) conversation.display_name = message.conversation_name;
+    if (message.conversation_avatar_url) conversation.avatar_url = message.conversation_avatar_url;
     if (!conversation.participants && participant) conversation.participants = [participant];
     if (provider === "line_personal" && participant) {
       const index = conversation.participants.findIndex((item) => item.id === participant.id);
