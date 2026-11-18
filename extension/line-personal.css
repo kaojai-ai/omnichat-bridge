@@ -13,3 +13,6 @@
 
 .connection-provider-title { display: flex; align-items: center; gap: 8px; }
 .connection-provider-title img { width: 24px; height: 24px; border-radius: 5px; object-fit: contain; }
+
+#personal-status[data-loading="true"]::before { margin-right: 8px; vertical-align: -2px; }
+#personal-countdown { font-variant-numeric: tabular-nums; }

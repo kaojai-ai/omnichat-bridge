@@ -9,18 +9,18 @@ import { personalCommandClient } from "./lib/line-personal-command.js";
 import { createPersonalProfiles } from "./lib/line-personal-profiles.js";
 import { STORAGE, hasLocalConsent, readStorage } from "./lib/storage.js";
 
-const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "pin-help", "account", "name", "id", "copy", "connect", "disconnect"].map((name) => [name, document.getElementById(`personal-${name}`)]));
+const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "pin-help", "account", "name", "id", "copy", "connect", "disconnect", "reconnect", "countdown"].map((name) => [name, document.getElementById(`personal-${name}`)]));
 const requestedAccount = new URL(location.href).searchParams.get("account");
 const scope = /^u[a-f0-9]{32}$/i.test(requestedAccount ?? "") ? requestedAccount : "setup";
 const tab = await chrome.tabs.getCurrent();
 let session = null;
 let port;
 let closed = false;
-let releaseLock;
 const receipts = new Map();
 const active = (value) => Boolean(value && session === value && !value.controller.signal.aborted);
-const report = (text, error = false, ready = false) => {
-  ui.status.textContent = text;
+const report = (text, error = false, ready = false, loading = false) => {
+  if (ui.status.textContent !== text) ui.status.textContent = text;
+  ui.status.dataset.loading = String(loading);
   ui.status.dataset.state = error ? "error" : ready ? "ready" : "neutral";
 };
 
@@ -74,24 +74,57 @@ async function queue(value, raw, captureMethod) {
   const result = await chrome.runtime.sendMessage({ type: "queue_messages", provider: "line_personal", messages: [message], flush: true });
   if (!result?.ok || result.latest_cursor?.message_id !== message.id) throw new Error("MESSAGE_QUEUE_UNAVAILABLE");
 }
+function waitForReconnect(signal, delayMs) {
+  const deadline = Date.now() + delayMs;
+  const updateCountdown = () => {
+    ui.countdown.textContent = `Retrying in ${Math.max(1, Math.ceil((deadline - Date.now()) / 1_000))}s`;
+  };
+  updateCountdown();
+  ui.countdown.hidden = false;
+  ui.reconnect.hidden = false;
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, delayMs);
+    const ticker = setInterval(updateCountdown, 250);
+    function finish() {
+      clearTimeout(timer);
+      clearInterval(ticker);
+      signal.removeEventListener("abort", finish);
+      ui.reconnect.removeEventListener("click", finish);
+      ui.countdown.hidden = true;
+      ui.reconnect.hidden = true;
+      resolve();
+    }
+    signal.addEventListener("abort", finish, { once: true });
+    ui.reconnect.addEventListener("click", finish, { once: true });
+  });
+}
+
+function requiresNewLogin(error) {
+  const code = error?.data?.code ?? error?.data?.e?.code;
+  return error?.httpStatus === 401 || error?.name === "NotAuthorized"
+    || code === "NOT_AUTHORIZED_DEVICE" || code === "AUTHENTICATION_FAILED";
+}
+
 async function poll(value) {
   const saved = await value.storage.get("syncRevisions");
   const revisions = saved ?? { revision: 0, globalRev: 0, individualRev: 0 };
-  let failures = 0;
+  let retryDelay = 2_000;
   while (active(value)) {
-    if (!await configured(value)) {
-      report("Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.");
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      continue;
-    }
-    value.forwardStartedAt ??= Date.now();
-    if (!value.bootstrapRequested && !await value.storage.get("bootstrapDone")) {
-      value.bootstrapRequested = true;
-      void chrome.runtime.sendMessage({ type: "sync_account", provider: "line_personal", provider_account_id: value.base.profile.mid, tab_id: tab.id })
-        .then((result) => result?.ok && value.storage.set("bootstrapDone", true))
-        .catch(() => report("Connected. Recent history is unavailable; use Sync messages to retry.", true));
-    }
     try {
+      if (!await configured(value)) {
+        report("Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.");
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        continue;
+      }
+      value.forwardStartedAt ??= Date.now();
+      if (!value.bootstrapRequested && !await value.storage.get("bootstrapDone")) {
+        value.bootstrapRequested = true;
+        void chrome.runtime.sendMessage({ type: "sync_account", provider: "line_personal", provider_account_id: value.base.profile.mid, tab_id: tab.id })
+          .then((result) => result?.ok && value.storage.set("bootstrapDone", true))
+          .catch(() => {
+            if (active(value) && value.ready) report("Connected. Recent history is unavailable; use Sync messages to retry.", true);
+          });
+      }
       const response = await value.base.talk.sync({ ...revisions, limit: 100 });
       if (!active(value)) return;
       const next = { ...revisions };
@@ -105,17 +138,32 @@ async function poll(value) {
           && (saved || Number(event.message.createdTime) >= value.forwardStartedAt)) await queue(value, event.message, "realtime_socket");
         if (event.revision != null) next.revision = event.revision;
       }
-      Object.assign(revisions, next); // Never acknowledge an event before shared queue acceptance.
       await value.storage.set("syncRevisions", next);
-      value.lastSuccess = Date.now(); failures = 0; changed();
+      if (!active(value)) return;
+      Object.assign(revisions, next); // Advance only after queue acceptance and durable cursor storage.
+      value.ready = true;
+      value.lastSuccess = Date.now();
+      retryDelay = 2_000;
+      changed();
       report("Connected. Incoming messages and replies use your configured server.", false, true);
       await new Promise((resolve) => setTimeout(resolve, 250));
-    } catch {
+    } catch (error) {
       if (!active(value)) return;
-      failures++;
-      report("LINE connection interrupted. Reconnecting…", true);
-      if (failures >= 3) { value.ready = false; changed(); report("Reconnect LINE to continue receiving and sending messages.", true); return; }
-      await new Promise((resolve) => setTimeout(resolve, failures * 2_000));
+      value.ready = false;
+      changed();
+      if (requiresNewLogin(error)) {
+        // The setup tab can authorize a different account on the next QR scan.
+        if (scope === "setup") await value.storage.clear();
+        else await value.storage.delete("authToken");
+        receipts.clear();
+        if (!active(value)) return;
+        ui.connect.textContent = "Reconnect LINE";
+        report("LINE ended this session. Reconnect and scan the QR code in LINE.", true);
+        return;
+      }
+      report("LINE connection interrupted. Reconnecting…", false, false, true);
+      await waitForReconnect(value.controller.signal, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 30_000);
     }
   }
 }
@@ -237,13 +285,13 @@ async function start(value) {
     report(isConfigured ? "Connected. Incoming messages and replies use your configured server." : "Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.", false, isConfigured);
     stage = "account registration";
     await account(); changed();
-    void poll(value).catch(() => { if (active(value)) { value.ready = false; changed(); report("Reconnect LINE to continue receiving and sending messages.", true); } });
-    await new Promise((resolve) => { releaseLock = resolve; controller.signal.addEventListener("abort", resolve, { once: true }); });
+    stage = "sync";
+    await poll(value);
   } catch (error) {
     if (active(value)) {
       // QR authorization may already have produced a valid token. Keep it
       // for transport outages; explicit disconnect and invalid keys still clear.
-      if (!isTransientConnectionError(error)) await storage.clear();
+      if (stage !== "sync" && !isTransientConnectionError(error)) await storage.clear();
       report(connectionFailureMessage(stage, error), true);
     }
   } finally {
@@ -254,10 +302,11 @@ async function start(value) {
 
 async function disconnect() {
   const value = session;
-  session = null; value?.controller.abort(); releaseLock?.();
+  session = null; value?.controller.abort();
   await value?.storage?.clear(); receipts.clear();
   ui.account.hidden = true; ui.authorization.hidden = true; ui.pin.textContent = "";
   ui.connect.hidden = false; ui.connect.disabled = false; ui.disconnect.hidden = true;
+  ui.connect.textContent = "Connect LINE";
   report("Disconnected. Local session removed."); changed();
 }
 
@@ -296,6 +345,6 @@ window.addEventListener("beforeunload", (event) => {
   event.preventDefault();
   event.returnValue = true;
 });
-window.addEventListener("pagehide", () => { closed = true; session?.controller.abort(); releaseLock?.(); });
+window.addEventListener("pagehide", () => { closed = true; session?.controller.abort(); });
 setInterval(changed, 20_000);
 connectPort();
