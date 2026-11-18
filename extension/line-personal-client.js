@@ -235,7 +235,18 @@ async function disconnect() {
 const requireConsent = await initializeConnectionPage({ onConsentRevoked: () => { void disconnect(); } });
 
 ui.connect.addEventListener("click", async () => {
-  if (session || !await requireConsent()) return;
+  if (session) return;
+  // The connection button is shown only after consent. Request optional LINE
+  // access directly in the click handler, before consent/storage checks await.
+  try {
+    const granted = await chrome.permissions.request({ origins: [
+      "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*",
+    ] });
+    if (!granted) { report("Allow LINE access to connect this account.", true); return; }
+    if (!await requireConsent()) return;
+  } catch {
+    report("Could not request LINE access. Click Connect to try again.", true); return;
+  }
   ui.connect.disabled = true; ui.connect.hidden = true; ui.disconnect.hidden = false;
   const value = { controller: new AbortController(), ready: false, lastSuccess: 0, startedAt: Date.now() };
   session = value; report("Approve the connection in LINE on your phone.");

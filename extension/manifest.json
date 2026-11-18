@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Omnichat Bridge",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "options_page": "line-personal.html",
   "description": "Syncs supported provider chat messages in realtime and forwards them to your configured server.",
   "permissions": ["alarms", "scripting", "storage"],
-  "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*", "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*", "https://hook.kaojai.ai/*", "https://ingress.kaojai.ai/*", "https://msg-storage.kaojai.ai/*", "https://omnichat.kaojai.ai/*", "https://msg-store.kaojai.ai/*"],
+  "host_permissions": ["https://seller.shopee.co.th/*", "https://chat.line.biz/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [

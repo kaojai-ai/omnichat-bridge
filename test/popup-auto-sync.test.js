@@ -33,8 +33,12 @@ for (const provider of ["shopee", "line_oa"]) {
     const account = { provider, provider_account_id: "account" };
     let available = [account];
     const requests = [];
+    const checked = [];
     const context = vm.createContext({
       isProviderChatTab: true, popupTabId: 7, currentTabSyncAccounts,
+      findAccountConfig: (config, item) => config.accounts.find(account => account.provider === item.provider),
+      accountOrigins: config => config.accounts,
+      checkTargetPermission: async accounts => checked.push(accounts),
       providerAdapters: { forPage: () => ({ id: provider }), get: id => ({ id, supports: capability => capability === "account_detection" }) },
       chrome: { tabs: { get: async () => ({ id: 7, url: "https://provider.example/chat" }) },
         runtime: { sendMessage: async message => {
@@ -45,8 +49,9 @@ for (const provider of ["shopee", "line_oa"]) {
     });
     const start = source.indexOf("async function autoStartSync(config) {");
     vm.runInContext(source.slice(start, source.indexOf("async function load()", start)), context);
-    assert.equal(await context.autoStartSync({ accounts: [account] }), true);
+    assert.equal(await context.autoStartSync({ accounts: [account, { provider: "line_personal", provider_account_id: "ungranted" }] }), true);
     assert.deepEqual(requests.map(message => message.type), ["detect_account", provider === "line_oa" ? "sync_line_tab" : "sync_account"]);
+    assert.deepEqual(Array.from(checked[0]), [account], "ungranted unrelated providers do not block automatic sync");
     assert.equal(requests[1].tab_id, 7);
     assert.equal(requests[1].retry_access, false, "saving configuration cannot retry a denied account");
     if (provider === "shopee") {

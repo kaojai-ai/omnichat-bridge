@@ -77,7 +77,7 @@ test("permission button requests immediately from click and does not start decli
   let sent = 0;
   const container = { replaceChildren() { buttons.length = 0; }, append: value => buttons.push(value) };
   const scope = vm.createContext({ regionalShopeeOrigins, storedConfig: { accounts: [{ provider: "shopee", country: "MY" }] },
-    language: "en", t: (_key, country) => `Allow Shopee ${country} access`, consented: () => true, globalThis: { OmnichatShopeeUrl: { countryForUrl: () => "MY" } },
+    activeProviderAdapter: { id: "shopee" }, accountOrigins: () => [], language: "en", t: (_key, country) => `Allow Shopee ${country} access`, consented: () => true, globalThis: { OmnichatShopeeUrl: { countryForUrl: () => "MY" } },
     document: { querySelector: () => container, createElement: () => ({ addEventListener(_event, listener) { this.click = listener; } }) },
     chrome: { permissions: { contains: async () => false, request: () => { requested = true; return Promise.resolve(false); } },
       runtime: { sendMessage: async () => { sent++; } } },

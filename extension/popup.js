@@ -39,18 +39,28 @@ async function renderRegionalAccess() {
   const container = document.querySelector("#regional-access");
   if (!container) return;
   const config = storedConfig;
+  const provider = activeProviderAdapter?.id;
   const missing = [];
-  for (const origin of regionalShopeeOrigins(config)) {
+  const accounts = config.accounts.filter(account => (!provider || account.provider === provider) && account.enabled !== false);
+  const origins = new Set([
+    ...(!provider || provider === "shopee" ? regionalShopeeOrigins({ ...config, accounts }) : []),
+    ...accountOrigins({ ...config, accounts }).map(value => {
+      const url = new URL(value);
+      return `${url.protocol === "wss:" ? "https:" : url.protocol}//${url.host}`;
+    }),
+  ]);
+  for (const origin of origins) {
     if (!await chrome.permissions.contains({ origins: [`${origin}/*`] })) missing.push(origin);
   }
-  if (config !== storedConfig) return;
+  if (config !== storedConfig || provider !== activeProviderAdapter?.id) return;
   container.replaceChildren();
   container.hidden = !missing.length || !consented();
   for (const origin of missing) {
     const country = globalThis.OmnichatShopeeUrl.countryForUrl(origin);
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = t("allowRegionalShopee", country);
+    button.textContent = country ? t("allowRegionalShopee", country)
+      : `${language === "th" ? "อนุญาตการเข้าถึง" : "Allow access to"} ${new URL(origin).host}`;
     button.addEventListener("click", () => {
       // Must run before any await: imported files and startup have no user gesture.
       const request = chrome.permissions.request({ origins: [`${origin}/*`] });
@@ -444,13 +454,14 @@ function configOrEmpty(value) {
   }
 }
 
-async function requestTargetPermission(urls) {
+async function checkTargetPermission(urls) {
   const origins = [...new Set(urls.map((value) => {
     const url = new URL(value);
     return `${url.protocol === "wss:" ? "https:" : url.protocol}//${url.host}/*`;
   }))];
-  if (!await chrome.permissions.request({ origins })) {
-    throw new Error("Server permission was not granted.");
+  if (!await chrome.permissions.contains({ origins })) {
+    void renderRegionalAccess();
+    throw new Error("Allow server access using the access buttons, then retry Sync.");
   }
 }
 
@@ -548,7 +559,7 @@ async function retryAccount(account) {
   renderDashboard();
   try {
     const config = findAccountConfig(storedConfig, account);
-    await requestTargetPermission(accountOrigins({ ...storedConfig, accounts: [config] }));
+    await checkTargetPermission(accountOrigins({ ...storedConfig, accounts: [config] }));
     const result = await chrome.runtime.sendMessage({
       type: "sync_account",
       provider: account.provider,
@@ -1302,6 +1313,8 @@ async function autoStartSync(config) {
   if (!detected?.ok) throw new Error("Could not detect provider accounts. Try again from the provider chat.");
   const accounts = currentTabSyncAccounts(config, detected.accounts, provider);
   if (!accounts.length) throw new Error("Saved configuration does not include any detected provider account.");
+  await checkTargetPermission(accountOrigins({ ...config,
+    accounts: accounts.map(account => findAccountConfig(config, account)) }));
   const command = provider === "line_oa"
     ? { type: "sync_line_tab", tab_id: tab.id, retry_access: false }
     : { type: "sync_account", provider, provider_account_id: accounts[0].provider_account_id, tab_id: tab.id, retry_access: false };
@@ -1484,7 +1497,7 @@ syncButton.addEventListener("click", async () => {
     if (!detected?.ok) throw new Error(detected?.error || "Could not verify the active provider account. Refresh its chat and try Sync again.");
     const accounts = currentTabSyncAccounts(storedConfig, detected.accounts, provider);
     if (!accounts.length) throw new Error("No configured account is available to this login.");
-    await requestTargetPermission(accountOrigins({ ...storedConfig,
+    await checkTargetPermission(accountOrigins({ ...storedConfig,
       accounts: accounts.map(account => findAccountConfig(storedConfig, account)) }));
     if (actionId !== syncActionId) return;
     let result;
@@ -1689,7 +1702,6 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     });
     renderConfigEditor();
     try {
-      await requestTargetPermission(accountOrigins(config));
       const syncStarted = configurationChanged && await autoStartSync(config);
       setConfigStatus(
         syncStarted
@@ -1729,8 +1741,6 @@ configFile.addEventListener("change", async () => {
     let message = `Imported ${config.accounts.length} account${config.accounts.length === 1 ? "" : "s"}.`;
     let permissionError = false;
     try {
-      await requestTargetPermission(accountOrigins(config));
-      message += " Server access approved.";
       if (await autoStartSync(config)) message += " Sync started.";
       else message += " Open a supported provider chat to start sync.";
     } catch (error) {

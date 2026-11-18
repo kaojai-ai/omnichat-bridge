@@ -44,7 +44,8 @@ heart in the popup footer to enable hidden features; it turns black. Double-clic
 it again to hide them. The setting persists on this browser.
 
 Select **LINE Personal** in the provider dropdown to open its connection/setup
-page, connect with the QR/PIN on your phone, and copy the detected account ID
+page, click **Connect** and approve optional LINE host access, then connect
+with the QR/PIN on your phone and copy the detected account ID
 into the LINE Personal setup in your server's Admin. Import the resulting
 version 3 account configuration to enable forwarding. Do not add an incomplete
 LINE Personal entry to `accounts`: account entries still require the verified
