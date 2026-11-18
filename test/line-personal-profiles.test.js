@@ -59,9 +59,11 @@ test("Personal groups keep both senders' metadata in one shared batch", () => {
  providerAdapterForId: id => ({ id }), crypto: { randomUUID: () => "batch" }, chrome: { runtime: { getManifest: () => ({ version: "test" }) } } });
  vm.runInContext(`${source.slice(start, end)}; globalThis.batch = batchFor;`, context);
  const messages = [peer, second].map(id => ({ provider: "line_personal", conversation_id: "group", sender_id: id, participant: { id, display_name: id === peer ? "First" : "Second" } }));
+ messages[0].conversation_avatar_url = "https://profile.line-scdn.net/group/photo";
  messages[1].conversation_name = "Group name";
  const batch = context.batch(messages, "installation");
  assert.equal(batch.conversations[0].display_name, "Group name");
+ assert.equal(batch.conversations[0].avatar_url, "https://profile.line-scdn.net/group/photo");
  assert.equal(batch.conversations[0].participants.length, 2);
  assert.equal(batch.conversations[0].participants[1].display_name, "Second");
 });
@@ -71,11 +73,12 @@ test("group names come from the matching chat while sender profiles stay indepen
  let chatCalls = 0;
  const profiles = createPersonalProfiles({
   loadContact: async mid => ({ mid, displayName: "Sender" }),
-  loadChat: async chatMid => { chatCalls++; return { chatMid, chatName: " Group name " }; },
+  loadChat: async chatMid => { chatCalls++; return { chatMid, chatName: " Group name ", picturePath: "/group/photo" }; },
  });
  const input = { provider: "line_personal", conversation_id: group, conversation_type: "group", sender_id: peer, participant: { id: peer } };
  const result = await profiles.enrich(input, own);
  assert.equal(result.conversation_name, "Group name");
+ assert.equal(result.conversation_avatar_url, "https://profile.line-scdn.net/group/photo");
  assert.deepEqual(result.participant, { id: peer, display_name: "Sender" });
  assert.equal((await profiles.enrich({ ...input, sender_id: own }, own)).conversation_name, "Group name");
  assert.equal(chatCalls, 1);
@@ -84,10 +87,11 @@ test("group names come from the matching chat while sender profiles stay indepen
 test("a failed or mismatched group lookup never blocks or misnames a message", async () => {
  const group = `c${"3".repeat(32)}`;
  const input = { conversation_id: group, conversation_type: "group", sender_id: peer, participant: { id: peer } };
- for (const loadChat of [async () => { throw new Error("unavailable"); }, async () => ({ chatMid: "other", chatName: "Wrong" })]) {
+ for (const loadChat of [async () => { throw new Error("unavailable"); }, async () => ({ chatMid: "other", chatName: "Wrong", picturePath: "/wrong" })]) {
   const profiles = createPersonalProfiles({ loadContact: async mid => ({ mid, displayName: "Sender" }), loadChat });
   const result = await profiles.enrich(input, own);
   assert.equal(result.conversation_name, undefined);
+  assert.equal(result.conversation_avatar_url, undefined);
   assert.equal(result.participant.display_name, "Sender");
  }
 });
