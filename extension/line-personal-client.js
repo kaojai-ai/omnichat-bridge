@@ -182,12 +182,28 @@ async function handle(message) {
   try { return await task; } finally { if (value.replyInFlight === task) value.replyInFlight = null; }
 }
 
+function isTransientConnectionError(error) {
+  return error?.httpStatus === 404 || (error?.httpStatus >= 500 && error.httpStatus <= 599)
+    || error?.name === "TypeError" || error?.name === "TimeoutError";
+}
+
+function connectionFailureMessage(stage, error) {
+  // Never display raw SDK messages, response bodies, URLs or credentials.
+  const status = error?.httpStatus;
+  const reason = Number.isInteger(status) && status >= 400 && status <= 599 ? `HTTP ${status}`
+    : ["TimeoutError", "NotAuthorized", "E2EEKeyMismatch", "NoE2EEKey"].includes(error?.name) ? error.name
+    : error?.name === "TypeError" ? "network or browser failure" : "connection failed";
+  return `LINE ${stage} failed (${reason}). Click Connect to try again.`;
+}
+
 async function start(value) {
   const storage = await personalSessionStorage(scope);
   if (!active(value)) return;
   const controller = value.controller;
   value.storage = storage;
-  const base = new BaseClient({ device: "ANDROIDSECONDARY", storage, fetch: createBrowserFetch(controller.signal) });
+  // Use direct HTTPS RPC: the extra /enc gateway returns 404 (LINEJS #280).
+  // TLS and LINE message E2EE remain enabled.
+  const base = new BaseClient({ device: "ANDROIDSECONDARY", legy: { encrypted: false }, storage, fetch: createBrowserFetch(controller.signal) });
   value.base = base;
   value.profiles = createPersonalProfiles({ signal: controller.signal,
     loadContact: (mid, signal) => personalCommandClient(base, signal).talk.getContact({ mid }),
@@ -200,23 +216,36 @@ async function start(value) {
     void QRCode.toCanvas(ui.qr, url, { width: 280, margin: 2 }).catch(() => report("Could not display the QR code. Reconnect and try again.", true));
   });
   base.on("pincall", (pin) => { if (active(value) && /^\d{4,8}$/.test(String(pin))) { ui.qr.hidden = true; ui.pin.hidden = false; ui.pin.textContent = String(pin); ui["pin-help"].hidden = false; } });
+  let stage = "session";
   try {
     const token = await storage.get("authToken");
+    stage = token ? "saved login" : "QR login";
     if (token) await base.loginProcess.login({ authToken: token });
-    else { await base.loginProcess.withQrCode({}); await base.loginProcess.ready(); }
+    else {
+      await base.loginProcess.withQrCode({});
+      stage = "profile";
+      await base.loginProcess.ready();
+    }
     if (!active(value)) return;
     const profile = base.profile;
     if (!profile?.mid || (scope !== "setup" && profile.mid !== scope)) { await storage.clear(); throw new Error("ACCOUNT_MISMATCH"); }
     value.ready = true; value.lastSuccess = Date.now();
     ui.authorization.hidden = true; ui.pin.textContent = "";
     ui.account.hidden = false; ui.name.textContent = profile.displayName || "LINE Personal"; ui.id.textContent = profile.mid;
+    stage = "configuration";
     const isConfigured = await configured(value);
     report(isConfigured ? "Connected. Incoming messages and replies use your configured server." : "Connected locally. Copy this account ID into your LINE Personal configuration to enable forwarding.", false, isConfigured);
+    stage = "account registration";
     await account(); changed();
     void poll(value).catch(() => { if (active(value)) { value.ready = false; changed(); report("Reconnect LINE to continue receiving and sending messages.", true); } });
     await new Promise((resolve) => { releaseLock = resolve; controller.signal.addEventListener("abort", resolve, { once: true }); });
-  } catch {
-    if (active(value)) { await storage.clear(); report("Could not connect this account. Reconnect and approve the QR on your phone.", true); }
+  } catch (error) {
+    if (active(value)) {
+      // QR authorization may already have produced a valid token. Keep it
+      // for transport outages; explicit disconnect and invalid keys still clear.
+      if (!isTransientConnectionError(error)) await storage.clear();
+      report(connectionFailureMessage(stage, error), true);
+    }
   } finally {
     controller.abort(); base.authToken = "";
     if (session === value) { session = null; ui.connect.hidden = false; ui.connect.disabled = false; ui.disconnect.hidden = true; changed(); }
@@ -240,7 +269,7 @@ ui.connect.addEventListener("click", async () => {
   // access directly in the click handler, before consent/storage checks await.
   try {
     const granted = await chrome.permissions.request({ origins: [
-      "https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*",
+      "https://legy.line-apps.com/*", "https://obs.line-apps.com/*",
     ] });
     if (!granted) { report("Allow LINE access to connect this account.", true); return; }
     if (!await requireConsent()) return;

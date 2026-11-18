@@ -53,6 +53,14 @@ ID and server-issued settings. Existing configured LINE Personal accounts also
 remain selectable when hidden features are off. Selecting a provider focuses its existing
 tab when available.
 
+LINE Personal uses direct HTTPS Talk RPC rather than LINEJS's extra LEGY `/enc`
+envelope, which began returning 404 on 18 November 2026
+([upstream incident](https://github.com/evex-dev/linejs/issues/280)). TLS and
+message E2EE remain enabled. Scoped history/profile/reply clients retain this
+transport setting. A temporary HTTP 404/5xx, network or timeout failure retains
+session credentials for another Connect attempt; invalid keys, explicit
+Disconnect and account mismatch still clear the local session.
+
 Keep Chrome, the connection tab and the computer running. Login credentials and
 encryption keys stay in trusted Chrome session storage; restarting Chrome or
 updating/reloading the extension requires reconnecting. Configuration exports

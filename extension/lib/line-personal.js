@@ -22,7 +22,7 @@
     providerStatusReady: (status) => status?.ok === true && status.account_access_verified === true,
     providerStatusHealthy: (status) => status?.ok === true && status.realtime_connected === true,
     configOrigins: (account) => [account.events_url, account.api_url, account.logs_url,
-      "https://legy.line-apps.com/", "https://gf.line.naver.jp/", "https://obs.line-apps.com/"],
+      "https://legy.line-apps.com/", "https://obs.line-apps.com/"],
     validateConfig(value, version = 3) {
       if (version !== 3 || !id(value?.provider_account_id)) throw new Error("LINE Personal requires version 3 and a verified personal account ID.");
       if (typeof value.hmac_secret !== "string" || !value.hmac_secret.trim()) throw new Error("HMAC secret is required.");

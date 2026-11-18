@@ -8,7 +8,11 @@ export function createBrowserFetch(signal, { fetch = globalThis.fetch, timeoutMs
     const response = await fetch(request, {
       signal: AbortSignal.any([request.signal, signal, AbortSignal.timeout(timeoutMs)]),
     });
-    if (!response.ok) throw new Error("LINE_HTTP_REQUEST_FAILED");
+    if (!response.ok) {
+      const error = new Error("LINE_HTTP_REQUEST_FAILED");
+      error.httpStatus = response.status;
+      throw error;
+    }
     return response;
   };
 }

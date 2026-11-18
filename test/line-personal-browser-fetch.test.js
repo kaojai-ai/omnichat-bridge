@@ -44,5 +44,5 @@ test("a successful request keeps its response and HTTP failures stay sanitized",
   } });
   assert.equal(await fetch("https://legy.line-apps.com/SYNC4"), response);
   const failed = createBrowserFetch(session.signal, { fetch: async () => new Response("private provider error", { status: 401 }) });
-  await assert.rejects(failed("https://legy.line-apps.com/SYNC4"), { message: "LINE_HTTP_REQUEST_FAILED" });
+  await assert.rejects(failed("https://legy.line-apps.com/SYNC4"), { message: "LINE_HTTP_REQUEST_FAILED", httpStatus: 401 });
 });

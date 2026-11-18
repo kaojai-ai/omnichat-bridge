@@ -155,7 +155,7 @@ ui.connect.addEventListener("click", async () => {
   const storage = new MemoryStorage();
   let base;
   try {
-    base = new BaseClient({ device: "ANDROIDSECONDARY", fetch: createBrowserFetch(controller.signal), storage });
+    base = new BaseClient({ device: "ANDROIDSECONDARY", legy: { encrypted: false }, fetch: createBrowserFetch(controller.signal), storage });
   } catch (error) {
     diagnostic(`INITIALIZE_${safeError(error)}`);
     ui.status.textContent = "Browser client initialization failed. No login was started.";

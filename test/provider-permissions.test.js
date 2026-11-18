@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import "../extension/lib/provider-adapters.js";
+import "../extension/lib/line-personal.js";
 import { accountOrigins } from "../extension/lib/config.js";
 import { regionalShopeeOrigins } from "../extension/lib/regional-permissions.js";
 
@@ -56,7 +58,7 @@ for (const granted of [false, true]) {
       ui: { connect: { addEventListener: (_event, handler) => { click = handler; } }, disconnect: {} },
       chrome: { permissions: { request: ({ origins }) => {
         requested = true;
-        assert.deepEqual(Array.from(origins), ["https://legy.line-apps.com/*", "https://gf.line.naver.jp/*", "https://obs.line-apps.com/*"]);
+        assert.deepEqual(Array.from(origins), ["https://legy.line-apps.com/*", "https://obs.line-apps.com/*"]);
         return Promise.resolve(granted);
       } } },
       requireConsent: async () => { assert.equal(requested, true); return true; }, report() {}, changed() {},
@@ -71,3 +73,9 @@ for (const granted of [false, true]) {
     assert.equal(Boolean(scope.session), granted);
   });
 }
+
+
+test("LINE Sync checks only the direct transport hosts granted by Connect", () => {
+  const origins = accountOrigins({ accounts: [{ provider: "line_personal" }] });
+  assert.deepEqual(origins, ["https://legy.line-apps.com/", "https://obs.line-apps.com/"]);
+});

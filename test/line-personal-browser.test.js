@@ -54,6 +54,25 @@ test("browser bundle initializes without eval, Node globals or authentication", 
   assert.ok(!context.client.authToken);
 });
 
+test("primary and scoped profile calls use direct HTTPS even with modern tokens", async () => {
+  const urls = [];
+  context.fetch = input => {
+    urls.push(new URL(input.url));
+    throw new Error("OFFLINE_REQUEST_CAPTURED");
+  };
+  await vm.runInContext(`
+    globalThis.directBase = new CommandBaseClient({ device: "ANDROIDSECONDARY", legy: { encrypted: false },
+      storage: new CommandMemoryStorage(), fetch: createBrowserFetch(new AbortController().signal) });
+    directBase.authToken = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlIn0.fixture";
+    globalThis.directCommand = personalCommandClient(directBase, new AbortController().signal);
+  `, context);
+  await assert.rejects(vm.runInContext("directBase.talk.getProfile()", context), /OFFLINE_REQUEST_CAPTURED/);
+  await assert.rejects(vm.runInContext("directCommand.talk.getProfile()", context), /OFFLINE_REQUEST_CAPTURED/);
+  assert.deepEqual(urls.map(url => url.origin + url.pathname), [
+    "https://legy.line-apps.com/S4", "https://legy.line-apps.com/S4",
+  ]);
+});
+
 test("command deadlines abort the native transport independently while preserving session tokens and request sequencing", async () => {
   const calls = [];
   context.fetch = (input, init) => {
@@ -69,7 +88,7 @@ test("command deadlines abort the native transport independently while preservin
     globalThis.pollController = new AbortController();
     globalThis.commandController = new AbortController();
     globalThis.commandBase = new CommandBaseClient({
-      device: "ANDROIDSECONDARY", storage: new CommandMemoryStorage(),
+      device: "ANDROIDSECONDARY", legy: { encrypted: false }, storage: new CommandMemoryStorage(),
       fetch: createBrowserFetch(pollController.signal),
     });
     commandBase.authToken = "fixture-original";
@@ -83,6 +102,8 @@ test("command deadlines abort the native transport independently while preservin
     scopedCommand.emit("update:authtoken", "fixture-rotated");
   })()`, context);
   assert.deepEqual(Array.from(context.requestSequences), [0, 1, 2]);
+  assert.equal(context.scopedCommand.legy.encrypted, false, "scoped commands must not return to the broken encrypted gateway");
+  assert.equal(context.scopedCommand.endpoint, context.commandBase.endpoint);
   assert.equal(context.scopedCommand.storage, context.commandBase.storage);
   assert.equal(context.scopedCommand.profile, context.commandBase.profile);
   assert.equal(context.commandBase.authToken, "fixture-rotated");

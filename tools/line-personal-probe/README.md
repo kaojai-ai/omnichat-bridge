@@ -62,7 +62,7 @@ This optional local runner creates a **new** QR-authorized in-memory LINE
 session. It never reads, exposes or controls an installed Chrome extension's
 page, session or credentials. It executes the same browser-bundled base client
 and crypto facade inside a VM with code generation disabled, using Node fetch
-restricted to the three LINE origins and disallowing redirects.
+restricted to the two LINE origins and disallowing redirects.
 
 The user scans `tmp/line-personal-live-case/qr.png` and enters the temporary PIN
 from `pin.txt` if requested. Authentication may require reauthorizing another
