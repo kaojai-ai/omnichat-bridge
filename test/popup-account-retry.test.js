@@ -8,7 +8,7 @@ const start = popup.indexOf("async function retryAccount(account) {");
 const end = popup.indexOf("\nasync function copyProviderAccountId", start);
 assert.ok(start >= 0 && end > start);
 
-function harness(result) {
+function harness(result, granted = true) {
   const requests = [];
   const configs = [];
   const account = { provider: "line_oa", provider_account_id: "@failed" };
@@ -17,8 +17,8 @@ function harness(result) {
     retryingAccounts: new Set(), accountRetryErrors: new Map(),
     storedConfig: { accounts: [{ provider_account_id: "@healthy" }, account] },
     findAccountConfig: (_config, item) => item,
-    accountOrigins: (config) => { configs.push(config); return []; },
-    checkTargetPermission: async () => {},
+    requestTargetPermission: (config) => { configs.push(config); return Promise.resolve(granted); },
+    t: key => key,
     chrome: { runtime: { sendMessage: async (message) => { requests.push(message); return result; } } },
     renderDashboard() {}, refreshStoredState: async () => {}, reportPopupError() {},
   };
@@ -29,7 +29,10 @@ function harness(result) {
 
 test("row retry targets only the failed LINE account and leaves other accounts untouched", async () => {
   const { context, account, requests, configs } = harness({ ok: true });
-  await context.retryAccount(account);
+  const retry = context.retryAccount(account);
+  assert.equal(configs.length, 1, "row Retry requests permission during the click");
+  assert.equal(requests.length, 0);
+  await retry;
   assert.equal(requests.length, 1);
   assert.equal(requests[0].type, "sync_account");
   assert.equal(requests[0].provider_account_id, "@failed");
@@ -63,5 +66,12 @@ test("row retry cannot restart an account the user turned off", async () => {
   await context.retryAccount(account);
   assert.equal(requests.length, 0);
   assert.equal(configs.length, 0);
+  assert.equal(context.retryingAccounts.size, 0);
+});
+
+test("row Retry skips sync if site access is declined", async () => {
+  const { context, account, requests } = harness({ ok: true }, false);
+  await context.retryAccount(account);
+  assert.equal(requests.length, 0);
   assert.equal(context.retryingAccounts.size, 0);
 });

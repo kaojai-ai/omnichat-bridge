@@ -69,28 +69,6 @@ test("revocation removes only that market while preserving other features and co
   assert.deepEqual(h.scripts().map(script => script.id), ["another-feature"]);
 });
 
-test("permission button requests immediately from click and does not start declined access", async () => {
-  const popup = await readFile(new URL("../extension/popup.js", import.meta.url), "utf8");
-  const code = popup.slice(popup.indexOf("async function renderRegionalAccess("), popup.indexOf("const emptyConfig ="));
-  const buttons = [];
-  let requested = false;
-  let sent = 0;
-  const container = { replaceChildren() { buttons.length = 0; }, append: value => buttons.push(value) };
-  const scope = vm.createContext({ regionalShopeeOrigins, storedConfig: { accounts: [{ provider: "shopee", country: "MY" }] },
-    activeProviderAdapter: { id: "shopee" }, accountOrigins: () => [], language: "en", t: (_key, country) => `Allow Shopee ${country} access`, consented: () => true, globalThis: { OmnichatShopeeUrl: { countryForUrl: () => "MY" } },
-    document: { querySelector: () => container, createElement: () => ({ addEventListener(_event, listener) { this.click = listener; } }) },
-    chrome: { permissions: { contains: async () => false, request: () => { requested = true; return Promise.resolve(false); } },
-      runtime: { sendMessage: async () => { sent++; } } },
-    refreshStoredState: async () => {}, reportPopupError: () => assert.fail("unexpected error"),
-  });
-  vm.runInContext(code, scope);
-  await scope.renderRegionalAccess();
-  buttons[0].click();
-  assert.equal(requested, true, "no asynchronous work precedes permissions.request");
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(sent, 0);
-});
-
 test("revoked regional access cancels existing tab polling and closes only affected account", async () => {
   const background = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
   const start = background.indexOf("async function refreshRegionalShopeePermissions(");

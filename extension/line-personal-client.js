@@ -1,3 +1,5 @@
+import { LINE_PERSONAL_ORIGINS } from "./lib/line-personal.js";
+import { permissionPatterns } from "./lib/permission-patterns.js";
 import { initializeConnectionPage } from "./lib/connection-page.js";
 import { BaseClient } from "@evex-dev/linejs/base";
 import QRCode from "qrcode";
@@ -74,8 +76,12 @@ async function queue(value, raw, captureMethod) {
   const result = await chrome.runtime.sendMessage({ type: "queue_messages", provider: "line_personal", messages: [message], flush: true });
   if (!result?.ok || result.latest_cursor?.message_id !== message.id) throw new Error("MESSAGE_QUEUE_UNAVAILABLE");
 }
+function requestLinePersonalAccess() {
+  return chrome.permissions.request({ origins: permissionPatterns(LINE_PERSONAL_ORIGINS) });
+}
+
 function waitForReconnect(signal, delayMs) {
-  const deadline = Date.now() + delayMs;
+  let deadline = Date.now() + delayMs;
   const updateCountdown = () => {
     ui.countdown.textContent = `Retrying in ${Math.max(1, Math.ceil((deadline - Date.now()) / 1_000))}s`;
   };
@@ -83,19 +89,38 @@ function waitForReconnect(signal, delayMs) {
   ui.countdown.hidden = false;
   ui.reconnect.hidden = false;
   return new Promise((resolve) => {
-    const timer = setTimeout(finish, delayMs);
+    let timer = setTimeout(finish, delayMs);
     const ticker = setInterval(updateCountdown, 250);
     function finish() {
       clearTimeout(timer);
       clearInterval(ticker);
       signal.removeEventListener("abort", finish);
-      ui.reconnect.removeEventListener("click", finish);
+      ui.reconnect.removeEventListener("click", reconnect);
       ui.countdown.hidden = true;
       ui.reconnect.hidden = true;
       resolve();
     }
     signal.addEventListener("abort", finish, { once: true });
-    ui.reconnect.addEventListener("click", finish, { once: true });
+    async function reconnect() {
+      ui.reconnect.disabled = true;
+      clearTimeout(timer);
+      try {
+        if (await requestLinePersonalAccess()) {
+          finish();
+          return;
+        }
+        if (!signal.aborted) report("Allow LINE access to reconnect this account.", true);
+      } catch {
+        if (!signal.aborted) report("Could not request LINE access. Try Reconnect now again.", true);
+      } finally {
+        ui.reconnect.disabled = false;
+      }
+      if (signal.aborted) return;
+      deadline = Date.now() + delayMs;
+      updateCountdown();
+      timer = setTimeout(finish, delayMs);
+    }
+    ui.reconnect.addEventListener("click", reconnect);
   });
 }
 
@@ -317,9 +342,7 @@ ui.connect.addEventListener("click", async () => {
   // The connection button is shown only after consent. Request optional LINE
   // access directly in the click handler, before consent/storage checks await.
   try {
-    const granted = await chrome.permissions.request({ origins: [
-      "https://legy.line-apps.com/*", "https://obs.line-apps.com/*",
-    ] });
+    const granted = await requestLinePersonalAccess();
     if (!granted) { report("Allow LINE access to connect this account.", true); return; }
     if (!await requireConsent()) return;
   } catch {

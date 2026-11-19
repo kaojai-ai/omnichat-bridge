@@ -3,58 +3,75 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import "../extension/lib/provider-adapters.js";
-import "../extension/lib/line-personal.js";
+import { LINE_PERSONAL_ORIGINS } from "../extension/lib/line-personal.js";
+import { permissionPatterns } from "../extension/lib/permission-patterns.js";
 import { accountOrigins } from "../extension/lib/config.js";
-import { regionalShopeeOrigins } from "../extension/lib/regional-permissions.js";
 
 const popup = await readFile(new URL("../extension/popup.js", import.meta.url), "utf8");
 const personal = await readFile(new URL("../extension/line-personal-client.js", import.meta.url), "utf8");
 
+const permissionHelpers = popup.slice(popup.indexOf("function requestTargetPermission("), popup.indexOf("function setStatusAppearance("));
+
 test("Sync checks grants without requesting permission after asynchronous work", async () => {
-  let granted = true, prompts = 0, renders = 0;
-  const scope = vm.createContext({ URL, chrome: { permissions: {
+  let granted = true;
+  const scope = vm.createContext({ permissionPatterns, t: key => key, chrome: { permissions: {
     contains: async ({ origins }) => { assert.deepEqual(Array.from(origins), ["https://server.example/*"]); return granted; },
-    request: () => { prompts++; throw Error("Sync must never prompt"); },
-  } }, renderRegionalAccess: () => { renders++; } });
-  vm.runInContext(popup.slice(popup.indexOf("async function checkTargetPermission("), popup.indexOf("function setStatusAppearance(")), scope);
+    request: () => assert.fail("Permission checks must never prompt"),
+  } } });
+  vm.runInContext(permissionHelpers, scope);
   await scope.checkTargetPermission(["wss://server.example/live", "https://server.example/events"]);
   granted = false;
-  await assert.rejects(scope.checkTargetPermission(["https://server.example/events"]), /Allow server access/);
-  assert.equal(prompts, 0);
-  assert.equal(renders, 1);
+  await assert.rejects(scope.checkTargetPermission(["https://server.example/events"]), /serverAccessNeeded/);
 });
 
-for (const provider of [null, "shopee"]) {
-  test(`missing access buttons remain usable with ${provider ?? "unknown"} provider`, async () => {
-    const buttons = [], requests = [];
-    const container = { replaceChildren() { buttons.length = 0; }, append: button => buttons.push(button) };
+for (const outcome of ["declined", "granted", "rejected", "thrown"]) {
+  test(`Save configuration persists independently of permission: ${outcome}`, async () => {
+    const changes = [];
+    let finishPermission;
+    let status;
+    let click;
+    const button = { addEventListener: (_event, handler) => { click = handler; } };
     const config = { accounts: [
-      { provider: "shopee", country: "MY", events_url: "https://shop.example/events" },
-      { provider: "line_personal", events_url: "https://personal.example/events" },
+      { provider: "shopee", country: "MY", events_url: "https://shop.example/events", commands_url: "wss://shop.example/live", image_server_url: "https://images.example" },
+      { provider: "shopee", country: "PH", enabled: false, events_url: "https://disabled.example" },
     ] };
-    const scope = vm.createContext({ URL, storedConfig: config, activeProviderAdapter: provider && { id: provider },
-      regionalShopeeOrigins, accountOrigins, language: "en", consented: () => true, t: (_key, country) => country,
-      globalThis: { OmnichatShopeeUrl: { countryForUrl: url => url.includes("shopee") ? "MY" : null } },
-      document: { querySelector: () => container, createElement: () => ({ addEventListener(_event, callback) { this.click = callback; } }) },
-      chrome: { permissions: { contains: async () => false, request: args => { requests.push(args); return Promise.resolve(false); } },
-        runtime: { sendMessage: () => assert.fail("Denied access must not affect runtime") } },
-      refreshStoredState() {}, reportPopupError: () => assert.fail("Unexpected error"),
+    const scope = vm.createContext({
+      permissionPatterns, accountOrigins, storedConfig: { accounts: [] }, STORAGE: { config: "config" },
+      document: { querySelector: () => button }, configInput: { value: JSON.stringify(config) }, deviceNameInput: { value: "Device" },
+      t: key => key, validateConfigFile: value => value, normalizeDeviceName: value => value,
+      renderProviderSelector() {}, renderDeviceNameBadge() {}, logPopup() {}, renderConfigEditor() {}, setConfigStatus: (...args) => { status = args; },
+      writeStorage: async values => { changes.push("save"); assert.deepEqual(JSON.parse(JSON.stringify(values.config)), config); },
+      autoStartSync: async () => { changes.push("sync"); return true; },
+      chrome: { permissions: { request: ({ origins }) => {
+        changes.push("request");
+        assert.deepEqual(Array.from(origins), ["https://shop.example/*", "https://images.example/*"]);
+        if (outcome === "thrown") throw new Error("Permission API unavailable");
+        return new Promise((resolve, reject) => {
+          finishPermission = () => outcome === "rejected"
+            ? reject(new Error("Permission API unavailable"))
+            : resolve(outcome === "granted");
+        });
+      } } },
     });
-    vm.runInContext(popup.slice(popup.indexOf("async function renderRegionalAccess("), popup.indexOf("const emptyConfig =")), scope);
-    await scope.renderRegionalAccess();
-    assert.ok(buttons.some(button => button.textContent === "MY"), "regional grant is discoverable before tab URL access");
-    if (provider) assert.ok(buttons.every(button => !button.textContent.includes("personal.example")));
-    buttons.find(button => button.textContent.includes("shop.example")).click();
-    assert.deepEqual(Array.from(requests[0].origins), ["https://shop.example/*"], "grant is requested immediately for only the selected origin");
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(config.accounts.length, 2);
+    const handler = popup.slice(popup.indexOf('document.querySelector("#save-config").addEventListener'), popup.indexOf('document.querySelector("#import-config").addEventListener'));
+    vm.runInContext(permissionHelpers + handler, scope);
+    const task = click({ currentTarget: button });
+    assert.deepEqual(changes, ["request", "save"], "save starts without waiting for the permission result");
+    finishPermission?.();
+    await task;
+    assert.deepEqual(changes, outcome === "granted" ? ["request", "save", "sync"] : ["request", "save"]);
+    if (outcome === "rejected" || outcome === "thrown") {
+      assert.deepEqual(status, ["Configuration saved. Permission API unavailable", true]);
+    }
+    assert.equal(button.disabled, false);
   });
 }
 
 for (const granted of [false, true]) {
-  test(`LINE Connect requests only LINE hosts before awaiting consent; grant=${granted}`, async () => {
+  test(`LINE Connect requests access before awaiting consent; grant=${granted}`, async () => {
     let click, requested = false, starts = 0;
     const scope = vm.createContext({ session: null, AbortController, Date, scope: "setup",
+      LINE_PERSONAL_ORIGINS, permissionPatterns,
       ui: { connect: { addEventListener: (_event, handler) => { click = handler; } }, disconnect: {} },
       chrome: { permissions: { request: ({ origins }) => {
         requested = true;
@@ -65,6 +82,7 @@ for (const granted of [false, true]) {
       navigator: { locks: { request: async (_key, _options, callback) => callback({}) } },
       start: async () => { starts++; },
     });
+    vm.runInContext(personal.slice(personal.indexOf("function requestLinePersonalAccess"), personal.indexOf("function waitForReconnect")), scope);
     vm.runInContext(personal.slice(personal.indexOf('ui.connect.addEventListener("click"'), personal.indexOf('ui.disconnect.addEventListener')), scope);
     const task = click();
     assert.equal(requested, true);
@@ -75,7 +93,7 @@ for (const granted of [false, true]) {
 }
 
 
-test("LINE Sync checks only the direct transport hosts granted by Connect", () => {
-  const origins = accountOrigins({ accounts: [{ provider: "line_personal" }] });
-  assert.deepEqual(origins, ["https://legy.line-apps.com/", "https://obs.line-apps.com/"]);
+test("LINE Personal server permission scope excludes LINE transport hosts", () => {
+  const origins = accountOrigins({ accounts: [{ provider: "line_personal", events_url: "https://bridge.example/events" }] });
+  assert.deepEqual(origins, ["https://bridge.example/events"]);
 });

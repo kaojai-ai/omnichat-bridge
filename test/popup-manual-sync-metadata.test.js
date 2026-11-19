@@ -20,14 +20,16 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
   const results = [];
   const refreshes = [];
   const activations = [];
+  const permissionScopes = [];
   const button = { dataset: { action }, addEventListener: (_event, handler) => { click = handler; } };
   const scope = vm.createContext({
-    syncButton: button, storedConfig: { accounts }, detectedAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
+    syncButton: button, storedConfig: { accounts: [...accounts, { provider: "shopee", provider_account_id: "other-shop" }] }, detectedAccounts: accounts, pageAccounts: accounts, activeProviderAdapter: { id: provider }, pendingAction: "",
     progressArea: {}, status: { classList: { remove() {} } },
     logPopup() {}, diagnosticErrorDetails: () => ({}),
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
     hiddenFeatures: false, isProviderChatTab, activateProvider: async adapter => activations.push(adapter.id),
     accountOrigins: config => config.accounts,
+    requestTargetPermission: config => { permissionScopes.push(Array.from(config.accounts, account => account.provider_account_id)); return true; },
     checkTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
     detectAccount: async () => { detections += 1; }, refreshStoredState: async () => {},
     providerAdapters: { forPage: () => ({ id: provider }) },
@@ -47,7 +49,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
     showSyncResult: async result => results.push(result),
   });
   vm.runInContext(handlerSource, scope);
-  return { scope, requests, refreshes, results, activations, click: () => click(),
+  return { scope, requests, refreshes, results, activations, permissionScopes, click: () => click(),
     allowPermission: () => finishPermission(), finishPreparation: () => finishPreparation({ ok: true }),
     cancel: () => vm.runInContext("syncActionId += 1", scope), get detections() { return detections; } };
 }
@@ -56,6 +58,7 @@ for (const provider of ["shopee", "line_oa"]) {
   test(`manual ${provider} sync selects the proper current-tab scope`, async () => {
     const h = harness({ provider });
     const task = h.click();
+    assert.deepEqual(h.permissionScopes, [provider === "shopee" ? ["shop"] : ["@one", "@two"]]);
     assert.equal(h.requests.length, 0);
     await turn();
     assert.deepEqual(h.requests.map(value => value.type), ["repair_provider_tabs", "detect_account"], "fresh login verification precedes permissions and sync");
