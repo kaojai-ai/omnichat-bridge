@@ -14,7 +14,9 @@ Both providers use the same popup and configuration flow.
    **Sync messages** from the provider chat to request access again.
 
 If you decline access, the configuration is still saved. Additional server and
-provider hosts use optional Chrome permissions.
+provider hosts use optional Chrome permissions. For LINE Personal, **Connect
+LINE** or **Reconnect now** requests LINE access and any server access configured
+for that account before connecting.
 
 Refresh provider tabs after updates when their page scripts need new behavior.
 Shopee's content bridge can also reattach without a full page refresh. Chrome

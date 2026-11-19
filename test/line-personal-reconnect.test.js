@@ -16,6 +16,7 @@ test("LINE sync backs off, retries immediately on click, resets after success, a
   const statuses = [];
   let persisted = 0;
   let attempts = 0;
+  let permissionRequests = 0;
   const value = {
     controller,
     ready: true,
@@ -39,6 +40,7 @@ test("LINE sync backs off, retries immediately on click, resets after success, a
     active: () => !controller.signal.aborted,
     configured: async () => true,
     changed() {},
+    requestLinePersonalAccess: () => { permissionRequests++; return Promise.resolve(true); },
     report: (...args) => statuses.push(args),
     setInterval: () => 0,
     clearInterval() {},
@@ -49,6 +51,7 @@ test("LINE sync backs off, retries immediately on click, resets after success, a
           assert.equal(reconnect.hidden, false);
           assert.equal(countdown.textContent, "Retrying in 4s");
           reconnect.dispatchEvent(new Event("click"));
+          assert.equal(permissionRequests, 1, "manual reconnect requests access directly from the click");
         } else finish();
       });
       return 0;
@@ -59,6 +62,7 @@ test("LINE sync backs off, retries immediately on click, resets after success, a
   await context.poll(value);
   assert.deepEqual(delays, [2000, 4000, 8000, 16000, 30000, 30000, 250, 2000]);
   assert.equal(persisted, 1);
+  assert.equal(permissionRequests, 1, "automatic retries do not request access");
   assert.equal(value.ready, false);
   assert.equal(reconnect.hidden, true);
   assert.equal(countdown.hidden, true);

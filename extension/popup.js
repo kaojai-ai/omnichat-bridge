@@ -1,3 +1,4 @@
+import { permissionPatterns } from "./lib/permission-patterns.js";
 import { forwardLogLevel } from "./lib/log-forwarding.js";
 import { regionalShopeeOrigins } from "./lib/regional-permissions.js";
 import {
@@ -405,13 +406,6 @@ function configOrEmpty(value) {
   }
 }
 
-function permissionPatterns(urls) {
-  return [...new Set(urls.map((value) => {
-    const url = new URL(value);
-    return `https://${url.hostname}/*`;
-  }))];
-}
-
 function requestTargetPermission(config, provider) {
   const accounts = config.accounts.filter(account =>
     account.enabled !== false && (!provider || account.provider === provider));
@@ -516,13 +510,14 @@ function accountRowStatus(account) {
 
 async function retryAccount(account) {
   const key = accountConfigKey(account);
-  if (retryingAccounts.has(key) || findAccountConfig(storedConfig, account)?.enabled === false) return;
+  const config = findAccountConfig(storedConfig, account);
+  if (!config || config.enabled === false || retryingAccounts.has(key)) return;
   retryingAccounts.add(key);
   accountRetryErrors.delete(key);
   renderDashboard();
   try {
-    const config = findAccountConfig(storedConfig, account);
-    await checkTargetPermission(accountOrigins({ ...storedConfig, accounts: [config] }));
+    const granted = await requestTargetPermission({ ...storedConfig, accounts: [config] });
+    if (!granted) throw new Error(t("serverAccessNeeded"));
     const result = await chrome.runtime.sendMessage({
       type: "sync_account",
       provider: account.provider,

@@ -3,18 +3,19 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import "../extension/lib/provider-adapters.js";
-import "../extension/lib/line-personal.js";
+import { linePersonalOrigins } from "../extension/lib/line-personal.js";
+import { permissionPatterns } from "../extension/lib/permission-patterns.js";
 import { accountOrigins } from "../extension/lib/config.js";
 import { regionalShopeeOrigins } from "../extension/lib/regional-permissions.js";
 
 const popup = await readFile(new URL("../extension/popup.js", import.meta.url), "utf8");
 const personal = await readFile(new URL("../extension/line-personal-client.js", import.meta.url), "utf8");
 
-const permissionHelpers = popup.slice(popup.indexOf("function permissionPatterns("), popup.indexOf("function setStatusAppearance("));
+const permissionHelpers = popup.slice(popup.indexOf("function requestTargetPermission("), popup.indexOf("function setStatusAppearance("));
 
 test("Sync checks grants without requesting permission after asynchronous work", async () => {
   let granted = true;
-  const scope = vm.createContext({ URL, t: key => key, chrome: { permissions: {
+  const scope = vm.createContext({ permissionPatterns, t: key => key, chrome: { permissions: {
     contains: async ({ origins }) => { assert.deepEqual(Array.from(origins), ["https://server.example/*"]); return granted; },
     request: () => assert.fail("Permission checks must never prompt"),
   } } });
@@ -34,7 +35,7 @@ for (const granted of [false, true]) {
       { provider: "shopee", country: "PH", enabled: false, events_url: "https://disabled.example" },
     ] };
     const scope = vm.createContext({
-      URL, regionalShopeeOrigins, accountOrigins, storedConfig: { accounts: [] }, STORAGE: { config: "config" },
+      permissionPatterns, regionalShopeeOrigins, accountOrigins, storedConfig: { accounts: [] }, STORAGE: { config: "config" },
       document: { querySelector: () => button }, configInput: { value: JSON.stringify(config) }, deviceNameInput: { value: "Device" },
       t: key => key, validateConfigFile: value => value, normalizeDeviceName: value => value,
       renderProviderSelector() {}, renderDeviceNameBadge() {}, logPopup() {}, renderConfigEditor() {}, setConfigStatus() {},
@@ -57,19 +58,27 @@ for (const granted of [false, true]) {
 }
 
 for (const granted of [false, true]) {
-  test(`LINE Connect requests only LINE hosts before awaiting consent; grant=${granted}`, async () => {
+  test(`LINE Connect requests access before awaiting consent; grant=${granted}`, async () => {
     let click, requested = false, starts = 0;
-    const scope = vm.createContext({ session: null, AbortController, Date, scope: "setup",
+    const accountId = "u" + "a".repeat(32);
+    const config = { accounts: [
+      { provider: "line_personal", provider_account_id: accountId, api_url: "https://bridge.example" },
+      { provider: "line_personal", provider_account_id: "other", api_url: "https://other.example" },
+    ] };
+    const scope = vm.createContext({ session: null, AbortController, Date, scope: granted ? accountId : "setup",
+      config, linePersonalOrigins, permissionPatterns,
       ui: { connect: { addEventListener: (_event, handler) => { click = handler; } }, disconnect: {} },
       chrome: { permissions: { request: ({ origins }) => {
         requested = true;
-        assert.deepEqual(Array.from(origins), ["https://legy.line-apps.com/*", "https://obs.line-apps.com/*"]);
+        assert.deepEqual(Array.from(origins), ["https://legy.line-apps.com/*", "https://obs.line-apps.com/*",
+          ...(granted ? ["https://bridge.example/*"] : [])]);
         return Promise.resolve(granted);
       } } },
       requireConsent: async () => { assert.equal(requested, true); return true; }, report() {}, changed() {},
       navigator: { locks: { request: async (_key, _options, callback) => callback({}) } },
       start: async () => { starts++; },
     });
+    vm.runInContext(personal.slice(personal.indexOf("function requestLinePersonalAccess"), personal.indexOf("function waitForReconnect")), scope);
     vm.runInContext(personal.slice(personal.indexOf('ui.connect.addEventListener("click"'), personal.indexOf('ui.disconnect.addEventListener')), scope);
     const task = click();
     assert.equal(requested, true);
@@ -80,7 +89,7 @@ for (const granted of [false, true]) {
 }
 
 
-test("LINE Sync checks only the direct transport hosts granted by Connect", () => {
+test("LINE Personal without configured endpoints uses only its direct transport hosts", () => {
   const origins = accountOrigins({ accounts: [{ provider: "line_personal" }] });
   assert.deepEqual(origins, ["https://legy.line-apps.com/", "https://obs.line-apps.com/"]);
 });
