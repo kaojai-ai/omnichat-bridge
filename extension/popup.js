@@ -680,7 +680,7 @@ function renderProviderSelector() {
       const label = document.createElement("span"); label.textContent = adapter.id === "shopee" ? "SHOPEE" : adapter.displayName;
       button.append(logo, label);
       button.addEventListener("click", () => {
-        void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+        void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(error => renderDashboard(error.message || "Could not open the provider tab. Try again.", true));
       });
       cards.append(button);
     }
@@ -694,7 +694,7 @@ function renderProviderSelector() {
     button.append(logo, label);
     button.addEventListener("click", () => {
       selector.open = false;
-      void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(() => renderDashboard("Could not open the provider tab. Try again.", true));
+      void activateProvider(adapter, storedConfig, chrome, hiddenFeatures).catch(error => renderDashboard(error.message || "Could not open the provider tab. Try again.", true));
     });
     options.append(button);
   }
@@ -1404,7 +1404,11 @@ syncButton.addEventListener("click", async () => {
     return;
   }
   if (!isProviderChatTab && activeProviderAdapter) {
-    await activateProvider(activeProviderAdapter, storedConfig, chrome, hiddenFeatures);
+    try {
+      await activateProvider(activeProviderAdapter, storedConfig, chrome, hiddenFeatures);
+    } catch (error) {
+      renderDashboard(error.message || "Could not open the provider tab. Try again.", true);
+    }
     return;
   }
   if (syncButton.dataset.action === "open_webchat_mini") {

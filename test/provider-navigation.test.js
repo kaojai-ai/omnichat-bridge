@@ -89,12 +89,31 @@ test("hidden features unlock Personal setup without an account", async () => {
   assert.deepEqual(reuse.calls, [["query", {}], ["update", 12, { active: true }], ["window", 3, { focused: true }]]);
 });
 
-test("opening regional Shopee requests its configured seller site during the click", async () => {
+test("opening Shopee requests every enabled regional seller site during the click", async () => {
   const h = browser();
-  const regional = { ...shopee, chatUrlForAccount: () => "https://seller.shopee.com.my/new-webchat" };
+  const regional = { ...shopee, chatUrlForAccount: () => shopee.chatUrl };
   h.api.permissions = { request: async permission => { h.calls.push(["request", permission]); return true; } };
-  const open = activateProvider(regional, { accounts: [{ provider: "shopee", country: "MY" }] }, h.api);
-  assert.deepEqual(h.calls, [["request", { origins: ["https://seller.shopee.com.my/*"] }]]);
+  const open = activateProvider(regional, { accounts: [
+    { provider: "shopee", country: "TH" },
+    { provider: "shopee", country: "MY" },
+    { provider: "shopee", country: "SG" },
+    { provider: "shopee", country: "PH", enabled: false },
+  ] }, h.api);
+  assert.deepEqual(h.calls, [["request", { origins: ["https://seller.shopee.com.my/*", "https://seller.shopee.sg/*"] }]]);
   const tab = await open;
-  assert.equal(tab.url, "https://seller.shopee.com.my/new-webchat");
+  assert.equal(tab.url, shopee.chatUrl);
+});
+
+test("declining regional access still opens a configured market with access", async () => {
+  const h = browser();
+  h.api.permissions = {
+    request: async () => false,
+    contains: async ({ origins }) => origins.includes("https://seller.shopee.sg/*"),
+  };
+  const regional = { ...shopee, chatUrlForAccount: account => `https://seller.${account.country.toLowerCase()}.test/chat` };
+  const tab = await activateProvider(regional, { accounts: [
+    { provider: "shopee", country: "MY" },
+    { provider: "shopee", country: "SG" },
+  ] }, h.api);
+  assert.equal(tab.url, "https://seller.sg.test/chat");
 });

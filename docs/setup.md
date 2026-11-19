@@ -16,7 +16,8 @@ Both providers use the same popup and configuration flow.
 If you decline access, the configuration is still saved. Additional server and
 provider hosts use optional Chrome permissions. For LINE Personal, **Connect
 LINE** or **Reconnect now** requests access to LINE before connecting. For a
-regional Shopee account, select Shopee in the popup to approve its seller site.
+regional Shopee account, select Shopee in the popup to approve the seller sites
+for your configured markets.
 
 Refresh provider tabs after updates when their page scripts need new behavior.
 Shopee's content bridge can also reattach without a full page refresh. Chrome
