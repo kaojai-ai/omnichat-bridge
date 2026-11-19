@@ -1649,7 +1649,14 @@ document.querySelector("#save-config").addEventListener("click", async (event) =
     const config = validateConfigFile(input);
     const deviceName = normalizeDeviceName(deviceNameInput.value) || generateDeviceName();
     const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
-    const granted = await requestTargetPermission(config);
+    // Start the permission request during the click and save independently of its result.
+    const permission = (async () => {
+      try {
+        return await requestTargetPermission(config) ? "" : t("serverAccessNeeded");
+      } catch (error) {
+        return error.message || t("serverAccessNeeded");
+      }
+    })();
     await writeStorage({
       [STORAGE.config]: config,
       [STORAGE.deviceName]: deviceName,
@@ -1668,8 +1675,9 @@ document.querySelector("#save-config").addEventListener("click", async (event) =
       logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),
     });
     renderConfigEditor();
-    if (!granted) {
-      setConfigStatus(`Configuration saved. ${t("serverAccessNeeded")}`, true);
+    const permissionError = await permission;
+    if (permissionError) {
+      setConfigStatus(`Configuration saved. ${permissionError}`, true);
       return;
     }
     try {

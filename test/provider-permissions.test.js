@@ -24,9 +24,11 @@ test("Sync checks grants without requesting permission after asynchronous work",
   await assert.rejects(scope.checkTargetPermission(["https://server.example/events"]), /serverAccessNeeded/);
 });
 
-for (const granted of [false, true]) {
-  test(`Save configuration requests hosts together before saving, grant=${granted}`, async () => {
+for (const outcome of ["declined", "granted", "rejected", "thrown"]) {
+  test(`Save configuration persists independently of permission: ${outcome}`, async () => {
     const changes = [];
+    let finishPermission;
+    let status;
     let click;
     const button = { addEventListener: (_event, handler) => { click = handler; } };
     const config = { accounts: [
@@ -37,21 +39,30 @@ for (const granted of [false, true]) {
       permissionPatterns, accountOrigins, storedConfig: { accounts: [] }, STORAGE: { config: "config" },
       document: { querySelector: () => button }, configInput: { value: JSON.stringify(config) }, deviceNameInput: { value: "Device" },
       t: key => key, validateConfigFile: value => value, normalizeDeviceName: value => value,
-      renderProviderSelector() {}, renderDeviceNameBadge() {}, logPopup() {}, renderConfigEditor() {}, setConfigStatus() {},
+      renderProviderSelector() {}, renderDeviceNameBadge() {}, logPopup() {}, renderConfigEditor() {}, setConfigStatus: (...args) => { status = args; },
       writeStorage: async values => { changes.push("save"); assert.deepEqual(JSON.parse(JSON.stringify(values.config)), config); },
       autoStartSync: async () => { changes.push("sync"); return true; },
       chrome: { permissions: { request: ({ origins }) => {
         changes.push("request");
         assert.deepEqual(Array.from(origins), ["https://shop.example/*", "https://images.example/*"]);
-        return Promise.resolve(granted);
+        if (outcome === "thrown") throw new Error("Permission API unavailable");
+        return new Promise((resolve, reject) => {
+          finishPermission = () => outcome === "rejected"
+            ? reject(new Error("Permission API unavailable"))
+            : resolve(outcome === "granted");
+        });
       } } },
     });
     const handler = popup.slice(popup.indexOf('document.querySelector("#save-config").addEventListener'), popup.indexOf('document.querySelector("#import-config").addEventListener'));
     vm.runInContext(permissionHelpers + handler, scope);
     const task = click({ currentTarget: button });
-    assert.deepEqual(changes, ["request"], "the permission request runs during the click");
+    assert.deepEqual(changes, ["request", "save"], "save starts without waiting for the permission result");
+    finishPermission?.();
     await task;
-    assert.deepEqual(changes, granted ? ["request", "save", "sync"] : ["request", "save"]);
+    assert.deepEqual(changes, outcome === "granted" ? ["request", "save", "sync"] : ["request", "save"]);
+    if (outcome === "rejected" || outcome === "thrown") {
+      assert.deepEqual(status, ["Configuration saved. Permission API unavailable", true]);
+    }
     assert.equal(button.disabled, false);
   });
 }
