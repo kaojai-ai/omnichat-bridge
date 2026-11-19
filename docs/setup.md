@@ -9,15 +9,12 @@ Both providers use the same popup and configuration flow.
 2. Sign in to [Shopee Seller Centre](https://seller.shopee.co.th/) and open its
    Chat panel, or sign in to [LINE OA Chat](https://chat.line.biz/).
 3. Open the extension, accept the transfer disclosure, and open **Settings**.
-4. Import or paste your server-issued configuration and save it. Use the popup’s
-   **Allow access to …** buttons to approve missing server origins, then select
-   **Sync messages**. Imports never open permission prompts automatically.
+4. Import or paste your server-issued configuration, then select **Save
+   configuration**. Approve site access if Chrome asks. You can also select
+   **Sync messages** from the provider chat to request access again.
 
-Access buttons show the current provider’s configured origins (or all configured
-origins before a provider can be detected). Granting or declining access does not
-change other providers’ configurations. Existing Thai Shopee and LINE OA page
-permissions remain required; additional server and LINE Personal hosts are
-optional, so enabling another provider does not expand mandatory permissions.
+If you decline access, the configuration is still saved. Additional server and
+provider hosts use optional Chrome permissions.
 
 Refresh provider tabs after updates when their page scripts need new behavior.
 Shopee's content bridge can also reattach without a full page refresh. Chrome

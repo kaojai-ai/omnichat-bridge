@@ -10,44 +10,49 @@ import { regionalShopeeOrigins } from "../extension/lib/regional-permissions.js"
 const popup = await readFile(new URL("../extension/popup.js", import.meta.url), "utf8");
 const personal = await readFile(new URL("../extension/line-personal-client.js", import.meta.url), "utf8");
 
+const permissionHelpers = popup.slice(popup.indexOf("function permissionPatterns("), popup.indexOf("function setStatusAppearance("));
+
 test("Sync checks grants without requesting permission after asynchronous work", async () => {
-  let granted = true, prompts = 0, renders = 0;
-  const scope = vm.createContext({ URL, chrome: { permissions: {
+  let granted = true;
+  const scope = vm.createContext({ URL, t: key => key, chrome: { permissions: {
     contains: async ({ origins }) => { assert.deepEqual(Array.from(origins), ["https://server.example/*"]); return granted; },
-    request: () => { prompts++; throw Error("Sync must never prompt"); },
-  } }, renderRegionalAccess: () => { renders++; } });
-  vm.runInContext(popup.slice(popup.indexOf("async function checkTargetPermission("), popup.indexOf("function setStatusAppearance(")), scope);
+    request: () => assert.fail("Permission checks must never prompt"),
+  } } });
+  vm.runInContext(permissionHelpers, scope);
   await scope.checkTargetPermission(["wss://server.example/live", "https://server.example/events"]);
   granted = false;
-  await assert.rejects(scope.checkTargetPermission(["https://server.example/events"]), /Allow server access/);
-  assert.equal(prompts, 0);
-  assert.equal(renders, 1);
+  await assert.rejects(scope.checkTargetPermission(["https://server.example/events"]), /serverAccessNeeded/);
 });
 
-for (const provider of [null, "shopee"]) {
-  test(`missing access buttons remain usable with ${provider ?? "unknown"} provider`, async () => {
-    const buttons = [], requests = [];
-    const container = { replaceChildren() { buttons.length = 0; }, append: button => buttons.push(button) };
+for (const granted of [false, true]) {
+  test(`Save configuration requests hosts together before saving, grant=${granted}`, async () => {
+    const changes = [];
+    let click;
+    const button = { addEventListener: (_event, handler) => { click = handler; } };
     const config = { accounts: [
-      { provider: "shopee", country: "MY", events_url: "https://shop.example/events" },
-      { provider: "line_personal", events_url: "https://personal.example/events" },
+      { provider: "shopee", country: "MY", events_url: "https://shop.example/events", commands_url: "wss://shop.example/live", image_server_url: "https://images.example" },
+      { provider: "shopee", country: "PH", enabled: false, events_url: "https://disabled.example" },
     ] };
-    const scope = vm.createContext({ URL, storedConfig: config, activeProviderAdapter: provider && { id: provider },
-      regionalShopeeOrigins, accountOrigins, language: "en", consented: () => true, t: (_key, country) => country,
-      globalThis: { OmnichatShopeeUrl: { countryForUrl: url => url.includes("shopee") ? "MY" : null } },
-      document: { querySelector: () => container, createElement: () => ({ addEventListener(_event, callback) { this.click = callback; } }) },
-      chrome: { permissions: { contains: async () => false, request: args => { requests.push(args); return Promise.resolve(false); } },
-        runtime: { sendMessage: () => assert.fail("Denied access must not affect runtime") } },
-      refreshStoredState() {}, reportPopupError: () => assert.fail("Unexpected error"),
+    const scope = vm.createContext({
+      URL, regionalShopeeOrigins, accountOrigins, storedConfig: { accounts: [] }, STORAGE: { config: "config" },
+      document: { querySelector: () => button }, configInput: { value: JSON.stringify(config) }, deviceNameInput: { value: "Device" },
+      t: key => key, validateConfigFile: value => value, normalizeDeviceName: value => value,
+      renderProviderSelector() {}, renderDeviceNameBadge() {}, logPopup() {}, renderConfigEditor() {}, setConfigStatus() {},
+      writeStorage: async values => { changes.push("save"); assert.deepEqual(JSON.parse(JSON.stringify(values.config)), config); },
+      autoStartSync: async () => { changes.push("sync"); return true; },
+      chrome: { permissions: { request: ({ origins }) => {
+        changes.push("request");
+        assert.deepEqual(Array.from(origins), ["https://seller.shopee.com.my/*", "https://shop.example/*", "https://images.example/*"]);
+        return Promise.resolve(granted);
+      } } },
     });
-    vm.runInContext(popup.slice(popup.indexOf("async function renderRegionalAccess("), popup.indexOf("const emptyConfig =")), scope);
-    await scope.renderRegionalAccess();
-    assert.ok(buttons.some(button => button.textContent === "MY"), "regional grant is discoverable before tab URL access");
-    if (provider) assert.ok(buttons.every(button => !button.textContent.includes("personal.example")));
-    buttons.find(button => button.textContent.includes("shop.example")).click();
-    assert.deepEqual(Array.from(requests[0].origins), ["https://shop.example/*"], "grant is requested immediately for only the selected origin");
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(config.accounts.length, 2);
+    const handler = popup.slice(popup.indexOf('document.querySelector("#save-config").addEventListener'), popup.indexOf('document.querySelector("#import-config").addEventListener'));
+    vm.runInContext(permissionHelpers + handler, scope);
+    const task = click({ currentTarget: button });
+    assert.deepEqual(changes, ["request"], "the permission request runs during the click");
+    await task;
+    assert.deepEqual(changes, granted ? ["request", "save", "sync"] : ["request", "save"]);
+    assert.equal(button.disabled, false);
   });
 }
 

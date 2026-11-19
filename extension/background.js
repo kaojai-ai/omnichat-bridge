@@ -1096,11 +1096,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       error => respond({ ok: false, error: error.message || "Could not repair provider tabs." }));
     return true;
   }
-  if (message?.type === "refresh_regional_permissions") {
-    void refreshRegionalShopeePermissions().then(() => respond({ ok: true }),
-      () => respond({ ok: false, error: "Could not enable regional access." }));
-    return true;
-  }
   if (message?.type === "sync_line_tab") {
     void syncLineTab(message.tab_id, { retry_access: message.retry_access }).then(respond,
       error => respond({ ok: false, error: error.message || "LINE sync failed." }));

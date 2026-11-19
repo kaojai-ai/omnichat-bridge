@@ -28,6 +28,7 @@ function harness({ provider = "shopee", action = "sync", unknown = false, freshA
     renderDashboard() {}, setStatusAppearance() {}, openConfig() {},
     hiddenFeatures: false, isProviderChatTab, activateProvider: async adapter => activations.push(adapter.id),
     accountOrigins: config => config.accounts,
+    requestTargetPermission: (_config, selectedProvider) => { assert.equal(selectedProvider, provider); return true; },
     checkTargetPermission: () => new Promise(resolve => { finishPermission = resolve; }),
     detectAccount: async () => { detections += 1; }, refreshStoredState: async () => {},
     providerAdapters: { forPage: () => ({ id: provider }) },

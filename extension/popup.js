@@ -30,54 +30,6 @@ import { accountCapabilityStatus, accountCapabilitySummary, currentAccountSyncFa
 
 const providerAdapters = globalThis.OmnichatProviderAdapters;
 const shopeeAdapter = globalThis.OmnichatProviderAdapters.get("shopee");
-function updateProviderNavigation() {
-  renderProviderSelector();
-  void renderRegionalAccess();
-}
-
-async function renderRegionalAccess() {
-  const container = document.querySelector("#regional-access");
-  if (!container) return;
-  const config = storedConfig;
-  const provider = activeProviderAdapter?.id;
-  const missing = [];
-  const accounts = config.accounts.filter(account => (!provider || account.provider === provider) && account.enabled !== false);
-  const origins = new Set([
-    ...(!provider || provider === "shopee" ? regionalShopeeOrigins({ ...config, accounts }) : []),
-    ...accountOrigins({ ...config, accounts }).map(value => {
-      const url = new URL(value);
-      return `${url.protocol === "wss:" ? "https:" : url.protocol}//${url.host}`;
-    }),
-  ]);
-  for (const origin of origins) {
-    if (!await chrome.permissions.contains({ origins: [`${origin}/*`] })) missing.push(origin);
-  }
-  if (config !== storedConfig || provider !== activeProviderAdapter?.id) return;
-  container.replaceChildren();
-  container.hidden = !missing.length || !consented();
-  for (const origin of missing) {
-    const country = globalThis.OmnichatShopeeUrl.countryForUrl(origin);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = country ? t("allowRegionalShopee", country)
-      : `${language === "th" ? "อนุญาตการเข้าถึง" : "Allow access to"} ${new URL(origin).host}`;
-    button.addEventListener("click", () => {
-      // Must run before any await: imported files and startup have no user gesture.
-      const request = chrome.permissions.request({ origins: [`${origin}/*`] });
-      button.disabled = true;
-      void request.then(async granted => {
-        if (!granted) return;
-        const result = await chrome.runtime.sendMessage({ type: "refresh_regional_permissions" });
-        if (!result?.ok) throw new Error(result?.error || "Could not enable regional access.");
-        await refreshStoredState();
-      }).catch(error => reportPopupError("regional_permission", error)).finally(() => {
-        button.disabled = false;
-        void renderRegionalAccess();
-      });
-    });
-    container.append(button);
-  }
-}
 
 const emptyConfig = () => ({ version: CONFIG_VERSION, accounts: [] });
 const sampleConfig = {
@@ -215,7 +167,6 @@ const TRANSLATIONS = {
     accountOffHint: "Sending, receiving and sync are off for this account.",
     accountDeleteConfirm: name => `Delete configuration for ${name}? Saved messages and sync history will be kept.`,
     forwardLogDescription: "Forward this level and above automatically.",
-    allowRegionalShopee: country => `Allow Shopee ${country} access`,
     language: "Language", subtitle: "Secured bridge to your server", beforeContinue: "Before you continue", configure: "Configure",
     review: "Review what leaves this browser.", privacyTitle: "Privacy and consent", privacyDescription: "What this extension transfers from this browser.",
     transfers: "This extension transfers", transfersRest: "chat messages, media links, buyer profiles, IDs, timestamps, your device label, installation ID, and provider connection health to the server you configure.",
@@ -226,6 +177,7 @@ const TRANSLATIONS = {
     logsSubmitted: (count) => `Submitted ${count} log entries.`, logsSubmitRemaining: (count) => `${count} entries remain. Submit again to send them.`,
     lineAccessUnknown: "No configured LINE accounts are verified for this login. Open LINE Chat and check access again.",
     inactiveShop: "Not active in this browser", activeShopContext: (shop) => `Active Shopee shop: ${shop}.`, separateProfiles: "Use a separate Chrome profile for each Shopee login to keep shops connected at the same time.", sessionUnverified: "The active Shopee shop is not verified yet. Open its chat to check the session.", sessionConflict: "Shopee tabs report different shops. Keep one Shopee login per Chrome profile, then refresh its chat.",
+    serverAccessNeeded: "Approve site access using Save configuration or Sync.",
     failed: "FAILED", syncFailed: "Sync failed", detectingShop: "Detecting account…", waitingForShop: "WAITING FOR ACCOUNT", configurationMissing: "No configuration is saved for this provider.", shopUnknown: "Cannot detect the signed-in shop. Open its Shopee chat and retry.", ready: "READY", syncing: "SYNCING", connected: "CONNECTED", offline: "OFFLINE", needConfig: "NEED CONFIG", leader: "LEADER", standby: "STANDBY", noLeader: "NOT READY", pending: (count) => `${count} pending`, discard: "Discard", openLogs: "Open Logs", openWebchat: "Open Webchat mini", retry: "Retry now", unattendedRecovery: "Recover provider tabs automatically", openingWebchat: "Opening Webchat mini…", checking: "Checking messages…", webchatOpened: "Webchat mini opened.", syncCancelled: "Sync cancelled.", noSyncInProgress: "No sync in progress.", cancelling: "Cancelling…", cancellingSync: "Cancelling sync…", unattendedEnabled: "Unattended recovery enabled.", unattendedDisabled: "Unattended recovery disabled.",
     loadFailed: "Could not load extension data. Close and reopen the popup.", loadingLogs: "Loading logs…", logsLoadFailed: "Could not load logs.", allCaughtUp: "All caught up.", sent: (count) => `Sent ${count} message${count === 1 ? "" : "s"}.`, messagesPending: (count) => `${count} message${count === 1 ? "" : "s"} pending.`, lastSynced: (value) => `Last synced ${value}`, noLogsMatch: "No logs match this level.", noLogsRecorded: "No logs recorded yet.", copied: "Copied", couldNotCopy: "Could not copy", copyId: (label) => `Copy ${label} ID`, openProviderChat: "Open a supported provider chat to detect your accounts.", openShopeeChat: "Open Webchat mini to detect your Shopee accounts.",
   },
@@ -236,7 +188,6 @@ const TRANSLATIONS = {
     accountOffHint: "ปิดการส่ง รับ และซิงค์ข้อความของบัญชีนี้แล้ว",
     accountDeleteConfirm: name => `ลบการตั้งค่าของ ${name} หรือไม่? ข้อความที่บันทึกและประวัติการซิงค์จะยังอยู่`,
     forwardLogDescription: "ส่งบันทึกระดับที่เลือกขึ้นไปโดยอัตโนมัติ",
-    allowRegionalShopee: country => `อนุญาต Shopee ${country}`,
     language: "ภาษา", subtitle: "เชื่อมต่อเซิร์ฟเวอร์อย่างปลอดภัย", beforeContinue: "ก่อนดำเนินการต่อ", configure: "ตั้งค่า", review: "ตรวจสอบข้อมูลที่จะออกจากเบราว์เซอร์นี้", privacyTitle: "ความเป็นส่วนตัวและความยินยอม", privacyDescription: "ข้อมูลที่ส่วนขยายนี้ส่งจากเบราว์เซอร์นี้",
     transfers: "ส่วนขยายนี้ส่ง", transfersRest: "ข้อความแชต ลิงก์สื่อ โปรไฟล์ผู้ซื้อ ID เวลา ป้ายชื่ออุปกรณ์ รหัสติดตั้ง และสถานะการเชื่อมต่อผู้ให้บริการไปยังเซิร์ฟเวอร์ที่คุณกำหนด", never: "ส่วนขยายนี้จะไม่เก็บหรือส่ง", neverRest: "รหัสผ่าน คุกกี้ โทเค็นเข้าสู่ระบบ หรือข้อมูลรับรองเบราว์เซอร์อื่น ๆ", learnMore: "ดูข้อมูลเพิ่มเติมเกี่ยวกับส่วนขยายนี้ที่", consent: "ฉันเข้าใจและยินยอมให้ส่งข้อมูลนี้", continue: "ดำเนินการต่อ",
     supported: "ผู้ให้บริการที่รองรับ", selectProvider: "เลือกช่องทาง", chooseProvider: "เลือกผู้ให้บริการเพื่อจัดการบัญชีที่นี่", openChat: "เปิดแชต", help: "ต้องการความช่วยเหลือหรือไม่ ดู", documentation: "เอกสารบน GitHub", detectedAccounts: "บัญชี", noAccounts: "ยังไม่พบบัญชีผู้ให้บริการ", deviceName: "ชื่ออุปกรณ์", deviceNamePlaceholder: "เช่น MacBook ฝ่ายต้อนรับ", configuration: "การตั้งค่า", currentConfig: "การตั้งค่าที่บันทึกไว้", noSavedAccounts: "ยังไม่มีบัญชีที่บันทึก · แสดงตัวอย่างด้านล่าง", logsDescription: "เก็บบันทึกสูงสุด 2 วัน · ส่งออกครบทุกระดับ", filterLogs: "กรอง Logs ตามระดับ", clearLogs: "ล้าง Logs", installationId: (id) => `รหัสติดตั้ง: ${id}`, installationCopied: "คัดลอกรหัสติดตั้งแล้ว", sync: "ซิงค์ข้อความ", cancel: "ยกเลิกการซิงค์", settings: "การตั้งค่า", logs: "Logs", privacy: "นโยบายความเป็นส่วนตัว", erase: "ลบข้อมูลทั้งหมด", save: "บันทึกการตั้งค่า", import: "นำเข้าการตั้งค่า", export: "ส่งออกการตั้งค่า", download: "ดาวน์โหลด", copy: "คัดลอก", allLevels: "ทุกระดับ", info: "ข้อมูล", warnings: "คำเตือน", errors: "ข้อผิดพลาด", debug: "ดีบัก",
@@ -244,6 +195,7 @@ const TRANSLATIONS = {
     logsSubmitted: (count) => `ส่ง Logs แล้ว ${count} รายการ`, logsSubmitRemaining: (count) => `เหลือ ${count} รายการ กดส่งอีกครั้งเพื่อส่งรายการที่เหลือ`,
     lineAccessUnknown: "ยังยืนยันสิทธิ์บัญชี LINE ที่ตั้งค่าไว้ไม่ได้ เปิด LINE Chat แล้วตรวจสอบสิทธิ์อีกครั้ง",
     inactiveShop: "ไม่ได้ใช้งานในเบราว์เซอร์นี้", activeShopContext: (shop) => `ร้าน Shopee ที่ใช้งานอยู่: ${shop}`, separateProfiles: "ใช้โปรไฟล์ Chrome แยกสำหรับแต่ละบัญชี Shopee เพื่อเชื่อมต่อหลายร้านพร้อมกัน", sessionUnverified: "ยังยืนยันร้าน Shopee ที่ใช้งานอยู่ไม่ได้ เปิดแชตของร้านเพื่อตรวจสอบเซสชัน", sessionConflict: "แท็บ Shopee รายงานร้านไม่ตรงกัน ใช้บัญชี Shopee เดียวต่อโปรไฟล์ Chrome แล้วรีเฟรชแชตของร้าน",
+    serverAccessNeeded: "อนุญาตการเข้าถึงเว็บไซต์ผ่านปุ่มบันทึกการตั้งค่าหรือซิงค์",
     failed: "ไม่สำเร็จ", syncFailed: "ซิงค์ไม่สำเร็จ", detectingShop: "กำลังตรวจหาบัญชี…", waitingForShop: "รอบัญชี", configurationMissing: "ยังไม่มีการตั้งค่าสำหรับผู้ให้บริการนี้", shopUnknown: "ยังตรวจไม่พบร้านค้าที่เข้าสู่ระบบ เปิดแชต Shopee แล้วลองอีกครั้ง", ready: "พร้อม", syncing: "กำลังซิงค์", connected: "เชื่อมต่อแล้ว", offline: "ออฟไลน์", needConfig: "ต้องตั้งค่า", leader: "ตัวหลัก", standby: "รอ", noLeader: "ยังไม่พร้อม", pending: (count) => `รอดำเนินการ ${count} รายการ`, discard: "ละทิ้ง", openLogs: "เปิด Logs", openWebchat: "เปิด Webchat mini", retry: "ลองใหม่", unattendedRecovery: "กู้คืนแท็บผู้ให้บริการอัตโนมัติ", openingWebchat: "กำลังเปิด Webchat mini…", checking: "กำลังตรวจหาข้อความที่พลาด…", webchatOpened: "เปิด Webchat mini แล้ว", syncCancelled: "ยกเลิกการซิงค์แล้ว", noSyncInProgress: "ไม่มีการซิงค์ที่กำลังทำงาน", cancelling: "กำลังยกเลิก…", cancellingSync: "กำลังยกเลิกการซิงค์…", unattendedEnabled: "เปิดการกู้คืนอัตโนมัติแล้ว", unattendedDisabled: "ปิดการกู้คืนอัตโนมัติแล้ว", loadFailed: "โหลดข้อมูลส่วนขยายไม่สำเร็จ กรุณาปิดแล้วเปิดป๊อปอัปใหม่", loadingLogs: "กำลังโหลด Logs…", logsLoadFailed: "โหลด Logs ไม่สำเร็จ", allCaughtUp: "ซิงค์ครบแล้ว", sent: (count) => `ส่งแล้ว ${count} ข้อความ`, messagesPending: (count) => `มีข้อความรอดำเนินการ ${count} รายการ`, lastSynced: (value) => `ซิงค์ล่าสุด ${value}`, noLogsMatch: "ไม่มี Logs ที่ตรงกับระดับนี้", noLogsRecorded: "ยังไม่มี Logs", copied: "คัดลอกแล้ว", couldNotCopy: "คัดลอกไม่ได้", copyId: (label) => `คัดลอก ID ${label}`, openProviderChat: "เปิดแชตของผู้ให้บริการที่รองรับเพื่อค้นหาบัญชี", openShopeeChat: "เปิด Webchat mini เพื่อค้นหาบัญชี Shopee", thisBrowser: "เบราว์เซอร์นี้", upToDate: "เป็นเวอร์ชันล่าสุด", updateNow: "อัปเดตตอนนี้", updatingExtension: "กำลังอัปเดต…",
   },
 };
@@ -304,7 +256,6 @@ function applyTranslations() {
   }
 
   renderExtensionUpdate(extensionUpdate);
-  void renderRegionalAccess();
 }
 
 function adapterForAccount(account) {
@@ -454,14 +405,26 @@ function configOrEmpty(value) {
   }
 }
 
-async function checkTargetPermission(urls) {
-  const origins = [...new Set(urls.map((value) => {
+function permissionPatterns(urls) {
+  return [...new Set(urls.map((value) => {
     const url = new URL(value);
-    return `${url.protocol === "wss:" ? "https:" : url.protocol}//${url.host}/*`;
+    return `https://${url.hostname}/*`;
   }))];
-  if (!await chrome.permissions.contains({ origins })) {
-    void renderRegionalAccess();
-    throw new Error("Allow server access using the access buttons, then retry Sync.");
+}
+
+function requestTargetPermission(config, provider) {
+  const accounts = config.accounts.filter(account =>
+    account.enabled !== false && (!provider || account.provider === provider));
+  const scope = { ...config, accounts };
+  const origins = permissionPatterns([...regionalShopeeOrigins(scope), ...accountOrigins(scope)]);
+  // Call directly from the click handler before any asynchronous work.
+  return !origins.length || chrome.permissions.request({ origins });
+}
+
+async function checkTargetPermission(urls) {
+  const origins = permissionPatterns(urls);
+  if (origins.length && !await chrome.permissions.contains({ origins })) {
+    throw new Error(t("serverAccessNeeded"));
   }
 }
 
@@ -1208,7 +1171,7 @@ async function refreshStoredState() {
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   hiddenFeatures = stored[STORAGE.hiddenFeatures] === true;
   renderHiddenFeatures();
-  updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
+  renderProviderSelector();
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1270,7 +1233,6 @@ function renderConfigEditor() {
   configInput.value = empty ? "" : JSON.stringify(storedConfig, null, 2);
   configInput.placeholder = JSON.stringify(sampleConfig, null, 2);
   configInput.disabled = false;
-  document.querySelector("#save-config").disabled = false;
   configCount.textContent = empty ? t("noSavedAccounts") : t("currentConfig");
   exportButton.disabled = empty;
 }
@@ -1354,7 +1316,7 @@ async function load() {
   storedConfig = configOrEmpty(stored[STORAGE.config]);
   hiddenFeatures = stored[STORAGE.hiddenFeatures] === true;
   renderHiddenFeatures();
-  updateProviderNavigation(storedConfig.accounts.find(account => account.provider === "shopee"));
+  renderProviderSelector();
   storedStatus = stored[STORAGE.status] ?? null;
   scanStates = stored[STORAGE.scanState] ?? null;
   pendingStates = stored[STORAGE.pending] ?? null;
@@ -1483,6 +1445,9 @@ syncButton.addEventListener("click", async () => {
   pendingAction = "checking";
   renderDashboard();
   try {
+    const granted = await requestTargetPermission(storedConfig, activeProviderAdapter?.id);
+    if (actionId !== syncActionId) return;
+    if (!granted) throw new Error(t("serverAccessNeeded"));
     const tab = await chrome.tabs.get(popupTabId);
     const provider = providerAdapters.forPage(tab?.url)?.id;
     if (!provider) throw new Error("Open the provider account chat to sync.");
@@ -1677,12 +1642,15 @@ clearLogsButton.addEventListener("click", async (event) => {
   renderLogs();
 });
 
-document.querySelector("#save-config").addEventListener("click", async () => {
+document.querySelector("#save-config").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     const input = JSON.parse(configInput.value);
     const config = validateConfigFile(input);
     const deviceName = normalizeDeviceName(deviceNameInput.value) || generateDeviceName();
     const configurationChanged = JSON.stringify(config) !== JSON.stringify(storedConfig);
+    const granted = await requestTargetPermission(config);
     await writeStorage({
       [STORAGE.config]: config,
       [STORAGE.deviceName]: deviceName,
@@ -1693,7 +1661,7 @@ document.querySelector("#save-config").addEventListener("click", async () => {
       } : {}),
     });
     storedConfig = config;
-    updateProviderNavigation(config.accounts.find(account => account.provider === "shopee"));
+    renderProviderSelector();
     storedDeviceName = deviceName;
     renderDeviceNameBadge();
     logPopup("info", "configuration_saved", "Configuration saved.", {
@@ -1701,8 +1669,12 @@ document.querySelector("#save-config").addEventListener("click", async () => {
       logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),
     });
     renderConfigEditor();
+    if (!granted) {
+      setConfigStatus(`Configuration saved. ${t("serverAccessNeeded")}`, true);
+      return;
+    }
     try {
-      const syncStarted = configurationChanged && await autoStartSync(config);
+      const syncStarted = await autoStartSync(config);
       setConfigStatus(
         syncStarted
           ? "Configuration saved. Sync started."
@@ -1715,6 +1687,8 @@ document.querySelector("#save-config").addEventListener("click", async () => {
     }
   } catch (error) {
     setConfigStatus(error.message, true);
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -1733,7 +1707,7 @@ configFile.addEventListener("change", async () => {
       [STORAGE.logOutbox]: [],
     });
     storedConfig = config;
-    updateProviderNavigation(config.accounts.find(account => account.provider === "shopee"));
+    renderProviderSelector();
     logPopup("info", "configuration_imported", "Configuration imported.", {
       accounts: config.accounts.length,
       logs_enabled: Boolean(config.logs_url) || config.accounts.some((account) => Boolean(account.logs_url)),
