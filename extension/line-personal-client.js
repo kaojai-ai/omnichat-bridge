@@ -1,4 +1,4 @@
-import { linePersonalOrigins } from "./lib/line-personal.js";
+import { LINE_PERSONAL_ORIGINS } from "./lib/line-personal.js";
 import { permissionPatterns } from "./lib/permission-patterns.js";
 import { initializeConnectionPage } from "./lib/connection-page.js";
 import { BaseClient } from "@evex-dev/linejs/base";
@@ -15,11 +15,6 @@ const ui = Object.fromEntries(["status", "authorization", "qr", "pin", "pin-help
 const requestedAccount = new URL(location.href).searchParams.get("account");
 const scope = /^u[a-f0-9]{32}$/i.test(requestedAccount ?? "") ? requestedAccount : "setup";
 const tab = await chrome.tabs.getCurrent();
-let config;
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes[STORAGE.config]) config = changes[STORAGE.config].newValue ?? {};
-});
-config ??= (await readStorage([STORAGE.config]))[STORAGE.config];
 let session = null;
 let port;
 let closed = false;
@@ -81,15 +76,11 @@ async function queue(value, raw, captureMethod) {
   const result = await chrome.runtime.sendMessage({ type: "queue_messages", provider: "line_personal", messages: [message], flush: true });
   if (!result?.ok || result.latest_cursor?.message_id !== message.id) throw new Error("MESSAGE_QUEUE_UNAVAILABLE");
 }
-function requestLinePersonalAccess(accountId) {
-  const account = config?.accounts?.find(item => item.provider === "line_personal"
-    && item.provider_account_id === accountId && item.enabled !== false);
-  const urls = linePersonalOrigins(account);
-  if (account && config.logs_url) urls.push(config.logs_url);
-  return chrome.permissions.request({ origins: permissionPatterns(urls) });
+function requestLinePersonalAccess() {
+  return chrome.permissions.request({ origins: permissionPatterns(LINE_PERSONAL_ORIGINS) });
 }
 
-function waitForReconnect(signal, delayMs, accountId) {
+function waitForReconnect(signal, delayMs) {
   let deadline = Date.now() + delayMs;
   const updateCountdown = () => {
     ui.countdown.textContent = `Retrying in ${Math.max(1, Math.ceil((deadline - Date.now()) / 1_000))}s`;
@@ -114,7 +105,7 @@ function waitForReconnect(signal, delayMs, accountId) {
       ui.reconnect.disabled = true;
       clearTimeout(timer);
       try {
-        if (await requestLinePersonalAccess(accountId)) {
+        if (await requestLinePersonalAccess()) {
           finish();
           return;
         }
@@ -196,7 +187,7 @@ async function poll(value) {
         return;
       }
       report("LINE connection interrupted. Reconnecting…", false, false, true);
-      await waitForReconnect(value.controller.signal, retryDelay, value.base.profile?.mid);
+      await waitForReconnect(value.controller.signal, retryDelay);
       retryDelay = Math.min(retryDelay * 2, 30_000);
     }
   }
@@ -351,7 +342,7 @@ ui.connect.addEventListener("click", async () => {
   // The connection button is shown only after consent. Request optional LINE
   // access directly in the click handler, before consent/storage checks await.
   try {
-    const granted = await requestLinePersonalAccess(scope);
+    const granted = await requestLinePersonalAccess();
     if (!granted) { report("Allow LINE access to connect this account.", true); return; }
     if (!await requireConsent()) return;
   } catch {

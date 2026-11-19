@@ -1,6 +1,5 @@
 import { permissionPatterns } from "./lib/permission-patterns.js";
 import { forwardLogLevel } from "./lib/log-forwarding.js";
-import { regionalShopeeOrigins } from "./lib/regional-permissions.js";
 import {
   CONFIG_VERSION,
   accountConfigKey,
@@ -406,11 +405,9 @@ function configOrEmpty(value) {
   }
 }
 
-function requestTargetPermission(config, provider) {
-  const accounts = config.accounts.filter(account =>
-    account.enabled !== false && (!provider || account.provider === provider));
-  const scope = { ...config, accounts };
-  const origins = permissionPatterns([...regionalShopeeOrigins(scope), ...accountOrigins(scope)]);
+function requestTargetPermission(config) {
+  const accounts = config.accounts.filter(account => account.enabled !== false);
+  const origins = permissionPatterns(accountOrigins({ ...config, accounts }));
   // Call directly from the click handler before any asynchronous work.
   return !origins.length || chrome.permissions.request({ origins });
 }
@@ -1440,7 +1437,9 @@ syncButton.addEventListener("click", async () => {
   pendingAction = "checking";
   renderDashboard();
   try {
-    const granted = await requestTargetPermission(storedConfig, activeProviderAdapter?.id);
+    const knownAccounts = currentTabSyncAccounts(storedConfig, pageAccounts, activeProviderAdapter?.id);
+    const granted = !knownAccounts.length || await requestTargetPermission({ ...storedConfig,
+      accounts: knownAccounts.map(account => findAccountConfig(storedConfig, account)) });
     if (actionId !== syncActionId) return;
     if (!granted) throw new Error(t("serverAccessNeeded"));
     const tab = await chrome.tabs.get(popupTabId);
@@ -1455,7 +1454,8 @@ syncButton.addEventListener("click", async () => {
     const detected = await chrome.runtime.sendMessage({ type: "detect_account", provider, tab_id: tab.id });
     if (actionId !== syncActionId) return;
     if (!detected?.ok) throw new Error(detected?.error || "Could not verify the active provider account. Refresh its chat and try Sync again.");
-    const accounts = currentTabSyncAccounts(storedConfig, detected.accounts, provider);
+    pageAccounts = Array.isArray(detected.accounts) ? detected.accounts : [];
+    const accounts = currentTabSyncAccounts(storedConfig, pageAccounts, provider);
     if (!accounts.length) throw new Error("No configured account is available to this login.");
     await checkTargetPermission(accountOrigins({ ...storedConfig,
       accounts: accounts.map(account => findAccountConfig(storedConfig, account)) }));

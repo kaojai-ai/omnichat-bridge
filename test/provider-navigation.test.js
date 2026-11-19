@@ -88,3 +88,13 @@ test("hidden features unlock Personal setup without an account", async () => {
   await activateProvider(personal, setup, reuse.api, true);
   assert.deepEqual(reuse.calls, [["query", {}], ["update", 12, { active: true }], ["window", 3, { focused: true }]]);
 });
+
+test("opening regional Shopee requests its configured seller site during the click", async () => {
+  const h = browser();
+  const regional = { ...shopee, chatUrlForAccount: () => "https://seller.shopee.com.my/new-webchat" };
+  h.api.permissions = { request: async permission => { h.calls.push(["request", permission]); return true; } };
+  const open = activateProvider(regional, { accounts: [{ provider: "shopee", country: "MY" }] }, h.api);
+  assert.deepEqual(h.calls, [["request", { origins: ["https://seller.shopee.com.my/*"] }]]);
+  const tab = await open;
+  assert.equal(tab.url, "https://seller.shopee.com.my/new-webchat");
+});

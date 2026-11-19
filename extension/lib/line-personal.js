@@ -1,7 +1,4 @@
-export function linePersonalOrigins(account) {
-  return ["https://legy.line-apps.com/", "https://obs.line-apps.com/",
-    account?.events_url, account?.api_url, account?.logs_url, account?.image_server_url].filter(Boolean);
-}
+export const LINE_PERSONAL_ORIGINS = ["https://legy.line-apps.com/", "https://obs.line-apps.com/"];
 
 (() => {
   const pageUrl = () => globalThis.chrome?.runtime?.getURL?.("line-personal.html") ?? "";
@@ -26,7 +23,7 @@ export function linePersonalOrigins(account) {
     sendCommands: ["send_text"],
     providerStatusReady: (status) => status?.ok === true && status.account_access_verified === true,
     providerStatusHealthy: (status) => status?.ok === true && status.realtime_connected === true,
-    configOrigins: linePersonalOrigins,
+    configOrigins: account => [account.events_url, account.api_url, account.logs_url, account.image_server_url],
     validateConfig(value, version = 3) {
       if (version !== 3 || !id(value?.provider_account_id)) throw new Error("LINE Personal requires version 3 and a verified personal account ID.");
       if (typeof value.hmac_secret !== "string" || !value.hmac_secret.trim()) throw new Error("HMAC secret is required.");
